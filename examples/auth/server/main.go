@@ -90,6 +90,19 @@ func main() {
 	var providers []auth.Provider
 	providers = append(providers, jwtProvider, apiKeyProvider)
 
+	// Add OAuth2 provider if enabled
+	if config.EnableOAuth {
+		// For server-side token validation, we use NewOAuth2AuthProviderWithConfig
+		// which is designed to validate tokens rather than generate them
+		oauth2Provider := auth.NewOAuth2AuthProviderWithConfig(
+			nil,   // No config needed for simple validation
+			"",    // No userinfo endpoint for this example
+			"sub", // Default subject field
+		)
+		providers = append(providers, oauth2Provider)
+		log.Printf("Added OAuth2 authentication provider for token validation")
+	}
+
 	// Chain the auth providers
 	chainProvider := auth.NewChainAuthProvider(providers...)
 
@@ -380,8 +393,7 @@ func (m *mockOAuthServer) handleTokenRequest(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	err := r.ParseForm()
-	if err != nil {
+	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Failed to parse form data", http.StatusBadRequest)
 		return
 	}
