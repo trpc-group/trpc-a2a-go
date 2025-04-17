@@ -27,7 +27,7 @@ If applicable, add screenshots to help explain your problem.
  - OS: [e.g. iOS]
  - Version [e.g. 22]
  - Go version:
- - A2A-Go version:
+ - tRPC-A2A-go version:
 
 **Additional context**
 Add any other context about the problem here. 

@@ -1,8 +1,8 @@
-// Tencent is pleased to support the open source community by making a2a-go available.
+// Tencent is pleased to support the open source community by making trpc-a2a-go available.
 //
 // Copyright (C) 2025 THL A29 Limited, a Tencent company.  All rights reserved.
 //
-// a2a-go is licensed under the Apache License Version 2.0.
+// trpc-a2a-go is licensed under the Apache License Version 2.0.
 
 // Package main implements a streaming server for the A2A protocol.
 package main
@@ -19,9 +19,9 @@ import (
 	"syscall"
 	"time"
 
-	"trpc.group/trpc-go/a2a-go/protocol"
-	"trpc.group/trpc-go/a2a-go/server"
-	"trpc.group/trpc-go/a2a-go/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/server"
+	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
 // streamingTaskProcessor implements the TaskProcessor interface for streaming responses.
@@ -358,7 +358,7 @@ func main() {
 		URL:         serverURL,
 		Version:     "1.0.0",
 		Provider: &server.AgentProvider{
-			Name: "A2A-Go Examples",
+			Name: "tRPC-A2A-go Examples",
 		},
 		Capabilities: server.AgentCapabilities{
 			Streaming:              true,

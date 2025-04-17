@@ -1,4 +1,4 @@
-module trpc.group/trpc-go/a2a-go
+module trpc.group/trpc-go/trpc-a2a-go
 
 go 1.23.0
 

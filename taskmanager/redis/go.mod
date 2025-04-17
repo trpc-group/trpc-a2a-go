@@ -1,16 +1,16 @@
-module trpc.group/trpc-go/a2a-go/taskmanager/redis
+module trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis
 
 go 1.23.0
 
 toolchain go1.23.7
 
-replace trpc.group/trpc-go/a2a-go => ../../
+replace trpc.group/trpc-go/trpc-a2a-go => ../../
 
 require (
 	github.com/alicebob/miniredis/v2 v2.31.1
 	github.com/redis/go-redis/v9 v9.7.3
 	github.com/stretchr/testify v1.10.0
-	trpc.group/trpc-go/a2a-go v0.0.0-00010101000000-000000000000
+	trpc.group/trpc-go/trpc-a2a-go v0.0.0-00010101000000-000000000000
 )
 
 require (

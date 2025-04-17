@@ -1,6 +1,6 @@
 # Contributor Guidelines
 
-Thank you for your interest and support for A2A-Go!
+Thank you for your interest and support for tRPC-A2A-go!
 This document outlines the roles and responsibilities of contributors in the project, as well as the process for becoming a Contributor and losing Maintainer status. We hope that this document will help every contributor understand the growth path and make a greater contribution to the project's development.
 
 ## Contributor Roles and Responsibilities

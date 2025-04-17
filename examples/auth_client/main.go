@@ -1,8 +1,8 @@
-// Tencent is pleased to support the open source community by making a2a-go available.
+// Tencent is pleased to support the open source community by making trpc-a2a-go available.
 //
 // Copyright (C) 2025 THL A29 Limited, a Tencent company.  All rights reserved.
 //
-// a2a-go is licensed under the Apache License Version 2.0.
+// trpc-a2a-go is licensed under the Apache License Version 2.0.
 
 // Package main provides example code for using different authentication methods with the A2A client.
 package main
@@ -17,9 +17,9 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 
-	"trpc.group/trpc-go/a2a-go/auth"
-	"trpc.group/trpc-go/a2a-go/client"
-	"trpc.group/trpc-go/a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/auth"
+	"trpc.group/trpc-go/trpc-a2a-go/client"
+	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 )
 
 func main() {

@@ -1,6 +1,6 @@
 # A2A Basic Example
 
-This example demonstrates a basic implementation of the Agent-to-Agent (A2A) protocol using the a2a-go library. It consists of:
+This example demonstrates a basic implementation of the Agent-to-Agent (A2A) protocol using the trpc-a2a-go library. It consists of:
 
 1. A versatile text processing agent server that supports multiple operations
 2. A feature-rich CLI client that demonstrates all the core A2A protocol APIs

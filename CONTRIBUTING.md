@@ -1,6 +1,6 @@
 # How to Contribute
 
-Thank you for your interest and support in A2A-Go!
+Thank you for your interest and support in tRPC-A2A-go!
 
 We welcome and appreciate any form of contribution, including but not limited to submitting issues, providing improvement suggestions, improving documentation, fixing bugs, and adding features.
 This document aims to provide you with a detailed contribution guide to help you better participate in the project.
@@ -10,16 +10,16 @@ We look forward to working with you to make this project better together!
 ## Before contributing code
 
 The project welcomes code patches, but to make sure things are well coordinated you should discuss any significant change before starting the work.
-It's recommended that you signal your intention to contribute in the issue tracker, either by claiming an [existing one](https://github.com/trpc-group/a2a-go/issues) or by [opening a new issue](https://github.com/trpc-group/a2a-go/issues/new).
+It's recommended that you signal your intention to contribute in the issue tracker, either by claiming an [existing one](https://github.com/trpc-group/trpc-a2a-go/issues) or by [opening a new issue](https://github.com/trpc-group/trpc-a2a-go/issues/new).
 
 ### Checking the issue tracker
 
-Whether you already know what contribution to make, or you are searching for an idea, the [issue tracker](https://github.com/trpc-group/a2a-go/issues) is always the first place to go.
+Whether you already know what contribution to make, or you are searching for an idea, the [issue tracker](https://github.com/trpc-group/trpc-a2a-go/issues) is always the first place to go.
 Issues are triaged to categorize them and manage the workflow.
 
 Most issues will be marked with one of the following workflow labels:
 - **NeedsInvestigation**: The issue is not fully understood and requires analysis to understand the root cause.
-- **NeedsDecision**: The issue is relatively well understood, but the A2A-Go team hasn't yet decided the best way to address it.
+- **NeedsDecision**: The issue is relatively well understood, but the tRPC-A2A-go team hasn't yet decided the best way to address it.
   It would be better to wait for a decision before writing code.
   If you are interested in working on an issue in this state, feel free to "ping" maintainers in the issue's comments if some time has passed without a decision.
 - **NeedsFix**: The issue is fully understood and code can be written to fix it.
@@ -32,7 +32,7 @@ This process gives everyone a chance to validate the design, helps prevent dupli
 It also checks that the design is sound before code is written; the code review tool is not the place for high-level discussions.
 
 When opening an issue, make sure to answer these five questions:
-1. What version of A2A-Go are you using ?
+1. What version of tRPC-A2A-go are you using ?
 2. What operating system and processor architecture are you using(`go env`)?
 3. What did you do?
 4. What did you expect to see?
@@ -43,7 +43,7 @@ For change proposals, see Proposing Changes To [tRPC-Proposals](https://github.c
 ## Contributing code
 
 Follow the [GitHub flow](https://docs.github.com/en/get-started/quickstart/github-flow) to [create a GitHub pull request](https://docs.github.com/en/get-started/quickstart/github-flow#create-a-pull-request).
-If this is your first time submitting a PR to the A2A-Go project, you will be reminded in the "Conversation" tab of the PR to sign and submit the [Contributor License Agreement](https://github.com/trpc-group/cla-database/blob/main/Tencent-Contributor-License-Agreement.md).
+If this is your first time submitting a PR to the tRPC-A2A-go project, you will be reminded in the "Conversation" tab of the PR to sign and submit the [Contributor License Agreement](https://github.com/trpc-group/cla-database/blob/main/Tencent-Contributor-License-Agreement.md).
 Only when you have signed the Contributor License Agreement, your submitted PR has the possibility of being accepted.
 
 Some things to keep in mind:
@@ -59,7 +59,7 @@ Some things to keep in mind:
 
 ### Writing good commit messages
 
-Commit messages in A2A-Go follow a specific set of conventions, which we discuss in this section.
+Commit messages in tRPC-A2A-go follow a specific set of conventions, which we discuss in this section.
 
 Here is an example of a good one:
 
@@ -80,7 +80,7 @@ Here is an example of a good one:
 
 The first line of the change description is conventionally a short one-line summary of the change, prefixed by the primary affected package.
 
-A rule of thumb is that it should be written so to complete the sentence "This change modifies A2A-Go to _____."
+A rule of thumb is that it should be written so to complete the sentence "This change modifies tRPC-A2A-go to _____."
 That means it does not start with a capital letter, is not a complete sentence, and actually summarizes the result of the change.
 
 Follow the first line by a blank line.
@@ -88,18 +88,18 @@ Follow the first line by a blank line.
 #### Main content
 
 The rest of the description elaborates and should provide context for the change and explain what it does.
-Write in complete sentences with correct punctuation, just like for your comments in A2A-Go.
+Write in complete sentences with correct punctuation, just like for your comments in tRPC-A2A-go.
 Don't use HTML, Markdown, or any other markup language.
 Add any relevant information, such as benchmark data if the change affects performance.
 The [benchstat](https://godoc.org/golang.org/x/perf/cmd/benchstat) tool is conventionally used to format benchmark data for change descriptions.
 
 #### Referencing issues
 
-The special notation "Fixes #12345" associates the change with issue 12345 in the A2A-Go issue tracker.
+The special notation "Fixes #12345" associates the change with issue 12345 in the tRPC-A2A-go issue tracker.
 When this change is eventually applied, the issue tracker will automatically mark the issue as fixed.
 
 - If there is a corresponding issue, add either `Fixes #12345` or `Updates #12345` (the latter if this is not a complete fix) to this comment
-- If referring to a repo other than `a2a-go` you can use the `owner/repo#issue_number` syntax: `Fixes trpc-group/tnet#12345`
+- If referring to a repo other than `trpc-a2a-go` you can use the `owner/repo#issue_number` syntax: `Fixes trpc-group/tnet#12345`
 
 #### PR type label
 
@@ -128,13 +128,13 @@ Release notes are required for any pull request with user-visible changes, this 
 
 If the current PR doesn't have user-visible changes, such as internal code refactoring or adding test cases, the release notes should be filled with 'NONE' and the changes in this PR will not be recorded in the next version's CHANGELOG. If the current PR has user-visible changes, the release notes should be filled out according to the actual situation, avoiding technical details and describing the impact of the current changes from a user's perspective as much as possible.
 
-Release notes are one of the most important reference points for users about to import or upgrade to a particular release of A2A-Go.
+Release notes are one of the most important reference points for users about to import or upgrade to a particular release of tRPC-A2A-go.
 
 ## Miscellaneous topics
 
 ### Copyright headers
 
-Files in the A2A-Go repository don't list author names, both to avoid clutter and to avoid having to keep the lists up to date.
+Files in the tRPC-A2A-go repository don't list author names, both to avoid clutter and to avoid having to keep the lists up to date.
 Instead, your name will appear in the change log.
 
 New files that you contribute should use the standard copyright header:
@@ -142,11 +142,11 @@ New files that you contribute should use the standard copyright header:
 ```go
 //
 //
-// Tencent is pleased to support the open source community by making a2a-go available.
+// Tencent is pleased to support the open source community by making trpc-a2a-go available.
 //
 // Copyright (C) 2025 THL A29 Limited, a Tencent company.  All rights reserved.
 //
-// a2a-go is licensed under the Apache License Version 2.0.
+// trpc-a2a-go is licensed under the Apache License Version 2.0.
 //
 //
 ```

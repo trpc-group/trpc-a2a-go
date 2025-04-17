@@ -1,8 +1,8 @@
-// Tencent is pleased to support the open source community by making a2a-go available.
+// Tencent is pleased to support the open source community by making trpc-a2a-go available.
 //
 // Copyright (C) 2025 THL A29 Limited, a Tencent company.  All rights reserved.
 //
-// a2a-go is licensed under the Apache License Version 2.0.
+// trpc-a2a-go is licensed under the Apache License Version 2.0.
 
 // Package main implements an A2A server with authentication and push notification authentication.
 package main
@@ -17,10 +17,10 @@ import (
 	"syscall"
 	"time"
 
-	"trpc.group/trpc-go/a2a-go/auth"
-	"trpc.group/trpc-go/a2a-go/protocol"
-	"trpc.group/trpc-go/a2a-go/server"
-	"trpc.group/trpc-go/a2a-go/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/auth"
+	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/server"
+	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
 func main() {

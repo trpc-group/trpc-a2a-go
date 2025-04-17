@@ -1,8 +1,8 @@
-// Tencent is pleased to support the open source community by making a2a-go available.
+// Tencent is pleased to support the open source community by making trpc-a2a-go available.
 //
 // Copyright (C) 2025 THL A29 Limited, a Tencent company.  All rights reserved.
 //
-// a2a-go is licensed under the Apache License Version 2.0.
+// trpc-a2a-go is licensed under the Apache License Version 2.0.
 
 // Package log provides logging utilities for tdxa-go.
 package log
@@ -40,7 +40,7 @@ var encoderConfig = zapcore.EncoderConfig{
 	EncodeCaller:   zapcore.ShortCallerEncoder,
 }
 
-// Logger is the underlying logging work for a2a-go.
+// Logger is the underlying logging work for trpc-a2a-go.
 type Logger interface {
 	// Debug logs to DEBUG log. Arguments are handled in the manner of fmt.Print.
 	Debug(args ...interface{})

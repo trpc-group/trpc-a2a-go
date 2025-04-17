@@ -1,6 +1,6 @@
 ---
 name: "❓ Question"
-description: Ask questions about a2a-go
+description: Ask questions about trpc-a2a-go
 title: ''
 labels: ["type/question"]
 assignees: ''

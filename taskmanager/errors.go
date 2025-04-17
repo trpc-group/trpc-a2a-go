@@ -1,8 +1,8 @@
-// Tencent is pleased to support the open source community by making a2a-go available.
+// Tencent is pleased to support the open source community by making trpc-a2a-go available.
 //
 // Copyright (C) 2025 THL A29 Limited, a Tencent company.  All rights reserved.
 //
-// a2a-go is licensed under the Apache License Version 2.0.
+// trpc-a2a-go is licensed under the Apache License Version 2.0.
 
 // Package taskmanager defines task management interfaces, types, and implementations.
 package taskmanager
@@ -10,8 +10,8 @@ package taskmanager
 import (
 	"fmt"
 
-	"trpc.group/trpc-go/a2a-go/jsonrpc"
-	"trpc.group/trpc-go/a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/jsonrpc"
+	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 )
 
 // Custom JSON-RPC error codes specific to the TaskManager.

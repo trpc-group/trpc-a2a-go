@@ -1,11 +1,11 @@
-# tRPC-A2A-Go
+# tRPC-tRPC-A2A-go
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/trpc-group/a2a-go.svg)](https://pkg.go.dev/github.com/trpc-group/a2a-go)
-[![Go Report Card](https://goreportcard.com/badge/github.com/trpc-group/a2a-go)](https://goreportcard.com/report/github.com/trpc-group/a2a-go)
-[![LICENSE](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/trpc-group/a2a-go/blob/main/LICENSE)
-[![Releases](https://img.shields.io/github/release/trpc-group/a2a-go.svg?style=flat-square)](https://github.com/trpc-group/a2a-go/releases)
-[![Tests](https://github.com/trpc-group/a2a-go/actions/workflows/prc.yml/badge.svg)](https://github.com/trpc-group/a2a-go/actions/workflows/prc.yml)
-[![Coverage](https://codecov.io/gh/trpc-group/a2a-go/branch/main/graph/badge.svg)](https://app.codecov.io/gh/trpc-group/a2a-go/tree/main)
+[![Go Reference](https://pkg.go.dev/badge/github.com/trpc-group/trpc-a2a-go.svg)](https://pkg.go.dev/github.com/trpc-group/trpc-a2a-go)
+[![Go Report Card](https://goreportcard.com/badge/github.com/trpc-group/trpc-a2a-go)](https://goreportcard.com/report/github.com/trpc-group/trpc-a2a-go)
+[![LICENSE](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/trpc-group/trpc-a2a-go/blob/main/LICENSE)
+[![Releases](https://img.shields.io/github/release/trpc-group/trpc-a2a-go.svg?style=flat-square)](https://github.com/trpc-group/trpc-a2a-go/releases)
+[![Tests](https://github.com/trpc-group/trpc-a2a-go/actions/workflows/prc.yml/badge.svg)](https://github.com/trpc-group/trpc-a2a-go/actions/workflows/prc.yml)
+[![Coverage](https://codecov.io/gh/trpc-group/trpc-a2a-go/branch/main/graph/badge.svg)](https://app.codecov.io/gh/trpc-group/trpc-a2a-go/tree/main)
 
 This is tRPC group's Go implementation of the [A2A protocol](https://google.github.io/A2A/), enabling different AI agents to discover and collaborate with each other.
 
@@ -131,7 +131,7 @@ go run examples/auth_server/main.go
 import (
     "context"
 
-    "trpc.group/trpc-go/a2a-go/taskmanager"
+    "trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
 // Implement the TaskProcessor interface
@@ -158,8 +158,8 @@ func (p *myTaskProcessor) Process(
 
 ```go
 import (
-    "trpc.group/trpc-go/a2a-go/server"
-    "trpc.group/trpc-go/a2a-go/taskmanager"
+    "trpc.group/trpc-go/trpc-a2a-go/server"
+    "trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
 // Helper function to create string pointers
@@ -201,8 +201,8 @@ agentCard := server.AgentCard{
 import (
     "log"
 
-    "trpc.group/trpc-go/a2a-go/server"
-    "trpc.group/trpc-go/a2a-go/taskmanager"
+    "trpc.group/trpc-go/trpc-a2a-go/server"
+    "trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
 // Create the task processor
@@ -233,8 +233,8 @@ To secure your A2A server, you can use the authentication providers:
 
 ```go
 import (
-    "trpc.group/trpc-go/a2a-go/auth"
-    "trpc.group/trpc-go/a2a-go/server"
+    "trpc.group/trpc-go/trpc-a2a-go/auth"
+    "trpc.group/trpc-go/trpc-a2a-go/server"
 )
 
 // Create a JWT authentication provider
@@ -276,7 +276,7 @@ srv, err := server.NewA2AServer(
 
 ## Authentication
 
-The a2a-go framework supports multiple authentication methods for securing communication between agents and clients:
+The trpc-a2a-go framework supports multiple authentication methods for securing communication between agents and clients:
 
 ### Supported Authentication Methods
 
