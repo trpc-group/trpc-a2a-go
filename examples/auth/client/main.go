@@ -121,7 +121,9 @@ func createOAuth2ClientCredentialsClient(agentURL string) (*client.A2AClient, er
 	// In a real application, you would get these securely from environment variables
 	clientID := "my-client-id"
 	clientSecret := "my-client-secret"
-	tokenURL := "https://auth.example.com/oauth2/token"
+
+	// Use the local OAuth2 server endpoint
+	tokenURL := getOAuthTokenURL(agentURL)
 	scopes := []string{"a2a.read", "a2a.write"}
 
 	return client.NewA2AClient(
@@ -132,24 +134,32 @@ func createOAuth2ClientCredentialsClient(agentURL string) (*client.A2AClient, er
 
 // createOAuth2TokenSourceClient creates a client using a custom OAuth2 token source.
 func createOAuth2TokenSourceClient(agentURL string) (*client.A2AClient, error) {
+	// Extract the OAuth token URL from agentURL
+	tokenURL := getOAuthTokenURL(agentURL)
+
 	// Example with password credentials grant
 	config := &oauth2.Config{
 		ClientID:     "my-client-id",
 		ClientSecret: "my-client-secret",
 		Endpoint: oauth2.Endpoint{
-			TokenURL: "https://auth.example.com/oauth2/token",
+			TokenURL: tokenURL,
 		},
 		Scopes: []string{"a2a.read", "a2a.write"},
 	}
 
-	// In a real application, you might want to cache tokens
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// For our mock server, we don't actually need username/password
+	// as it only implements client_credentials grant
+	// In a real app, these would come from configuration
 	token, err := config.PasswordCredentialsToken(
-		context.Background(),
+		ctx,
 		"username",
 		"password",
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("OAuth2 token acquisition failed: %w", err)
 	}
 
 	tokenSource := config.TokenSource(context.Background(), token)
@@ -161,20 +171,23 @@ func createOAuth2TokenSourceClient(agentURL string) (*client.A2AClient, error) {
 
 // createCustomOAuth2Client creates a client with a completely custom OAuth2 provider.
 func createCustomOAuth2Client(agentURL string) (*client.A2AClient, error) {
+	// Extract the OAuth token URL from agentURL
+	tokenURL := getOAuthTokenURL(agentURL)
+
 	// Create a client credentials config
-	config := &clientcredentials.Config{
+	ccConfig := &clientcredentials.Config{
 		ClientID:     "my-client-id",
 		ClientSecret: "my-client-secret",
-		TokenURL:     "https://auth.example.com/oauth2/token",
+		TokenURL:     tokenURL,
 		Scopes:       []string{"a2a.read", "a2a.write"},
 	}
 
 	// Create a custom OAuth2 provider
 	provider := auth.NewOAuth2ClientCredentialsProvider(
-		config.ClientID,
-		config.ClientSecret,
-		config.TokenURL,
-		config.Scopes,
+		ccConfig.ClientID,
+		ccConfig.ClientSecret,
+		ccConfig.TokenURL,
+		ccConfig.Scopes,
 	)
 
 	// Use the custom provider
@@ -182,4 +195,21 @@ func createCustomOAuth2Client(agentURL string) (*client.A2AClient, error) {
 		agentURL,
 		client.WithAuthProvider(provider),
 	)
+}
+
+// Helper function to get the OAuth token URL based on agent URL
+func getOAuthTokenURL(agentURL string) string {
+	tokenURL := ""
+	if agentURL == "http://localhost:8080/" {
+		tokenURL = "http://localhost:8080/oauth2/token"
+	} else {
+		// Try to adapt to a different port
+		// This is a simple adaptation, not fully robust
+		tokenURL = agentURL + "oauth2/token"
+		if tokenURL[len(tokenURL)-1] == '/' {
+			tokenURL = tokenURL[:len(tokenURL)-1]
+		}
+	}
+	fmt.Printf("Using OAuth2 token URL: %s\n", tokenURL)
+	return tokenURL
 }
