@@ -9,6 +9,21 @@
 
 This is tRPC group's Go implementation of the [A2A protocol](https://google.github.io/A2A/), enabling different AI agents to discover and collaborate with each other.
 
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Examples](#examples)
+  - [Simple Example](#1-simple-example-examplessimple)
+  - [Streaming Examples](#2-streaming-examples-examplesstreaming)
+  - [Basic Example](#3-basic-example-examplesbasic)
+  - [Authentication Examples](#4-authentication-examples-examplesauth)
+- [Creating Your Own Agent](#creating-your-own-agent)
+- [Authentication](#authentication)
+- [Session Management](#session-management)
+- [Future Enhancements](#future-enhancements)
+- [Contributing](#contributing)
+- [Acknowledgements](#acknowledgements)
+
 ## Quick Start
 
 ### Running the Basic Server Example
@@ -52,7 +67,44 @@ go run main.go --session "your-session-id"
 
 The repository includes several examples demonstrating different aspects of the A2A protocol:
 
-### 1. Basic Example ([examples/basic](examples/basic))
+### 1. Simple Example ([examples/simple](examples/simple))
+
+A minimal example demonstrating the core A2A functionality:
+- Simple server that reverses text input
+- Simple client that sends non-streaming requests
+- Basic task lifecycle (submission, processing, completion)
+- Text processing with artifacts
+
+```bash
+# Start the simple server
+cd examples/simple/server
+go run main.go
+
+# Run the simple client
+cd examples/simple/client
+go run main.go
+
+# Send a custom message
+go run main.go --message "Text to be reversed"
+```
+
+### 2. Streaming Examples ([examples/streaming](examples/streaming))
+
+Examples focused on streaming capabilities:
+- Server implementation with streaming response support
+- Client implementation for handling streaming data
+
+```bash
+# Start the streaming server
+cd examples/streaming/server
+go run main.go
+
+# Run the streaming client
+cd examples/streaming/client
+go run main.go
+```
+
+### 3. Basic Example ([examples/basic](examples/basic))
 
 A comprehensive example showcasing:
 - A versatile text processing server with multiple operations
@@ -62,21 +114,13 @@ A comprehensive example showcasing:
 - Task management (create, cancel, get)
 - Agent capability discovery
 
-### 2. Authentication Examples ([examples/auth](examples/auth))
+### 4. Authentication Examples ([examples/auth](examples/auth))
 
 Complete examples demonstrating authentication:
 - Server implementation with various authentication methods
 - Client examples showing how to connect with different auth methods
 - JWT, API key, and OAuth2 implementations
 - Command-line options for all authentication parameters
-
-### 3. Streaming Examples ([examples/streaming](examples/streaming))
-
-Examples focused on streaming capabilities:
-- Server implementation with streaming response support
-- Client implementation for handling streaming data
-
-### Running Authentication Examples
 
 ```bash
 # Start the authentication server with OAuth2 support enabled
@@ -102,26 +146,17 @@ go run main.go --auth jwt --jwt-secret-file "path/to/jwt-secret.key"
 go run main.go --auth jwt --message "Custom message" --session-id "session123"
 ```
 
-### Running Streaming Examples
-
-```bash
-# Start the streaming server
-cd examples/streaming/server
-go run main.go
-
-# Run the streaming client
-cd examples/streaming/client
-go run main.go
-```
-
 ## Creating Your Own Agent
 
-1. Implement the `TaskProcessor` interface:
+### 1. Implement the TaskProcessor Interface
+
+This interface defines how your agent processes incoming tasks:
 
 ```go
 import (
     "context"
 
+    "trpc.group/trpc-go/trpc-a2a-go/protocol"
     "trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
@@ -131,21 +166,23 @@ type myTaskProcessor struct {
 }
 
 func (p *myTaskProcessor) Process(
-	ctx context.Context,
-	taskID string,
-	message taskmanager.Message,
-	handle taskmanager.TaskHandle,
+    ctx context.Context,
+    taskID string,
+    message protocol.Message,
+    handle taskmanager.TaskHandle,
 ) error {
-	// 1. Extract input data from message
-	// 2. Process data, generate results
-	// 3. Use handle to update task status and add artifacts
+    // 1. Extract input data from message
+    // 2. Process data, generate results
+    // 3. Use handle to update task status and add artifacts
 
     // Processing complete, return nil for success
     return nil
 }
 ```
 
-2. Create an agent card, describing your agent's capabilities:
+### 2. Create an Agent Card
+
+The agent card describes your agent's capabilities:
 
 ```go
 import (
@@ -186,7 +223,9 @@ agentCard := server.AgentCard{
 }
 ```
 
-3. Create and start the server:
+### 3. Create and Start the Server
+
+Initialize the server with your task processor and agent card:
 
 ```go
 import (
@@ -220,14 +259,26 @@ if err := srv.Start(":8080"); err != nil {
 
 ## Authentication
 
-The trpc-a2a-go framework supports multiple authentication methods for securing communication between agents and clients:
+The tRPC-A2A-Go framework supports multiple authentication methods for securing communication between agents and clients:
 
-### Adding Authentication
+### Supported Authentication Methods
 
-To secure your A2A server, you can use the authentication providers:
+- **JWT (JSON Web Tokens)**: Secure token-based authentication with support for audience and issuer validation
+- **API Keys**: Simple key-based authentication using custom headers
+- **OAuth 2.0**: Support for various OAuth2 flows, including:
+  - Client Credentials flow
+  - Password Credentials flow
+  - Custom token sources
+  - Token validation
+
+### Server-Side Authentication
+
+#### Adding Authentication to Your Server
 
 ```go
 import (
+    "time"
+    
     "trpc.group/trpc-go/trpc-a2a-go/auth"
     "trpc.group/trpc-go/trpc-a2a-go/server"
 )
@@ -270,21 +321,28 @@ srv, err := server.NewA2AServer(
 )
 ```
 
-### Supported Authentication Methods
-
-- **JWT (JSON Web Tokens)**: Secure token-based authentication with support for audience and issuer validation.
-- **API Keys**: Simple key-based authentication using custom headers.
-- **OAuth 2.0**: Support for various OAuth2 flows, including:
-  - Client Credentials flow
-  - Password Credentials flow
-  - Custom token sources
-  - Token validation
-
-### Client Authentication
-
-To create an authenticated client, use one of the authentication options:
+#### Using Authentication Middleware
 
 ```go
+// Create an authentication provider
+jwtProvider := auth.NewJWTAuthProvider(secretKey, audience, issuer, tokenLifetime)
+
+// Create middleware
+authMiddleware := auth.NewMiddleware(jwtProvider)
+
+// Wrap your handler
+http.Handle("/protected", authMiddleware.Wrap(yourHandler))
+```
+
+### Client-Side Authentication
+
+Create authenticated clients using the appropriate options:
+
+```go
+import (
+    "trpc.group/trpc-go/trpc-a2a-go/client"
+)
+
 // JWT Authentication
 client, err := client.NewA2AClient(
     "https://agent.example.com/",
@@ -311,37 +369,12 @@ client, err := client.NewA2AClient(
 
 See the [examples/auth/client](examples/auth/client) directory for complete examples of using different authentication methods.
 
-### Server Authentication
-
-On the server side, implement authentication using middleware:
-
-```go
-// Create an authentication provider
-jwtProvider := auth.NewJWTAuthProvider(secretKey, audience, issuer, tokenLifetime)
-
-// Create middleware
-authMiddleware := auth.NewMiddleware(jwtProvider)
-
-// Wrap your handler
-http.Handle("/protected", authMiddleware.Wrap(yourHandler))
-```
-
-For chaining multiple authentication methods:
-
-```go
-chainProvider := auth.NewChainAuthProvider(
-    jwtProvider,
-    apiKeyProvider,
-    oauth2Provider,
-)
-```
-
 ### Push Notification Authentication
 
-The framework supports JWT-based authentication for push notification endpoints with automatic key generation and JWKS publishing:
+The framework includes support for secure push notifications:
 
 ```go
-// Create an authenticator
+// Create an authenticator for push notifications
 notifAuth := auth.NewPushNotificationAuthenticator()
 
 // Generate a key pair
@@ -351,14 +384,8 @@ if err := notifAuth.GenerateKeyPair(); err != nil {
 
 // Expose JWKS endpoint
 http.HandleFunc("/.well-known/jwks.json", notifAuth.HandleJWKS)
-```
 
-### Push Notification Authentication
-
-A2A supports authenticated push notifications:
-
-```go
-// Enable JWKS endpoint for push notifications
+// Enable JWKS endpoint when creating the server
 srv, err := server.NewA2AServer(
     agentCard,
     taskManager,
@@ -390,10 +417,11 @@ This allows for:
 
 ## Future Enhancements
 
-- Persistent storage
+- Persistent storage options for task history
 - More utilities and helper functions
-- Metrics and logging
+- Metrics and logging integrations
 - Comprehensive test suite
+- Advanced session management capabilities
 
 ## Contributing
 
