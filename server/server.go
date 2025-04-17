@@ -388,8 +388,9 @@ func (s *A2AServer) handleSSEStream(
 					TaskID: taskID,
 					Reason: "task ended",
 				}
-				if err := sse.FormatEvent(w, protocol.EventClose, closeData); err != nil {
-					log.Errorf("Error writing SSE close event for task %s: %v", taskID, err)
+				// Use JSON-RPC format for the close event
+				if err := sse.FormatJSONRPCEvent(w, protocol.EventClose, requestID, closeData); err != nil {
+					log.Errorf("Error writing SSE JSON-RPC close event for task %s: %v", taskID, err)
 				} else {
 					flusher.Flush()
 				}
@@ -408,10 +409,10 @@ func (s *A2AServer) handleSSEStream(
 				continue // Skip unknown event types
 			}
 
-			// Write the event to the SSE stream.
-			if err := sse.FormatEvent(w, eventType, event); err != nil {
+			// Write the event to the SSE stream using JSON-RPC format.
+			if err := sse.FormatJSONRPCEvent(w, eventType, requestID, event); err != nil {
 				// Error writing, likely client disconnected.
-				log.Errorf("Error writing SSE event for task %s (client likely disconnected): %v. "+
+				log.Errorf("Error writing SSE JSON-RPC event for task %s (client likely disconnected): %v. "+
 					"Closing stream.", taskID, err)
 				return // Exit the handler.
 			}
