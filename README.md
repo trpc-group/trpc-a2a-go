@@ -13,11 +13,11 @@ This is tRPC group's Go implementation of the [A2A protocol](https://google.gith
 
 Implemented core components include:
 
-### 1. Type System (`taskmanager` and `jsonrpc`)
+### 1. Protocol Support
 
-- Complete implementation of data types defined in the A2A protocol specification
-- Includes JSON-RPC message structures (`jsonrpc`), task states, and more (`taskmanager`)
-- Provides convenient constructors and interfaces
+- Complete implementation of the A2A protocol specification
+- Includes JSON-RPC message structures (`jsonrpc`) and protocol types (`protocol`)
+- Provides data types for task states, parts, artifacts, and more
 
 ### 2. Client (`client`)
 
@@ -51,76 +51,89 @@ Implemented core components include:
 
 ## Examples
 
-### 1. Basic Agent (`examples/agents/basic`)
+The repository includes several examples demonstrating different aspects of the A2A protocol:
 
-A simple text-reversing agent example that:
-- Handles text input
-- Reverses text and returns the result
-- Supports streaming responses
-- Implements the `TaskProcessor` interface for task handling
+### 1. Basic Example (`examples/basic`)
 
-### 2. CLI Client (`examples/hosts/cli`)
+A comprehensive example showcasing:
+- A versatile text processing server with multiple operations
+- A feature-rich CLI client with support for all core A2A protocol APIs
+- Streaming and non-streaming modes
+- Multi-turn conversations
+- Task management (create, cancel, get)
+- Agent capability discovery
 
-An interactive command-line client that:
-- Connects to any A2A agent
-- Sends text requests
-- Displays streaming responses and artifacts
-- Maintains session context
+### 2. Authentication Examples (`examples/auth`)
 
-### 3. Streaming Client (`examples/streaming`)
+Complete examples demonstrating authentication:
+- Server implementation with various authentication methods
+- Client examples showing how to connect with different auth methods
+- JWT, API key, and OAuth2 implementations
 
-A streaming data processing client example that:
-- Connects to an A2A agent
-- Sends streaming data requests
-- Handles streaming response events
+### 3. Streaming Examples (`examples/streaming`)
 
-### 4. Authentication Server (`examples/auth_server`)
-
-A complete example of an A2A server with authentication that:
-- Demonstrates JWT and API key authentication
-- Includes a mock task manager to showcase functionality
-- Shows how to secure A2A endpoints
+Examples focused on streaming capabilities:
+- Server implementation with streaming response support
+- Client implementation for handling streaming data
 
 ## Usage
 
-### Running Example Agents
+### Running the Basic Server Example
 
 ```bash
-# Start the example agent on default port 8080
-go run examples/agents/basic/main.go
+# Start the example server on default port 8080
+cd examples/basic/server
+go run main.go
 
 # Specify different host and port
-go run examples/agents/basic/main.go --host 0.0.0.0 --port 9000
+go run main.go --host 0.0.0.0 --port 9000
+
+# Disable streaming capability
+go run main.go --no-stream
 
 # Disable CORS headers
-go run examples/agents/basic/main.go --no-cors
+go run main.go --no-cors
 ```
 
-### Using the CLI Client
+### Using the Basic CLI Client
 
 ```bash
 # Connect to a local agent
-go run examples/hosts/cli/main.go
+cd examples/basic/client
+go run main.go
 
 # Connect to a specific agent
-go run examples/hosts/cli/main.go --agent http://localhost:9000/
+go run main.go --agent http://localhost:9000/
 
 # Specify request timeout
-go run examples/hosts/cli/main.go --timeout 30s
+go run main.go --timeout 30s
+
+# Disable streaming mode
+go run main.go --no-stream
 ```
 
-### Running the Streaming Client Example
+### Running Authentication Examples
 
 ```bash
-# Connect to a local agent for streaming
-go run examples/streaming/main.go
+# Start the authentication server
+cd examples/auth/server
+go run main.go
+
+# Run authentication client examples
+cd examples/auth/client
+go run main.go
 ```
 
-### Running the Authentication Server Example
+### Running Streaming Examples
 
 ```bash
-# Start the authentication example server
-go run examples/auth_server/main.go
+# Start the streaming server
+cd examples/streaming/server
+go run main.go
+
+# Run the streaming client
+cd examples/streaming/client
+go run main.go
 ```
 
 ## Creating Your Own Agent
@@ -159,7 +172,7 @@ func (p *myTaskProcessor) Process(
 ```go
 import (
     "trpc.group/trpc-go/trpc-a2a-go/server"
-    "trpc.group/trpc-go/trpc-a2a-go/taskmanager"
+    "trpc.group/trpc-go/trpc-a2a-go/protocol"
 )
 
 // Helper function to create string pointers
@@ -179,8 +192,8 @@ agentCard := server.AgentCard{
         Streaming: true,
         StateTransitionHistory: true,
     },
-    DefaultInputModes: []string{string(taskmanager.PartTypeText)},
-    DefaultOutputModes: []string{string(taskmanager.PartTypeText)},
+    DefaultInputModes: []string{string(protocol.PartTypeText)},
+    DefaultOutputModes: []string{string(protocol.PartTypeText)},
     Skills: []server.AgentSkill{
         {
             ID: "my_skill",
@@ -188,8 +201,8 @@ agentCard := server.AgentCard{
             Description: stringPtr("Skill description"),
             Tags: []string{"tag1", "tag2"},
             Examples: []string{"Example input"},
-            InputModes: []string{string(taskmanager.PartTypeText)},
-            OutputModes: []string{string(taskmanager.PartTypeText)},
+            InputModes: []string{string(protocol.PartTypeText)},
+            OutputModes: []string{string(protocol.PartTypeText)},
         },
     },
 }
@@ -282,11 +295,10 @@ The trpc-a2a-go framework supports multiple authentication methods for securing 
 
 - **JWT (JSON Web Tokens)**: Secure token-based authentication with support for audience and issuer validation.
 - **API Keys**: Simple key-based authentication using custom headers.
-- **OAuth 2.0**: Complete OAuth2 support including:
+- **OAuth 2.0**: Support for various OAuth2 flows, including:
   - Client Credentials flow
   - Password Credentials flow
   - Custom token sources
-  - User info retrieval
 
 ### Client Authentication
 
@@ -317,7 +329,7 @@ client, err := client.NewA2AClient(
 )
 ```
 
-See the `examples/auth_client` directory for complete examples of using different authentication methods.
+See the `examples/auth/client` directory for complete examples of using different authentication methods.
 
 ### Server Authentication
 
@@ -370,7 +382,7 @@ http.HandleFunc("/.well-known/jwks.json", notifAuth.HandleJWKS)
 
 ## Contributing
 
-Contributions and improvement suggestions are welcome! Please ensure your code follows Go coding standards and includes appropriate tests. 
+Contributions and improvement suggestions are welcome! Please ensure your code follows Go coding standards and includes appropriate tests. See the [CONTRIBUTING.md](CONTRIBUTING.md) file for more details.
 
 ## Acknowledgements
 
