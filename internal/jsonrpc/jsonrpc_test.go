@@ -388,3 +388,50 @@ func TestErrorNilCase(t *testing.T) {
 	var err *Error
 	assert.Equal(t, "<nil jsonrpc error>", err.Error(), "Nil error should have correct string representation")
 }
+
+func TestNewNotificationResponse(t *testing.T) {
+	testCases := []struct {
+		name  string
+		id    interface{}
+		data  interface{}
+		hasID bool
+	}{
+		{
+			name:  "Notification without ID",
+			id:    nil,
+			data:  map[string]string{"key": "value"},
+			hasID: false,
+		},
+		{
+			name:  "Response with string ID",
+			id:    "test-id-123",
+			data:  map[string]string{"key": "value"},
+			hasID: true,
+		},
+		{
+			name:  "Response with numeric ID",
+			id:    123,
+			data:  map[string]string{"key": "value"},
+			hasID: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			response := NewNotificationResponse(tc.id, tc.data)
+
+			// Verify JSONRPC version
+			assert.Equal(t, Version, response.JSONRPC, "JSONRPC version should be set correctly")
+
+			// Verify ID handling
+			if tc.hasID {
+				assert.Equal(t, tc.id, response.ID, "ID should match the provided value")
+			} else {
+				assert.Nil(t, response.ID, "ID should be nil for notifications")
+			}
+
+			// Verify the result is the data directly
+			assert.Equal(t, tc.data, response.Result, "Result should be the provided data directly")
+		})
+	}
+}

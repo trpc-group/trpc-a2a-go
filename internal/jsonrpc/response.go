@@ -37,3 +37,15 @@ func NewErrorResponse(id interface{}, err *Error) *Response {
 		Error:   err,
 	}
 }
+
+// NewNotificationResponse creates a JSON-RPC notification response with an optional ID.
+// When ID is nil, it creates a proper notification (no ID field).
+// When ID is provided, it creates a response that includes the ID (used for SSE events).
+// This is useful for event streams like SSE where messages may need to be correlated
+// with the original request.
+func NewNotificationResponse(id interface{}, result interface{}) *Response {
+	return &Response{
+		Message: Message{JSONRPC: Version, ID: id},
+		Result:  result,
+	}
+}

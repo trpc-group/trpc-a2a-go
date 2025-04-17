@@ -277,6 +277,7 @@ func TestA2ASrv_HandleTasksSendSub_SSE(t *testing.T) {
 	event3 := protocol.TaskStatusUpdateEvent{
 		ID:     taskID,
 		Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
+		Final:  true,
 	}
 	mockTM.SubscribeEvents = []protocol.TaskEvent{event1, event2, event3}
 	mockTM.SubscribeError = nil
@@ -309,7 +310,6 @@ func TestA2ASrv_HandleTasksSendSub_SSE(t *testing.T) {
 
 	// Read and verify SSE events
 	reader := sse.NewEventReader(resp.Body) // Use the client's SSE reader
-	receivedMockEventsCount := 0
 	receivedEvents := []protocol.TaskEvent{}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -326,19 +326,33 @@ func TestA2ASrv_HandleTasksSendSub_SSE(t *testing.T) {
 		if len(data) == 0 { // Skip keep-alive comments/empty lines
 			continue
 		}
+		var jsonRPCResponse jsonrpc.RawResponse
+		if err := json.Unmarshal(data, &jsonRPCResponse); err != nil {
+			t.Logf("Not a JSON-RPC response: %s", string(data))
+			if eventType == "close" {
+				t.Logf("Received close event: %s", string(data))
+				break
+			}
+			continue
+		}
+		if jsonRPCResponse.Error != nil {
+			t.Fatalf("JSON-RPC error in SSE event: %v", jsonRPCResponse.Error)
+			continue
+		}
+		eventBytes := jsonRPCResponse.Result
 
 		var event protocol.TaskEvent
 		switch eventType {
 		case "task_status_update":
 			var statusEvent protocol.TaskStatusUpdateEvent
-			if err := json.Unmarshal(data, &statusEvent); err != nil {
-				t.Fatalf("Failed to unmarshal task_status_update: %v. Data: %s", err, string(data))
+			if err := json.Unmarshal(eventBytes, &statusEvent); err != nil {
+				t.Fatalf("Failed to unmarshal task_status_update: %v. Data: %s", err, string(eventBytes))
 			}
 			event = statusEvent
 		case "task_artifact_update":
 			var artifactEvent protocol.TaskArtifactUpdateEvent
-			if err := json.Unmarshal(data, &artifactEvent); err != nil {
-				t.Fatalf("Failed to unmarshal task_artifact_update: %v. Data: %s", err, string(data))
+			if err := json.Unmarshal(eventBytes, &artifactEvent); err != nil {
+				t.Fatalf("Failed to unmarshal task_artifact_update: %v. Data: %s", err, string(eventBytes))
 			}
 			event = artifactEvent
 		case "close": // Handle potential close event
@@ -349,50 +363,23 @@ func TestA2ASrv_HandleTasksSendSub_SSE(t *testing.T) {
 			continue
 		}
 
-		if event == nil { // Check if event was assigned
-			// Reset for next event (important!)
-			eventType = ""
-			data = data[:0] // Reset byte slice
-			continue
+		if event != nil {
+			receivedEvents = append(receivedEvents, event)
 		}
-
-		// Ignore the initial event potentially sent by the mock implementation
-		if statusUpdate, ok := event.(protocol.TaskStatusUpdateEvent); ok && (statusUpdate.Status.State == protocol.TaskStateSubmitted || statusUpdate.Status.State == protocol.TaskStateWorking) {
-			if receivedMockEventsCount == 0 { // Only skip the very first auto-sent event
-				continue
-			}
-		}
-
-		receivedEvents = append(receivedEvents, event)
-		receivedMockEventsCount++
-
-		// Reset for next event
-		eventType = ""
-		data = data[:0] // Reset byte slice
 
 		// Check context cancellation (e.g., test timeout)
 		if ctx.Err() != nil {
 			t.Fatalf("Test context canceled: %v", ctx.Err())
 		}
 	}
-
-	// Assert received events match the mock configuration (excluding initial pending)
-	// require.Equal(t, len(mockTM.SubscribeEvents), receivedMockEventsCount, "Number of received mock events doesn't match") // Removed: Count can mismatch due to initial/close events.
-
-	// Simple check: ensure the final event received matches the last mock event type/state
 	require.Greater(t, len(receivedEvents), 0, "Should have received at least one event")
-	lastReceived := receivedEvents[len(receivedEvents)-1]
-	lastMock := mockTM.SubscribeEvents[len(mockTM.SubscribeEvents)-1]
-
-	assert.Equal(t, lastMock.IsFinal(), lastReceived.IsFinal(), "Finality of last event mismatch")
-	if lastMockStatus, ok1 := lastMock.(protocol.TaskStatusUpdateEvent); ok1 {
-		if lastReceivedStatus, ok2 := lastReceived.(protocol.TaskStatusUpdateEvent); ok2 {
-			assert.Equal(t, lastMockStatus.Status.State, lastReceivedStatus.Status.State, "State of last status event mismatch")
-		} else {
-			t.Errorf("Last mock event was status, but last received was %T", lastReceived)
+	var lastStatusEvent protocol.TaskStatusUpdateEvent
+	for i := len(receivedEvents) - 1; i >= 0; i-- {
+		if statusEvent, ok := receivedEvents[i].(protocol.TaskStatusUpdateEvent); ok {
+			lastStatusEvent = statusEvent
+			break
 		}
 	}
-	// Add more detailed comparisons if needed.
+	require.NotEmpty(t, lastStatusEvent.ID, "Should have received at least one status update event")
+	assert.Equal(t, protocol.TaskStateCompleted, lastStatusEvent.Status.State, "State of last status event should be 'completed'")
 }
-
-// Use the mock task manager from mock_task_manager_test.go

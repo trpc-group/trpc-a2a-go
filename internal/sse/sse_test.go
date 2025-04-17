@@ -1,11 +1,15 @@
 package sse
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"trpc.group/trpc-go/trpc-a2a-go/internal/jsonrpc"
 )
 
 func TestNewEventReader(t *testing.T) {
@@ -232,4 +236,57 @@ func TestCloseEventDataMarshaling(t *testing.T) {
 	if unmarshaled.Reason != closeData.Reason {
 		t.Errorf("Expected Reason %q, got %q.", closeData.Reason, unmarshaled.Reason)
 	}
+}
+
+func TestFormatJSONRPCEvent(t *testing.T) {
+	// Test data
+	eventType := "test_event"
+	eventID := "test-request-123"
+	eventData := map[string]string{
+		"key1": "value1",
+		"key2": "value2",
+	}
+
+	// Buffer to capture the output
+	var buf bytes.Buffer
+
+	// Format the event
+	err := FormatJSONRPCEvent(&buf, eventType, eventID, eventData)
+	assert.NoError(t, err, "FormatJSONRPCEvent should not return an error")
+
+	// Get the formatted output
+	output := buf.String()
+
+	// Verify the SSE format structure
+	assert.Contains(t, output, "event: test_event", "Output should contain the event type")
+	assert.Contains(t, output, "data: {", "Output should contain JSON data")
+	assert.Contains(t, output, "\"jsonrpc\":\"2.0\"", "Output should contain JSON-RPC version")
+	assert.Contains(t, output, "\"id\":\"test-request-123\"", "Output should contain the request ID")
+
+	// Verify the content can be parsed back
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	var dataLine string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			dataLine = strings.TrimPrefix(line, "data: ")
+			break
+		}
+	}
+
+	// Parse the JSON-RPC response
+	var response jsonrpc.Response
+	err = json.Unmarshal([]byte(dataLine), &response)
+	assert.NoError(t, err, "Should be able to unmarshal the JSON-RPC response")
+
+	// Check response structure
+	assert.Equal(t, "2.0", response.JSONRPC, "JSONRPC version should be 2.0")
+	assert.Equal(t, eventID, response.ID, "ID should match the provided request ID")
+
+	// Verify result contains the same key-value pairs
+	// JSON unmarshaling creates map[string]interface{}, so we can't use direct equality
+	resultMap, ok := response.Result.(map[string]interface{})
+	assert.True(t, ok, "Result should be a map")
+	assert.Equal(t, "value1", resultMap["key1"], "Value for key1 should match")
+	assert.Equal(t, "value2", resultMap["key2"], "Value for key2 should match")
 }

@@ -241,6 +241,29 @@ func (c *A2AClient) processSSEStream(
 				)
 				return // Exit immediately, do not process any more events
 			}
+
+			// First, try to unmarshal as a JSON-RPC response
+			var jsonRPCResponse jsonrpc.RawResponse
+			jsonRPCErr := json.Unmarshal(eventBytes, &jsonRPCResponse)
+
+			// If this is a valid JSON-RPC response, extract the result for further processing
+			if jsonRPCErr == nil && jsonRPCResponse.JSONRPC == jsonrpc.Version {
+				log.Debugf(
+					"Received JSON-RPC wrapped event for task %s. Type: %s",
+					taskID, eventType,
+				)
+				// Check for errors in the JSON-RPC response
+				if jsonRPCResponse.Error != nil {
+					log.Errorf(
+						"JSON-RPC error in SSE event for task %s: %v",
+						taskID, jsonRPCResponse.Error,
+					)
+					continue // Skip events with JSON-RPC errors
+				}
+				// Use the result field directly for further processing
+				eventBytes = jsonRPCResponse.Result
+			}
+
 			// Deserialize the event data based on the event type from SSE.
 			var taskEvent protocol.TaskEvent
 			switch eventType {
