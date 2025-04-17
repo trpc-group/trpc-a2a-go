@@ -43,6 +43,9 @@ go run main.go --timeout 30s
 
 # Disable streaming mode
 go run main.go --no-stream
+
+# Use a specific session ID
+go run main.go --session "your-session-id"
 ```
 
 ## Examples
@@ -55,7 +58,7 @@ A comprehensive example showcasing:
 - A versatile text processing server with multiple operations
 - A feature-rich CLI client with support for all core A2A protocol APIs
 - Streaming and non-streaming modes
-- Multi-turn conversations
+- Multi-turn conversations with session management
 - Task management (create, cancel, get)
 - Agent capability discovery
 
@@ -65,6 +68,7 @@ Complete examples demonstrating authentication:
 - Server implementation with various authentication methods
 - Client examples showing how to connect with different auth methods
 - JWT, API key, and OAuth2 implementations
+- Command-line options for all authentication parameters
 
 ### 3. Streaming Examples ([examples/streaming](examples/streaming))
 
@@ -75,13 +79,27 @@ Examples focused on streaming capabilities:
 ### Running Authentication Examples
 
 ```bash
-# Start the authentication server
+# Start the authentication server with OAuth2 support enabled
 cd examples/auth/server
-go run main.go
+go run main.go --enable-oauth true
 
-# Run authentication client examples
+# Run client with JWT authentication
 cd examples/auth/client
-go run main.go
+go run main.go --auth jwt --jwt-secret "your-secret-key"
+
+# Run client with API key authentication
+go run main.go --auth apikey --api-key "test-api-key"
+
+# Run client with OAuth2 authentication
+go run main.go --auth oauth2 \
+  --oauth2-client-id "my-client-id" \
+  --oauth2-client-secret "my-client-secret"
+
+# Run client with JWT from a file
+go run main.go --auth jwt --jwt-secret-file "path/to/jwt-secret.key"
+
+# Specify custom message and session ID
+go run main.go --auth jwt --message "Custom message" --session-id "session123"
 ```
 
 ### Running Streaming Examples
@@ -230,11 +248,25 @@ apiKeys := map[string]string{
 }
 apiKeyProvider := auth.NewAPIKeyAuthProvider(apiKeys, "X-API-Key")
 
+// OAuth2 token validation provider
+oauth2Provider := auth.NewOAuth2AuthProviderWithConfig(
+    nil,   // No config needed for simple validation
+    "",    // No userinfo endpoint for this example
+    "sub", // Default subject field for identifying users
+)
+
+// Chain multiple authentication methods
+chainProvider := auth.NewChainAuthProvider(
+    jwtProvider, 
+    apiKeyProvider,
+    oauth2Provider,
+)
+
 // Create the server with authentication
 srv, err := server.NewA2AServer(
     agentCard,
     taskManager,
-    server.WithAuthProvider(jwtProvider), // or apiKeyProvider
+    server.WithAuthProvider(chainProvider),
 )
 ```
 
@@ -246,6 +278,7 @@ srv, err := server.NewA2AServer(
   - Client Credentials flow
   - Password Credentials flow
   - Custom token sources
+  - Token validation
 
 ### Client Authentication
 
@@ -332,6 +365,28 @@ srv, err := server.NewA2AServer(
     server.WithJWKSEndpoint(true, "/.well-known/jwks.json"),
 )
 ```
+
+## Session Management
+
+The A2A protocol supports session management to group related tasks:
+
+```go
+// Client-side: Creating a task with session ID
+sessionID := "your-session-id" // Or generate one with uuid.New().String()
+taskParams := protocol.SendTaskParams{
+    ID:        "task-123",
+    SessionID: &sessionID,
+    Message:   message,
+}
+
+// Server-side: Tasks with the same sessionID are recognized
+// as belonging to the same conversation or workflow
+```
+
+This allows for:
+- Grouping related tasks under a single session
+- Multi-turn conversations across different task IDs
+- Better organization and retrieval of task history
 
 ## Future Enhancements
 
