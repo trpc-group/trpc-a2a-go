@@ -5,3 +5,5 @@
 
 test_output.txt
 *cover.out*
+
+*jwt-secret.key*
