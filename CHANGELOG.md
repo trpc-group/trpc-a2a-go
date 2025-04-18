@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.2 (2025-04-18)
+
+- Change agent card provider `name` to `organization` 
+
 ## 0.0.1 (2025-04-18)
 
 - Initial release
