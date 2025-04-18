@@ -65,6 +65,8 @@ type ClientProvider interface {
 	Provider
 	// ConfigureClient configures an HTTP client with authentication.
 	ConfigureClient(client *http.Client) *http.Client
+	// FillRequestKey fills the request with a JWT token.
+	FillRequestKey(req *http.Request) (*http.Request, error)
 }
 
 // JWTAuthProvider authenticates requests using JWT.
@@ -196,6 +198,16 @@ func (p *JWTAuthProvider) ConfigureClient(client *http.Client) *http.Client {
 	return &newClient
 }
 
+// FillRequestKey fills the request with a JWT token.
+func (p *JWTAuthProvider) FillRequestKey(req *http.Request) (*http.Request, error) {
+	token, err := p.CreateToken("client", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set(AuthHeaderName, fmt.Sprintf("%s %s", TokenTypeBearer, token))
+	return req, nil
+}
+
 // jwtAuthTransport is an http.RoundTripper that adds JWT authentication.
 type jwtAuthTransport struct {
 	base     http.RoundTripper
@@ -286,6 +298,15 @@ func (p *APIKeyAuthProvider) ConfigureClient(client *http.Client) *http.Client {
 	newClient := *client
 	newClient.Transport = transport
 	return &newClient
+}
+
+// FillRequestKey fills the request with an API key.
+func (p *APIKeyAuthProvider) FillRequestKey(req *http.Request) (*http.Request, error) {
+	if p.clientAPIKey == "" {
+		return req, nil
+	}
+	req.Header.Set(p.HeaderName, p.clientAPIKey)
+	return req, nil
 }
 
 // apiKeyAuthTransport is an http.RoundTripper that adds API key authentication.
@@ -399,6 +420,11 @@ func (p *OAuth2AuthProvider) ConfigureClient(client *http.Client) *http.Client {
 	// If we have a config but no token yet, we can't configure a client
 	// (would need an authorization code or other grant type flow)
 	return client
+}
+
+// FillRequestKey fills the request with an OAuth2 token.
+func (p *OAuth2AuthProvider) FillRequestKey(req *http.Request) (*http.Request, error) {
+	return req, nil
 }
 
 // getUserFromUserInfo fetches user info from the userinfo endpoint
