@@ -1,6 +1,6 @@
 # tRPC-A2A-Go
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/trpc-group/trpc-a2a-go.svg)](https://pkg.go.dev/github.com/trpc-group/trpc-a2a-go)
+[![Go Reference](https://pkg.go.dev/badge/trpc.group/trpc-go/trpc-a2a-go.svg)](https://pkg.go.dev/trpc.group/trpc-go/trpc-a2a-go)
 [![Go Report Card](https://goreportcard.com/badge/trpc.group/trpc-go/trpc-a2a-go)](https://goreportcard.com/report/trpc.group/trpc-go/trpc-a2a-go)
 [![LICENSE](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/trpc-group/trpc-a2a-go/blob/main/LICENSE)
 [![Releases](https://img.shields.io/github/release/trpc-group/trpc-a2a-go.svg?style=flat-square)](https://github.com/trpc-group/trpc-a2a-go/releases)
