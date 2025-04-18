@@ -358,7 +358,7 @@ func main() {
 		URL:         serverURL,
 		Version:     "1.0.0",
 		Provider: &server.AgentProvider{
-			Name: "tRPC-A2A-go Examples",
+			Organization: "tRPC-A2A-go Examples",
 		},
 		Capabilities: server.AgentCapabilities{
 			Streaming:              true,

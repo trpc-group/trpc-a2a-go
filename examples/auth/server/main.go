@@ -117,7 +117,7 @@ func main() {
 		Description: addressableStr("A demonstration server with JWT and API key authentication"),
 		URL:         fmt.Sprintf("http://localhost:%d", config.Port),
 		Provider: &server.AgentProvider{
-			Name: "Example Provider",
+			Organization: "Example Provider",
 		},
 		Version: "1.0.0",
 		Capabilities: server.AgentCapabilities{

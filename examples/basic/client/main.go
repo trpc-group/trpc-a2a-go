@@ -158,7 +158,7 @@ func displayAgentCapabilities(card *server.AgentCard) {
 
 	// Print provider if available
 	if card.Provider != nil {
-		fmt.Printf("  Provider: %s\n", card.Provider.Name)
+		fmt.Printf("  Provider: %s\n", card.Provider.Organization)
 	}
 
 	// Print capabilities

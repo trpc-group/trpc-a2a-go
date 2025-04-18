@@ -120,7 +120,7 @@ func main() {
 		URL:         fmt.Sprintf("http://%s:%d/", *host, *port),
 		Version:     "1.0.0",
 		Provider: &server.AgentProvider{
-			Name: "tRPC-A2A-Go Example",
+			Organization: "tRPC-A2A-Go Examples",
 		},
 		Capabilities: server.AgentCapabilities{
 			Streaming:              false,

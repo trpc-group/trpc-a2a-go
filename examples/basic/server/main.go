@@ -498,7 +498,7 @@ func main() {
 		URL:         serverURL,
 		Version:     "2.0.0", // Updated version
 		Provider: &server.AgentProvider{
-			Name: "tRPC-A2A-go Examples",
+			Organization: "tRPC-A2A-go Examples",
 		},
 		Capabilities: server.AgentCapabilities{
 			Streaming:              !forceNoStream, // Support streaming based on flag

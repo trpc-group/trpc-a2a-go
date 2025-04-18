@@ -37,8 +37,8 @@ type AgentSkill struct {
 
 // AgentProvider contains information about the agent's provider or developer.
 type AgentProvider struct {
-	// Name is the name of the provider.
-	Name string `json:"name"`
+	// Organization is the name of the provider.
+	Organization string `json:"organization"`
 	// URL is an optional URL for the provider.
 	URL *string `json:"url,omitempty"`
 }
