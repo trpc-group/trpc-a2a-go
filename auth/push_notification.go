@@ -292,11 +292,63 @@ func (a *PushNotificationAuthenticator) SetJWKSClient(jwksURL string) {
 	a.jwksClient = NewJWKSClient(jwksURL, 1*time.Hour)
 }
 
-// CreateAuthorizationHeader creates an Authorization header for a push notification.
+// CreateAuthorizationHeader creates an Authorization header for push notifications.
 func (a *PushNotificationAuthenticator) CreateAuthorizationHeader(payload []byte) (string, error) {
 	token, err := a.SignPayload(payload)
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("%s %s", TokenTypeBearer, token), nil
+}
+
+// SendPushNotification sends a push notification with JWT authentication.
+// This is a convenience function for sending notifications from the server side.
+func (a *PushNotificationAuthenticator) SendPushNotification(
+	ctx context.Context,
+	url string,
+	payload interface{},
+) error {
+	// Validate inputs
+	if url == "" {
+		return errors.New("push notification URL is required")
+	}
+
+	// Make sure URL starts with http:// or https://
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		url = "http://" + url
+	}
+
+	// Marshal payload to JSON
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	// Create authorization header
+	authHeader, err := a.CreateAuthorizationHeader(payloadBytes)
+	if err != nil {
+		return fmt.Errorf("failed to create authorization header: %w", err)
+	}
+
+	// Send push notification
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, url, strings.NewReader(string(payloadBytes)))
+	if err != nil {
+		return fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send push notification: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("push notification failed with status: %s", resp.Status)
+	}
+
+	return nil
 }

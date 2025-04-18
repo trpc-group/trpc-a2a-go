@@ -17,14 +17,13 @@ import (
 	"time"
 
 	"golang.org/x/oauth2/clientcredentials"
-
 	"trpc.group/trpc-go/trpc-a2a-go/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/client"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 )
 
-// Config holds the client configuration options.
-type Config struct {
+// config holds the client configuration options.
+type config struct {
 	AuthMethod string
 	AgentURL   string
 	Timeout    time.Duration
@@ -124,8 +123,8 @@ func main() {
 }
 
 // parseFlags parses command-line flags and returns a Config.
-func parseFlags() Config {
-	var config Config
+func parseFlags() config {
+	var config config
 
 	// Basic options
 	flag.StringVar(&config.AuthMethod, "auth", "jwt", "Authentication method (jwt, apikey, oauth2)")
@@ -160,7 +159,7 @@ func parseFlags() Config {
 }
 
 // getJWTSecret retrieves the JWT secret from either the direct key or a file.
-func getJWTSecret(config Config) ([]byte, error) {
+func getJWTSecret(config config) ([]byte, error) {
 	// If a secret file is provided, read from it
 	if config.JWTSecretFile != "" {
 		secret, err := os.ReadFile(config.JWTSecretFile)
@@ -175,7 +174,7 @@ func getJWTSecret(config Config) ([]byte, error) {
 }
 
 // createJWTClient creates an A2A client with JWT authentication.
-func createJWTClient(config Config) (*client.A2AClient, error) {
+func createJWTClient(config config) (*client.A2AClient, error) {
 	secret, err := getJWTSecret(config)
 	if err != nil {
 		return nil, err
@@ -188,7 +187,7 @@ func createJWTClient(config Config) (*client.A2AClient, error) {
 }
 
 // createAPIKeyClient creates an A2A client with API key authentication.
-func createAPIKeyClient(config Config) (*client.A2AClient, error) {
+func createAPIKeyClient(config config) (*client.A2AClient, error) {
 	return client.NewA2AClient(
 		config.AgentURL,
 		client.WithAPIKeyAuth(config.APIKey, config.APIKeyHeader),
@@ -196,7 +195,7 @@ func createAPIKeyClient(config Config) (*client.A2AClient, error) {
 }
 
 // createOAuth2Client creates an A2A client with OAuth2 authentication.
-func createOAuth2Client(config Config) (*client.A2AClient, error) {
+func createOAuth2Client(config config) (*client.A2AClient, error) {
 	// Method 1: Using client credentials flow
 	return createOAuth2ClientCredentialsClient(config)
 
@@ -206,7 +205,7 @@ func createOAuth2Client(config Config) (*client.A2AClient, error) {
 }
 
 // createOAuth2ClientCredentialsClient creates a client using OAuth2 client credentials flow.
-func createOAuth2ClientCredentialsClient(config Config) (*client.A2AClient, error) {
+func createOAuth2ClientCredentialsClient(config config) (*client.A2AClient, error) {
 	// Determine token URL if not specified
 	tokenURL := config.OAuth2TokenURL
 	if tokenURL == "" {
@@ -228,7 +227,7 @@ func createOAuth2ClientCredentialsClient(config Config) (*client.A2AClient, erro
 }
 
 // createOAuth2TokenSourceClient creates a client using a custom OAuth2 token source.
-func createOAuth2TokenSourceClient(config Config) (*client.A2AClient, error) {
+func createOAuth2TokenSourceClient(config config) (*client.A2AClient, error) {
 	// Extract the OAuth token URL from agentURL
 	tokenURL := getOAuthTokenURL(config.AgentURL)
 
@@ -240,7 +239,7 @@ func createOAuth2TokenSourceClient(config Config) (*client.A2AClient, error) {
 }
 
 // createCustomOAuth2Client creates a client with a completely custom OAuth2 provider.
-func createCustomOAuth2Client(config Config) (*client.A2AClient, error) {
+func createCustomOAuth2Client(config config) (*client.A2AClient, error) {
 	// Extract the OAuth token URL from agentURL
 	tokenURL := getOAuthTokenURL(config.AgentURL)
 

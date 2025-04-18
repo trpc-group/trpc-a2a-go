@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -21,16 +22,14 @@ import (
 	"syscall"
 	"time"
 
-	"flag"
-
 	"trpc.group/trpc-go/trpc-a2a-go/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/server"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
-// Config holds server configuration
-type Config struct {
+// config holds server configuration
+type config struct {
 	Host          string
 	Port          int
 	JWTSecretFile string
@@ -159,7 +158,6 @@ func main() {
 		agentCard,
 		taskManager,
 		server.WithAuthProvider(chainProvider),
-		server.WithJWKSEndpoint(true, "/.well-known/jwks.json"),
 	)
 	if err != nil {
 		log.Fatalf("Failed to create A2A server: %v", err)
@@ -225,8 +223,8 @@ func main() {
 }
 
 // parseFlags parses command line flags and returns a configuration
-func parseFlags() *Config {
-	config := &Config{
+func parseFlags() *config {
+	config := &config{
 		APIKeys: map[string]string{
 			"test-api-key": "test-user",
 		},
@@ -248,7 +246,7 @@ func parseFlags() *Config {
 }
 
 // loadOrGenerateSecret loads a JWT secret from file or generates and saves a new one
-func loadOrGenerateSecret(config *Config) error {
+func loadOrGenerateSecret(config *config) error {
 	// Try to load existing secret
 	data, err := os.ReadFile(config.JWTSecretFile)
 	if err == nil && len(data) >= 32 {
@@ -318,10 +316,6 @@ func printExampleCommands(port int, token string, enableOAuth bool, tokenEndpoin
 	// Agent card example
 	log.Printf("\nFetch agent card:")
 	log.Printf("curl http://localhost:%d/.well-known/agent.json", port)
-
-	// JWKS endpoint example
-	log.Printf("\nFetch JWKS endpoint:")
-	log.Printf("curl http://localhost:%d/.well-known/jwks.json", port)
 }
 
 // echoProcessor is a simple processor that echoes user messages

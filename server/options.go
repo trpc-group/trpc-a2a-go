@@ -76,3 +76,12 @@ func WithJWKSEndpoint(enabled bool, path string) Option {
 		}
 	}
 }
+
+// WithPushNotificationAuthenticator sets a custom authenticator for push notifications.
+// This allows reusing the same authenticator instance throughout the application
+// ensuring that the same keys are used for signing and verification.
+func WithPushNotificationAuthenticator(authenticator *auth.PushNotificationAuthenticator) Option {
+	return func(s *A2AServer) {
+		s.pushAuth = authenticator
+	}
+}

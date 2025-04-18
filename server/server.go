@@ -72,9 +72,12 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 	}
 	// Initialize push notification authenticator.
 	if server.jwksEnabled {
-		server.pushAuth = auth.NewPushNotificationAuthenticator()
-		if err := server.pushAuth.GenerateKeyPair(); err != nil {
-			return nil, fmt.Errorf("failed to generate JWKS key pair: %w", err)
+		if server.pushAuth == nil {
+			// Only generate a new authenticator if one wasn't supplied
+			server.pushAuth = auth.NewPushNotificationAuthenticator()
+			if err := server.pushAuth.GenerateKeyPair(); err != nil {
+				return nil, fmt.Errorf("failed to generate JWKS key pair: %w", err)
+			}
 		}
 	}
 	return server, nil
