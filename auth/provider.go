@@ -65,8 +65,6 @@ type ClientProvider interface {
 	Provider
 	// ConfigureClient configures an HTTP client with authentication.
 	ConfigureClient(client *http.Client) *http.Client
-	// FillRequestKey fills the request with a JWT token.
-	FillRequestKey(req *http.Request) (*http.Request, error)
 }
 
 // JWTAuthProvider authenticates requests using JWT.
@@ -198,14 +196,15 @@ func (p *JWTAuthProvider) ConfigureClient(client *http.Client) *http.Client {
 	return &newClient
 }
 
-// FillRequestKey fills the request with a JWT token.
-func (p *JWTAuthProvider) FillRequestKey(req *http.Request) (*http.Request, error) {
+// Headers returns the header keys and values to be added to the request.
+func (p *JWTAuthProvider) Headers() (map[string]string, error) {
 	token, err := p.CreateToken("client", nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set(AuthHeaderName, fmt.Sprintf("%s %s", TokenTypeBearer, token))
-	return req, nil
+	return map[string]string{
+		AuthHeaderName: fmt.Sprintf("%s %s", TokenTypeBearer, token),
+	}, nil
 }
 
 // jwtAuthTransport is an http.RoundTripper that adds JWT authentication.
@@ -300,13 +299,14 @@ func (p *APIKeyAuthProvider) ConfigureClient(client *http.Client) *http.Client {
 	return &newClient
 }
 
-// FillRequestKey fills the request with an API key.
-func (p *APIKeyAuthProvider) FillRequestKey(req *http.Request) (*http.Request, error) {
+// Headers returns the header keys and values to be added to the request.
+func (p *APIKeyAuthProvider) Headers() (map[string]string, error) {
 	if p.clientAPIKey == "" {
-		return req, nil
+		return nil, nil
 	}
-	req.Header.Set(p.HeaderName, p.clientAPIKey)
-	return req, nil
+	return map[string]string{
+		p.HeaderName: p.clientAPIKey,
+	}, nil
 }
 
 // apiKeyAuthTransport is an http.RoundTripper that adds API key authentication.
@@ -420,11 +420,6 @@ func (p *OAuth2AuthProvider) ConfigureClient(client *http.Client) *http.Client {
 	// If we have a config but no token yet, we can't configure a client
 	// (would need an authorization code or other grant type flow)
 	return client
-}
-
-// FillRequestKey fills the request with an OAuth2 token.
-func (p *OAuth2AuthProvider) FillRequestKey(req *http.Request) (*http.Request, error) {
-	return req, nil
 }
 
 // getUserFromUserInfo fetches user info from the userinfo endpoint
