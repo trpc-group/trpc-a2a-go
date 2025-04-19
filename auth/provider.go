@@ -196,6 +196,17 @@ func (p *JWTAuthProvider) ConfigureClient(client *http.Client) *http.Client {
 	return &newClient
 }
 
+// Headers returns the header keys and values to be added to the request.
+func (p *JWTAuthProvider) Headers() (map[string]string, error) {
+	token, err := p.CreateToken("client", nil)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{
+		AuthHeaderName: fmt.Sprintf("%s %s", TokenTypeBearer, token),
+	}, nil
+}
+
 // jwtAuthTransport is an http.RoundTripper that adds JWT authentication.
 type jwtAuthTransport struct {
 	base     http.RoundTripper
@@ -286,6 +297,16 @@ func (p *APIKeyAuthProvider) ConfigureClient(client *http.Client) *http.Client {
 	newClient := *client
 	newClient.Transport = transport
 	return &newClient
+}
+
+// Headers returns the header keys and values to be added to the request.
+func (p *APIKeyAuthProvider) Headers() (map[string]string, error) {
+	if p.clientAPIKey == "" {
+		return nil, nil
+	}
+	return map[string]string{
+		p.HeaderName: p.clientAPIKey,
+	}, nil
 }
 
 // apiKeyAuthTransport is an http.RoundTripper that adds API key authentication.
