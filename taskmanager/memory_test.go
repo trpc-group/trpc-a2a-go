@@ -661,7 +661,7 @@ func TestMemTaskManagerPushNotif(t *testing.T) {
 			Token: "test-token",
 			Authentication: &protocol.AuthenticationInfo{
 				Schemes:     []string{"Bearer"},
-				Credentials: "Bearer test-token",
+				Credentials: stringPtr("Bearer test-token"),
 			},
 			Metadata: map[string]interface{}{
 				"priority": "high",
@@ -678,7 +678,8 @@ func TestMemTaskManagerPushNotif(t *testing.T) {
 	assert.Equal(t, "test-token", resultConfig.PushNotificationConfig.Token)
 	require.NotNil(t, resultConfig.PushNotificationConfig.Authentication)
 	assert.Equal(t, []string{"Bearer"}, resultConfig.PushNotificationConfig.Authentication.Schemes)
-	assert.Equal(t, "Bearer test-token", resultConfig.PushNotificationConfig.Authentication.Credentials)
+	require.NotNil(t, resultConfig.PushNotificationConfig.Authentication.Credentials)
+	assert.Equal(t, "Bearer test-token", *resultConfig.PushNotificationConfig.Authentication.Credentials)
 	assert.Equal(t, "high", resultConfig.PushNotificationConfig.Metadata["priority"])
 
 	// Test OnPushNotificationGet
@@ -691,7 +692,8 @@ func TestMemTaskManagerPushNotif(t *testing.T) {
 	assert.Equal(t, "test-token", fetchedConfig.PushNotificationConfig.Token)
 	require.NotNil(t, fetchedConfig.PushNotificationConfig.Authentication)
 	assert.Equal(t, []string{"Bearer"}, fetchedConfig.PushNotificationConfig.Authentication.Schemes)
-	assert.Equal(t, "Bearer test-token", fetchedConfig.PushNotificationConfig.Authentication.Credentials)
+	require.NotNil(t, fetchedConfig.PushNotificationConfig.Authentication.Credentials)
+	assert.Equal(t, "Bearer test-token", *fetchedConfig.PushNotificationConfig.Authentication.Credentials)
 	require.NotNil(t, fetchedConfig.PushNotificationConfig.Metadata)
 	assert.Equal(t, "high", fetchedConfig.PushNotificationConfig.Metadata["priority"])
 
@@ -740,7 +742,7 @@ func TestMemTaskManagerPushNotif(t *testing.T) {
 			Token: "updated-token",
 			Authentication: &protocol.AuthenticationInfo{
 				Schemes:     []string{"Bearer"},
-				Credentials: "Bearer updated-token",
+				Credentials: stringPtr("Bearer updated-token"),
 			},
 		},
 	}
@@ -751,7 +753,8 @@ func TestMemTaskManagerPushNotif(t *testing.T) {
 	assert.Equal(t, "updated-token", updatedResult.PushNotificationConfig.Token)
 	require.NotNil(t, updatedResult.PushNotificationConfig.Authentication)
 	assert.Equal(t, []string{"Bearer"}, updatedResult.PushNotificationConfig.Authentication.Schemes)
-	assert.Equal(t, "Bearer updated-token", updatedResult.PushNotificationConfig.Authentication.Credentials)
+	require.NotNil(t, updatedResult.PushNotificationConfig.Authentication.Credentials)
+	assert.Equal(t, "Bearer updated-token", *updatedResult.PushNotificationConfig.Authentication.Credentials)
 
 	// Fetch again to verify update
 	fetchedUpdatedConfig, err := tm.OnPushNotificationGet(context.Background(), getParams)
@@ -760,7 +763,8 @@ func TestMemTaskManagerPushNotif(t *testing.T) {
 	assert.Equal(t, "updated-token", fetchedUpdatedConfig.PushNotificationConfig.Token)
 	require.NotNil(t, fetchedUpdatedConfig.PushNotificationConfig.Authentication)
 	assert.Equal(t, []string{"Bearer"}, fetchedUpdatedConfig.PushNotificationConfig.Authentication.Schemes)
-	assert.Equal(t, "Bearer updated-token", fetchedUpdatedConfig.PushNotificationConfig.Authentication.Credentials)
+	require.NotNil(t, fetchedUpdatedConfig.PushNotificationConfig.Authentication.Credentials)
+	assert.Equal(t, "Bearer updated-token", *fetchedUpdatedConfig.PushNotificationConfig.Authentication.Credentials)
 }
 
 func TestMemoryTaskManager_OnResubscribe(t *testing.T) {
@@ -886,4 +890,9 @@ func TestMemoryTaskManager_OnResubscribe(t *testing.T) {
 	require.True(t, ok, "Event should be a TaskStatusUpdateEvent")
 	assert.Equal(t, protocol.TaskStateCompleted, completedStatusEvent.Status.State)
 	assert.True(t, completedStatusEvent.Final)
+}
+
+// Helper function to create string pointers
+func stringPtr(s string) *string {
+	return &s
 }

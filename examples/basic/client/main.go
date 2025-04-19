@@ -1191,8 +1191,8 @@ func getPushNotification(a2aClient *client.A2AClient, taskID string, timeout tim
 		if len(auth.Schemes) > 0 {
 			fmt.Printf("  Authentication Schemes: %v\n", auth.Schemes)
 		}
-		if auth.Credentials != "" {
-			fmt.Printf("  Credentials: %s\n", auth.Credentials)
+		if auth.Credentials != nil {
+			fmt.Printf("  Credentials: %s\n", *auth.Credentials)
 		}
 	}
 

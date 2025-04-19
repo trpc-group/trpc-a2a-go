@@ -7,6 +7,10 @@
 // Package server contains the A2A server implementation and related types.
 package server
 
+import (
+	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+)
+
 // AgentCapabilities defines the capabilities supported by an agent.
 type AgentCapabilities struct {
 	// Streaming is a flag indicating if the agent supports streaming responses.
@@ -71,11 +75,11 @@ type AgentCard struct {
 	// Capabilities are the declared capabilities of the agent.
 	Capabilities AgentCapabilities `json:"capabilities"`
 	// Authentication is an optional authentication details.
-	Authentication *AgentAuthentication `json:"authentication,omitempty"`
+	Authentication *protocol.AuthenticationInfo `json:"authentication,omitempty"`
 	// DefaultInputModes are the default input modes if not specified per skill.
-	DefaultInputModes []string `json:"defaultInputModes"`
+	DefaultInputModes []string `json:"defaultInputModes,omitempty"`
 	// DefaultOutputModes are the default output modes if not specified per skill.
-	DefaultOutputModes []string `json:"defaultOutputModes"`
+	DefaultOutputModes []string `json:"defaultOutputModes,omitempty"`
 	// Skills are optional list of specific skills.
-	Skills []AgentSkill `json:"skills,omitempty"`
+	Skills []AgentSkill `json:"skills"`
 }
