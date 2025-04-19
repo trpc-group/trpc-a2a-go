@@ -60,7 +60,7 @@ func NewA2AClient(agentURL string, opts ...Option) (*A2AClient, error) {
 			Timeout: defaultTimeout,
 		},
 		userAgent:      defaultUserAgent,
-		httpReqHandler: httpRequestHandler,
+		httpReqHandler: &httpRequestHandler{},
 	}
 	// Apply functional options.
 	for _, opt := range opts {
@@ -164,7 +164,7 @@ func (c *A2AClient) StreamTask(
 	}
 	log.Debugf("A2A Client Stream Request -> Method: %s, ID: %v, URL: %s", request.Method, request.ID, targetURL)
 	// Make the initial request to establish the stream.
-	resp, err := c.httpReqHandler(ctx, c.httpClient, req)
+	resp, err := c.httpReqHandler.Handle(ctx, c.httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.StreamTask: http request failed: %w", err)
 	}
@@ -377,7 +377,7 @@ func (c *A2AClient) doRequest(
 		req.Header.Set("User-Agent", c.userAgent)
 	}
 	log.Debugf("A2A Client Request -> Method: %s, ID: %v, URL: %s", request.Method, request.ID, targetURL)
-	resp, err := c.httpReqHandler(ctx, c.httpClient, req)
+	resp, err := c.httpReqHandler.Handle(ctx, c.httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.doRequest: http request failed: %w", err)
 	}
@@ -496,8 +496,13 @@ func (c *A2AClient) GetPushNotification(
 	return config, nil
 }
 
-// httpRequestHandler is the default HTTP request handler.
-func httpRequestHandler(
+// httpRequestHandler is the HTTP request handler for a2a client.
+type httpRequestHandler struct {
+	handler HttpReqHandler
+}
+
+// Handle is the HTTP request handler for a2a client.
+func (h *httpRequestHandler) Handle(
 	ctx context.Context,
 	client *http.Client,
 	req *http.Request,
