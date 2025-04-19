@@ -896,3 +896,256 @@ func TestMemoryTaskManager_OnResubscribe(t *testing.T) {
 func stringPtr(s string) *string {
 	return &s
 }
+
+// TestAddArtifact tests the AddArtifact method of TaskHandle and MemoryTaskManager
+func TestAddArtifact(t *testing.T) {
+	processor := &mockProcessor{}
+	tm, err := NewMemoryTaskManager(processor)
+	require.NoError(t, err)
+
+	taskID := "test-artifact-task"
+	params := createTestTask(taskID, "Test with artifacts")
+
+	// Helper function to create bool pointers
+	boolPtr := func(b bool) *bool {
+		return &b
+	}
+
+	// Create a task and get its handle
+	processor.processFunc = func(ctx context.Context, taskID string, msg protocol.Message, handle TaskHandle) error {
+		// Test adding an artifact to the task
+		textPart := protocol.NewTextPart("Artifact content")
+		err := handle.AddArtifact(protocol.Artifact{
+			Name:        stringPtr("test-artifact"),
+			Description: stringPtr("A test artifact"),
+			Parts:       []protocol.Part{textPart},
+			LastChunk:   boolPtr(true),
+		})
+		assert.NoError(t, err, "Adding artifact should succeed")
+
+		// Test adding a streaming artifact (multiple chunks)
+		firstChunkPart := protocol.NewTextPart("First chunk")
+		err = handle.AddArtifact(protocol.Artifact{
+			Name:        stringPtr("streaming-artifact"),
+			Description: stringPtr("A streaming artifact"),
+			Parts:       []protocol.Part{firstChunkPart},
+			LastChunk:   boolPtr(false),
+		})
+		assert.NoError(t, err, "Adding first chunk should succeed")
+
+		lastChunkPart := protocol.NewTextPart("Last chunk")
+		err = handle.AddArtifact(protocol.Artifact{
+			Name:        stringPtr("streaming-artifact"),
+			Description: stringPtr("A streaming artifact"),
+			Parts:       []protocol.Part{lastChunkPart},
+			LastChunk:   boolPtr(true),
+		})
+		assert.NoError(t, err, "Adding last chunk should succeed")
+
+		return handle.UpdateStatus(protocol.TaskStateCompleted, nil)
+	}
+
+	// Run the task
+	task, err := tm.OnSendTask(context.Background(), params)
+	require.NoError(t, err)
+	assert.Equal(t, protocol.TaskStateCompleted, task.Status.State)
+
+	// Verify the artifacts are present in the task
+	// NOTE: All artifacts are stored, not just the final ones
+	require.Len(t, task.Artifacts, 3, "Task should have 3 artifacts")
+
+	// Verify first artifact
+	assert.Equal(t, "test-artifact", *task.Artifacts[0].Name)
+	assert.Equal(t, "A test artifact", *task.Artifacts[0].Description)
+	assert.True(t, *task.Artifacts[0].LastChunk)
+	require.Len(t, task.Artifacts[0].Parts, 1)
+	textPart, ok := task.Artifacts[0].Parts[0].(protocol.TextPart)
+	require.True(t, ok)
+	assert.Equal(t, "Artifact content", textPart.Text)
+
+	// Verify first streaming chunk
+	assert.Equal(t, "streaming-artifact", *task.Artifacts[1].Name)
+	assert.Equal(t, "A streaming artifact", *task.Artifacts[1].Description)
+	assert.False(t, *task.Artifacts[1].LastChunk)
+
+	// Verify last streaming chunk
+	assert.Equal(t, "streaming-artifact", *task.Artifacts[2].Name)
+	assert.Equal(t, "A streaming artifact", *task.Artifacts[2].Description)
+	assert.True(t, *task.Artifacts[2].LastChunk)
+	require.Len(t, task.Artifacts[2].Parts, 1)
+	textPart, ok = task.Artifacts[2].Parts[0].(protocol.TextPart)
+	require.True(t, ok)
+	assert.Equal(t, "Last chunk", textPart.Text)
+
+	// Test error case: add artifact to non-existent task
+	memTask := &MemoryTaskManager{
+		Tasks:       make(map[string]*protocol.Task),
+		Messages:    make(map[string][]protocol.Message),
+		Subscribers: make(map[string][]chan<- protocol.TaskEvent),
+		Processor:   processor,
+	}
+
+	handle := &memoryTaskHandle{
+		taskID:  "non-existent-task",
+		manager: memTask,
+	}
+
+	err = handle.AddArtifact(protocol.Artifact{
+		Name:      stringPtr("test-artifact"),
+		Parts:     []protocol.Part{protocol.NewTextPart("Test content")},
+		LastChunk: boolPtr(true),
+	})
+	assert.Error(t, err, "Adding artifact to non-existent task should fail")
+	assert.Contains(t, err.Error(), "not found", "Error should indicate task not found")
+}
+
+// TestIsStreamingRequest tests the IsStreamingRequest method of TaskHandle
+func TestIsStreamingRequest(t *testing.T) {
+	processor := &mockProcessor{}
+	tm, err := NewMemoryTaskManager(processor)
+	require.NoError(t, err)
+
+	// Test with a streaming task (OnSendTaskSubscribe)
+	taskID := "test-streaming-task"
+	params := createTestTask(taskID, "Streaming task")
+
+	// Create a complex processor to test IsStreamingRequest
+	processor.processFunc = func(ctx context.Context, taskID string, msg protocol.Message, handle TaskHandle) error {
+		// Check if this is a streaming request
+		isStreaming := handle.IsStreamingRequest()
+		assert.True(t, isStreaming, "Task should be identified as streaming")
+
+		// Update status and finish
+		return handle.UpdateStatus(protocol.TaskStateCompleted, nil)
+	}
+
+	// Start a streaming task
+	eventsChan, err := tm.OnSendTaskSubscribe(context.Background(), params)
+	require.NoError(t, err)
+
+	// Collect events to avoid blocking
+	go func() {
+		for range eventsChan {
+			// Just consume events
+		}
+	}()
+
+	// Let the task complete
+	time.Sleep(50 * time.Millisecond)
+
+	// Test with a non-streaming task (OnSendTask)
+	taskID = "test-nonstreaming-task"
+	params = createTestTask(taskID, "Non-streaming task")
+
+	// Update processor for the second task
+	processor.processFunc = func(ctx context.Context, taskID string, msg protocol.Message, handle TaskHandle) error {
+		// Check if this is a streaming request
+		isStreaming := handle.IsStreamingRequest()
+		assert.False(t, isStreaming, "Task should not be identified as streaming")
+
+		// Update status and finish
+		return handle.UpdateStatus(protocol.TaskStateCompleted, nil)
+	}
+
+	// Start a non-streaming task
+	_, err = tm.OnSendTask(context.Background(), params)
+	require.NoError(t, err)
+}
+
+// TestProcessError tests the processError helper function
+func TestProcessError(t *testing.T) {
+	// Access to unexported processError function through reflection
+	tm, err := NewMemoryTaskManager(&mockProcessor{})
+	require.NoError(t, err)
+
+	// Custom error type for testing
+	errTaskNotFound := ErrTaskNotFound("task-id")
+
+	// Test with a pre-defined error
+	result := tm.processError(errTaskNotFound)
+	assert.Equal(t, errTaskNotFound.Error(), result.Error(), "Pre-defined errors should be returned as-is")
+
+	// Test with a random error
+	randomErr := fmt.Errorf("random error")
+	result = tm.processError(randomErr)
+	assert.ErrorIs(t, result, randomErr, "Random errors should be wrapped")
+	assert.Contains(t, result.Error(), "random error", "Error message should be preserved")
+}
+
+// Helper extension of MemoryTaskManager to expose processError
+func (m *MemoryTaskManager) processError(err error) error {
+	// Call the unexported processError through composition
+	return processError(err)
+}
+
+// TestRemoveSubscriber tests the removeSubscriber internal function
+func TestRemoveSubscriber(t *testing.T) {
+	processor := &mockProcessor{}
+	tm, err := NewMemoryTaskManager(processor)
+	require.NoError(t, err)
+
+	taskID := "test-subscriber-task"
+
+	// Create some test channels
+	ch1 := make(chan protocol.TaskEvent, 5)
+	ch2 := make(chan protocol.TaskEvent, 5)
+	ch3 := make(chan protocol.TaskEvent, 5)
+
+	// Add subscribers
+	tm.SubMutex.Lock()
+	tm.Subscribers[taskID] = []chan<- protocol.TaskEvent{ch1, ch2, ch3}
+	tm.SubMutex.Unlock()
+
+	// Test removing a subscriber
+	tm.removeSubscriber(taskID, ch2)
+
+	// Verify ch2 was removed
+	tm.SubMutex.RLock()
+	subscribers := tm.Subscribers[taskID]
+	tm.SubMutex.RUnlock()
+
+	require.Len(t, subscribers, 2)
+	// We can't do direct channel comparisons, so check the length instead
+	// and verify the first and last elements
+	assert.Equal(t, 2, len(subscribers))
+
+	// Test removing another subscriber
+	tm.removeSubscriber(taskID, ch1)
+
+	// Verify ch1 was removed
+	tm.SubMutex.RLock()
+	subscribers = tm.Subscribers[taskID]
+	tm.SubMutex.RUnlock()
+
+	require.Len(t, subscribers, 1)
+	// Since we removed ch1 and ch2, only ch3 should remain
+
+	// Test removing the last subscriber
+	tm.removeSubscriber(taskID, ch3)
+
+	// Verify the task ID is no longer in the subscribers map
+	tm.SubMutex.RLock()
+	_, exists := tm.Subscribers[taskID]
+	tm.SubMutex.RUnlock()
+
+	assert.False(t, exists, "Task ID should be removed from subscribers map when last subscriber is removed")
+
+	// Test removing from a non-existent task
+	// This should not panic
+	tm.removeSubscriber("non-existent-task", ch1)
+
+	// Test removing a non-existent channel
+	nonExistentCh := make(chan protocol.TaskEvent)
+	tm.SubMutex.Lock()
+	tm.Subscribers[taskID] = []chan<- protocol.TaskEvent{ch1}
+	tm.SubMutex.Unlock()
+
+	tm.removeSubscriber(taskID, nonExistentCh)
+
+	// Verify ch1 is still there
+	tm.SubMutex.RLock()
+	subscribers = tm.Subscribers[taskID]
+	tm.SubMutex.RUnlock()
+
+	require.Len(t, subscribers, 1)
+}

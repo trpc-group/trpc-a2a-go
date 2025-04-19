@@ -45,18 +45,14 @@ func defaultAgentCard() AgentCard {
 	}
 }
 
-// Helper function to get a pointer to a string (for optional fields)
-func stringPtr(s string) *string {
-	return &s
-}
-
-// Helper function to get a pointer to a boolean.
-func boolPtr(b bool) *bool {
-	return &b
-}
-
 // Helper to perform a JSON-RPC request against the test server.
-func performJSONRPCRequest(t *testing.T, server *httptest.Server, method string, params interface{}, requestID interface{}) *jsonrpc.Response {
+func performJSONRPCRequest(
+	t *testing.T,
+	server *httptest.Server,
+	method string,
+	params interface{},
+	requestID interface{},
+) *jsonrpc.Response {
 	t.Helper()
 
 	// Marshal params
@@ -406,6 +402,10 @@ type mockTaskManager struct {
 	SubscribeEvents []protocol.TaskEvent // Events to send for subscription
 	SubscribeError  error
 
+	// Additional fields for tests
+	SendTaskSubscribeStream chan protocol.TaskEvent
+	SendTaskSubscribeError  error
+
 	// Push notification fields
 	pushNotificationSetResponse *protocol.TaskPushNotificationConfig
 	pushNotificationSetError    error
@@ -413,7 +413,7 @@ type mockTaskManager struct {
 	pushNotificationGetError    error
 }
 
-// newMockTaskManager creates a new mockTaskManager for testing.
+// newMockTaskManager creates a new MockTaskManager for testing.
 func newMockTaskManager() *mockTaskManager {
 	return &mockTaskManager{
 		tasks: make(map[string]*protocol.Task),
@@ -519,6 +519,16 @@ func (m *mockTaskManager) OnSendTaskSubscribe(
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.SendTaskSubscribeError != nil {
+		return nil, m.SendTaskSubscribeError
+	}
+
+	// Return the preconfigured stream if available
+	if m.SendTaskSubscribeStream != nil {
+		return m.SendTaskSubscribeStream, nil
+	}
+
+	// Otherwise, do the default behavior
 	if m.SubscribeError != nil {
 		return nil, m.SubscribeError
 	}
