@@ -19,11 +19,9 @@ import (
 type Option func(*A2AClient)
 
 // HttpReqHandler is a custom HTTP request handler for a2a client.
-type HttpReqHandler func(
-	ctx context.Context,
-	client *http.Client,
-	req *http.Request,
-) (*http.Response, error)
+type HttpReqHandler interface {
+	Handle(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error)
+}
 
 // WithHTTPClient sets a custom http.Client for the A2AClient.
 func WithHTTPClient(client *http.Client) Option {
