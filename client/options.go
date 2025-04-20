@@ -18,8 +18,8 @@ import (
 // Option is a functional option type for configuring the A2AClient.
 type Option func(*A2AClient)
 
-// HttpReqHandler is a custom HTTP request handler for a2a client.
-type HttpReqHandler interface {
+// HTTPReqHandler is a custom HTTP request handler for a2a client.
+type HTTPReqHandler interface {
 	Handle(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error)
 }
 
@@ -102,8 +102,8 @@ func WithAuthProvider(provider auth.ClientProvider) Option {
 	}
 }
 
-// WithHttpReqHandler sets a custom HTTP request handler for the A2AClient.
-func WithHttpReqHandler(handler HttpReqHandler) Option {
+// WithHTTPReqHandler sets a custom HTTP request handler for the A2AClient.
+func WithHTTPReqHandler(handler HTTPReqHandler) Option {
 	return func(c *A2AClient) {
 		c.httpReqHandler = handler
 	}

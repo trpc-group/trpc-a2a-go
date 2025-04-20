@@ -38,7 +38,7 @@ type A2AClient struct {
 	httpClient     *http.Client        // Underlying HTTP client.
 	userAgent      string              // User-Agent header string.
 	authProvider   auth.ClientProvider // Authentication provider.
-	httpReqHandler HttpReqHandler      // Custom HTTP request handler.
+	httpReqHandler HTTPReqHandler      // Custom HTTP request handler.
 }
 
 // NewA2AClient creates a new A2A client targeting the specified agentURL.
@@ -498,7 +498,7 @@ func (c *A2AClient) GetPushNotification(
 
 // httpRequestHandler is the HTTP request handler for a2a client.
 type httpRequestHandler struct {
-	handler HttpReqHandler
+	handler HTTPReqHandler
 }
 
 // Handle is the HTTP request handler for a2a client.
