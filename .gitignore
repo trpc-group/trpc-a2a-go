@@ -8,3 +8,5 @@ test_output.txt
 *.out
 
 *jwt-secret.key*
+
+!CODEOWNERS

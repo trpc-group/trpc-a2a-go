@@ -1,0 +1,5 @@
+# CODEOWNERS file for a2a-go-github
+# Each line is a file pattern followed by one or more owners.
+
+# Default owners for everything in the repo (unless a later match takes precedence)
+* @trpc-group/trpc-go
