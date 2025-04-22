@@ -104,7 +104,7 @@ func TestWithAPIKeyAuth(t *testing.T) {
 
 func TestWithOAuth2ClientCredentials(t *testing.T) {
 	clientID := "test-client-id"
-	clientSecret := "test-client-secret"
+	clientSecret := "test-client-secret-placeholder"
 	tokenURL := "https://auth.example.com/token"
 	scopes := []string{"profile", "email"}
 
@@ -125,7 +125,7 @@ func TestWithOAuth2TokenSource(t *testing.T) {
 	// Create a test OAuth2 config
 	config := &oauth2.Config{
 		ClientID:     "test-client-id",
-		ClientSecret: "test-client-secret",
+		ClientSecret: "test-client-secret-placeholder",
 		Endpoint: oauth2.Endpoint{
 			TokenURL: "https://auth.example.com/token",
 		},
@@ -133,7 +133,7 @@ func TestWithOAuth2TokenSource(t *testing.T) {
 
 	// Create a static token source
 	tokenSource := oauth2.StaticTokenSource(&oauth2.Token{
-		AccessToken: "test-access-token",
+		AccessToken: "test-access-token-placeholder",
 		TokenType:   "Bearer",
 	})
 
