@@ -473,6 +473,14 @@ func (m *MemoryTaskManager) OnPushNotificationSet(
 	ctx context.Context,
 	params protocol.TaskPushNotificationConfig,
 ) (*protocol.TaskPushNotificationConfig, error) {
+	// Check if the task exists
+	m.TasksMutex.RLock()
+	_, exists := m.Tasks[params.ID]
+	m.TasksMutex.RUnlock()
+	if !exists {
+		return nil, ErrTaskNotFound(params.ID)
+	}
+
 	// Store the push notification configuration.
 	m.PushNotificationsMutex.Lock()
 	m.PushNotifications[params.ID] = params.PushNotificationConfig
