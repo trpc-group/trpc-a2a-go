@@ -2,4 +2,4 @@
 # Each line is a file pattern followed by one or more owners.
 
 # Default owners for everything in the repo (unless a later match takes precedence)
-* @trpc-group/trpc-go
+* @trpc-group/trpc-go-a2a-maintainer
