@@ -7,6 +7,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -26,6 +27,15 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
+
+// Helper functions for testing
+func stringPtr(s string) *string {
+	return &s
+}
+
+func boolPtr(b bool) *bool {
+	return &b
+}
 
 // setupTestServer creates a test server with the given task manager and options.
 // Returns the test server and the A2A server for use in tests.
@@ -504,4 +514,165 @@ func TestA2AServer_StartStop(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		t.Fatal("Timed out waiting for server to stop")
 	}
+}
+
+// TestA2AServer_HandleTasksSendSubscribe tests the handleTasksSendSubscribe handler
+func TestA2AServer_HandleTasksSendSubscribe(t *testing.T) {
+	mockTM := newMockTaskManager()
+	testServer, _ := setupTestServer(t, mockTM)
+
+	// Configure mock task manager to succeed
+	events := make(chan protocol.TaskEvent, 10)
+	mockTM.SendTaskSubscribeStream = events
+	mockTM.SendTaskSubscribeError = nil
+
+	t.Run("Successful Subscription", func(t *testing.T) {
+		// Create SSE event to be sent
+		statusUpdate := protocol.TaskStatusUpdateEvent{
+			ID:     "test-sub-task",
+			Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
+			Final:  false,
+		}
+		artifactUpdate := protocol.TaskArtifactUpdateEvent{
+			ID: "test-sub-task",
+			Artifact: protocol.Artifact{
+				Name:      stringPtr("test-artifact"),
+				LastChunk: boolPtr(true),
+				Parts:     []protocol.Part{protocol.NewTextPart("Artifact content")},
+			},
+			Final: false,
+		}
+		finalUpdate := protocol.TaskStatusUpdateEvent{
+			ID:     "test-sub-task",
+			Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
+			Final:  true,
+		}
+
+		params := protocol.SendTaskParams{
+			ID: "test-sub-task",
+			Message: protocol.Message{
+				Role:  protocol.MessageRoleUser,
+				Parts: []protocol.Part{protocol.NewTextPart("Test message")},
+			},
+		}
+
+		// Create request - directly using the test server URL instead of "http://test"
+		paramsBytes, err := json.Marshal(params)
+		require.NoError(t, err)
+
+		reqBody := jsonrpc.Request{
+			Message: jsonrpc.Message{JSONRPC: "2.0", ID: "req-1"},
+			Method:  protocol.MethodTasksSendSubscribe,
+			Params:  json.RawMessage(paramsBytes),
+		}
+		reqBytes, err := json.Marshal(reqBody)
+		require.NoError(t, err)
+
+		req, err := http.NewRequest(http.MethodPost, testServer.URL, bytes.NewReader(reqBytes))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "text/event-stream") // Request SSE
+
+		// We need to close the actual channel right after the test
+		// to avoid blocking the test server
+		t.Cleanup(func() {
+			close(events)
+		})
+
+		// Setup a channel to receive the request
+		doneCh := make(chan struct{})
+
+		// Launch goroutine to handle the response reading
+		go func() {
+			resp, err := testServer.Client().Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			// Verify response is an SSE stream
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+			assert.Equal(t, "text/event-stream", resp.Header.Get("Content-Type"))
+
+			// Send test events through channel
+			events <- statusUpdate
+			events <- artifactUpdate
+			events <- finalUpdate
+
+			// Read the SSE events
+			reader := bufio.NewReader(resp.Body)
+			for i := 0; i < 3; i++ {
+				// Read the event line, which starts with "event:"
+				eventLine, err := reader.ReadString('\n')
+				require.NoError(t, err)
+				assert.Contains(t, eventLine, "event:")
+
+				// Read the data line, which starts with "data:"
+				dataLine, err := reader.ReadString('\n')
+				require.NoError(t, err)
+				assert.Contains(t, dataLine, "data:")
+
+				// Read the empty line
+				_, err = reader.ReadString('\n')
+				require.NoError(t, err)
+			}
+
+			close(doneCh)
+		}()
+
+		// Wait for test to complete or timeout
+		select {
+		case <-doneCh:
+			// Test completed successfully
+		case <-time.After(1 * time.Second):
+			t.Fatal("Test timed out waiting for SSE response")
+		}
+	})
+
+	t.Run("Error from Task Manager", func(t *testing.T) {
+		// Configure mock task manager to fail
+		mockTM.SendTaskSubscribeError = fmt.Errorf("subscription error")
+
+		params := protocol.SendTaskParams{
+			ID: "test-sub-error",
+			Message: protocol.Message{
+				Role:  protocol.MessageRoleUser,
+				Parts: []protocol.Part{protocol.NewTextPart("Test message")},
+			},
+		}
+
+		// Create request
+		req, _ := createJSONRPCRequest(t, protocol.MethodTasksSendSubscribe, params, "req-error")
+
+		resp := executeRequest(t, testServer, req, testServer.URL)
+		defer resp.Body.Close()
+
+		// Verify response contains error
+		jsonResp := decodeJSONRPCResponse(t, resp)
+		assert.NotNil(t, jsonResp.Error)
+		// Check for error in data field instead of message (internal errors are wrapped)
+		if dataStr, ok := jsonResp.Error.Data.(string); ok {
+			assert.Contains(t, dataStr, "subscription error")
+		} else {
+			assert.Fail(t, "Expected error data to contain the error message")
+		}
+	})
+
+	t.Run("Invalid Parameters", func(t *testing.T) {
+		// Create request with invalid params (missing required fields)
+		invalidParams := struct {
+			ID string `json:"id"`
+			// Missing Message field
+		}{
+			ID: "test-invalid",
+		}
+
+		req, _ := createJSONRPCRequest(t, protocol.MethodTasksSendSubscribe, invalidParams, "req-invalid")
+
+		resp := executeRequest(t, testServer, req, testServer.URL)
+		defer resp.Body.Close()
+
+		// Verify response contains error
+		jsonResp := decodeJSONRPCResponse(t, resp)
+		assert.NotNil(t, jsonResp.Error)
+		assert.Equal(t, jsonrpc.CodeInvalidParams, jsonResp.Error.Code)
+	})
 }

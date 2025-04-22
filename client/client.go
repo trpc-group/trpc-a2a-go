@@ -34,10 +34,11 @@ const (
 // A2AClient provides methods to interact with an A2A agent server.
 // It handles making HTTP requests and encoding/decoding JSON-RPC messages.
 type A2AClient struct {
-	baseURL      *url.URL            // Parsed base URL of the agent server.
-	httpClient   *http.Client        // Underlying HTTP client.
-	userAgent    string              // User-Agent header string.
-	authProvider auth.ClientProvider // Authentication provider.
+	baseURL        *url.URL            // Parsed base URL of the agent server.
+	httpClient     *http.Client        // Underlying HTTP client.
+	userAgent      string              // User-Agent header string.
+	authProvider   auth.ClientProvider // Authentication provider.
+	httpReqHandler HTTPReqHandler      // Custom HTTP request handler.
 }
 
 // NewA2AClient creates a new A2A client targeting the specified agentURL.
@@ -58,7 +59,8 @@ func NewA2AClient(agentURL string, opts ...Option) (*A2AClient, error) {
 		httpClient: &http.Client{
 			Timeout: defaultTimeout,
 		},
-		userAgent: defaultUserAgent,
+		userAgent:      defaultUserAgent,
+		httpReqHandler: &httpRequestHandler{},
 	}
 	// Apply functional options.
 	for _, opt := range opts {
@@ -162,9 +164,12 @@ func (c *A2AClient) StreamTask(
 	}
 	log.Debugf("A2A Client Stream Request -> Method: %s, ID: %v, URL: %s", request.Method, request.ID, targetURL)
 	// Make the initial request to establish the stream.
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpReqHandler.Handle(ctx, c.httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.StreamTask: http request failed: %w", err)
+	}
+	if resp == nil || resp.Body == nil {
+		return nil, fmt.Errorf("a2aClient.StreamTask: unexpected nil response")
 	}
 	// Check for non-success HTTP status codes.
 	// For SSE, a successful setup should result in 200 OK.
@@ -372,9 +377,12 @@ func (c *A2AClient) doRequest(
 		req.Header.Set("User-Agent", c.userAgent)
 	}
 	log.Debugf("A2A Client Request -> Method: %s, ID: %v, URL: %s", request.Method, request.ID, targetURL)
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpReqHandler.Handle(ctx, c.httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.doRequest: http request failed: %w", err)
+	}
+	if resp == nil || resp.Body == nil {
+		return nil, fmt.Errorf("a2aClient.doRequest: unexpected nil response")
 	}
 	// Ensure body is always closed.
 	defer resp.Body.Close()
@@ -486,4 +494,35 @@ func (c *A2AClient) GetPushNotification(
 	}
 
 	return config, nil
+}
+
+// httpRequestHandler is the HTTP request handler for a2a client.
+type httpRequestHandler struct {
+	handler HTTPReqHandler
+}
+
+// Handle is the HTTP request handler for a2a client.
+func (h *httpRequestHandler) Handle(
+	ctx context.Context,
+	client *http.Client,
+	req *http.Request,
+) (*http.Response, error) {
+	var err error
+	var resp *http.Response
+	defer func() {
+		if err != nil && resp != nil {
+			resp.Body.Close()
+		}
+	}()
+
+	if client == nil {
+		return nil, fmt.Errorf("a2aClient.httpRequestHandler: http client is nil")
+	}
+
+	resp, err = client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.httpRequestHandler: http request failed: %w", err)
+	}
+
+	return resp, nil
 }

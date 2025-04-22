@@ -158,7 +158,7 @@ func displayAgentCapabilities(card *server.AgentCard) {
 
 	// Print provider if available
 	if card.Provider != nil {
-		fmt.Printf("  Provider: %s\n", card.Provider.Name)
+		fmt.Printf("  Provider: %s\n", card.Provider.Organization)
 	}
 
 	// Print capabilities
@@ -554,7 +554,7 @@ func handleStreamingInteraction(
 		getFinalTaskState(a2aClient, taskID, config.Timeout, finalTaskState, finalArtifacts, config.HistoryLength)
 	}
 
-	log.Printf("Stream processing finished for task %s.", taskID)
+	log.Printf("Stream processing finished for task %s", taskID)
 	fmt.Println(strings.Repeat("-", 60))
 }
 
@@ -1191,8 +1191,8 @@ func getPushNotification(a2aClient *client.A2AClient, taskID string, timeout tim
 		if len(auth.Schemes) > 0 {
 			fmt.Printf("  Authentication Schemes: %v\n", auth.Schemes)
 		}
-		if auth.Credentials != "" {
-			fmt.Printf("  Credentials: %s\n", auth.Credentials)
+		if auth.Credentials != nil {
+			fmt.Printf("  Credentials: %s\n", *auth.Credentials)
 		}
 	}
 

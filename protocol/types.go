@@ -4,8 +4,7 @@
 //
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
-// Package taskmanager handles the lifecycle and state of A2A tasks,
-// defining the core types and interfaces based on the A2A specification.
+// Package protocol defines the core types and interfaces based on the A2A specification.
 package protocol
 
 import (
@@ -113,13 +112,7 @@ type AuthenticationInfo struct {
 	// Schemes is a list of authentication schemes supported.
 	Schemes []string `json:"schemes"`
 	// Credentials are the actual authentication credentials.
-	Credentials string `json:"credentials,omitempty"`
-	// OAuth2 contains OAuth2 specific authentication configuration.
-	OAuth2 *OAuth2AuthInfo `json:"oauth2,omitempty"`
-	// JWT contains JWT specific authentication configuration.
-	JWT *JWTAuthInfo `json:"jwt,omitempty"`
-	// APIKey contains API key specific authentication configuration.
-	APIKey *APIKeyAuthInfo `json:"apiKey,omitempty"`
+	Credentials *string `json:"credentials,omitempty"`
 }
 
 // OAuth2AuthInfo contains OAuth2-specific authentication details.
@@ -184,6 +177,8 @@ type TaskPushNotificationConfig struct {
 	ID string `json:"id"`
 	// PushNotificationConfig contains the notification settings.
 	PushNotificationConfig PushNotificationConfig `json:"pushNotificationConfig"`
+	// Metadata is optional additional configuration data.
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // Part is an interface representing a segment of a message (text, file, or data).
@@ -406,6 +401,8 @@ type SendTaskParams struct {
 	SessionID *string `json:"sessionId,omitempty"`
 	// Message is the user's message initiating the task.
 	Message Message `json:"message"`
+	// PushNotification contains optional push notification settings.
+	PushNotification *PushNotificationConfig `json:"pushNotification,omitempty"`
 	// HistoryLength is the requested history length in response.
 	HistoryLength *int `json:"historyLength,omitempty"`
 	// Metadata is the optional metadata.
@@ -419,6 +416,8 @@ type TaskQueryParams struct {
 	ID string `json:"id"`
 	// HistoryLength is the requested message history length.
 	HistoryLength *int `json:"historyLength,omitempty"`
+	// Metadata is the optional metadata.
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // TaskIDParams defines parameters for methods needing only a task ID (e.g., tasks_cancel).
@@ -426,6 +425,8 @@ type TaskQueryParams struct {
 type TaskIDParams struct {
 	// ID is the ID of the task.
 	ID string `json:"id"`
+	// Metadata is the optional metadata.
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // --- Factory Functions ---

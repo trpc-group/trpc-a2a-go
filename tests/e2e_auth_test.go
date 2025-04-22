@@ -436,9 +436,8 @@ func setupAuthServer(t *testing.T, provider auth.Provider) (taskmanager.TaskMana
 		Capabilities: server.AgentCapabilities{
 			Streaming: true,
 		},
-		Authentication: &server.AgentAuthentication{
-			Type:     "apiKey,jwt",
-			Required: true,
+		Authentication: &protocol.AuthenticationInfo{
+			Schemes: []string{"apiKey", "jwt"},
 		},
 		DefaultInputModes:  []string{"text"},
 		DefaultOutputModes: []string{"text"},

@@ -116,41 +116,19 @@ func main() {
 		Description: addressableStr("A demonstration server with JWT and API key authentication"),
 		URL:         fmt.Sprintf("http://localhost:%d", config.Port),
 		Provider: &server.AgentProvider{
-			Name: "Example Provider",
+			Organization: "Example Provider",
 		},
 		Version: "1.0.0",
 		Capabilities: server.AgentCapabilities{
 			Streaming:         true,
 			PushNotifications: true,
 		},
-		Authentication: &server.AgentAuthentication{
-			Type:     authType,
-			Required: true,
-			Config: map[string]interface{}{
-				"jwt": map[string]interface{}{
-					"audience": config.JWTAudience,
-					"issuer":   config.JWTIssuer,
-				},
-				"apiKey": map[string]interface{}{
-					"headerName": config.APIKeyHeader,
-				},
-			},
+		Authentication: &protocol.AuthenticationInfo{
+			Schemes:     []string{authType},
+			Credentials: &config.APIKeyHeader,
 		},
 		DefaultInputModes:  []string{"text"},
 		DefaultOutputModes: []string{"text"},
-	}
-
-	// Add OAuth2 configuration if enabled
-	if config.EnableOAuth {
-		if agentCard.Authentication != nil {
-			configMap, ok := agentCard.Authentication.Config.(map[string]interface{})
-			if ok {
-				configMap["oauth2"] = map[string]interface{}{
-					"tokenUrl": tokenEndpoint,
-					"scopes":   []string{"a2a.read", "a2a.write"},
-				}
-			}
-		}
 	}
 
 	// Create the server with authentication

@@ -9,6 +9,7 @@ package protocol
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -120,4 +121,277 @@ func TestTaskEvent_IsFinal(t *testing.T) {
 			assert.Equal(t, tc.expected, tc.event.IsFinal())
 		})
 	}
+}
+
+// TestTaskState tests the task state constants
+func TestTaskState(t *testing.T) {
+	tests := []struct {
+		state    TaskState
+		expected string
+	}{
+		{TaskStateSubmitted, "submitted"},
+		{TaskStateWorking, "working"},
+		{TaskStateCompleted, "completed"},
+		{TaskStateCanceled, "canceled"},
+		{TaskStateFailed, "failed"},
+		{TaskStateUnknown, "unknown"},
+		{TaskStateInputRequired, "input-required"},
+	}
+
+	for _, test := range tests {
+		t.Run(string(test.state), func(t *testing.T) {
+			assert.Equal(t, test.expected, string(test.state))
+		})
+	}
+}
+
+// TestMessageJSON tests the JSON marshaling and unmarshaling of Message
+func TestMessageJSON(t *testing.T) {
+	// Create text part
+	textPart := TextPart{
+		Type: PartTypeText,
+		Text: "Hello, world!",
+	}
+
+	// Create file part
+	filePart := FilePart{
+		Type: PartTypeFile,
+		File: FileContent{
+			Name:     stringPtr("example.txt"),
+			MimeType: stringPtr("text/plain"),
+			Bytes:    stringPtr("RmlsZSBjb250ZW50"), // Base64 encoded "File content"
+		},
+	}
+
+	// Create a message with these parts
+	original := NewMessage(MessageRoleUser, []Part{textPart, filePart})
+
+	// Marshal the message
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+
+	// Unmarshal back to a message
+	var decoded Message
+	err = json.Unmarshal(data, &decoded)
+	require.NoError(t, err)
+
+	// Verify the role
+	assert.Equal(t, MessageRoleUser, decoded.Role)
+
+	// Verify we have two parts
+	require.Len(t, decoded.Parts, 2)
+
+	// Check the text part
+	textPartDecoded, ok := decoded.Parts[0].(TextPart)
+	require.True(t, ok, "First part should be a TextPart")
+	assert.Equal(t, PartTypeText, textPartDecoded.Type)
+	assert.Equal(t, "Hello, world!", textPartDecoded.Text)
+
+	// Check the file part
+	filePartDecoded, ok := decoded.Parts[1].(FilePart)
+	require.True(t, ok, "Second part should be a FilePart")
+	assert.Equal(t, PartTypeFile, filePartDecoded.Type)
+	assert.Equal(t, "example.txt", *filePartDecoded.File.Name)
+	assert.Equal(t, "text/plain", *filePartDecoded.File.MimeType)
+	assert.Equal(t, "RmlsZSBjb250ZW50", *filePartDecoded.File.Bytes)
+}
+
+// TestPartValidation tests validation of different part types
+func TestPartValidation(t *testing.T) {
+	// Test TextPart
+	t.Run("TextPart", func(t *testing.T) {
+		textPart := TextPart{
+			Type: PartTypeText,
+			Text: "Valid text content",
+		}
+		assert.True(t, isValidPart(textPart))
+
+		// Invalid part type
+		invalidPart := TextPart{
+			Type: "invalid",
+			Text: "Text with invalid part type",
+		}
+		assert.False(t, isValidPart(invalidPart))
+	})
+
+	// Test FilePart
+	t.Run("FilePart", func(t *testing.T) {
+		validFilePart := FilePart{
+			Type: PartTypeFile,
+			File: FileContent{
+				Name:     stringPtr("file.txt"),
+				MimeType: stringPtr("text/plain"),
+				Bytes:    stringPtr("SGVsbG8="), // Base64 "Hello"
+			},
+		}
+		assert.True(t, isValidPart(validFilePart))
+
+		// Invalid part: missing required file info
+		invalidFilePart := FilePart{
+			Type: PartTypeFile,
+			File: FileContent{}, // Empty file content
+		}
+		assert.False(t, isValidPart(invalidFilePart))
+	})
+
+	// Test DataPart
+	t.Run("DataPart", func(t *testing.T) {
+		validDataPart := DataPart{
+			Type: PartTypeData,
+			Data: map[string]interface{}{"key": "value"},
+		}
+		assert.True(t, isValidPart(validDataPart))
+
+		// Invalid part: nil data
+		invalidDataPart := DataPart{
+			Type: PartTypeData,
+			Data: nil,
+		}
+		assert.False(t, isValidPart(invalidDataPart))
+	})
+}
+
+// isValidPart is a helper function to check if a part is valid
+// This is a simplified validation just for testing
+func isValidPart(part Part) bool {
+	switch p := part.(type) {
+	case TextPart:
+		return p.Type == PartTypeText && p.Text != ""
+	case FilePart:
+		return p.Type == PartTypeFile && (p.File.Name != nil || p.File.URI != nil || p.File.Bytes != nil)
+	case DataPart:
+		return p.Type == PartTypeData && p.Data != nil
+	default:
+		return false
+	}
+}
+
+// TestArtifact tests the artifact functionality
+func TestArtifact(t *testing.T) {
+	// Create a simple text part
+	textPart := TextPart{
+		Type: PartTypeText,
+		Text: "Artifact content",
+	}
+
+	// Create an artifact
+	artifact := Artifact{
+		Name:        stringPtr("Test Artifact"),
+		Description: stringPtr("This is a test artifact"),
+		Parts:       []Part{textPart},
+		Index:       1,
+		LastChunk:   boolPtr(true),
+	}
+
+	// Validate the artifact
+	assert.NotNil(t, artifact.Name)
+	assert.Equal(t, "Test Artifact", *artifact.Name)
+	assert.NotNil(t, artifact.Description)
+	assert.Equal(t, "This is a test artifact", *artifact.Description)
+	assert.Len(t, artifact.Parts, 1)
+	assert.Equal(t, 1, artifact.Index)
+	assert.NotNil(t, artifact.LastChunk)
+	assert.True(t, *artifact.LastChunk)
+
+	// Test JSON marshaling
+	data, err := json.Marshal(artifact)
+	require.NoError(t, err)
+
+	// Test JSON unmarshaling
+	var decoded Artifact
+	err = json.Unmarshal(data, &decoded)
+	require.NoError(t, err)
+
+	// Verify the decoded artifact
+	assert.Equal(t, *artifact.Name, *decoded.Name)
+	assert.Equal(t, *artifact.Description, *decoded.Description)
+	assert.Equal(t, artifact.Index, decoded.Index)
+	assert.Equal(t, *artifact.LastChunk, *decoded.LastChunk)
+
+	// Check the part
+	require.Len(t, decoded.Parts, 1)
+	decodedPart, ok := decoded.Parts[0].(TextPart)
+	require.True(t, ok, "Should decode as a TextPart")
+	assert.Equal(t, PartTypeText, decodedPart.Type)
+	assert.Equal(t, "Artifact content", decodedPart.Text)
+}
+
+// TestTaskStatus tests the TaskStatus type
+func TestTaskStatus(t *testing.T) {
+	now := time.Now().Format(time.RFC3339)
+
+	// Create a task status
+	status := TaskStatus{
+		State:     TaskStateCompleted,
+		Timestamp: now,
+	}
+
+	// Validate the fields
+	assert.Equal(t, TaskStateCompleted, status.State)
+	assert.Equal(t, now, status.Timestamp)
+
+	// Test adding a message to the status
+	message := NewMessage(MessageRoleAgent, []Part{
+		TextPart{
+			Type: PartTypeText,
+			Text: "Task completed successfully",
+		},
+	})
+
+	status.Message = &message
+	assert.NotNil(t, status.Message)
+	assert.Equal(t, MessageRoleAgent, status.Message.Role)
+}
+
+// Helper functions for testing
+func stringPtr(s string) *string {
+	return &s
+}
+
+// TestMarkerFunctions tests the marker functions for parts and events
+func TestMarkerFunctions(t *testing.T) {
+	// Test part marker functions
+	textPart := TextPart{Type: PartTypeText, Text: "Test"}
+	filePart := FilePart{Type: PartTypeFile}
+	dataPart := DataPart{Type: PartTypeData, Data: map[string]string{"key": "value"}}
+
+	// This test simply ensures the marker functions exist and don't panic
+	// They're just marker methods with no behavior
+	textPart.partMarker()
+	filePart.partMarker()
+	dataPart.partMarker()
+
+	// Test event marker functions
+	statusEvent := TaskStatusUpdateEvent{ID: "test", Status: TaskStatus{State: TaskStateCompleted}}
+	artifactEvent := TaskArtifactUpdateEvent{ID: "test"}
+
+	// This test simply ensures the marker functions exist and don't panic
+	statusEvent.eventMarker()
+	artifactEvent.eventMarker()
+
+	// Verify these functions don't have any observable behavior
+	// This is just to increase test coverage, as these are marker functions
+}
+
+// TestNewTask tests the NewTask factory function
+func TestNewTask(t *testing.T) {
+	// Test with just ID
+	taskID := "test-task"
+	task := NewTask(taskID, nil)
+
+	assert.Equal(t, taskID, task.ID)
+	assert.Nil(t, task.SessionID)
+	assert.Equal(t, TaskStateSubmitted, task.Status.State)
+	assert.NotEmpty(t, task.Status.Timestamp)
+	assert.NotNil(t, task.Metadata)
+	assert.Empty(t, task.Metadata)
+	assert.Nil(t, task.Artifacts)
+
+	// Test with session ID
+	sessionID := "test-session"
+	task = NewTask(taskID, &sessionID)
+
+	assert.Equal(t, taskID, task.ID)
+	assert.Equal(t, &sessionID, task.SessionID)
+	assert.Equal(t, *task.SessionID, sessionID)
 }
