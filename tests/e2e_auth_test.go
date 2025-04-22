@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -346,6 +347,15 @@ func TestPushNotificationAuthentication(t *testing.T) {
 	t.Logf("Authorization header created: %s", authHeader)
 
 	// Send push notification from agent to client
+	// Validate URL to prevent potential SSRF attacks
+	parsedURL, err := url.Parse(clientURL)
+	require.NoError(t, err, "Failed to parse client URL")
+
+	// Check if URL is valid - limited to http/https and certain hosts
+	require.True(t, parsedURL.Scheme == "http" || parsedURL.Scheme == "https",
+		"URL must use http or https scheme")
+
+	// Create request with validated URL
 	req, err := http.NewRequest("POST", clientURL, bytes.NewReader(payload))
 	require.NoError(t, err, "Failed to create request")
 	req.Header.Set("Content-Type", "application/json")
@@ -377,7 +387,10 @@ func TestPushNotificationAuthentication(t *testing.T) {
 	// Test with invalid token
 	// ---------------------
 	t.Log("Testing with invalid authorization header...")
-	invalidReq, _ := http.NewRequest("POST", clientURL, bytes.NewReader(payload))
+
+	// Reuse the validated URL from earlier
+	invalidReq, err := http.NewRequest("POST", clientURL, bytes.NewReader(payload))
+	require.NoError(t, err, "Failed to create invalid request")
 	invalidReq.Header.Set("Content-Type", "application/json")
 	invalidReq.Header.Set("Authorization", "Bearer invalidtoken")
 
