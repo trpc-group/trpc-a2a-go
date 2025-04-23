@@ -17,7 +17,7 @@ The system also includes a CLI client for interacting with the agents.
 ## Prerequisites
 
 *   Go (version 1.21 or later recommended)
-*   Google API key (Get freely from https://ai.google.dev/gemini-api/docs/api-key and set it as `GOOGLE_API_KEY` environment variable)
+*   Google API key (Obtain for free from https://ai.google.dev/gemini-api/docs/api-key and set it as `GOOGLE_API_KEY` environment variable)
 
 ## Directory Structure
 
