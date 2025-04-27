@@ -41,13 +41,15 @@ type pushNotificationTaskProcessor struct {
 }
 
 // Process implements the TaskProcessor interface.
+// This method should return quickly, only setting the task to "submitted" state
+// and then processing the task asynchronously.
 func (p *pushNotificationTaskProcessor) Process(
 	ctx context.Context,
 	taskID string,
 	message protocol.Message,
 	handle taskmanager.TaskHandle,
 ) error {
-	log.Infof("Processing task: %s", taskID)
+	log.Infof("Task received: %s", taskID)
 
 	// Extract task payload from the message parts
 	var payload map[string]interface{}
@@ -62,22 +64,32 @@ func (p *pushNotificationTaskProcessor) Process(
 	}
 
 	// Update status to working
-	if err := handle.UpdateStatus(protocol.TaskStateWorking, &protocol.Message{
+	if err := handle.UpdateStatus(ctx, protocol.TaskStateWorking, &protocol.Message{
 		Role: protocol.MessageRoleAgent,
 		Parts: []protocol.Part{
-			protocol.NewTextPart("Processing task..."),
+			protocol.NewTextPart("Task queued for processing..."),
 		},
 	}); err != nil {
 		return fmt.Errorf("failed to update task status: %v", err)
 	}
 
+	// Start asynchronous processing
+	go p.processTaskAsync(ctx, taskID, payload, handle)
+
+	return nil
+}
+
+// processTaskAsync handles the actual task processing in a separate goroutine.
+func (p *pushNotificationTaskProcessor) processTaskAsync(
+	ctx context.Context,
+	taskID string,
+	payload map[string]interface{},
+	handle taskmanager.TaskHandle,
+) {
+	log.Infof("Starting async processing of task: %s", taskID)
+
 	// Process the task (simulating work)
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(2 * time.Second):
-		// Simulated processing time
-	}
+	time.Sleep(5 * time.Second) // Longer processing time to demonstrate async behavior
 
 	// Prepare message for completion
 	completeMsg := "Task completed"
@@ -89,20 +101,19 @@ func (p *pushNotificationTaskProcessor) Process(
 	// When we call UpdateStatus with a terminal state (like completed),
 	// the task manager automatically:
 	// 1. Updates the task status in memory
-	// 2. Notifies subscribers via SSE events
-	// 3. Sends a push notification to the registered webhook URL (if enabled)
-	err := handle.UpdateStatus(protocol.TaskStateCompleted, &protocol.Message{
+	// 2. Sends a push notification to the registered webhook URL (if enabled)
+	err := handle.UpdateStatus(ctx, protocol.TaskStateCompleted, &protocol.Message{
 		Role: protocol.MessageRoleAgent,
 		Parts: []protocol.Part{
 			protocol.NewTextPart(completeMsg),
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to update task status: %v", err)
+		log.Errorf("Failed to update task status: %v", err)
+		return
 	}
 
-	log.Infof("Task completed: %s", taskID)
-	return nil
+	log.Infof("Task completed asynchronously: %s", taskID)
 }
 
 type pushNotificationTaskManager struct {
@@ -115,25 +126,43 @@ func (m *pushNotificationTaskManager) OnSendTask(ctx context.Context, request pr
 	if err != nil {
 		return nil, err
 	}
-	m.sendPushNotification(ctx, task)
 	return task, nil
 }
 
-func (m *pushNotificationTaskManager) sendPushNotification(ctx context.Context, task *protocol.Task) {
-	log.Infof("Sending push notification for task: %s", task.ID)
+// UpdateTaskStatus implements the TaskManager interface.
+func (m *pushNotificationTaskManager) UpdateTaskStatus(ctx context.Context, taskID string, state protocol.TaskState, message *protocol.Message) error {
+	if state == protocol.TaskStateCompleted || state == protocol.TaskStateFailed || state == protocol.TaskStateCanceled {
+		m.sendPushNotification(ctx, taskID, string(state))
+	}
+	if err := m.TaskManager.UpdateTaskStatus(ctx, taskID, state, message); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (m *pushNotificationTaskManager) sendPushNotification(ctx context.Context, taskID, status string) {
+	log.Infof("Sending push notification for task: %s with status: %s", taskID, status)
 	// Get push config from task manager
 	ptm, ok := m.TaskManager.(*taskmanager.MemoryTaskManager)
 	if !ok {
 		log.Errorf("failed to cast task manager to memory task manager")
 		return
 	}
-	pushConfig := ptm.PushNotifications[task.ID]
+	pushConfig, exists := ptm.PushNotifications[taskID]
+	if !exists {
+		log.Infof("No push notification configuration for task: %s", taskID)
+		return
+	}
+
 	// Send push notification
 	if err := m.authenticator.SendPushNotification(ctx, pushConfig.URL, map[string]interface{}{
-		"task_id": task.ID,
-		"status":  "completed",
+		"task_id":   taskID,
+		"status":    status,
+		"timestamp": time.Now().Format(time.RFC3339),
 	}); err != nil {
-		log.Errorf("failed to send push notification: %v", err)
+		log.Errorf("Failed to send push notification: %v", err)
+	} else {
+		log.Infof("Push notification sent successfully for task: %s", taskID)
 	}
 }
 
@@ -175,6 +204,12 @@ func main() {
 		log.Fatalf("failed to create task manager: %v", err)
 	}
 
+	// Create custom task manager with push notification support
+	customTM := &pushNotificationTaskManager{
+		TaskManager:   tm,
+		authenticator: authenticator,
+	}
+
 	// Combine standard options with additional options
 	options := []server.Option{
 		server.WithJWKSEndpoint(true, "/.well-known/jwks.json"),
@@ -184,10 +219,7 @@ func main() {
 	// Create server with the authenticator
 	a2aServer, err := server.NewA2AServer(
 		agentCard,
-		&pushNotificationTaskManager{
-			TaskManager:   tm,
-			authenticator: authenticator,
-		},
+		customTM,
 		options...,
 	)
 	if err != nil {

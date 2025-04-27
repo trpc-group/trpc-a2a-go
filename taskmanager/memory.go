@@ -76,7 +76,7 @@ func (m *MemoryTaskManager) processTaskWithProcessor(
 	}
 
 	// Set initial status to Working before calling Process
-	if err := m.UpdateTaskStatus(taskID, protocol.TaskStateWorking, nil); err != nil {
+	if err := m.UpdateTaskStatus(ctx, taskID, protocol.TaskStateWorking, nil); err != nil {
 		log.Errorf("Error setting initial Working status for task %s: %v", taskID, err)
 		return fmt.Errorf("failed to set initial working status: %w", err)
 	}
@@ -89,7 +89,7 @@ func (m *MemoryTaskManager) processTaskWithProcessor(
 			Parts: []protocol.Part{protocol.NewTextPart(err.Error())},
 		}
 		// Log update error while still handling the processor error
-		if updateErr := m.UpdateTaskStatus(taskID, protocol.TaskStateFailed, errMsg); updateErr != nil {
+		if updateErr := m.UpdateTaskStatus(ctx, taskID, protocol.TaskStateFailed, errMsg); updateErr != nil {
 			log.Errorf("Failed to update task %s status to failed: %v", taskID, updateErr)
 		}
 		return err
@@ -124,7 +124,7 @@ func (m *MemoryTaskManager) startTaskSubscribe(
 					Role:  protocol.MessageRoleAgent,
 					Parts: []protocol.Part{protocol.NewTextPart(err.Error())},
 				}
-				if updateErr := m.UpdateTaskStatus(taskID, protocol.TaskStateFailed, errMsg); updateErr != nil {
+				if updateErr := m.UpdateTaskStatus(ctx, taskID, protocol.TaskStateFailed, errMsg); updateErr != nil {
 					log.Errorf("Failed to update task %s status to failed: %v", taskID, updateErr)
 				}
 			}
@@ -189,7 +189,7 @@ func (m *MemoryTaskManager) OnSendTaskSubscribe(
 	// Set initial state if new (submitted -> working)
 	// This will generate the first event for subscribers
 	if task.Status.State == protocol.TaskStateSubmitted {
-		if err := m.UpdateTaskStatus(params.ID, protocol.TaskStateWorking, nil); err != nil {
+		if err := m.UpdateTaskStatus(ctx, params.ID, protocol.TaskStateWorking, nil); err != nil {
 			m.removeSubscriber(params.ID, eventChan)
 			close(eventChan)
 			return nil, err
@@ -283,7 +283,7 @@ func (m *MemoryTaskManager) OnCancelTask(ctx context.Context, params protocol.Ta
 		},
 	}
 	// Update state to Cancelled.
-	if err := m.UpdateTaskStatus(params.ID, protocol.TaskStateCanceled, cancelMsg); err != nil {
+	if err := m.UpdateTaskStatus(ctx, params.ID, protocol.TaskStateCanceled, cancelMsg); err != nil {
 		log.Errorf("Error updating status to Cancelled for task %s: %v", params.ID, err)
 		return nil, err
 	}
@@ -298,7 +298,7 @@ func (m *MemoryTaskManager) OnCancelTask(ctx context.Context, params protocol.Ta
 // UpdateTaskStatus updates the task's state and notifies any subscribers.
 // Returns an error if the task does not exist.
 // Exported method (used by memoryTaskHandle).
-func (m *MemoryTaskManager) UpdateTaskStatus(taskID string, state protocol.TaskState, message *protocol.Message) error {
+func (m *MemoryTaskManager) UpdateTaskStatus(ctx context.Context, taskID string, state protocol.TaskState, message *protocol.Message) error {
 	m.TasksMutex.Lock()
 	task, exists := m.Tasks[taskID]
 	if !exists {
@@ -332,7 +332,7 @@ func (m *MemoryTaskManager) UpdateTaskStatus(taskID string, state protocol.TaskS
 // AddArtifact adds an artifact to the task and notifies subscribers.
 // Returns an error if the task does not exist.
 // Exported method (used by memoryTaskHandle).
-func (m *MemoryTaskManager) AddArtifact(taskID string, artifact protocol.Artifact) error {
+func (m *MemoryTaskManager) AddArtifact(ctx context.Context, taskID string, artifact protocol.Artifact) error {
 	m.TasksMutex.Lock()
 	task, exists := m.Tasks[taskID]
 	if !exists {
@@ -473,14 +473,6 @@ func (m *MemoryTaskManager) OnPushNotificationSet(
 	ctx context.Context,
 	params protocol.TaskPushNotificationConfig,
 ) (*protocol.TaskPushNotificationConfig, error) {
-	// Check if the task exists
-	m.TasksMutex.RLock()
-	_, exists := m.Tasks[params.ID]
-	m.TasksMutex.RUnlock()
-	if !exists {
-		return nil, ErrTaskNotFound(params.ID)
-	}
-
 	// Store the push notification configuration.
 	m.PushNotificationsMutex.Lock()
 	m.PushNotifications[params.ID] = params.PushNotificationConfig

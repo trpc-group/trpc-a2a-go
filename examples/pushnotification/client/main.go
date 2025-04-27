@@ -6,10 +6,19 @@
 
 // Package main implements a client demonstrating how to receive and verify
 // push notifications using JWKS.
+//
+// This example demonstrates the recommended approach for long-running tasks:
+// 1. Client sends a task via non-streaming API (tasks/send)
+// 2. Client registers a webhook for push notifications
+// 3. Client disconnects or does other work
+// 4. Server processes the task asynchronously
+// 5. When task completes, server sends push notification to the webhook
+// 6. Client processes the notification
 package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -31,12 +40,16 @@ import (
 )
 
 const (
-	defaultTaskQueueName = "task-queue"
-	defaultServerHost    = "localhost"
-	defaultServerPort    = 8000
-	defaultWebhookPort   = 8001
-	defaultWebhookHost   = "localhost"
-	defaultWebhookPath   = "/webhook"
+	defaultServerHost  = "localhost"
+	defaultServerPort  = 8000
+	defaultWebhookHost = "localhost"
+	defaultWebhookPort = 8001
+	defaultWebhookPath = "/webhook"
+
+	// JWT verification settings
+	jwksRefreshInterval = 15 * time.Minute
+	jwtMaxAge           = 5 * time.Minute
+	httpTimeout         = 10 * time.Second
 )
 
 // Config holds client configuration.
@@ -59,37 +72,86 @@ type TaskStatusChange struct {
 
 // WebhookHandler handles incoming push notifications.
 type WebhookHandler struct {
-	keyset      jwk.Set
-	keysetMutex sync.RWMutex
-	jwksURL     string
+	jwksClient *JWKSClient
+	tasks      *TaskTracker
 }
 
-// NewWebhookHandler creates a new webhook handler for push notifications.
-func NewWebhookHandler(jwksURL string) *WebhookHandler {
-	handler := &WebhookHandler{
+// JWKSClient manages fetching and caching JWKS for JWT verification.
+type JWKSClient struct {
+	jwksURL      string
+	keyset       jwk.Set
+	keysetMutex  sync.RWMutex
+	lastRefresh  time.Time
+	refreshMutex sync.Mutex
+}
+
+// TaskTracker tracks task statuses.
+type TaskTracker struct {
+	taskMap   map[string]string
+	taskMutex sync.RWMutex
+}
+
+// NewTaskTracker creates a new TaskTracker.
+func NewTaskTracker() *TaskTracker {
+	return &TaskTracker{
+		taskMap: make(map[string]string),
+	}
+}
+
+// TrackTask adds a task to the tracking map.
+func (t *TaskTracker) TrackTask(taskID string) {
+	t.taskMutex.Lock()
+	defer t.taskMutex.Unlock()
+	t.taskMap[taskID] = "pending"
+	log.Infof("Task added to tracking: %s", taskID)
+}
+
+// UpdateTaskStatus updates the status of a tracked task.
+func (t *TaskTracker) UpdateTaskStatus(taskID, status string) {
+	t.taskMutex.Lock()
+	defer t.taskMutex.Unlock()
+	t.taskMap[taskID] = status
+	log.Infof("Task status updated: %s -> %s", taskID, status)
+}
+
+// GetTaskStatus returns the current status of a task.
+func (t *TaskTracker) GetTaskStatus(taskID string) string {
+	t.taskMutex.RLock()
+	defer t.taskMutex.RUnlock()
+	status, exists := t.taskMap[taskID]
+	if !exists {
+		return "unknown"
+	}
+	return status
+}
+
+// NewJWKSClient creates a new JWKS client for JWT verification.
+func NewJWKSClient(jwksURL string) *JWKSClient {
+	client := &JWKSClient{
 		jwksURL: jwksURL,
+		keyset:  jwk.NewSet(),
 	}
 
 	// Fetch JWKS initially
-	if err := handler.refreshJWKS(); err != nil {
+	if err := client.RefreshJWKS(); err != nil {
 		log.Errorf("Initial JWKS fetch failed: %v", err)
 	} else {
 		log.Infof("Initial JWKS fetch successful")
 	}
 
 	// Start a background goroutine to refresh JWKS periodically
-	go handler.periodicJWKSRefresh()
+	go client.StartPeriodicRefresh()
 
-	return handler
+	return client
 }
 
-// periodicJWKSRefresh refreshes the JWKS every 15 minutes.
-func (h *WebhookHandler) periodicJWKSRefresh() {
-	ticker := time.NewTicker(15 * time.Minute)
+// StartPeriodicRefresh refreshes the JWKS periodically.
+func (c *JWKSClient) StartPeriodicRefresh() {
+	ticker := time.NewTicker(jwksRefreshInterval)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		if err := h.refreshJWKS(); err != nil {
+		if err := c.RefreshJWKS(); err != nil {
 			log.Errorf("JWKS refresh failed: %v", err)
 		} else {
 			log.Infof("JWKS refreshed successfully")
@@ -97,17 +159,21 @@ func (h *WebhookHandler) periodicJWKSRefresh() {
 	}
 }
 
-// refreshJWKS fetches the latest JWKS from the server.
-func (h *WebhookHandler) refreshJWKS() error {
-	log.Infof("Fetching JWKS from %s", h.jwksURL)
+// RefreshJWKS fetches the latest JWKS from the server.
+func (c *JWKSClient) RefreshJWKS() error {
+	// Use mutex to prevent multiple simultaneous refreshes
+	c.refreshMutex.Lock()
+	defer c.refreshMutex.Unlock()
+
+	log.Infof("Fetching JWKS from %s", c.jwksURL)
 
 	// Create HTTP client with timeout
 	httpClient := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: httpTimeout,
 	}
 
 	// Fetch JWKS
-	resp, err := httpClient.Get(h.jwksURL)
+	resp, err := httpClient.Get(c.jwksURL)
 	if err != nil {
 		return fmt.Errorf("failed to fetch JWKS: %w", err)
 	}
@@ -131,21 +197,66 @@ func (h *WebhookHandler) refreshJWKS() error {
 	}
 
 	// Update keyset
-	h.keysetMutex.Lock()
-	h.keyset = keyset
-	h.keysetMutex.Unlock()
+	c.keysetMutex.Lock()
+	c.keyset = keyset
+	c.lastRefresh = time.Now()
+	c.keysetMutex.Unlock()
 
 	log.Infof("JWKS updated successfully, contains %d keys", keyset.Len())
 	return nil
 }
 
+// GetKeySet returns the current JWKS.
+func (c *JWKSClient) GetKeySet() jwk.Set {
+	c.keysetMutex.RLock()
+	defer c.keysetMutex.RUnlock()
+	return c.keyset
+}
+
+// NewWebhookHandler creates a new webhook handler for push notifications.
+func NewWebhookHandler(jwksURL string) *WebhookHandler {
+	return &WebhookHandler{
+		jwksClient: NewJWKSClient(jwksURL),
+		tasks:      NewTaskTracker(),
+	}
+}
+
+// TrackTask adds a task to the tracking map.
+func (h *WebhookHandler) TrackTask(taskID string) {
+	h.tasks.TrackTask(taskID)
+}
+
+// GetTaskStatus returns the current status of a task.
+func (h *WebhookHandler) GetTaskStatus(taskID string) string {
+	return h.tasks.GetTaskStatus(taskID)
+}
+
 // ServeHTTP handles incoming push notifications from the server.
 func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	log.Infof("Received push notification")
+	log.Infof("=== Received push notification ===")
 
 	// Check if this is a POST request
 	if r.Method != http.MethodPost {
+		log.Infof("Method not allowed: %s", r.Method)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Check validation token mechanism if present
+	validationToken := r.URL.Query().Get("validationToken")
+	if validationToken != "" {
+		// This is a validation request, echo the token back
+		log.Infof("Responding to validation request with token: %s", validationToken)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(validationToken))
+		return
+	}
+
+	// Read request body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Infof("Failed to read request body: %v", err)
+		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
 
@@ -159,7 +270,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Extract token from header (Bearer <token>)
 	parts := strings.Split(authHeader, " ")
-	if len(parts) != 2 || parts[0] != "Bearer" {
+	if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
 		log.Infof("Invalid Authorization header format")
 		http.Error(w, "Invalid Authorization format", http.StatusUnauthorized)
 		return
@@ -167,18 +278,10 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	tokenString := parts[1]
 
 	// Verify JWT signature using JWKS
-	token, err := h.verifyJWT(tokenString)
+	token, err := h.verifyJWT(tokenString, body)
 	if err != nil {
 		log.Infof("JWT verification failed: %v", err)
 		http.Error(w, "Invalid token", http.StatusUnauthorized)
-		return
-	}
-
-	// Parse request body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		log.Infof("Failed to read request body: %v", err)
-		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
 
@@ -206,23 +309,21 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payloadObj, ok := jwtPayload["payload"].(map[string]interface{})
-	if !ok {
-		log.Infof("JWT missing payload field")
-		http.Error(w, "Invalid token format", http.StatusUnauthorized)
-		return
+	// Verify task_id in the payload if present in the JWT
+	if payloadObj, ok := jwtPayload["payload"].(map[string]interface{}); ok {
+		if jwtTaskID, ok := payloadObj["task_id"].(string); ok && jwtTaskID != taskID {
+			log.Infof("Task ID mismatch: JWT=%v vs Notification=%s", jwtTaskID, taskID)
+			http.Error(w, "Task ID mismatch", http.StatusUnauthorized)
+			return
+		}
 	}
 
-	jwtTaskID, ok := payloadObj["task_id"].(string)
-	if !ok || jwtTaskID != taskID {
-		log.Infof("Task ID mismatch: JWT=%v vs Notification=%s", jwtTaskID, taskID)
-		http.Error(w, "Task ID mismatch", http.StatusUnauthorized)
-		return
-	}
+	// Update task status in our tracking map
+	status, _ := notification["status"].(string)
+	h.tasks.UpdateTaskStatus(taskID, status)
 
 	// Log verification success
-	status, _ := notification["status"].(string)
-	log.Infof("Verified notification for task %s: Status = %s", taskID, status)
+	log.Infof("★★★ Verified notification for task %s: Status = %s ★★★", taskID, status)
 	prettyJSON, _ := json.MarshalIndent(notification, "", "  ")
 	log.Infof("Notification details: %s", string(prettyJSON))
 
@@ -232,22 +333,50 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // verifyJWT verifies a JWT token using the JWKS.
-func (h *WebhookHandler) verifyJWT(tokenString string) (jwt.Token, error) {
+func (h *WebhookHandler) verifyJWT(tokenString string, payload []byte) (jwt.Token, error) {
 	// Get keyset for verification
-	h.keysetMutex.RLock()
-	keyset := h.keyset
-	h.keysetMutex.RUnlock()
+	keyset := h.jwksClient.GetKeySet()
 
-	if keyset == nil {
+	if keyset == nil || keyset.Len() == 0 {
 		return nil, fmt.Errorf("no JWKS available")
 	}
 
+	// Calculate payload hash for verification
+	hash := sha256.Sum256(payload)
+	expectedPayloadHash := fmt.Sprintf("%x", hash)
+
 	// Verify token
-	return jwt.Parse(
+	token, err := jwt.Parse(
 		[]byte(tokenString),
 		jwt.WithKeySet(keyset),
 		jwt.WithValidate(true),
+		jwt.WithVerify(true),
 	)
+
+	if err != nil {
+		return nil, fmt.Errorf("JWT validation failed: %w", err)
+	}
+
+	// Verify token has not expired
+	if iat, exists := token.Get("iat"); exists {
+		if iatTime, ok := iat.(time.Time); ok {
+			tokenAge := time.Since(iatTime)
+			if tokenAge > jwtMaxAge {
+				return nil, fmt.Errorf("token has expired (age: %v)", tokenAge)
+			}
+		}
+	}
+
+	// Verify payload hash if present in token
+	if requestBodyHash, exists := token.Get("request_body_sha256"); exists {
+		if hashStr, ok := requestBodyHash.(string); ok {
+			if hashStr != expectedPayloadHash {
+				return nil, fmt.Errorf("payload hash mismatch")
+			}
+		}
+	}
+
+	return token, nil
 }
 
 // startWebhookServer starts the webhook server on the specified host and port.
@@ -326,6 +455,9 @@ func main() {
 		log.Fatalf("Failed to marshal payload: %v", err)
 	}
 
+	// Start tracking this task
+	handler.TrackTask(taskID)
+
 	// Create task parameters
 	params := protocol.SendTaskParams{
 		ID: taskID,
@@ -337,8 +469,7 @@ func main() {
 		),
 	}
 
-	// Set up push notification configuration BEFORE sending the task
-	// This prevents a race condition where the task completes before notification is registered
+	// Step 1: Set up push notification configuration BEFORE sending the task
 	pushConfig := protocol.TaskPushNotificationConfig{
 		ID: taskID,
 		PushNotificationConfig: protocol.PushNotificationConfig{
@@ -347,23 +478,41 @@ func main() {
 		},
 	}
 
-	// Register for push notifications FIRST
-	log.Infof("Registering for push notifications at: %s", webhookURL)
+	// Step 1.1: Register for push notifications
+	log.Infof("1. Registering for push notifications at: %s", webhookURL)
 	_, err = a2aClient.SetPushNotification(context.Background(), pushConfig)
 	if err != nil {
 		log.Fatalf("Failed to set push notification: %v", err)
 	}
-	log.Infof("Successfully registered for push notifications")
+	log.Infof("   ✓ Successfully registered for push notifications")
 
-	// Now send the task
-	log.Infof("Sending task to %s:%d...", cfg.ServerHost, cfg.ServerPort)
+	// Step 2: Send the task (using non-streaming API)
+	log.Infof("2. Sending task to %s:%d using non-streaming API (tasks/send)...", cfg.ServerHost, cfg.ServerPort)
 	task, err := a2aClient.SendTasks(context.Background(), params)
 	if err != nil {
 		log.Fatalf("Failed to send task: %v", err)
 	}
-	log.Infof("Task sent successfully, initial status: %s", task.Status.State)
+	log.Infof("   ✓ Task sent successfully, initial status: %s", task.Status.State)
 
-	log.Infof("Waiting for push notifications...")
+	// Step 3: Client can do other work while waiting for push notification
+	log.Infof("3. Task is being processed asynchronously on the server")
+	log.Infof("   Client is free to do other work or disconnect")
+	log.Infof("   Waiting for push notifications via webhook...")
+
+	// Poll for task status updates periodically to demonstrate client activity
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			status := handler.GetTaskStatus(taskID)
+			if status == "completed" || status == "failed" || status == "canceled" {
+				log.Infof("4. Task is complete! Final status: %s (received via push notification)", status)
+				return
+			}
+			log.Infof("   ... client still waiting for push notification, current tracked status: %s", status)
+		}
+	}()
 
 	// Wait for termination signal
 	sigCh := make(chan os.Signal, 1)

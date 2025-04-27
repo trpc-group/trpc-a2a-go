@@ -49,7 +49,7 @@ func (p *streamingTaskProcessor) Process(
 			protocol.MessageRoleAgent,
 			[]protocol.Part{protocol.NewTextPart(errMsg)},
 		)
-		_ = handle.UpdateStatus(protocol.TaskStateFailed, &failedMessage)
+		_ = handle.UpdateStatus(ctx, protocol.TaskStateFailed, &failedMessage)
 		return fmt.Errorf(errMsg)
 	}
 
@@ -70,7 +70,7 @@ func (p *streamingTaskProcessor) Process(
 		protocol.MessageRoleAgent,
 		[]protocol.Part{protocol.NewTextPart("Starting to process your streaming data...")},
 	)
-	if err := handle.UpdateStatus(protocol.TaskStateWorking, &initialMessage); err != nil {
+	if err := handle.UpdateStatus(ctx, protocol.TaskStateWorking, &initialMessage); err != nil {
 		log.Printf("Error updating initial status for task %s: %v", taskID, err)
 		return err
 	}
@@ -84,7 +84,7 @@ func (p *streamingTaskProcessor) Process(
 		// Check for cancellation
 		if err := ctx.Err(); err != nil {
 			log.Printf("Task %s cancelled during streaming: %v", taskID, err)
-			_ = handle.UpdateStatus(protocol.TaskStateCanceled, nil)
+			_ = handle.UpdateStatus(ctx, protocol.TaskStateCanceled, nil)
 			return err
 		}
 
@@ -100,7 +100,7 @@ func (p *streamingTaskProcessor) Process(
 		)
 
 		// Update status to show progress
-		if err := handle.UpdateStatus(protocol.TaskStateWorking, &statusMsg); err != nil {
+		if err := handle.UpdateStatus(ctx, protocol.TaskStateWorking, &statusMsg); err != nil {
 			log.Printf("Error updating progress status for task %s: %v", taskID, err)
 			// Continue processing despite update error
 		}
@@ -117,7 +117,7 @@ func (p *streamingTaskProcessor) Process(
 		}
 
 		// Add the artifact
-		if err := handle.AddArtifact(chunkArtifact); err != nil {
+		if err := handle.AddArtifact(ctx, chunkArtifact); err != nil {
 			log.Printf("Error adding artifact for task %s chunk %d: %v", taskID, i+1, err)
 			// Continue processing despite artifact error
 		}
@@ -125,11 +125,7 @@ func (p *streamingTaskProcessor) Process(
 		// Simulate processing time
 		select {
 		case <-ctx.Done():
-			log.Printf("Task %s cancelled during delay: %v", taskID, ctx.Err())
-			_ = handle.UpdateStatus(protocol.TaskStateCanceled, nil)
-			return ctx.Err()
-		case <-time.After(500 * time.Millisecond): // Simulate work with delay
-			// Continue processing
+
 		}
 	}
 
@@ -140,7 +136,7 @@ func (p *streamingTaskProcessor) Process(
 			protocol.NewTextPart(
 				fmt.Sprintf("Completed processing all %d chunks successfully!", totalChunks))},
 	)
-	if err := handle.UpdateStatus(protocol.TaskStateCompleted, &completeMessage); err != nil {
+	if err := handle.UpdateStatus(ctx, protocol.TaskStateCompleted, &completeMessage); err != nil {
 		log.Printf("Error updating final status for task %s: %v", taskID, err)
 		return fmt.Errorf("failed to update final task status: %w", err)
 	}
@@ -162,7 +158,7 @@ func (p *streamingTaskProcessor) processNonStreaming(
 		protocol.MessageRoleAgent,
 		[]protocol.Part{protocol.NewTextPart("Processing your text...")},
 	)
-	if err := handle.UpdateStatus(protocol.TaskStateWorking, &initialMessage); err != nil {
+	if err := handle.UpdateStatus(ctx, protocol.TaskStateWorking, &initialMessage); err != nil {
 		log.Printf("Error updating initial status for task %s: %v", taskID, err)
 		return err
 	}
@@ -180,7 +176,7 @@ func (p *streamingTaskProcessor) processNonStreaming(
 	}
 
 	// Add the artifact
-	if err := handle.AddArtifact(artifact); err != nil {
+	if err := handle.AddArtifact(ctx, artifact); err != nil {
 		log.Printf("Error adding artifact for task %s: %v", taskID, err)
 	}
 
@@ -191,7 +187,7 @@ func (p *streamingTaskProcessor) processNonStreaming(
 			protocol.NewTextPart(
 				fmt.Sprintf("Processing complete. Input: %s -> Output: %s", text, processedText))},
 	)
-	if err := handle.UpdateStatus(protocol.TaskStateCompleted, &completeMessage); err != nil {
+	if err := handle.UpdateStatus(ctx, protocol.TaskStateCompleted, &completeMessage); err != nil {
 		log.Printf("Error updating final status for task %s: %v", taskID, err)
 		return fmt.Errorf("failed to update final task status: %w", err)
 	}

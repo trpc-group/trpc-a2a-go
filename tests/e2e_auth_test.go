@@ -504,7 +504,7 @@ func (m *mockTaskManager) OnSendTask(
 		manager: m,
 	}
 
-	if err := handle.UpdateStatus(protocol.TaskStateWorking, nil); err != nil {
+	if err := handle.UpdateStatus(ctx, protocol.TaskStateWorking, nil); err != nil {
 		return task, err
 	}
 
@@ -514,7 +514,7 @@ func (m *mockTaskManager) OnSendTask(
 		}
 	} else {
 		// Mark the task as done if no processor
-		if err := handle.UpdateStatus(protocol.TaskStateCompleted, nil); err != nil {
+		if err := handle.UpdateStatus(ctx, protocol.TaskStateCompleted, nil); err != nil {
 			return task, err
 		}
 	}
@@ -623,7 +623,7 @@ func (m *mockTaskManager) OnCancelTask(
 		manager: m,
 	}
 
-	if err := handle.UpdateStatus(protocol.TaskStateCanceled, nil); err != nil {
+	if err := handle.UpdateStatus(ctx, protocol.TaskStateCanceled, nil); err != nil {
 		return task, err
 	}
 
@@ -675,6 +675,43 @@ func (m *mockTaskManager) OnSendTaskSubscribe(
 	return eventCh, nil
 }
 
+// UpdateTaskStatus updates a task's status directly.
+// This implements the TaskManager interface.
+func (m *mockTaskManager) UpdateTaskStatus(ctx context.Context, taskID string, state protocol.TaskState, message *protocol.Message) error {
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("task %s not found", taskID)
+	}
+
+	// Update status
+	task.Status.State = state
+	task.Status.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	if message != nil {
+		task.Status.Message = message
+	}
+
+	return nil
+}
+
+// AddArtifact adds an artifact to a task.
+// This implements the TaskManager interface.
+func (m *mockTaskManager) AddArtifact(ctx context.Context, taskID string, artifact protocol.Artifact) error {
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("task %s not found", taskID)
+	}
+
+	// Initialize artifacts slice if needed
+	if task.Artifacts == nil {
+		task.Artifacts = make([]protocol.Artifact, 0)
+	}
+
+	// Add the artifact
+	task.Artifacts = append(task.Artifacts, artifact)
+
+	return nil
+}
+
 // mockTaskHandle implements the TaskHandle interface.
 type mockTaskHandle struct {
 	taskID  string
@@ -682,7 +719,7 @@ type mockTaskHandle struct {
 }
 
 // UpdateStatus updates the status of a task.
-func (h *mockTaskHandle) UpdateStatus(state protocol.TaskState, message *protocol.Message) error {
+func (h *mockTaskHandle) UpdateStatus(ctx context.Context, state protocol.TaskState, message *protocol.Message) error {
 	task, e := h.manager.Task(h.taskID)
 	if e != nil {
 		return e
@@ -698,7 +735,7 @@ func (h *mockTaskHandle) UpdateStatus(state protocol.TaskState, message *protoco
 }
 
 // AddArtifact implements the TaskHandle interface.
-func (h *mockTaskHandle) AddArtifact(artifact protocol.Artifact) error {
+func (h *mockTaskHandle) AddArtifact(ctx context.Context, artifact protocol.Artifact) error {
 	task, err := h.manager.Task(h.taskID)
 	if err != nil {
 		return err
@@ -760,5 +797,5 @@ func (p *echoProcessor) Process(
 	}
 
 	// Mark the task as done with the response
-	return handle.UpdateStatus(protocol.TaskStateCompleted, &response)
+	return handle.UpdateStatus(ctx, protocol.TaskStateCompleted, &response)
 }
