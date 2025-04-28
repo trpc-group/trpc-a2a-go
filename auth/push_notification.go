@@ -84,6 +84,11 @@ func (a *PushNotificationAuthenticator) GenerateKeyPair() error {
 		return fmt.Errorf("failed to set key usage: %w", err)
 	}
 
+	// Set algorithm
+	if err := key.Set(jwk.AlgorithmKey, "RS256"); err != nil {
+		return fmt.Errorf("failed to set key algorithm: %w", err)
+	}
+
 	// Add the key to the key set
 	a.keySet.AddKey(key)
 

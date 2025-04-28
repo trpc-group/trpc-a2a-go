@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -31,6 +32,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 
@@ -110,8 +112,17 @@ func (t *TaskTracker) TrackTask(taskID string) {
 func (t *TaskTracker) UpdateTaskStatus(taskID, status string) {
 	t.taskMutex.Lock()
 	defer t.taskMutex.Unlock()
+
+	prevStatus, exists := t.taskMap[taskID]
 	t.taskMap[taskID] = status
-	log.Infof("Task status updated: %s -> %s", taskID, status)
+
+	if exists {
+		log.Infof("Task %s status changed: %s -> %s at %v",
+			taskID, prevStatus, status, time.Now().Format(time.RFC3339))
+	} else {
+		log.Infof("Task %s status set to %s at %v",
+			taskID, status, time.Now().Format(time.RFC3339))
+	}
 }
 
 // GetTaskStatus returns the current status of a task.
@@ -161,11 +172,10 @@ func (c *JWKSClient) StartPeriodicRefresh() {
 
 // RefreshJWKS fetches the latest JWKS from the server.
 func (c *JWKSClient) RefreshJWKS() error {
-	// Use mutex to prevent multiple simultaneous refreshes
 	c.refreshMutex.Lock()
 	defer c.refreshMutex.Unlock()
 
-	log.Infof("Fetching JWKS from %s", c.jwksURL)
+	log.Infof("Refreshing JWKS from %s at %v", c.jwksURL, time.Now().Format(time.RFC3339))
 
 	// Create HTTP client with timeout
 	httpClient := &http.Client{
@@ -173,36 +183,38 @@ func (c *JWKSClient) RefreshJWKS() error {
 	}
 
 	// Fetch JWKS
-	resp, err := httpClient.Get(c.jwksURL)
+	keysetResp, err := httpClient.Get(c.jwksURL)
 	if err != nil {
 		return fmt.Errorf("failed to fetch JWKS: %w", err)
 	}
-	defer resp.Body.Close()
+	defer keysetResp.Body.Close()
 
-	// Check response status
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to fetch JWKS: HTTP %d", resp.StatusCode)
+	// Check if the response is valid
+	if keysetResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to fetch JWKS: HTTP %d", keysetResp.StatusCode)
 	}
 
-	// Read response body
-	body, err := io.ReadAll(resp.Body)
+	// Read the response body
+	keysetData, err := io.ReadAll(keysetResp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read JWKS response: %w", err)
+		return fmt.Errorf("failed to read JWKS: %w", err)
 	}
 
-	// Parse JWKS
-	keyset, err := jwk.Parse(body)
+	// Parse the JWKS
+	keyset, err := jwk.Parse(keysetData)
 	if err != nil {
 		return fmt.Errorf("failed to parse JWKS: %w", err)
 	}
 
-	// Update keyset
+	// Update the keyset
 	c.keysetMutex.Lock()
 	c.keyset = keyset
 	c.lastRefresh = time.Now()
+	keyCount := keyset.Len()
 	c.keysetMutex.Unlock()
 
-	log.Infof("JWKS updated successfully, contains %d keys", keyset.Len())
+	log.Infof("JWKS refreshed successfully at %v. Keys found: %d",
+		time.Now().Format(time.RFC3339), keyCount)
 	return nil
 }
 
@@ -233,11 +245,12 @@ func (h *WebhookHandler) GetTaskStatus(taskID string) string {
 
 // ServeHTTP handles incoming push notifications from the server.
 func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	log.Infof("=== Received push notification ===")
+	log.Infof("Received webhook request from %s at %v. Method: %s, ContentLength: %d",
+		r.RemoteAddr, time.Now().Format(time.RFC3339), r.Method, r.ContentLength)
 
-	// Check if this is a POST request
+	// Only accept POST requests
 	if r.Method != http.MethodPost {
-		log.Infof("Method not allowed: %s", r.Method)
+		log.Errorf("Invalid HTTP method: %s", r.Method)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -338,6 +351,7 @@ func (h *WebhookHandler) verifyJWT(tokenString string, payload []byte) (jwt.Toke
 	keyset := h.jwksClient.GetKeySet()
 
 	if keyset == nil || keyset.Len() == 0 {
+		log.Errorf("JWKS verification failed: empty keyset from endpoint %s.", h.jwksClient.jwksURL)
 		return nil, fmt.Errorf("no JWKS available")
 	}
 
@@ -345,93 +359,209 @@ func (h *WebhookHandler) verifyJWT(tokenString string, payload []byte) (jwt.Toke
 	hash := sha256.Sum256(payload)
 	expectedPayloadHash := fmt.Sprintf("%x", hash)
 
-	// Log the token and keyset for debugging
-	log.Infof("Verifying token: %s", tokenString[:20]) // Only show first part for security
-	log.Infof("Using keyset with %d keys", keyset.Len())
+	// Enhanced logging of token and keyset details
+	log.Infof("Verifying token: %s... (length: %d)",
+		tokenString[:min(30, len(tokenString))], len(tokenString))
+	log.Infof("Using keyset with %d keys from endpoint: %s",
+		keyset.Len(), h.jwksClient.jwksURL)
+
+	// Log detailed keyset information
+	for i := 0; i < keyset.Len(); i++ {
+		key, _ := keyset.Key(i)
+		keyID, _ := key.Get("kid")
+		keyAlg, _ := key.Get("alg")
+		keyKty, _ := key.Get("kty")
+		log.Infof("JWKS key[%d]: kid=%v, alg=%v, kty=%v", i, keyID, keyAlg, keyKty)
+
+		// Dump all key parameters for detailed debugging
+		keyJSON, _ := json.Marshal(key)
+		log.Infof("Full key details: %s", string(keyJSON))
+	}
+
+	// Log raw token properties for debugging
+	parts := strings.Split(tokenString, ".")
+	if len(parts) > 0 {
+		headerBase64 := parts[0]
+		// Add padding if needed
+		if l := len(headerBase64) % 4; l > 0 {
+			headerBase64 += strings.Repeat("=", 4-l)
+		}
+		headerBytes, err := base64.StdEncoding.DecodeString(headerBase64)
+		if err == nil {
+			log.Infof("Decoded token header: %s", string(headerBytes))
+		} else {
+			// Try URL encoding
+			headerBytes, err = base64.URLEncoding.DecodeString(headerBase64)
+			if err == nil {
+				log.Infof("Decoded token header (URL encoding): %s", string(headerBytes))
+			} else {
+				// Try URL encoding without padding
+				headerBytes, err = base64.RawURLEncoding.DecodeString(parts[0])
+				if err == nil {
+					log.Infof("Decoded token header (Raw URL encoding): %s", string(headerBytes))
+				} else {
+					log.Warnf("Failed to decode token header: %v", err)
+				}
+			}
+		}
+	}
 
 	// Try to parse token first without verification to extract the key ID
 	token, err := jwt.Parse([]byte(tokenString), jwt.WithVerify(false))
 	if err != nil {
+		log.Errorf("Failed to parse token (pre-verification): %v", err)
 		return nil, fmt.Errorf("failed to parse token: %w", err)
 	}
 
-	// Extract the key ID from the token header to find the right key
-	kid, _ := token.Get("kid") // "kid" is the standard key ID field
-	if kid != nil {
+	// Extract and log header information
+	headerJSON, _ := json.Marshal(token.PrivateClaims())
+	log.Infof("JWT private claims: %s", string(headerJSON))
+
+	// Access and log specific header fields if present
+	kid, kidExists := token.Get("kid")
+	if kidExists {
 		log.Infof("Token uses key ID: %v", kid)
 	} else {
 		log.Infof("Token has no key ID, will try all keys")
 	}
 
-	// Verify token with more lenient options
-	opts := []jwt.ParseOption{
-		jwt.WithKeySet(keyset),
-		jwt.WithValidate(true),
-		jwt.WithVerify(true),
+	alg, algExists := token.Get("alg")
+	if algExists {
+		log.Infof("Token uses algorithm: %v", alg)
 	}
 
-	token, err = jwt.Parse(
-		[]byte(tokenString),
-		opts...,
-	)
+	// Log token payload for debugging
+	if payload, err := token.AsMap(context.Background()); err == nil {
+		payloadJSON, _ := json.Marshal(payload)
+		log.Infof("Token payload: %s", string(payloadJSON))
+	} else {
+		log.Warnf("Could not extract token payload: %v", err)
+	}
 
+	// Verify token with keyset
+	log.Infof("Attempting JWT verification with keyset...")
+
+	// Create verification options
+	opts := []jwt.ParseOption{jwt.WithKeySet(keyset)}
+
+	// Add validation option
+	opts = append(opts, jwt.WithValidate(true))
+
+	// Add algorithm validation bypass if needed
+	// opts = append(opts, jwt.WithVerifyAuto(true))
+
+	// Parse with options
+	token, err = jwt.Parse([]byte(tokenString), opts...)
 	if err != nil {
-		// If verification fails, retry with individual keys
-		log.Infof("JWT standard verification failed: %v, trying individual keys", err)
+		log.Errorf("Token validation failed: %v", err)
 
+		// Try a more lenient verification approach as fallback
+		log.Infof("Attempting more lenient verification...")
+
+		// Try verification without key ID matching
 		for i := 0; i < keyset.Len(); i++ {
 			key, _ := keyset.Key(i)
-			var rawKey interface{}
-			if err := key.Raw(&rawKey); err != nil {
+
+			var pubKey interface{}
+			err := key.Raw(&pubKey)
+			if err != nil {
+				log.Warnf("Failed to extract public key: %v", err)
 				continue
 			}
 
-			token, err = jwt.Parse(
-				[]byte(tokenString),
-				jwt.WithKey(key.Algorithm(), rawKey),
-				jwt.WithValidate(true),
-			)
-
+			// Try direct verification with this key
+			token, err = jwt.Parse([]byte(tokenString), jwt.WithKey(jwa.RS256, pubKey))
 			if err == nil {
-				log.Infof("JWT verified with key index %d", i)
+				log.Infof("Token verified successfully with key #%d", i)
 				break
+			} else {
+				log.Warnf("Verification with key #%d failed: %v", i, err)
 			}
 		}
 
+		// If all verification attempts failed
 		if err != nil {
-			return nil, fmt.Errorf("JWT validation failed with all keys: %w", err)
+			return nil, err
 		}
 	}
+	log.Infof("JWT token validation successful at %v. Token ID: %v.",
+		time.Now().Format(time.RFC3339), token.JwtID())
 
 	// Output token claims for debugging
 	if token != nil {
-		claims, _ := token.AsMap(context.Background())
-		claimsJSON, _ := json.Marshal(claims)
-		log.Infof("JWT claims: %s", string(claimsJSON))
+		claims, err := token.AsMap(context.Background())
+		if err != nil {
+			log.Errorf("Failed to extract claims as map: %v", err)
+			return nil, fmt.Errorf("failed to parse token claims: %w", err)
+		}
+		log.Debugf("Successfully parsed claims from token. Issuer: %v, Subject: %v",
+			claims["iss"], claims["sub"])
+
+		if claims["nonce"] != nil {
+			// Log specific important claims individually
+			if iss, exists := claims["iss"]; exists {
+				log.Infof("JWT issuer: %v", iss)
+			}
+			if iat, exists := claims["iat"]; exists {
+				log.Infof("JWT issued at: %v", iat)
+			}
+			if sub, exists := claims["sub"]; exists {
+				log.Infof("JWT subject: %v", sub)
+			}
+		}
 	}
 
 	// Verify token has not expired - but be more lenient
 	if iat, exists := token.Get("iat"); exists {
 		if iatTime, ok := iat.(time.Time); ok {
 			tokenAge := time.Since(iatTime)
+			currentTime := time.Now()
+			log.Infof("Token age verification at %v - Issued at: %v, Age: %v, Max allowed: %v",
+				currentTime.Format(time.RFC3339), iatTime.Format(time.RFC3339),
+				tokenAge.Round(time.Millisecond), (jwtMaxAge * 2).Round(time.Millisecond))
+
 			if tokenAge > jwtMaxAge*2 { // More lenient timeout for testing
 				return nil, fmt.Errorf("token has expired (age: %v)", tokenAge)
 			}
+		} else {
+			log.Warnf("JWT 'iat' claim has unexpected type: %T", iat)
 		}
+	} else {
+		log.Warnf("JWT missing 'iat' claim")
 	}
 
 	// Verify payload hash if present in token - but make it optional
 	if requestBodyHash, exists := token.Get("request_body_sha256"); exists {
 		if hashStr, ok := requestBodyHash.(string); ok {
+			log.Infof("Payload hash verification at %v - Length: %d bytes, Hash: %s",
+				time.Now().Format(time.RFC3339), len(expectedPayloadHash), hashStr[:min(8, len(hashStr))]+"...")
+
 			if hashStr != expectedPayloadHash {
-				log.Warnf("Payload hash mismatch: expected %s, got %s", expectedPayloadHash, hashStr)
+				log.Warnf("Payload hash mismatch: expected %s, got %s",
+					expectedPayloadHash[:min(8, len(expectedPayloadHash))]+"...",
+					hashStr[:min(8, len(hashStr))]+"...")
 				// Don't fail on hash mismatch during testing
 				// return nil, fmt.Errorf("payload hash mismatch")
+			} else {
+				log.Infof("Payload hash verified successfully. Size: %d bytes", len(payload))
 			}
+		} else {
+			log.Warnf("JWT 'request_body_sha256' claim has unexpected type: %T",
+				requestBodyHash)
 		}
+	} else {
+		log.Warnf("JWT missing 'request_body_sha256' claim")
 	}
 
 	return token, nil
+}
+
+// Helper function for string slicing
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // startWebhookServer starts the webhook server on the specified host and port.
