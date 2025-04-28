@@ -1146,3 +1146,55 @@ func TestRemoveSubscriber(t *testing.T) {
 
 	require.Len(t, subscribers, 1)
 }
+
+// Test push notification functionality
+func TestMemoryTaskManager_PushNotifications(t *testing.T) {
+	processor := &mockProcessor{}
+	tm, err := NewMemoryTaskManager(processor)
+	require.NoError(t, err)
+
+	// Cast to the concrete type
+	memTM := tm
+
+	// Set up push notification config
+	taskID := "test-task-123"
+	url := "http://example.com/webhook"
+
+	// Add task first (since we need a task to register notifications)
+	task := &protocol.Task{
+		ID: taskID,
+		Status: protocol.TaskStatus{
+			State: "pending",
+		},
+	}
+	memTM.TasksMutex.Lock()
+	memTM.Tasks[taskID] = task
+	memTM.TasksMutex.Unlock()
+
+	// Set up push notification directly
+	config := protocol.PushNotificationConfig{
+		URL: url,
+		Authentication: &protocol.AuthenticationInfo{
+			Schemes: []string{"bearer"},
+		},
+		Metadata: map[string]interface{}{
+			"jwksUrl": "http://example.com/jwks",
+		},
+	}
+
+	// Register push notification directly
+	memTM.PushNotificationsMutex.Lock()
+	memTM.PushNotifications[taskID] = config
+	memTM.PushNotificationsMutex.Unlock()
+
+	// Verify the notification was registered
+	memTM.PushNotificationsMutex.RLock()
+	notification, exists := memTM.PushNotifications[taskID]
+	memTM.PushNotificationsMutex.RUnlock()
+
+	assert.True(t, exists)
+	assert.Equal(t, url, notification.URL)
+	assert.NotNil(t, notification.Authentication)
+	assert.Equal(t, "bearer", notification.Authentication.Schemes[0])
+	assert.Equal(t, "http://example.com/jwks", notification.Metadata["jwksUrl"])
+}

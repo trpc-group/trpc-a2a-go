@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"trpc.group/trpc-go/trpc-a2a-go/auth"
 )
 
@@ -88,6 +89,18 @@ func TestWithJWKSEndpoint(t *testing.T) {
 	opt = WithJWKSEndpoint(false, "")
 	opt(s)
 	assert.False(t, s.jwksEnabled)
+}
+
+// Test for WithPushNotificationAuthenticator option
+func TestWithPushNotificationAuthenticator(t *testing.T) {
+	authenticator := auth.NewPushNotificationAuthenticator()
+	require.NoError(t, authenticator.GenerateKeyPair())
+
+	serverOptions := &A2AServer{}
+	opt := WithPushNotificationAuthenticator(authenticator)
+	opt(serverOptions)
+
+	assert.Equal(t, authenticator, serverOptions.pushAuth)
 }
 
 // mockAuthProvider is a simple mock implementing auth.Provider interface

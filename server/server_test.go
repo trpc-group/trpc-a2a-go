@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"trpc.group/trpc-go/trpc-a2a-go/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/internal/sse"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
@@ -257,7 +258,8 @@ func TestA2ASrv_HandleTasksSendSub_SSE(t *testing.T) {
 	defer testServer.Close()
 
 	taskID := "test-task-sse-1"
-	initialMsg := protocol.Message{Role: protocol.MessageRoleUser, Parts: []protocol.Part{protocol.NewTextPart("SSE test input")}}
+	initialMsg := protocol.Message{
+		Role: protocol.MessageRoleUser, Parts: []protocol.Part{protocol.NewTextPart("SSE test input")}}
 
 	// Configure mock events
 	event1 := protocol.TaskStatusUpdateEvent{
@@ -740,4 +742,70 @@ func (m *mockTaskManager) ProcessTask(
 	task.History = append(task.History, msg)
 
 	return task, nil
+}
+
+// mockProcessor is a mock implementation of taskmanager.Processor
+type mockProcessor struct{}
+
+func (m *mockProcessor) Process(
+	ctx context.Context,
+	taskID string,
+	message protocol.Message,
+	handle taskmanager.TaskHandle,
+) error {
+	return nil
+}
+
+// Test for push notification authenticator integration
+func TestServer_WithPushNotificationAuthenticator(t *testing.T) {
+	// Create authenticator
+	authenticator := auth.NewPushNotificationAuthenticator()
+	err := authenticator.GenerateKeyPair()
+	require.NoError(t, err)
+
+	// Create a task processor and manager
+	processor := &mockProcessor{}
+	tm, err := taskmanager.NewMemoryTaskManager(processor)
+	require.NoError(t, err)
+
+	// Create server with authenticator
+	card := AgentCard{
+		Name:    "Test Agent",
+		Version: "1.0.0",
+	}
+
+	server, err := NewA2AServer(
+		card,
+		tm,
+		WithPushNotificationAuthenticator(authenticator),
+	)
+	require.NoError(t, err)
+
+	// Verify the server has the authenticator configured
+	assert.Equal(t, authenticator, server.pushAuth)
+
+	// Test JWKS endpoint by creating a test server
+	server.jwksEnabled = true
+	server.jwksEndpoint = "/.well-known/jwks.json"
+
+	// Create a test HTTP server
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/jwks.json" {
+			authenticator.HandleJWKS(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer testServer.Close()
+
+	// Test that the JWKS endpoint works
+	req, err := http.NewRequest(http.MethodGet, testServer.URL+"/.well-known/jwks.json", nil)
+	require.NoError(t, err)
+
+	resp, err := testServer.Client().Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
 }
