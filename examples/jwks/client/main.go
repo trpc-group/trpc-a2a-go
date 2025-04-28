@@ -478,11 +478,8 @@ func (h *WebhookHandler) verifyJWT(tokenString string, payload []byte) (jwt.Toke
 				log.Warnf("Verification with key #%d failed: %v", i, err)
 			}
 		}
-
 		// If all verification attempts failed
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
 	log.Infof("JWT token validation successful at %v. Token ID: %v.",
 		time.Now().Format(time.RFC3339), token.JwtID())
