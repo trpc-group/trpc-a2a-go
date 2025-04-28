@@ -716,49 +716,6 @@ func (m *mockTaskManager) OnResubscribe(
 	return eventCh, nil
 }
 
-// UpdateTaskStatus implements the TaskManager interface.
-func (m *mockTaskManager) UpdateTaskStatus(ctx context.Context, taskID string, state protocol.TaskState, message *protocol.Message) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Check if task exists
-	task, exists := m.tasks[taskID]
-	if !exists {
-		return taskmanager.ErrTaskNotFound(taskID)
-	}
-
-	// Update task status
-	task.Status.State = state
-	task.Status.Timestamp = getCurrentTimestamp()
-	if message != nil {
-		task.Status.Message = message
-	}
-
-	return nil
-}
-
-// AddArtifact implements the TaskManager interface.
-func (m *mockTaskManager) AddArtifact(ctx context.Context, taskID string, artifact protocol.Artifact) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Check if task exists
-	task, exists := m.tasks[taskID]
-	if !exists {
-		return taskmanager.ErrTaskNotFound(taskID)
-	}
-
-	// Ensure artifacts slice exists
-	if task.Artifacts == nil {
-		task.Artifacts = make([]protocol.Artifact, 0)
-	}
-
-	// Add artifact
-	task.Artifacts = append(task.Artifacts, artifact)
-
-	return nil
-}
-
 // ProcessTask is a helper method for tests that need to process a task directly.
 func (m *mockTaskManager) ProcessTask(
 	ctx context.Context, taskID string, msg protocol.Message,

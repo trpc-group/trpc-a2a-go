@@ -89,7 +89,12 @@ func (m *MemoryTaskManager) processTaskWithProcessor(
 			Parts: []protocol.Part{protocol.NewTextPart(err.Error())},
 		}
 		// Log update error while still handling the processor error
-		if updateErr := m.UpdateTaskStatus(ctx, taskID, protocol.TaskStateFailed, errMsg); updateErr != nil {
+		if updateErr := m.UpdateTaskStatus(
+			ctx,
+			taskID,
+			protocol.TaskStateFailed,
+			errMsg,
+		); updateErr != nil {
 			log.Errorf("Failed to update task %s status to failed: %v", taskID, updateErr)
 		}
 		return err
@@ -298,7 +303,12 @@ func (m *MemoryTaskManager) OnCancelTask(ctx context.Context, params protocol.Ta
 // UpdateTaskStatus updates the task's state and notifies any subscribers.
 // Returns an error if the task does not exist.
 // Exported method (used by memoryTaskHandle).
-func (m *MemoryTaskManager) UpdateTaskStatus(ctx context.Context, taskID string, state protocol.TaskState, message *protocol.Message) error {
+func (m *MemoryTaskManager) UpdateTaskStatus(
+	ctx context.Context,
+	taskID string,
+	state protocol.TaskState,
+	message *protocol.Message,
+) error {
 	m.TasksMutex.Lock()
 	task, exists := m.Tasks[taskID]
 	if !exists {
@@ -315,6 +325,11 @@ func (m *MemoryTaskManager) UpdateTaskStatus(ctx context.Context, taskID string,
 	// Create a copy for notification before unlocking.
 	taskCopy := *task
 	m.TasksMutex.Unlock() // Unlock before potentially blocking on channel send.
+	if processor, ok := m.Processor.(TaskProcessorWithStatusUpdate); ok {
+		if err := processor.OnTaskStatusUpdate(ctx, taskID, state, message); err != nil {
+			log.Errorf("Error updating status for task %s: %v", taskID, err)
+		}
+	}
 	// Store the message in history if provided
 	if message != nil {
 		// Convert TaskStatus Message (which is a pointer) to a Message value for history
@@ -332,7 +347,7 @@ func (m *MemoryTaskManager) UpdateTaskStatus(ctx context.Context, taskID string,
 // AddArtifact adds an artifact to the task and notifies subscribers.
 // Returns an error if the task does not exist.
 // Exported method (used by memoryTaskHandle).
-func (m *MemoryTaskManager) AddArtifact(ctx context.Context, taskID string, artifact protocol.Artifact) error {
+func (m *MemoryTaskManager) AddArtifact(taskID string, artifact protocol.Artifact) error {
 	m.TasksMutex.Lock()
 	task, exists := m.Tasks[taskID]
 	if !exists {

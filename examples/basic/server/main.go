@@ -79,7 +79,7 @@ func (p *basicTaskProcessor) Process(
 			protocol.MessageRoleAgent,
 			[]protocol.Part{protocol.NewTextPart(errMsg)},
 		)
-		_ = handle.UpdateStatus(ctx, protocol.TaskStateFailed, &failedMessage)
+		_ = handle.UpdateStatus(protocol.TaskStateFailed, &failedMessage)
 		return fmt.Errorf(errMsg)
 	}
 
@@ -115,7 +115,7 @@ func (p *basicTaskProcessor) handleMultiTurnSession(
 			[]protocol.Part{protocol.NewTextPart("Please enter the text you want to process:")},
 		)
 
-		if err := handle.UpdateStatus(ctx, protocol.TaskStateInputRequired, &msg); err != nil {
+		if err := handle.UpdateStatus(protocol.TaskStateInputRequired, &msg); err != nil {
 			return fmt.Errorf("failed to update task status: %w", err)
 		}
 
@@ -152,7 +152,7 @@ func (p *basicTaskProcessor) handleMultiTurnSession(
 				protocol.MessageRoleAgent,
 				[]protocol.Part{protocol.NewTextPart("Processing your request...")},
 			)
-			if err := handle.UpdateStatus(ctx, protocol.TaskStateWorking, &inProgressMsg); err != nil {
+			if err := handle.UpdateStatus(protocol.TaskStateWorking, &inProgressMsg); err != nil {
 				log.Printf("Error sending intermediate status: %v", err)
 			}
 
@@ -161,7 +161,7 @@ func (p *basicTaskProcessor) handleMultiTurnSession(
 		}
 
 		// Update task status to completed
-		if err := handle.UpdateStatus(ctx, protocol.TaskStateCompleted, &finalMsg); err != nil {
+		if err := handle.UpdateStatus(protocol.TaskStateCompleted, &finalMsg); err != nil {
 			return fmt.Errorf("failed to update final task status: %w", err)
 		}
 
@@ -174,7 +174,7 @@ func (p *basicTaskProcessor) handleMultiTurnSession(
 			LastChunk:   boolPtr(true),
 		}
 
-		if err := handle.AddArtifact(ctx, artifact); err != nil {
+		if err := handle.AddArtifact(artifact); err != nil {
 			log.Printf("Error adding artifact for task %s: %v", taskID, err)
 		}
 
@@ -196,7 +196,7 @@ func (p *basicTaskProcessor) handleNewInteraction(
 	// Check for cancellation via context
 	if err := ctx.Err(); err != nil {
 		log.Printf("Task %s cancelled during processing: %v", taskID, err)
-		_ = handle.UpdateStatus(ctx, protocol.TaskStateCanceled, nil)
+		_ = handle.UpdateStatus(protocol.TaskStateCanceled, nil)
 		return err
 	}
 
@@ -225,7 +225,7 @@ func (p *basicTaskProcessor) handleNewInteraction(
 					"- count: Counts words and characters")},
 		)
 
-		if err := handle.UpdateStatus(ctx, protocol.TaskStateInputRequired, &msg); err != nil {
+		if err := handle.UpdateStatus(protocol.TaskStateInputRequired, &msg); err != nil {
 			return fmt.Errorf("failed to update task status: %w", err)
 		}
 
@@ -239,7 +239,7 @@ func (p *basicTaskProcessor) handleNewInteraction(
 			[]protocol.Part{protocol.NewTextPart("Please provide more information to continue:")},
 		)
 
-		if err := handle.UpdateStatus(ctx, protocol.TaskStateInputRequired, &msg); err != nil {
+		if err := handle.UpdateStatus(protocol.TaskStateInputRequired, &msg); err != nil {
 			return fmt.Errorf("failed to update task status: %w", err)
 		}
 
@@ -292,7 +292,7 @@ func (p *basicTaskProcessor) processWithStreaming(
 		[]protocol.Part{protocol.NewTextPart("Processing your request...")},
 	)
 
-	if err := handle.UpdateStatus(ctx, protocol.TaskStateWorking, &workingMsg); err != nil {
+	if err := handle.UpdateStatus(protocol.TaskStateWorking, &workingMsg); err != nil {
 		return fmt.Errorf("failed to update working status: %w", err)
 	}
 
@@ -315,7 +315,7 @@ func (p *basicTaskProcessor) processWithStreaming(
 		LastChunk:   boolPtr(false),
 	}
 
-	if err := handle.AddArtifact(ctx, artifact1); err != nil {
+	if err := handle.AddArtifact(artifact1); err != nil {
 		log.Printf("Error adding first artifact chunk for task %s: %v", taskID, err)
 	}
 
@@ -332,7 +332,7 @@ func (p *basicTaskProcessor) processWithStreaming(
 		LastChunk:   boolPtr(true),
 	}
 
-	if err := handle.AddArtifact(ctx, artifact2); err != nil {
+	if err := handle.AddArtifact(artifact2); err != nil {
 		log.Printf("Error adding second artifact chunk for task %s: %v", taskID, err)
 	}
 
@@ -342,7 +342,7 @@ func (p *basicTaskProcessor) processWithStreaming(
 		[]protocol.Part{protocol.NewTextPart(result)},
 	)
 	// Update task to completed
-	if err := handle.UpdateStatus(ctx, protocol.TaskStateCompleted, &finalMsg); err != nil {
+	if err := handle.UpdateStatus(protocol.TaskStateCompleted, &finalMsg); err != nil {
 		return fmt.Errorf("failed to update final status: %w", err)
 	}
 	return nil
@@ -394,7 +394,7 @@ func (p *basicTaskProcessor) processDirectly(
 	)
 
 	// Update task to completed
-	if err := handle.UpdateStatus(ctx, protocol.TaskStateCompleted, &finalMsg); err != nil {
+	if err := handle.UpdateStatus(protocol.TaskStateCompleted, &finalMsg); err != nil {
 		return fmt.Errorf("failed to update final status: %w", err)
 	}
 
@@ -407,7 +407,7 @@ func (p *basicTaskProcessor) processDirectly(
 		LastChunk:   boolPtr(true),
 	}
 
-	if err := handle.AddArtifact(ctx, artifact); err != nil {
+	if err := handle.AddArtifact(artifact); err != nil {
 		log.Printf("Error adding artifact for task %s: %v", taskID, err)
 	}
 

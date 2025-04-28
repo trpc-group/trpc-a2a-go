@@ -38,6 +38,7 @@ const (
 // and the PushNotificationProcessor interface for receiving the authenticator.
 type pushNotificationTaskProcessor struct {
 	notifyHost string
+	manager    *pushNotificationTaskManager
 }
 
 // Process implements the TaskProcessor interface.
@@ -64,7 +65,7 @@ func (p *pushNotificationTaskProcessor) Process(
 	}
 
 	// Update status to working
-	if err := handle.UpdateStatus(ctx, protocol.TaskStateWorking, &protocol.Message{
+	if err := handle.UpdateStatus(protocol.TaskStateWorking, &protocol.Message{
 		Role: protocol.MessageRoleAgent,
 		Parts: []protocol.Part{
 			protocol.NewTextPart("Task queued for processing..."),
@@ -76,6 +77,21 @@ func (p *pushNotificationTaskProcessor) Process(
 	// Start asynchronous processing
 	go p.processTaskAsync(ctx, taskID, payload, handle)
 
+	return nil
+}
+
+// OnTaskStatusUpdate implements the TaskProcessor interface.
+func (p *pushNotificationTaskProcessor) OnTaskStatusUpdate(
+	ctx context.Context,
+	taskID string,
+	state protocol.TaskState,
+	message *protocol.Message,
+) error {
+	log.Infof("Updating task status for task: %s with status: %s", taskID, state)
+	if state == protocol.TaskStateCompleted ||
+		state == protocol.TaskStateFailed || state == protocol.TaskStateCanceled {
+		p.manager.sendPushNotification(ctx, taskID, string(state))
+	}
 	return nil
 }
 
@@ -102,13 +118,12 @@ func (p *pushNotificationTaskProcessor) processTaskAsync(
 	// the task manager automatically:
 	// 1. Updates the task status in memory
 	// 2. Sends a push notification to the registered webhook URL (if enabled)
-	err := handle.UpdateStatus(ctx, protocol.TaskStateCompleted, &protocol.Message{
+	if err := handle.UpdateStatus(protocol.TaskStateCompleted, &protocol.Message{
 		Role: protocol.MessageRoleAgent,
 		Parts: []protocol.Part{
 			protocol.NewTextPart(completeMsg),
 		},
-	})
-	if err != nil {
+	}); err != nil {
 		log.Errorf("Failed to update task status: %v", err)
 		return
 	}
@@ -127,17 +142,6 @@ func (m *pushNotificationTaskManager) OnSendTask(ctx context.Context, request pr
 		return nil, err
 	}
 	return task, nil
-}
-
-// UpdateTaskStatus implements the TaskManager interface.
-func (m *pushNotificationTaskManager) UpdateTaskStatus(ctx context.Context, taskID string, state protocol.TaskState, message *protocol.Message) error {
-	if state == protocol.TaskStateCompleted || state == protocol.TaskStateFailed || state == protocol.TaskStateCanceled {
-		m.sendPushNotification(ctx, taskID, string(state))
-	}
-	if err := m.TaskManager.UpdateTaskStatus(ctx, taskID, state, message); err != nil {
-		return err
-	}
-	return nil
 }
 
 func (m *pushNotificationTaskManager) sendPushNotification(ctx context.Context, taskID, status string) {
@@ -209,7 +213,7 @@ func main() {
 		TaskManager:   tm,
 		authenticator: authenticator,
 	}
-
+	processor.manager = customTM
 	// Combine standard options with additional options
 	options := []server.Option{
 		server.WithJWKSEndpoint(true, "/.well-known/jwks.json"),

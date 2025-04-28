@@ -102,7 +102,7 @@ func (p *testStreamingProcessor) Process(
 				protocol.NewTextPart(fmt.Sprintf("Processing chunk: %s", chunk)), // Returns TextPart
 			},
 		}
-		if err := handle.UpdateStatus(ctx, protocol.TaskStateWorking, statusMsg); err != nil {
+		if err := handle.UpdateStatus(protocol.TaskStateWorking, statusMsg); err != nil {
 			log.Printf("[testStreamingProcessor] Error sending working status chunk: %v", err)
 			return err // Propagate error if sending status fails.
 		}
@@ -118,7 +118,7 @@ func (p *testStreamingProcessor) Process(
 		Index:     0,
 		LastChunk: boolPtr(true),
 	}
-	if err := handle.AddArtifact(ctx, finalArtifact); err != nil {
+	if err := handle.AddArtifact(finalArtifact); err != nil {
 		log.Printf("[testStreamingProcessor] Error sending artifact: %v", err)
 		return err // Propagate error if sending artifact fails.
 	}
@@ -132,7 +132,7 @@ func (p *testStreamingProcessor) Process(
 			), // Include the reversed text in the final message
 		},
 	}
-	if err := handle.UpdateStatus(ctx, protocol.TaskStateCompleted, completionMsg); err != nil {
+	if err := handle.UpdateStatus(protocol.TaskStateCompleted, completionMsg); err != nil {
 		log.Printf("[testStreamingProcessor] Error sending completed status: %v", err)
 		return err // Propagate error if sending final status fails.
 	}
@@ -503,5 +503,3 @@ func TestE2E_BasicAgent_Streaming(t *testing.T) {
 	expectedText := testReverseString(inputText)
 	require.Equal(t, expectedText, reversedText, "Artifact should contain reversed text")
 }
-
-// ... existing code ...

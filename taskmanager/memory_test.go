@@ -53,7 +53,7 @@ func (p *mockProcessor) Process(ctx context.Context, taskID string, msg protocol
 	}
 
 	// Set the status to Working first to test transition
-	err := handle.UpdateStatus(ctx, protocol.TaskStateWorking, &protocol.Message{
+	err := handle.UpdateStatus(protocol.TaskStateWorking, &protocol.Message{
 		Role:  protocol.MessageRoleAgent,
 		Parts: []protocol.Part{protocol.NewTextPart("Mock Working...")},
 	})
@@ -70,7 +70,7 @@ func (p *mockProcessor) Process(ctx context.Context, taskID string, msg protocol
 	}
 
 	// Mark task as completed and send final message
-	err = handle.UpdateStatus(ctx, protocol.TaskStateCompleted, &protocol.Message{
+	err = handle.UpdateStatus(protocol.TaskStateCompleted, &protocol.Message{
 		Role:  protocol.MessageRoleAgent,
 		Parts: []protocol.Part{protocol.NewTextPart("Mock Success")},
 	})
@@ -219,7 +219,7 @@ func TestOnSendTaskSubAsync(t *testing.T) {
 	processor := &mockProcessor{
 		processFunc: func(ctx context.Context, taskID string, msg protocol.Message, handle TaskHandle) error {
 			// Explicitly set working state
-			err := handle.UpdateStatus(ctx, protocol.TaskStateWorking, &protocol.Message{
+			err := handle.UpdateStatus(protocol.TaskStateWorking, &protocol.Message{
 				Role:  protocol.MessageRoleAgent,
 				Parts: []protocol.Part{protocol.NewTextPart("Mock working...")},
 			})
@@ -236,7 +236,7 @@ func TestOnSendTaskSubAsync(t *testing.T) {
 			}
 
 			// Set completed state
-			return handle.UpdateStatus(ctx, protocol.TaskStateCompleted, &protocol.Message{
+			return handle.UpdateStatus(protocol.TaskStateCompleted, &protocol.Message{
 				Role:  protocol.MessageRoleAgent,
 				Parts: []protocol.Part{protocol.NewTextPart("Mock Success")},
 			})
@@ -317,7 +317,7 @@ func TestMemTaskMgr_OnSendTaskSub_Error(t *testing.T) {
 	processor := &mockProcessor{
 		processFunc: func(ctx context.Context, taskID string, msg protocol.Message, handle TaskHandle) error {
 			// Simulate some work before failing
-			err := handle.UpdateStatus(ctx, protocol.TaskStateWorking, &protocol.Message{
+			err := handle.UpdateStatus(protocol.TaskStateWorking, &protocol.Message{
 				Role:  protocol.MessageRoleAgent,
 				Parts: []protocol.Part{protocol.NewTextPart("Working...")},
 			})
@@ -769,7 +769,7 @@ func TestMemoryTaskManager_OnResubscribe(t *testing.T) {
 	processor := &mockProcessor{
 		processFunc: func(ctx context.Context, taskID string, msg protocol.Message, handle TaskHandle) error {
 			// Set initial status and send an intermediate message
-			err := handle.UpdateStatus(ctx, protocol.TaskStateWorking, &protocol.Message{
+			err := handle.UpdateStatus(protocol.TaskStateWorking, &protocol.Message{
 				Role:  protocol.MessageRoleAgent,
 				Parts: []protocol.Part{protocol.NewTextPart("Working on task...")},
 			})
@@ -786,7 +786,7 @@ func TestMemoryTaskManager_OnResubscribe(t *testing.T) {
 			}
 
 			// Complete the task
-			err = handle.UpdateStatus(ctx, protocol.TaskStateCompleted, &protocol.Message{
+			err = handle.UpdateStatus(protocol.TaskStateCompleted, &protocol.Message{
 				Role:  protocol.MessageRoleAgent,
 				Parts: []protocol.Part{protocol.NewTextPart("Task completed!")},
 			})
@@ -912,7 +912,7 @@ func TestAddArtifact(t *testing.T) {
 	processor.processFunc = func(ctx context.Context, taskID string, msg protocol.Message, handle TaskHandle) error {
 		// Test adding an artifact to the task
 		textPart := protocol.NewTextPart("Artifact content")
-		err := handle.AddArtifact(context.Background(), protocol.Artifact{
+		err := handle.AddArtifact(protocol.Artifact{
 			Name:        stringPtr("test-artifact"),
 			Description: stringPtr("A test artifact"),
 			Parts:       []protocol.Part{textPart},
@@ -922,7 +922,7 @@ func TestAddArtifact(t *testing.T) {
 
 		// Test adding a streaming artifact (multiple chunks)
 		firstChunkPart := protocol.NewTextPart("First chunk")
-		err = handle.AddArtifact(context.Background(), protocol.Artifact{
+		err = handle.AddArtifact(protocol.Artifact{
 			Name:        stringPtr("streaming-artifact"),
 			Description: stringPtr("A streaming artifact"),
 			Parts:       []protocol.Part{firstChunkPart},
@@ -931,7 +931,7 @@ func TestAddArtifact(t *testing.T) {
 		assert.NoError(t, err, "Adding first chunk should succeed")
 
 		lastChunkPart := protocol.NewTextPart("Last chunk")
-		err = handle.AddArtifact(context.Background(), protocol.Artifact{
+		err = handle.AddArtifact(protocol.Artifact{
 			Name:        stringPtr("streaming-artifact"),
 			Description: stringPtr("A streaming artifact"),
 			Parts:       []protocol.Part{lastChunkPart},
@@ -939,7 +939,7 @@ func TestAddArtifact(t *testing.T) {
 		})
 		assert.NoError(t, err, "Adding last chunk should succeed")
 
-		return handle.UpdateStatus(ctx, protocol.TaskStateCompleted, nil)
+		return handle.UpdateStatus(protocol.TaskStateCompleted, nil)
 	}
 
 	// Run the task
@@ -987,7 +987,7 @@ func TestAddArtifact(t *testing.T) {
 		manager: memTask,
 	}
 
-	err = handle.AddArtifact(context.Background(), protocol.Artifact{
+	err = handle.AddArtifact(protocol.Artifact{
 		Name:      stringPtr("test-artifact"),
 		Parts:     []protocol.Part{protocol.NewTextPart("Test content")},
 		LastChunk: boolPtr(true),
@@ -1013,7 +1013,7 @@ func TestIsStreamingRequest(t *testing.T) {
 		assert.True(t, isStreaming, "Task should be identified as streaming")
 
 		// Update status and finish
-		return handle.UpdateStatus(ctx, protocol.TaskStateCompleted, nil)
+		return handle.UpdateStatus(protocol.TaskStateCompleted, nil)
 	}
 
 	// Start a streaming task
@@ -1041,7 +1041,7 @@ func TestIsStreamingRequest(t *testing.T) {
 		assert.False(t, isStreaming, "Task should not be identified as streaming")
 
 		// Update status and finish
-		return handle.UpdateStatus(ctx, protocol.TaskStateCompleted, nil)
+		return handle.UpdateStatus(protocol.TaskStateCompleted, nil)
 	}
 
 	// Start a non-streaming task

@@ -322,7 +322,7 @@ func (p *echoProcessor) Process(
 	}
 
 	// Update the task status to completed with our response
-	if err := handle.UpdateStatus(ctx, protocol.TaskStateCompleted, responseMsg); err != nil {
+	if err := handle.UpdateStatus(protocol.TaskStateCompleted, responseMsg); err != nil {
 		return fmt.Errorf("failed to update task status: %w", err)
 	}
 

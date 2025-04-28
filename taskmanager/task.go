@@ -21,13 +21,16 @@ type memoryTaskHandle struct {
 }
 
 // UpdateStatus implements TaskHandle.
-func (h *memoryTaskHandle) UpdateStatus(ctx context.Context, state protocol.TaskState, msg *protocol.Message) error {
-	return h.manager.UpdateTaskStatus(ctx, h.taskID, state, msg)
+func (h *memoryTaskHandle) UpdateStatus(
+	state protocol.TaskState,
+	msg *protocol.Message,
+) error {
+	return h.manager.UpdateTaskStatus(context.Background(), h.taskID, state, msg)
 }
 
 // AddArtifact implements TaskHandle.
-func (h *memoryTaskHandle) AddArtifact(ctx context.Context, artifact protocol.Artifact) error {
-	return h.manager.AddArtifact(ctx, h.taskID, artifact)
+func (h *memoryTaskHandle) AddArtifact(artifact protocol.Artifact) error {
+	return h.manager.AddArtifact(h.taskID, artifact)
 }
 
 // IsStreamingRequest checks if this task was initiated with a streaming request (OnSendTaskSubscribe).

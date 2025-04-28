@@ -42,7 +42,7 @@ func (p *simpleTaskProcessor) Process(
 			protocol.MessageRoleAgent,
 			[]protocol.Part{protocol.NewTextPart(errMsg)},
 		)
-		_ = handle.UpdateStatus(ctx, protocol.TaskStateFailed, &failedMessage)
+		_ = handle.UpdateStatus(protocol.TaskStateFailed, &failedMessage)
 		return fmt.Errorf(errMsg)
 	}
 
@@ -58,7 +58,7 @@ func (p *simpleTaskProcessor) Process(
 	)
 
 	// Update task status to completed.
-	if err := handle.UpdateStatus(ctx, protocol.TaskStateCompleted, &responseMessage); err != nil {
+	if err := handle.UpdateStatus(protocol.TaskStateCompleted, &responseMessage); err != nil {
 		return fmt.Errorf("failed to update task status: %w", err)
 	}
 
@@ -71,7 +71,7 @@ func (p *simpleTaskProcessor) Process(
 		LastChunk:   boolPtr(true),
 	}
 
-	if err := handle.AddArtifact(ctx, artifact); err != nil {
+	if err := handle.AddArtifact(artifact); err != nil {
 		log.Printf("Error adding artifact for task %s: %v", taskID, err)
 	}
 

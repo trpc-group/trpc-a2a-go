@@ -18,11 +18,11 @@ import (
 type TaskHandle interface {
 	// UpdateStatus updates the task's state and optional message.
 	// Returns an error if the task cannot be found or updated.
-	UpdateStatus(ctx context.Context, state protocol.TaskState, msg *protocol.Message) error
+	UpdateStatus(state protocol.TaskState, msg *protocol.Message) error
 
 	// AddArtifact adds a new artifact to the task.
 	// Returns an error if the task cannot be found or updated.
-	AddArtifact(ctx context.Context, artifact protocol.Artifact) error
+	AddArtifact(artifact protocol.Artifact) error
 
 	// IsStreamingRequest returns true if the task was initiated via a streaming request
 	// (OnSendTaskSubscribe) rather than a synchronous request (OnSendTask).
@@ -39,6 +39,16 @@ type TaskProcessor interface {
 	// It should report progress and results via handle.UpdateStatus and handle.AddArtifact.
 	// Returning an error indicates the processing failed fundamentally.
 	Process(ctx context.Context, taskID string, initialMsg protocol.Message, handle TaskHandle) error
+}
+
+// TaskProcessorWithStatusUpdate is an optional interface that can be implemented by TaskProcessor
+// to receive notifications when the task status changes.
+type TaskProcessorWithStatusUpdate interface {
+	TaskProcessor
+	// OnTaskStatusUpdate is called when the task status changes.
+	// It receives the task ID, the new state, and the optional message.
+	// It should return an error if the status update fails.
+	OnTaskStatusUpdate(ctx context.Context, taskID string, state protocol.TaskState, message *protocol.Message) error
 }
 
 // TaskManager defines the interface for managing A2A task lifecycles based on the protocol.
@@ -79,15 +89,4 @@ type TaskManager interface {
 	// OnResubscribe handles a request corresponding to the 'tasks/resubscribe' RPC method.
 	// It reestablishes an SSE stream for an existing task.
 	OnResubscribe(ctx context.Context, params protocol.TaskIDParams) (<-chan protocol.TaskEvent, error)
-
-	// UpdateTaskStatus updates the status of a task with the specified ID.
-	// It sets the state and optional message, and notifies subscribers.
-	// This method can be used to implement custom hooks for task status changes.
-	// Returns an error if the task cannot be found or updated.
-	UpdateTaskStatus(ctx context.Context, taskID string, state protocol.TaskState, message *protocol.Message) error
-
-	// AddArtifact adds an artifact to the task with the specified ID.
-	// It notifies subscribers about the new artifact.
-	// Returns an error if the task cannot be found or updated.
-	AddArtifact(ctx context.Context, taskID string, artifact protocol.Artifact) error
 }
