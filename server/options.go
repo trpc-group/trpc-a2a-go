@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	defaultReadTimeout  = 10 * time.Second
-	defaultWriteTimeout = 10 * time.Second
-	defaultIdleTimeout  = 60 * time.Second
+	defaultReadTimeout  = 60 * time.Second
+	defaultWriteTimeout = 60 * time.Second
+	defaultIdleTimeout  = 300 * time.Second
 )
 
 // Option is a function that configures the A2AServer.
