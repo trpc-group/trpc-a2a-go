@@ -724,6 +724,15 @@ func (h *mockTaskHandle) IsStreamingRequest() bool {
 	return false
 }
 
+// GetSessionID implements the TaskHandle interface.
+func (h *mockTaskHandle) GetSessionID() *string {
+	task, err := h.manager.Task(h.taskID)
+	if err != nil {
+		return nil
+	}
+	return task.SessionID
+}
+
 // AddResponse adds a response to a task.
 func (h *mockTaskHandle) AddResponse(response protocol.Message) error {
 	task, err := h.manager.Task(h.taskID)

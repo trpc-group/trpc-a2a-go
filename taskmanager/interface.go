@@ -28,6 +28,10 @@ type TaskHandle interface {
 	// (OnSendTaskSubscribe) rather than a synchronous request (OnSendTask).
 	// This allows the TaskProcessor to adapt its behavior based on the request type.
 	IsStreamingRequest() bool
+
+	// GetSessionID returns the session ID for the task.
+	// If the task is not associated with a session, it returns nil.
+	GetSessionID() *string
 }
 
 // TaskProcessor defines the interface for the core agent logic that processes a task.

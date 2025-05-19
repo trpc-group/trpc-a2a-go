@@ -44,6 +44,19 @@ func (h *memoryTaskHandle) IsStreamingRequest() bool {
 	return exists && len(subscribers) > 0
 }
 
+// GetSessionID implements TaskHandle.
+func (h *memoryTaskHandle) GetSessionID() *string {
+	h.manager.SubMutex.RLock()
+	defer h.manager.SubMutex.RUnlock()
+
+	task, exists := h.manager.Tasks[h.taskID]
+	if !exists {
+		return nil
+	}
+
+	return task.SessionID
+}
+
 // isFinalState checks if a TaskState represents a terminal state.
 // Not exported as it's an internal helper.
 func isFinalState(state protocol.TaskState) bool {
