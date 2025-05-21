@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.3 (2025-05-21)
+
+- Add `GetSessionId` to `TaskHandle` (#27)
+
 ## 0.0.2 (2025-04-18)
 
 - Change agent card provider `name` to `organization` 
