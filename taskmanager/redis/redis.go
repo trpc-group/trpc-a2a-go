@@ -46,6 +46,9 @@ type TaskManager struct {
 	// expiration is the time after which Redis keys expire.
 	expiration time.Duration
 
+	// tasks is a map of task IDs to tasks.
+	tasks map[string]*protocol.Task
+
 	// subMu is a mutex for the Subscribers map.
 	subMu sync.RWMutex
 	// subscribers is a map of task IDs to subscriber channels.
@@ -114,6 +117,19 @@ func (h *redisTaskHandle) IsStreamingRequest() bool {
 
 	subscribers, exists := h.manager.subscribers[h.taskID]
 	return exists && len(subscribers) > 0
+}
+
+// GetSessionID implements TaskHandle.
+func (h *redisTaskHandle) GetSessionID() *string {
+	h.manager.subMu.RLock()
+	defer h.manager.subMu.RUnlock()
+
+	task, exists := h.manager.tasks[h.taskID]
+	if !exists {
+		return nil
+	}
+
+	return task.SessionID
 }
 
 // OnSendTask handles the creation or retrieval of a task and initiates synchronous processing.
