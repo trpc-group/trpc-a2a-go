@@ -57,7 +57,7 @@ func TestRedisTaskSubscriber(t *testing.T) {
 	bufferSize := 5
 
 	// Create subscriber
-	subscriber := NewRedisTaskSubscriber(taskID, bufferSize)
+	subscriber := NewTaskSubscriber(taskID, bufferSize)
 
 	// Verify it implements the interface
 	var _ taskmanager.TaskSubscriber = subscriber
@@ -114,7 +114,7 @@ func TestRedisTaskSubscriberBufferFull(t *testing.T) {
 	taskID := "test-task-3"
 	bufferSize := 2
 
-	subscriber := NewRedisTaskSubscriber(taskID, bufferSize)
+	subscriber := NewTaskSubscriber(taskID, bufferSize)
 	defer subscriber.Close()
 
 	event := protocol.StreamingMessageEvent{

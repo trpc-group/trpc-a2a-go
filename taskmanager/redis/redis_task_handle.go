@@ -18,17 +18,17 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
-// redisTaskHandle implements TaskHandler interface for Redis.
-type redisTaskHandle struct {
-	manager   *RedisTaskManager
+// taskHandler implements TaskHandler interface for Redis.
+type taskHandler struct {
+	manager   *TaskManager
 	messageID string
 	ctx       context.Context
 }
 
-var _ taskmanager.TaskHandler = (*redisTaskHandle)(nil)
+var _ taskmanager.TaskHandler = (*taskHandler)(nil)
 
 // BuildTask creates a new task and returns the task ID.
-func (h *redisTaskHandle) BuildTask(specificTaskID *string, contextID *string) (string, error) {
+func (h *taskHandler) BuildTask(specificTaskID *string, contextID *string) (string, error) {
 	// If no taskID provided, generate one.
 	var actualTaskID string
 	if specificTaskID == nil || *specificTaskID == "" {
@@ -86,7 +86,7 @@ func (h *redisTaskHandle) BuildTask(specificTaskID *string, contextID *string) (
 }
 
 // UpdateTaskState updates the task's state and returns an error if failed.
-func (h *redisTaskHandle) UpdateTaskState(
+func (h *taskHandler) UpdateTaskState(
 	taskID *string,
 	state protocol.TaskState,
 	message *protocol.Message,
@@ -142,7 +142,7 @@ func (h *redisTaskHandle) UpdateTaskState(
 }
 
 // AddArtifact adds an artifact to the specified task.
-func (h *redisTaskHandle) AddArtifact(taskID *string, artifact protocol.Artifact, isFinal bool, needMoreData bool) error {
+func (h *taskHandler) AddArtifact(taskID *string, artifact protocol.Artifact, isFinal bool, needMoreData bool) error {
 	if taskID == nil || *taskID == "" {
 		return fmt.Errorf("taskID cannot be nil or empty")
 	}
@@ -181,7 +181,7 @@ func (h *redisTaskHandle) AddArtifact(taskID *string, artifact protocol.Artifact
 }
 
 // SubScribeTask subscribes to the task and returns a TaskSubscriber.
-func (h *redisTaskHandle) SubScribeTask(taskID *string) (taskmanager.TaskSubscriber, error) {
+func (h *taskHandler) SubScribeTask(taskID *string) (taskmanager.TaskSubscriber, error) {
 	if taskID == nil || *taskID == "" {
 		return nil, fmt.Errorf("taskID cannot be nil or empty")
 	}
@@ -192,13 +192,13 @@ func (h *redisTaskHandle) SubScribeTask(taskID *string) (taskmanager.TaskSubscri
 		return nil, fmt.Errorf("task not found: %s", *taskID)
 	}
 
-	subscriber := NewRedisTaskSubscriber(*taskID, defaultTaskSubscriberBufferSize)
+	subscriber := NewTaskSubscriber(*taskID, defaultTaskSubscriberBufferSize)
 	h.manager.addSubscriber(*taskID, subscriber)
 	return subscriber, nil
 }
 
 // GetTask returns the task by taskID as a CancellableTask.
-func (h *redisTaskHandle) GetTask(taskID *string) (taskmanager.CancellableTask, error) {
+func (h *taskHandler) GetTask(taskID *string) (taskmanager.CancellableTask, error) {
 	if taskID == nil || *taskID == "" {
 		return nil, fmt.Errorf("taskID cannot be nil or empty")
 	}
@@ -222,7 +222,7 @@ func (h *redisTaskHandle) GetTask(taskID *string) (taskmanager.CancellableTask, 
 }
 
 // CleanTask deletes the task and cleans up all associated resources.
-func (h *redisTaskHandle) CleanTask(taskID *string) error {
+func (h *taskHandler) CleanTask(taskID *string) error {
 	if taskID == nil || *taskID == "" {
 		return fmt.Errorf("taskID cannot be nil or empty")
 	}
@@ -249,7 +249,7 @@ func (h *redisTaskHandle) CleanTask(taskID *string) error {
 }
 
 // GetContextID returns the context ID of the current message, if any.
-func (h *redisTaskHandle) GetContextID() string {
+func (h *taskHandler) GetContextID() string {
 	msgKey := messagePrefix + h.messageID
 	msgBytes, err := h.manager.client.Get(h.ctx, msgKey).Bytes()
 	if err != nil {
@@ -268,7 +268,7 @@ func (h *redisTaskHandle) GetContextID() string {
 }
 
 // GetMessageHistory returns the conversation history for the current context.
-func (h *redisTaskHandle) GetMessageHistory() []protocol.Message {
+func (h *taskHandler) GetMessageHistory() []protocol.Message {
 	contextID := h.GetContextID()
 	if contextID == "" {
 		return []protocol.Message{}

@@ -113,41 +113,40 @@ func (p *basicMessageProcessor) ProcessMessage(
 		return &taskmanager.MessageProcessingResult{
 			StreamingEvents: subscriber,
 		}, nil
-	} else {
-		// Non-streaming mode - check for multi-turn interactions
-		session, exists := p.multiTurnSessions[contextID]
-
-		if exists && !session.complete {
-			// Continue existing multi-turn session
-			return p.processMultiTurnSession(ctx, text, contextID, handle, session, options)
-		}
-
-		// New interaction - check if it requires multi-turn handling
-		parts := strings.SplitN(text, " ", 2)
-		command := strings.ToLower(parts[0])
-
-		if command == modeMultiStep || command == modeInputExample {
-			// Create task for multi-turn interaction even in non-streaming mode
-			taskID, err := handle.BuildTask(nil, &contextID)
-			if err != nil {
-				return nil, fmt.Errorf("failed to build task: %w", err)
-			}
-
-			go p.processMessageAsync(ctx, text, contextID, taskID, handle)
-
-			// Return a message indicating async processing
-			responseMessage := protocol.NewMessage(
-				protocol.MessageRoleAgent,
-				[]protocol.Part{protocol.NewTextPart("Multi-turn interaction started. Please continue the conversation.")},
-			)
-			return &taskmanager.MessageProcessingResult{
-				Result: &responseMessage,
-			}, nil
-		}
-
-		// Simple command processing
-		return p.processSimpleCommand(text)
 	}
+	// Non-streaming mode - check for multi-turn interactions
+	session, exists := p.multiTurnSessions[contextID]
+
+	if exists && !session.complete {
+		// Continue existing multi-turn session
+		return p.processMultiTurnSession(ctx, text, contextID, handle, session, options)
+	}
+
+	// New interaction - check if it requires multi-turn handling
+	parts := strings.SplitN(text, " ", 2)
+	command := strings.ToLower(parts[0])
+
+	if command == modeMultiStep || command == modeInputExample {
+		// Create task for multi-turn interaction even in non-streaming mode
+		taskID, err := handle.BuildTask(nil, &contextID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build task: %w", err)
+		}
+
+		go p.processMessageAsync(ctx, text, contextID, taskID, handle)
+
+		// Return a message indicating async processing
+		responseMessage := protocol.NewMessage(
+			protocol.MessageRoleAgent,
+			[]protocol.Part{protocol.NewTextPart("Multi-turn interaction started. Please continue the conversation.")},
+		)
+		return &taskmanager.MessageProcessingResult{
+			Result: &responseMessage,
+		}, nil
+	}
+
+	// Simple command processing
+	return p.processSimpleCommand(text)
 }
 
 // processSimpleCommand handles direct command processing without tasks

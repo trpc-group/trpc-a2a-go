@@ -86,23 +86,22 @@ func (p *testProcessor) ProcessMessage(
 		return &taskmanager.MessageProcessingResult{
 			StreamingEvents: subscriber,
 		}, nil
-	} else {
-		// For non-streaming requests, process synchronously and return Result
-		// Process the task synchronously without auto-cleanup
-		if err := p.processTask(taskID, message, inputText, nil, handle); err != nil {
-			return nil, fmt.Errorf("failed to process task: %w", err)
-		}
-
-		// Get the final task state
-		finalTask, err := handle.GetTask(stringPtr(taskID))
-		if err != nil {
-			return nil, fmt.Errorf("failed to get final task: %w", err)
-		}
-
-		return &taskmanager.MessageProcessingResult{
-			Result: finalTask.Task(),
-		}, nil
 	}
+	// For non-streaming requests, process synchronously and return Result
+	// Process the task synchronously without auto-cleanup
+	if err := p.processTask(taskID, message, inputText, nil, handle); err != nil {
+		return nil, fmt.Errorf("failed to process task: %w", err)
+	}
+
+	// Get the final task state
+	finalTask, err := handle.GetTask(stringPtr(taskID))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get final task: %w", err)
+	}
+
+	return &taskmanager.MessageProcessingResult{
+		Result: finalTask.Task(),
+	}, nil
 }
 
 func (p *testProcessor) processTask(

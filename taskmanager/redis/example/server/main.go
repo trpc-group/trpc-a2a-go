@@ -318,7 +318,7 @@ func main() {
 	processor := &ToLowerProcessor{}
 
 	// Create Redis TaskManager
-	taskManager, err := redisTaskManager.NewRedisTaskManager(rdb, processor)
+	taskManager, err := redisTaskManager.NewTaskManager(rdb, processor)
 	if err != nil {
 		log.Fatalf("Failed to create Redis TaskManager: %v", err)
 	}

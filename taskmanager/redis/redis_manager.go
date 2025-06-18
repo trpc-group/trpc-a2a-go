@@ -37,11 +37,11 @@ const (
 	defaultTaskSubscriberBufferSize = 10
 )
 
-// RedisTaskManager provides a concrete, Redis-based implementation of the
+// TaskManager provides a concrete, Redis-based implementation of the
 // TaskManager interface. It persists messages, conversations, and tasks in Redis.
 // It requires a MessageProcessor to handle the actual agent logic.
 // It is safe for concurrent use.
-type RedisTaskManager struct {
+type TaskManager struct {
 	// processor is the user-provided message processor.
 	processor taskmanager.MessageProcessor
 	// client is the Redis client.
@@ -52,7 +52,7 @@ type RedisTaskManager struct {
 	// subMu is a mutex for the subscribers map.
 	subMu sync.RWMutex
 	// subscribers is a map of task IDs to subscriber channels.
-	subscribers map[string][]*RedisTaskSubscriber
+	subscribers map[string][]*TaskSubscriber
 
 	// cancelMu is a mutex for the cancels map.
 	cancelMu sync.RWMutex
@@ -63,12 +63,12 @@ type RedisTaskManager struct {
 	maxHistoryLength int // max history message count
 }
 
-// NewRedisTaskManager creates a new Redis-based TaskManager with the provided options.
-func NewRedisTaskManager(
+// NewTaskManager creates a new Redis-based TaskManager with the provided options.
+func NewTaskManager(
 	client *redis.Client,
 	processor taskmanager.MessageProcessor,
-	opts ...RedisTaskManagerOption,
-) (*RedisTaskManager, error) {
+	opts ...TaskManagerOption,
+) (*TaskManager, error) {
 	if processor == nil {
 		return nil, errors.New("processor cannot be nil")
 	}
@@ -92,11 +92,11 @@ func NewRedisTaskManager(
 	// Use expiration time from options
 	expiration := options.ExpireTime
 
-	manager := &RedisTaskManager{
+	manager := &TaskManager{
 		processor:        processor,
 		client:           client,
 		expiration:       expiration,
-		subscribers:      make(map[string][]*RedisTaskSubscriber),
+		subscribers:      make(map[string][]*TaskSubscriber),
 		cancels:          make(map[string]context.CancelFunc),
 		maxHistoryLength: options.MaxHistoryLength,
 	}
@@ -105,7 +105,7 @@ func NewRedisTaskManager(
 }
 
 // OnSendMessage handles the message/send request.
-func (m *RedisTaskManager) OnSendMessage(
+func (m *TaskManager) OnSendMessage(
 	ctx context.Context,
 	request protocol.SendMessageParams,
 ) (*protocol.MessageResult, error) {
@@ -119,7 +119,7 @@ func (m *RedisTaskManager) OnSendMessage(
 	options.Streaming = false // non-streaming processing
 
 	// Create MessageHandle.
-	handle := &redisTaskHandle{
+	handle := &taskHandler{
 		manager:   m,
 		messageID: request.Message.MessageID,
 		ctx:       ctx,
@@ -163,7 +163,7 @@ func (m *RedisTaskManager) OnSendMessage(
 }
 
 // OnSendMessageStream handles message/stream requests.
-func (m *RedisTaskManager) OnSendMessageStream(
+func (m *TaskManager) OnSendMessageStream(
 	ctx context.Context,
 	request protocol.SendMessageParams,
 ) (<-chan protocol.StreamingMessageEvent, error) {
@@ -176,7 +176,7 @@ func (m *RedisTaskManager) OnSendMessageStream(
 	options.Streaming = true // streaming mode
 
 	// Create streaming MessageHandle.
-	handle := &redisTaskHandle{
+	handle := &taskHandler{
 		manager:   m,
 		messageID: request.Message.MessageID,
 		ctx:       ctx,
@@ -196,7 +196,7 @@ func (m *RedisTaskManager) OnSendMessageStream(
 }
 
 // OnGetTask handles the tasks/get request.
-func (m *RedisTaskManager) OnGetTask(
+func (m *TaskManager) OnGetTask(
 	ctx context.Context,
 	params protocol.TaskQueryParams,
 ) (*protocol.Task, error) {
@@ -222,7 +222,7 @@ func (m *RedisTaskManager) OnGetTask(
 }
 
 // OnCancelTask handles the tasks/cancel request.
-func (m *RedisTaskManager) OnCancelTask(
+func (m *TaskManager) OnCancelTask(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (*protocol.Task, error) {
@@ -268,7 +268,7 @@ func (m *RedisTaskManager) OnCancelTask(
 }
 
 // OnPushNotificationSet handles tasks/pushNotificationConfig/set requests.
-func (m *RedisTaskManager) OnPushNotificationSet(
+func (m *TaskManager) OnPushNotificationSet(
 	ctx context.Context,
 	params protocol.TaskPushNotificationConfig,
 ) (*protocol.TaskPushNotificationConfig, error) {
@@ -294,7 +294,7 @@ func (m *RedisTaskManager) OnPushNotificationSet(
 }
 
 // OnPushNotificationGet handles tasks/pushNotificationConfig/get requests.
-func (m *RedisTaskManager) OnPushNotificationGet(
+func (m *TaskManager) OnPushNotificationGet(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (*protocol.TaskPushNotificationConfig, error) {
@@ -320,7 +320,7 @@ func (m *RedisTaskManager) OnPushNotificationGet(
 }
 
 // OnResubscribe handles tasks/resubscribe requests.
-func (m *RedisTaskManager) OnResubscribe(
+func (m *TaskManager) OnResubscribe(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (<-chan protocol.StreamingMessageEvent, error) {
@@ -330,7 +330,7 @@ func (m *RedisTaskManager) OnResubscribe(
 		return nil, err
 	}
 
-	subscriber := NewRedisTaskSubscriber(params.ID, defaultTaskSubscriberBufferSize)
+	subscriber := NewTaskSubscriber(params.ID, defaultTaskSubscriberBufferSize)
 
 	// Add to subscribers list.
 	m.addSubscriber(params.ID, subscriber)
@@ -339,12 +339,12 @@ func (m *RedisTaskManager) OnResubscribe(
 }
 
 // OnSendTask deprecated method empty implementation.
-func (m *RedisTaskManager) OnSendTask(ctx context.Context, request protocol.SendTaskParams) (*protocol.Task, error) {
+func (m *TaskManager) OnSendTask(ctx context.Context, request protocol.SendTaskParams) (*protocol.Task, error) {
 	return nil, fmt.Errorf("OnSendTask is deprecated, use OnSendMessage instead")
 }
 
 // OnSendTaskSubscribe deprecated method empty implementation.
-func (m *RedisTaskManager) OnSendTaskSubscribe(ctx context.Context, request protocol.SendTaskParams) (<-chan protocol.TaskEvent, error) {
+func (m *TaskManager) OnSendTaskSubscribe(ctx context.Context, request protocol.SendTaskParams) (<-chan protocol.TaskEvent, error) {
 	return nil, fmt.Errorf("OnSendTaskSubscribe is deprecated, use OnSendMessageStream instead")
 }
 
@@ -353,7 +353,7 @@ func (m *RedisTaskManager) OnSendTaskSubscribe(ctx context.Context, request prot
 // =============================================================================
 
 // processConfiguration processes and normalizes configuration.
-func (m *RedisTaskManager) processConfiguration(config *protocol.SendMessageConfiguration, metadata map[string]interface{}) taskmanager.ProcessOptions {
+func (m *TaskManager) processConfiguration(config *protocol.SendMessageConfiguration, metadata map[string]interface{}) taskmanager.ProcessOptions {
 	result := taskmanager.ProcessOptions{
 		Blocking:      false,
 		HistoryLength: 0,
@@ -382,7 +382,7 @@ func (m *RedisTaskManager) processConfiguration(config *protocol.SendMessageConf
 }
 
 // processRequestMessage processes and stores the request message.
-func (m *RedisTaskManager) processRequestMessage(message *protocol.Message) {
+func (m *TaskManager) processRequestMessage(message *protocol.Message) {
 	if message.MessageID == "" {
 		message.MessageID = protocol.GenerateMessageID()
 	}
@@ -392,7 +392,7 @@ func (m *RedisTaskManager) processRequestMessage(message *protocol.Message) {
 }
 
 // processReplyMessage processes and stores the reply message.
-func (m *RedisTaskManager) processReplyMessage(ctxID string, message *protocol.Message) {
+func (m *TaskManager) processReplyMessage(ctxID string, message *protocol.Message) {
 	message.ContextID = &ctxID
 	message.Role = protocol.MessageRoleAgent
 	if message.MessageID == "" {
@@ -406,12 +406,12 @@ func (m *RedisTaskManager) processReplyMessage(ctxID string, message *protocol.M
 }
 
 // generateMessageID generates a message ID.
-func (m *RedisTaskManager) generateMessageID() string {
+func (m *TaskManager) generateMessageID() string {
 	return protocol.GenerateMessageID()
 }
 
 // storeMessage stores a message in Redis and updates conversation history.
-func (m *RedisTaskManager) storeMessage(ctx context.Context, message protocol.Message) {
+func (m *TaskManager) storeMessage(ctx context.Context, message protocol.Message) {
 	// Store the message.
 	msgKey := messagePrefix + message.MessageID
 	msgBytes, err := json.Marshal(message)
@@ -447,7 +447,7 @@ func (m *RedisTaskManager) storeMessage(ctx context.Context, message protocol.Me
 }
 
 // getConversationHistory retrieves conversation history for a context.
-func (m *RedisTaskManager) getConversationHistory(
+func (m *TaskManager) getConversationHistory(
 	ctx context.Context,
 	contextID string,
 	length int,
@@ -499,7 +499,7 @@ func (m *RedisTaskManager) getConversationHistory(
 }
 
 // getTaskInternal retrieves a task from Redis.
-func (m *RedisTaskManager) getTaskInternal(ctx context.Context, taskID string) (*protocol.Task, error) {
+func (m *TaskManager) getTaskInternal(ctx context.Context, taskID string) (*protocol.Task, error) {
 	taskKey := taskPrefix + taskID
 	taskBytes, err := m.client.Get(ctx, taskKey).Bytes()
 	if err != nil {
@@ -515,7 +515,7 @@ func (m *RedisTaskManager) getTaskInternal(ctx context.Context, taskID string) (
 }
 
 // storeTask stores a task in Redis.
-func (m *RedisTaskManager) storeTask(ctx context.Context, task *protocol.Task) error {
+func (m *TaskManager) storeTask(ctx context.Context, task *protocol.Task) error {
 	taskKey := taskPrefix + task.ID
 	taskBytes, err := json.Marshal(task)
 	if err != nil {
@@ -530,7 +530,7 @@ func (m *RedisTaskManager) storeTask(ctx context.Context, task *protocol.Task) e
 }
 
 // deleteTask deletes a task from Redis.
-func (m *RedisTaskManager) deleteTask(ctx context.Context, taskID string) error {
+func (m *TaskManager) deleteTask(ctx context.Context, taskID string) error {
 	taskKey := taskPrefix + taskID
 	if err := m.client.Del(ctx, taskKey).Err(); err != nil {
 		return fmt.Errorf("failed to delete task: %w", err)
@@ -547,19 +547,19 @@ func isFinalState(state protocol.TaskState) bool {
 }
 
 // addSubscriber adds a subscriber to the list.
-func (m *RedisTaskManager) addSubscriber(taskID string, sub *RedisTaskSubscriber) {
+func (m *TaskManager) addSubscriber(taskID string, sub *TaskSubscriber) {
 	m.subMu.Lock()
 	defer m.subMu.Unlock()
 
 	if _, exists := m.subscribers[taskID]; !exists {
-		m.subscribers[taskID] = make([]*RedisTaskSubscriber, 0)
+		m.subscribers[taskID] = make([]*TaskSubscriber, 0)
 	}
 	m.subscribers[taskID] = append(m.subscribers[taskID], sub)
 	log.Debugf("Added subscriber for task %s", taskID)
 }
 
 // cleanSubscribers cleans up all subscribers for a task.
-func (m *RedisTaskManager) cleanSubscribers(taskID string) {
+func (m *TaskManager) cleanSubscribers(taskID string) {
 	m.subMu.Lock()
 	defer m.subMu.Unlock()
 
@@ -573,7 +573,7 @@ func (m *RedisTaskManager) cleanSubscribers(taskID string) {
 }
 
 // notifySubscribers notifies all subscribers of a task.
-func (m *RedisTaskManager) notifySubscribers(taskID string, event protocol.StreamingMessageEvent) {
+func (m *TaskManager) notifySubscribers(taskID string, event protocol.StreamingMessageEvent) {
 	m.subMu.RLock()
 	subs, exists := m.subscribers[taskID]
 	if !exists || len(subs) == 0 {
@@ -581,13 +581,13 @@ func (m *RedisTaskManager) notifySubscribers(taskID string, event protocol.Strea
 		return
 	}
 
-	subsCopy := make([]*RedisTaskSubscriber, len(subs))
+	subsCopy := make([]*TaskSubscriber, len(subs))
 	copy(subsCopy, subs)
 	m.subMu.RUnlock()
 
 	log.Debugf("Notifying %d subscribers for task %s (Event Type: %T)", len(subsCopy), taskID, event.Result)
 
-	var failedSubscribers []*RedisTaskSubscriber
+	var failedSubscribers []*TaskSubscriber
 
 	for _, sub := range subsCopy {
 		if sub.Closed() {
@@ -610,7 +610,7 @@ func (m *RedisTaskManager) notifySubscribers(taskID string, event protocol.Strea
 }
 
 // cleanupFailedSubscribers cleans up failed or closed subscribers.
-func (m *RedisTaskManager) cleanupFailedSubscribers(taskID string, failedSubscribers []*RedisTaskSubscriber) {
+func (m *TaskManager) cleanupFailedSubscribers(taskID string, failedSubscribers []*TaskSubscriber) {
 	m.subMu.Lock()
 	defer m.subMu.Unlock()
 
@@ -620,7 +620,7 @@ func (m *RedisTaskManager) cleanupFailedSubscribers(taskID string, failedSubscri
 	}
 
 	// Filter out failed subscribers.
-	filteredSubs := make([]*RedisTaskSubscriber, 0, len(subs))
+	filteredSubs := make([]*TaskSubscriber, 0, len(subs))
 	removedCount := 0
 
 	for _, sub := range subs {
@@ -649,7 +649,7 @@ func (m *RedisTaskManager) cleanupFailedSubscribers(taskID string, failedSubscri
 }
 
 // Close closes the Redis client and cleans up resources.
-func (m *RedisTaskManager) Close() error {
+func (m *TaskManager) Close() error {
 	// Cancel all active contexts.
 	m.cancelMu.Lock()
 	for _, cancel := range m.cancels {
@@ -665,7 +665,7 @@ func (m *RedisTaskManager) Close() error {
 			sub.Close()
 		}
 	}
-	m.subscribers = make(map[string][]*RedisTaskSubscriber)
+	m.subscribers = make(map[string][]*TaskSubscriber)
 	m.subMu.Unlock()
 
 	// Close the Redis client.

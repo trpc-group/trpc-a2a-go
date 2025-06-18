@@ -88,6 +88,8 @@ func GenerateRPCID() string {
 	return id.String()
 }
 
+// UnaryMessageResult is an interface representing a result of SendMessage.
+// It only supports Message or Task.
 type UnaryMessageResult interface {
 	unaryMessageResultMarker()
 	GetKind() string
