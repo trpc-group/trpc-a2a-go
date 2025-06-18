@@ -390,7 +390,8 @@ func TestNewTask(t *testing.T) {
 func TestGenerateContextID(t *testing.T) {
 	contextID1 := GenerateContextID()
 	assert.NotEmpty(t, contextID1)
-	assert.Len(t, contextID1, 36) // UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+	assert.True(t, strings.HasPrefix(contextID1, "ctx-"))
+	assert.Len(t, contextID1, 40) // "ctx-" + UUID (36 chars) = 40 chars
 
 	contextID2 := GenerateContextID()
 	assert.NotEmpty(t, contextID2)

@@ -43,8 +43,7 @@ type A2AClient struct {
 
 // NewA2AClient creates a new A2A client targeting the specified agentURL.
 // The agentURL should be the base endpoint for the agent (e.g., "http://localhost:8080/").
-// Options can be provided to configure the client, such as setting a custom
-// http.Client or timeout.
+// Options can be provided to configure the client, such as setting a custom http.Client or timeout.
 // Returns an error if the agentURL is invalid.
 func NewA2AClient(agentURL string, opts ...Option) (*A2AClient, error) {
 	if !strings.HasSuffix(agentURL, "/") {
@@ -70,13 +69,14 @@ func NewA2AClient(agentURL string, opts ...Option) (*A2AClient, error) {
 }
 
 // SendTasks sends a message using the tasks/send method.
-// deprecated: use SendTask instead
+// deprecated: use SendMessage instead
 // It returns the initial task state received from the agent.
 func (c *A2AClient) SendTasks(
 	ctx context.Context,
 	params protocol.SendTaskParams,
 ) (*protocol.Task, error) {
 	log.Info("SendTasks is deprecated in a2a specification, use SendMessage instead")
+
 	request := jsonrpc.NewRequest(protocol.MethodTasksSend, params.RPCID)
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
@@ -111,10 +111,7 @@ func (c *A2AClient) SendMessage(
 }
 
 // GetTasks retrieves the status of a task using the tasks_get method.
-func (c *A2AClient) GetTasks(
-	ctx context.Context,
-	params protocol.TaskQueryParams,
-) (*protocol.Task, error) {
+func (c *A2AClient) GetTasks(ctx context.Context, params protocol.TaskQueryParams) (*protocol.Task, error) {
 	request := jsonrpc.NewRequest(protocol.MethodTasksGet, params.RPCID)
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
@@ -186,7 +183,7 @@ func (c *A2AClient) StreamMessage(
 	}
 	resp, err := c.sendA2AStreamRequest(ctx, params.RPCID, paramsBytes)
 	if err != nil {
-		return nil, fmt.Errorf("a2aClient.StreamTask: failed to build stream request: %w", err)
+		return nil, fmt.Errorf("a2aClient.StreamMessage: failed to build stream request: %w", err)
 	}
 	eventsChan := make(chan protocol.StreamingMessageEvent, 10) // Buffered channel.
 	// Start a goroutine to read from the SSE stream.
@@ -249,35 +246,37 @@ func (c *A2AClient) sendA2AStreamRequest(ctx context.Context, id string, paramsB
 // processSSEStream reads Server-Sent Events from the response body and sends them
 // onto the provided channel. It handles closing the channel and response body.
 // Runs in its own goroutine.
-func processSSEStream[T interface{}](ctx context.Context,
+func processSSEStream[T interface{}](
+	ctx context.Context,
 	resp *http.Response,
-	taskID string,
+	reqID string,
 	eventsChan chan<- T,
 ) {
 	// Ensure resources are cleaned up when the goroutine exits.
 	defer resp.Body.Close()
 	defer close(eventsChan)
+
 	reader := sse.NewEventReader(resp.Body)
-	log.Debugf("SSE Processor started for task %s", taskID)
+	log.Debugf("SSE Processor started for request %s", reqID)
 	for {
 		select {
 		case <-ctx.Done():
 			// Context canceled (e.g., timeout or manual cancellation by caller).
-			log.Debugf("SSE context canceled for task %s: %v", taskID, ctx.Err())
+			log.Debugf("SSE context canceled for request %s: %v", reqID, ctx.Err())
 			return
 		default:
 			// Read the next event from the stream.
 			eventBytes, eventType, err := reader.ReadEvent()
 			if err != nil {
 				if err == io.EOF {
-					log.Debugf("SSE stream ended cleanly (EOF) for task %s", taskID)
+					log.Debugf("SSE stream ended cleanly (EOF) for request %s", reqID)
 				} else if errors.Is(err, context.Canceled) ||
 					strings.Contains(err.Error(), "connection reset by peer") {
 					// Client disconnected normally
-					log.Debugf("Client disconnected from SSE stream for task %s", taskID)
+					log.Debugf("Client disconnected from SSE stream for request %s", reqID)
 				} else {
 					// Log unexpected errors (like network issues or parsing problems)
-					log.Errorf("Error reading SSE stream for task %s: %v", taskID, err)
+					log.Errorf("Error reading SSE stream for request %s: %v", reqID, err)
 				}
 				return // Stop processing on any error or EOF.
 			}
@@ -288,8 +287,8 @@ func processSSEStream[T interface{}](ctx context.Context,
 			// Handle close event immediately before any other processing.
 			if eventType == protocol.EventClose {
 				log.Debugf(
-					"Received explicit '%s' event from server for task %s. Data: %s",
-					protocol.EventClose, taskID, string(eventBytes),
+					"Received explicit '%s' event from server for request %s. Data: %s",
+					protocol.EventClose, reqID, string(eventBytes),
 				)
 				return // Exit immediately, do not process any more events
 			}
@@ -300,10 +299,10 @@ func processSSEStream[T interface{}](ctx context.Context,
 
 			// If this is a valid JSON-RPC response, extract the result for further processing
 			if jsonRPCErr == nil && jsonRPCResponse.JSONRPC == jsonrpc.Version {
-				log.Debugf("Received JSON-RPC wrapped event for task %s. Type: %s", taskID, eventType)
+				log.Debugf("Received JSON-RPC wrapped event for request %s. Type: %s", reqID, eventType)
 				// Check for errors in the JSON-RPC response
 				if jsonRPCResponse.Error != nil {
-					log.Errorf("JSON-RPC error in SSE event for task %s: %v", taskID, jsonRPCResponse.Error)
+					log.Errorf("JSON-RPC error in SSE event for request %s: %v", reqID, jsonRPCResponse.Error)
 					continue // Skip events with JSON-RPC errors
 				}
 				// Use the result field directly for further processing
@@ -313,11 +312,11 @@ func processSSEStream[T interface{}](ctx context.Context,
 			// Deserialize the event data based on the event type from SSE.
 			event, err := unmarshalSSEEvent[T](eventBytes, eventType)
 			if err != nil {
-				log.Errorf("Error unmarshaling event for task:%s data:%s, error:%v", taskID, string(eventBytes), err)
+				log.Errorf("Error unmarshaling event for request:%s data:%s, error:%v", reqID, string(eventBytes), err)
 				continue
 			}
 
-			log.Debugf("Received event for task %s: %v", taskID, event)
+			log.Debugf("Received event for task %s: %v", reqID, event)
 
 			// Send the deserialized event to the caller's channel.
 			// Use a select to avoid blocking if the caller isn't reading fast enough
@@ -328,7 +327,7 @@ func processSSEStream[T interface{}](ctx context.Context,
 			case <-ctx.Done():
 				log.Debugf(
 					"SSE context canceled while sending event for task %s: %v",
-					taskID, ctx.Err(),
+					reqID, ctx.Err(),
 				)
 				return // Stop processing.
 			}

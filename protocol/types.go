@@ -58,17 +58,6 @@ func (r *TaskStatusUpdateEvent) GetKind() string { return KindTaskStatusUpdate }
 // GetKind returns the kind of the task artifact update event.
 func (r *TaskArtifactUpdateEvent) GetKind() string { return KindTaskArtifactUpdate }
 
-// ResultKind is a struct that used for unmarshal the kind of the result.
-type ResultKind struct {
-	// Kind is the kind of the result.
-	Kind string `json:"kind"`
-}
-
-// GetKind returns the kind of the result.
-func (r *ResultKind) GetKind() string {
-	return r.Kind
-}
-
 // GenerateMessageID generates a new unique message ID.
 func GenerateMessageID() string {
 	id := uuid.New()

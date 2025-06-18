@@ -38,6 +38,16 @@ type CancellableTask struct {
 	ctx        context.Context
 }
 
+// NewCancellableTask creates a new cancellable task
+func NewCancellableTask(task protocol.Task) *CancellableTask {
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	return &CancellableTask{
+		Task:       task,
+		cancelFunc: cancel,
+		ctx:        cancelCtx,
+	}
+}
+
 // Cancel cancels the task
 func (t *CancellableTask) Cancel() {
 	t.cancelFunc()

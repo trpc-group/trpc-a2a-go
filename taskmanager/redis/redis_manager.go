@@ -5,6 +5,7 @@
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
 // Package redis provides a Redis-based implementation of the A2A TaskManager interface.
+
 package redis
 
 import (
@@ -67,7 +68,6 @@ type RedisTaskManager struct {
 func NewRedisTaskManager(
 	client *redis.Client,
 	processor taskmanager.MessageProcessor,
-	opts ...Option,
 ) (*RedisTaskManager, error) {
 	if processor == nil {
 		return nil, errors.New("processor cannot be nil")
@@ -90,28 +90,7 @@ func NewRedisTaskManager(
 		maxHistoryLength: defaultMaxHistoryLength,
 	}
 
-	for _, opt := range opts {
-		opt(manager)
-	}
-
 	return manager, nil
-}
-
-// Option defines configuration options for RedisTaskManager.
-type Option func(*RedisTaskManager)
-
-// WithExpiration sets the expiration time for Redis keys.
-func WithExpiration(expiration time.Duration) Option {
-	return func(m *RedisTaskManager) {
-		m.expiration = expiration
-	}
-}
-
-// WithMaxHistoryLength sets the maximum history message length.
-func WithMaxHistoryLength(length int) Option {
-	return func(m *RedisTaskManager) {
-		m.maxHistoryLength = length
-	}
 }
 
 // OnSendMessage handles the message/send request.
@@ -407,13 +386,18 @@ func (m *RedisTaskManager) processReplyMessage(ctxID string, message *protocol.M
 	message.ContextID = &ctxID
 	message.Role = protocol.MessageRoleAgent
 	if message.MessageID == "" {
-		message.MessageID = protocol.GenerateMessageID()
+		message.MessageID = m.generateMessageID()
 	}
 
 	// If contextID is not nil, store the conversation history.
 	if message.ContextID != nil {
 		m.storeMessage(context.Background(), *message)
 	}
+}
+
+// generateMessageID generates a message ID.
+func (m *RedisTaskManager) generateMessageID() string {
+	return protocol.GenerateMessageID()
 }
 
 // storeMessage stores a message in Redis and updates conversation history.
@@ -532,6 +516,15 @@ func (m *RedisTaskManager) storeTask(ctx context.Context, task *protocol.Task) e
 		return fmt.Errorf("failed to store task: %w", err)
 	}
 
+	return nil
+}
+
+// deleteTask deletes a task from Redis.
+func (m *RedisTaskManager) deleteTask(ctx context.Context, taskID string) error {
+	taskKey := taskPrefix + taskID
+	if err := m.client.Del(ctx, taskKey).Err(); err != nil {
+		return fmt.Errorf("failed to delete task: %w", err)
+	}
 	return nil
 }
 

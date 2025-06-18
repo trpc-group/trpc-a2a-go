@@ -1,14 +1,20 @@
+// Tencent is pleased to support the open source community by making trpc-a2a-go available.
+//
+// Copyright (C) 2025 THL A29 Limited, a Tencent company.  All rights reserved.
+//
+// trpc-a2a-go is licensed under the Apache License Version 2.0.
+
+// Package main provides a Redis TaskManager example server that demonstrates
+// how to use the Redis-based task manager for processing text conversion tasks.
 package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -18,9 +24,48 @@ import (
 	redisTaskManager "trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis"
 )
 
+const (
+	// Default configuration values
+	defaultRedisAddress  = "localhost:6379"
+	defaultServerAddress = ":8080"
+
+	// Processing step timing constants
+	analysisDelay         = 500 * time.Millisecond
+	processingDelay       = 700 * time.Millisecond
+	conversionDelay       = 500 * time.Millisecond
+	artifactCreationDelay = 300 * time.Millisecond
+
+	// Processing step messages
+	msgStarting   = "[STARTING] Initializing text conversion process..."
+	msgAnalyzing  = "[ANALYZING] Processing input text (%d characters)..."
+	msgProcessing = "[PROCESSING] Converting text to lowercase..."
+	msgArtifact   = "[ARTIFACT] Creating result artifact..."
+	msgCompleted  = "[COMPLETED] Text processing finished! Original: '%s' -> Lowercase: '%s'"
+
+	// Server information
+	serverName        = "Text Case Converter"
+	serverDescription = "A simple agent that converts text to lowercase using Redis storage"
+	serverVersion     = "1.0.0"
+	organizationName  = "Redis TaskManager Example"
+
+	// Skill information
+	skillID          = "text_to_lower"
+	skillName        = "Text to Lowercase"
+	skillDescription = "Convert any text to lowercase"
+)
+
+var (
+	// Skill configuration
+	skillTags        = []string{"text", "conversion", "lowercase"}
+	skillExamples    = []string{"Hello World!", "THIS IS UPPERCASE", "MiXeD cAsE tExT"}
+	inputOutputModes = []string{"text"}
+)
+
 // ToLowerProcessor implements a simple text processing service that converts text to lowercase
 type ToLowerProcessor struct{}
 
+// ProcessMessage processes incoming messages by converting text to lowercase.
+// It supports both streaming and non-streaming modes of operation.
 func (p *ToLowerProcessor) ProcessMessage(
 	ctx context.Context,
 	message protocol.Message,
@@ -30,13 +75,7 @@ func (p *ToLowerProcessor) ProcessMessage(
 	log.Printf("Processing message: %s", message.MessageID)
 
 	// Extract text from message parts
-	var inputText string
-	for _, part := range message.Parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			inputText += textPart.Text
-		}
-	}
-
+	inputText := extractTextFromMessage(message)
 	if inputText == "" {
 		return &taskmanager.MessageProcessingResult{
 			Result: &protocol.Message{
@@ -49,72 +88,164 @@ func (p *ToLowerProcessor) ProcessMessage(
 	}
 
 	if options.Streaming {
-		// Streaming mode - process with task updates
-		task, err := handle.BuildTask(nil, message.ContextID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build task: %w", err)
+		return p.processStreamingMode(inputText, message.ContextID, handle)
+	}
+
+	return p.processNonStreamingMode(inputText), nil
+}
+
+// extractTextFromMessage extracts text content from message parts
+func extractTextFromMessage(message protocol.Message) string {
+	var inputText string
+	for _, part := range message.Parts {
+		if textPart, ok := part.(*protocol.TextPart); ok {
+			inputText += textPart.Text
 		}
+	}
+	return inputText
+}
 
-		// Subscribe to the task
-		subscriber, err := handle.SubScribeTask(&task.ID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to subscribe to task: %w", err)
-		}
+// processStreamingMode handles streaming processing with task updates
+func (p *ToLowerProcessor) processStreamingMode(
+	inputText string,
+	contextID *string,
+	handle taskmanager.TaskHandler,
+) (*taskmanager.MessageProcessingResult, error) {
+	// Build task for streaming mode
+	task, err := handle.BuildTask(nil, contextID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build task: %w", err)
+	}
 
-		// Process asynchronously
-		go p.processTextAsync(ctx, inputText, task.ID, handle)
+	// Subscribe to the task
+	subscriber, err := handle.SubScribeTask(&task.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to subscribe to task: %w", err)
+	}
 
-		return &taskmanager.MessageProcessingResult{
-			StreamingEvents: subscriber,
-		}, nil
-	} else {
-		// Non-streaming mode - return result directly
-		result := strings.ToLower(inputText)
+	// Process asynchronously
+	go p.processTextAsync(inputText, task, handle)
 
-		response := &protocol.Message{
-			Role: protocol.MessageRoleAgent,
-			Parts: []protocol.Part{
-				protocol.NewTextPart(result),
-			},
-		}
+	return &taskmanager.MessageProcessingResult{
+		StreamingEvents: subscriber,
+	}, nil
+}
 
-		return &taskmanager.MessageProcessingResult{
-			Result: response,
-		}, nil
+// processNonStreamingMode handles direct processing without streaming
+func (p *ToLowerProcessor) processNonStreamingMode(inputText string) *taskmanager.MessageProcessingResult {
+	result := strings.ToLower(inputText)
+
+	response := &protocol.Message{
+		Role: protocol.MessageRoleAgent,
+		Parts: []protocol.Part{
+			protocol.NewTextPart(result),
+		},
+	}
+
+	return &taskmanager.MessageProcessingResult{
+		Result: response,
 	}
 }
 
 func (p *ToLowerProcessor) processTextAsync(
-	ctx context.Context,
 	inputText string,
-	taskID string,
+	task *taskmanager.CancellableTask,
 	handle taskmanager.TaskHandler,
 ) {
-	// Update task to working state
-	_, err := handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, nil)
+	defer func() {
+		err := handle.CleanTask(&task.ID)
+		if err != nil {
+			log.Printf("Failed to clean task: %v", err)
+		}
+	}()
+
+	taskID := task.ID
+	// Check if the task is cancelled
+	select {
+	case <-task.Ctx().Done():
+		err := handle.CleanTask(&taskID)
+		if err != nil {
+			log.Printf("Failed to clean task: %v", err)
+		}
+		return
+	default:
+	}
+
+	// Step 1: Starting processing
+	_, err := handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
+		Role: protocol.MessageRoleAgent,
+		Parts: []protocol.Part{
+			protocol.NewTextPart(msgStarting),
+		},
+	})
 	if err != nil {
 		log.Printf("Failed to update task state: %v", err)
 		return
 	}
 
-	// Simulate processing time (in real world this might be calling external APIs)
-	time.Sleep(1 * time.Second)
+	// Simulate analysis phase
+	time.Sleep(analysisDelay)
+
+	// Step 2: Analysis phase
+	_, err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
+		Role: protocol.MessageRoleAgent,
+		Parts: []protocol.Part{
+			protocol.NewTextPart(fmt.Sprintf(msgAnalyzing, len(inputText))),
+		},
+	})
+	if err != nil {
+		log.Printf("Failed to update task state: %v", err)
+		return
+	}
+
+	// Simulate processing phase
+	time.Sleep(processingDelay)
+
+	// Step 3: Processing phase
+	_, err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
+		Role: protocol.MessageRoleAgent,
+		Parts: []protocol.Part{
+			protocol.NewTextPart(msgProcessing),
+		},
+	})
+	if err != nil {
+		log.Printf("Failed to update task state: %v", err)
+		return
+	}
+
+	// Simulate actual processing
+	time.Sleep(conversionDelay)
 
 	// Process the text
 	result := strings.ToLower(inputText)
 
+	// Step 4: Creating artifact
+	_, err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
+		Role: protocol.MessageRoleAgent,
+		Parts: []protocol.Part{
+			protocol.NewTextPart(msgArtifact),
+		},
+	})
+	if err != nil {
+		log.Printf("Failed to update task state: %v", err)
+		return
+	}
+
 	// Create an artifact with the processed text
 	artifact := protocol.Artifact{
-		ArtifactID:  "processed-text-" + taskID,
-		Name:        stringPtr("Lowercase Text"),
-		Description: stringPtr("Text converted to lowercase"),
+		ArtifactID:  protocol.GenerateArtifactID(),
+		Name:        stringPtr(skillName),
+		Description: stringPtr(skillDescription),
 		Parts: []protocol.Part{
 			protocol.NewTextPart(result),
 		},
 		Metadata: map[string]interface{}{
-			"operation":    "toLowerCase",
-			"originalText": inputText,
-			"processedAt":  time.Now().UTC().Format(time.RFC3339),
+			"operation":      skillID,
+			"originalText":   inputText,
+			"originalLength": len(inputText),
+			"resultLength":   len(result),
+			"processedAt":    time.Now().UTC().Format(time.RFC3339),
+			"processingTime": "1.7s",
 		},
 	}
 
@@ -123,11 +254,14 @@ func (p *ToLowerProcessor) processTextAsync(
 		log.Printf("Failed to add artifact: %v", err)
 	}
 
+	// Small delay to show artifact creation
+	time.Sleep(artifactCreationDelay)
+
 	// Send final status with result message
 	finalMessage := &protocol.Message{
 		Role: protocol.MessageRoleAgent,
 		Parts: []protocol.Part{
-			protocol.NewTextPart(fmt.Sprintf("Text processing completed! Original: '%s' -> Lowercase: '%s'", inputText, result)),
+			protocol.NewTextPart(fmt.Sprintf(msgCompleted, inputText, result)),
 		},
 	}
 
@@ -148,19 +282,39 @@ func boolPtr(b bool) *bool {
 
 func main() {
 	// Parse command line flags
-	var redisAddr string = "localhost:6379"
-	var serverPort int = 8080
+	var redisAddr = flag.String("redis_addr", defaultRedisAddress, "Redis server address")
+	var serverAddr = flag.String("addr", defaultServerAddress, "Server listen address (e.g., :8080 or localhost:8080)")
+	var help = flag.Bool("help", false, "Show help message")
+	var version = flag.Bool("version", false, "Show version information")
 
-	if len(os.Args) > 1 {
-		redisAddr = os.Args[1]
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Text Case Converter Server - Redis TaskManager Example\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: %s [OPTIONS]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Options:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nExamples:\n")
+		fmt.Fprintf(os.Stderr, "  %s                                # Use default settings\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s --redis_addr localhost:6380    # Custom Redis port\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s --addr :9000                   # Custom server port\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s --redis_addr redis.example.com:6379 --addr :8080\n", os.Args[0])
 	}
-	if len(os.Args) > 2 {
-		fmt.Sscanf(os.Args[2], "%d", &serverPort)
+
+	flag.Parse()
+
+	if *help {
+		flag.Usage()
+		os.Exit(0)
+	}
+
+	if *version {
+		fmt.Println("Text Case Converter Server v1.0.0")
+		fmt.Println("Redis TaskManager Example")
+		os.Exit(0)
 	}
 
 	// Create Redis client
 	rdb := redis.NewClient(&redis.Options{
-		Addr:     redisAddr,
+		Addr:     *redisAddr,
 		Password: "", // no password
 		DB:       0,  // default DB
 	})
@@ -168,20 +322,15 @@ func main() {
 	// Test Redis connection
 	ctx := context.Background()
 	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Fatalf("Failed to connect to Redis at %s: %v", redisAddr, err)
+		log.Fatalf("Failed to connect to Redis at %s: %v", *redisAddr, err)
 	}
-	log.Printf("Connected to Redis at %s successfully", redisAddr)
+	log.Printf("Connected to Redis at %s successfully", *redisAddr)
 
 	// Create the toLower processor
 	processor := &ToLowerProcessor{}
 
 	// Create Redis TaskManager
-	taskManager, err := redisTaskManager.NewRedisTaskManager(
-		rdb,
-		processor,
-		redisTaskManager.WithExpiration(2*time.Hour), // Short expiration for demo
-		redisTaskManager.WithMaxHistoryLength(50),    // Keep limited history
-	)
+	taskManager, err := redisTaskManager.NewRedisTaskManager(rdb, processor)
 	if err != nil {
 		log.Fatalf("Failed to create Redis TaskManager: %v", err)
 	}
@@ -189,67 +338,42 @@ func main() {
 
 	// Create agent card
 	agentCard := server.AgentCard{
-		Name:        "Text Case Converter",
-		Description: "A simple agent that converts text to lowercase using Redis storage",
-		URL:         fmt.Sprintf("http://localhost:%d/", serverPort),
-		Version:     "1.0.0",
+		Name:        serverName,
+		Description: serverDescription,
+		URL:         fmt.Sprintf("http://localhost%s/", *serverAddr),
+		Version:     serverVersion,
 		Provider: &server.AgentProvider{
-			Organization: "Redis TaskManager Example",
+			Organization: organizationName,
 		},
 		Capabilities: server.AgentCapabilities{
 			Streaming:         boolPtr(true),
 			PushNotifications: boolPtr(false),
 		},
-		DefaultInputModes:  []string{"text"},
-		DefaultOutputModes: []string{"text"},
+		DefaultInputModes:  inputOutputModes,
+		DefaultOutputModes: inputOutputModes,
 		Skills: []server.AgentSkill{
 			{
-				ID:          "text_to_lower",
-				Name:        "Text to Lowercase",
-				Description: stringPtr("Convert any text to lowercase"),
-				Tags:        []string{"text", "conversion", "lowercase"},
-				Examples:    []string{"Hello World!", "THIS IS UPPERCASE", "MiXeD cAsE tExT"},
-				InputModes:  []string{"text"},
-				OutputModes: []string{"text"},
+				ID:          skillID,
+				Name:        skillName,
+				Description: stringPtr(skillDescription),
+				Tags:        skillTags,
+				Examples:    skillExamples,
+				InputModes:  inputOutputModes,
+				OutputModes: inputOutputModes,
 			},
 		},
 	}
 
 	// Create HTTP server
-	httpServer, err := server.NewA2AServer(agentCard, taskManager)
+	agentServer, err := server.NewA2AServer(agentCard, taskManager)
 	if err != nil {
 		log.Fatalf("Failed to create A2A server: %v", err)
 	}
-
-	// Start HTTP server
-	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", serverPort),
-		Handler: httpServer.Handler(),
+	log.Printf("Starting Text Case Converter server on %s", *serverAddr)
+	log.Printf("Redis backend: %s", *redisAddr)
+	log.Printf("Try sending text like: 'Hello World!' and it will be converted to 'hello world!'")
+	err = agentServer.Start(*serverAddr)
+	if err != nil {
+		log.Fatalf("Failed to start A2A server: %v", err)
 	}
-
-	go func() {
-		log.Printf("Starting Text Case Converter server on port %d", serverPort)
-		log.Printf("Redis backend: %s", redisAddr)
-		log.Printf("Try sending text like: 'Hello World!' and it will be converted to 'hello world!'")
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server failed: %v", err)
-		}
-	}()
-
-	// Wait for interrupt signal
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	<-c
-
-	log.Println("Shutting down server...")
-
-	// Graceful shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("Server forced to shutdown: %v", err)
-	}
-
-	log.Println("Server exited")
 }

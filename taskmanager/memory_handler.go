@@ -1,3 +1,9 @@
+// Tencent is pleased to support the open source community by making trpc-a2a-go available.
+//
+// Copyright (C) 2025 THL A29 Limited, a Tencent company.  All rights reserved.
+//
+// trpc-a2a-go is licensed under the Apache License Version 2.0.
+
 package taskmanager
 
 import (
@@ -194,35 +200,29 @@ func (h *memoryTaskHandler) BuildTask(taskID *string, contextID *string) (*Cance
 		actualContextID = *contextID
 	}
 
-	// Only create new context if we're actually creating a new task
-	cancelCtx, cancel := context.WithCancel(h.ctx)
-
 	// create new task
-	task := &CancellableTask{
-		Task: protocol.Task{
-			ID:        actualTaskID,
-			ContextID: actualContextID,
-			Kind:      protocol.KindTask,
-			Status: protocol.TaskStatus{
-				State:     protocol.TaskStateSubmitted,
-				Timestamp: time.Now().UTC().Format(time.RFC3339),
-			},
-			Artifacts: make([]protocol.Artifact, 0),
-			History:   make([]protocol.Message, 0),
-			Metadata:  make(map[string]interface{}),
+	task := protocol.Task{
+		ID:        actualTaskID,
+		ContextID: actualContextID,
+		Kind:      protocol.KindTask,
+		Status: protocol.TaskStatus{
+			State:     protocol.TaskStateSubmitted,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		},
-		cancelFunc: cancel,
-		ctx:        cancelCtx,
+		Artifacts: make([]protocol.Artifact, 0),
+		History:   make([]protocol.Message, 0),
+		Metadata:  make(map[string]interface{}),
 	}
 
+	cancellableTask := NewCancellableTask(task)
+
 	// store task
-	h.manager.Tasks[actualTaskID] = task
+	h.manager.Tasks[actualTaskID] = cancellableTask
 
 	log.Debugf("Created new task %s with context %s", actualTaskID, actualContextID)
 
 	// return task copy
-	taskCopy := *task
-	return &taskCopy, nil
+	return cancellableTask, nil
 }
 
 // CancelTask cancels the task.

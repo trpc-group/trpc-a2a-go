@@ -56,7 +56,7 @@ func (h *redisTaskHandle) BuildTask(taskID *string, contextID *string) (*taskman
 	}
 
 	// Create new context for cancellation.
-	_, cancel := context.WithCancel(h.ctx)
+	_, cancel := context.WithCancel(context.Background())
 
 	// Create new task.
 	task := &protocol.Task{
@@ -86,10 +86,7 @@ func (h *redisTaskHandle) BuildTask(taskID *string, contextID *string) (*taskman
 	log.Debugf("Created new task %s with context %s", actualTaskID, actualContextID)
 
 	// Return as CancellableTask.
-	return &taskmanager.CancellableTask{
-		Task: *task,
-		// Note: We can't expose the cancel function directly due to interface constraints.
-	}, nil
+	return taskmanager.NewCancellableTask(*task), nil
 }
 
 // UpdateTaskState updates the task's state and returns the updated task.
@@ -224,7 +221,7 @@ func (h *redisTaskHandle) GetTask(taskID *string) (*taskmanager.CancellableTask,
 	}, nil
 }
 
-// CleanTask cancels the task.
+// CleanTask deletes the task and cleans up all associated resources.
 func (h *redisTaskHandle) CleanTask(taskID *string) error {
 	if taskID == nil || *taskID == "" {
 		return fmt.Errorf("taskID cannot be nil or empty")
@@ -244,9 +241,11 @@ func (h *redisTaskHandle) CleanTask(taskID *string) error {
 	}
 	h.manager.cancelMu.Unlock()
 
-	// Update task state to cancelled.
-	_, err = h.UpdateTaskState(taskID, protocol.TaskStateCanceled, nil)
-	return err
+	// Clean up subscribers.
+	h.manager.cleanSubscribers(*taskID)
+
+	// Delete the task from Redis.
+	return h.manager.deleteTask(h.ctx, *taskID)
 }
 
 // GetContextID returns the context ID of the current message, if any.

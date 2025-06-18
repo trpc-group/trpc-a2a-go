@@ -226,10 +226,10 @@ func TestNewRequest(t *testing.T) {
 			expectJSON: `{"jsonrpc":"2.0","id":123,"method":"get/data"}`,
 		},
 		{
-			name:       "Null ID",
+			name:       "Auto-generated ID",
 			method:     "notify/update",
 			id:         nil,
-			expectJSON: `{"jsonrpc":"2.0","method":"notify/update"}`,
+			expectJSON: ``, // Will be checked separately since ID is auto-generated
 		},
 		{
 			name:       "Complex Method Path",
@@ -246,6 +246,15 @@ func TestNewRequest(t *testing.T) {
 			// Verify individual fields
 			assert.Equal(t, Version, req.JSONRPC, "JSONRPC version should be set correctly")
 			assert.Equal(t, tc.method, req.Method, "Method should match input")
+
+			// Special handling for auto-generated ID test case
+			if tc.name == "Auto-generated ID" {
+				assert.NotNil(t, req.ID, "ID should be auto-generated when nil is passed")
+				assert.NotEmpty(t, req.ID, "Auto-generated ID should not be empty")
+				// Skip JSON comparison for auto-generated ID since it's unpredictable
+				return
+			}
+
 			assert.Equal(t, tc.id, req.ID, "ID should match input")
 			assert.Nil(t, req.Params, "Params should be nil by default")
 
