@@ -64,12 +64,6 @@ func TestNewMemoryTaskManager(t *testing.T) {
 			processor: nil,
 			wantErr:   true,
 		},
-		{
-			name:      "with options",
-			processor: &MockMessageProcessor{},
-			options:   []MemoryTaskManagerOption{WithMaxHistoryLength(50)},
-			wantErr:   false,
-		},
 	}
 
 	for _, tt := range tests {
@@ -97,8 +91,8 @@ func TestNewMemoryTaskManager(t *testing.T) {
 				t.Error("Processor not set correctly")
 			}
 
-			if len(tt.options) > 0 && manager.MaxHistoryLength != 50 {
-				t.Errorf("Expected MaxHistoryLength=50, got %d", manager.MaxHistoryLength)
+			if len(tt.options) > 0 && manager.maxHistoryLength != 50 {
+				t.Errorf("Expected MaxHistoryLength=50, got %d", manager.maxHistoryLength)
 			}
 		})
 	}
@@ -195,12 +189,12 @@ func TestMemoryTaskManager_OnSendMessageStream(t *testing.T) {
 	processor := &MockMessageProcessor{
 		ProcessMessageFunc: func(ctx context.Context, message protocol.Message, options ProcessOptions, handle TaskHandler) (*MessageProcessingResult, error) {
 			// Create a task for streaming
-			task, err := handle.BuildTask(nil, message.ContextID)
+			taskID, err := handle.BuildTask(nil, message.ContextID)
 			if err != nil {
 				return nil, err
 			}
 
-			subscriber, err := handle.SubScribeTask(&task.ID)
+			subscriber, err := handle.SubScribeTask(&taskID)
 			if err != nil {
 				return nil, err
 			}
@@ -210,7 +204,7 @@ func TestMemoryTaskManager_OnSendMessageStream(t *testing.T) {
 				defer subscriber.Close()
 
 				// Send initial status update
-				handle.UpdateTaskState(&task.ID, protocol.TaskStateWorking, nil)
+				handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, nil)
 
 				// Complete task
 				finalMessage := &protocol.Message{
@@ -219,7 +213,7 @@ func TestMemoryTaskManager_OnSendMessageStream(t *testing.T) {
 						protocol.NewTextPart("Streaming completed"),
 					},
 				}
-				handle.UpdateTaskState(&task.ID, protocol.TaskStateCompleted, finalMessage)
+				handle.UpdateTaskState(&taskID, protocol.TaskStateCompleted, finalMessage)
 			}()
 
 			return &MessageProcessingResult{
@@ -304,13 +298,19 @@ func TestMemoryTaskManager_OnGetTask(t *testing.T) {
 	processor := &MockMessageProcessor{
 		ProcessMessageFunc: func(ctx context.Context, message protocol.Message, options ProcessOptions, handle TaskHandler) (*MessageProcessingResult, error) {
 			// Create a task for testing
-			task, err := handle.BuildTask(nil, message.ContextID)
+			taskID, err := handle.BuildTask(nil, message.ContextID)
+			if err != nil {
+				return nil, err
+			}
+
+			// Get the actual task object
+			task, err := handle.GetTask(&taskID)
 			if err != nil {
 				return nil, err
 			}
 
 			return &MessageProcessingResult{
-				Result: &task.Task, // Return protocol.Task, not CancellableTask
+				Result: task.Task(), // Return protocol.Task, not CancellableTask
 			}, nil
 		},
 	}
@@ -408,13 +408,19 @@ func TestMemoryTaskManager_OnCancelTask(t *testing.T) {
 	processor := &MockMessageProcessor{
 		ProcessMessageFunc: func(ctx context.Context, message protocol.Message, options ProcessOptions, handle TaskHandler) (*MessageProcessingResult, error) {
 			// Create a task for testing cancellation
-			task, err := handle.BuildTask(nil, message.ContextID)
+			taskID, err := handle.BuildTask(nil, message.ContextID)
+			if err != nil {
+				return nil, err
+			}
+
+			// Get the actual task object
+			task, err := handle.GetTask(&taskID)
 			if err != nil {
 				return nil, err
 			}
 
 			return &MessageProcessingResult{
-				Result: &task.Task,
+				Result: task.Task(),
 			}, nil
 		},
 	}
@@ -590,19 +596,19 @@ func TestTaskSubscriber(t *testing.T) {
 		name     string
 		taskID   string
 		capacity int
-		setup    func(*TaskSubscriber)             // Setup function to perform actions
-		validate func(*testing.T, *TaskSubscriber) // Validation function
+		setup    func(*MemoryTaskSubscriber)             // Setup function to perform actions
+		validate func(*testing.T, *MemoryTaskSubscriber) // Validation function
 	}{
 		{
 			name:     "create subscriber",
 			taskID:   "test-task",
 			capacity: 5,
-			setup:    func(s *TaskSubscriber) {},
-			validate: func(t *testing.T, s *TaskSubscriber) {
-				if s.TaskID != "test-task" {
-					t.Errorf("Expected task ID %s, got %s", "test-task", s.TaskID)
+			setup:    func(s *MemoryTaskSubscriber) {},
+			validate: func(t *testing.T, s *MemoryTaskSubscriber) {
+				if s.taskID != "test-task" {
+					t.Errorf("Expected task ID %s, got %s", "test-task", s.taskID)
 				}
-				if s.IsClosed() {
+				if s.Closed() {
 					t.Error("Expected subscriber to be open")
 				}
 			},
@@ -611,7 +617,7 @@ func TestTaskSubscriber(t *testing.T) {
 			name:     "send and receive event",
 			taskID:   "test-task-2",
 			capacity: 5,
-			setup: func(s *TaskSubscriber) {
+			setup: func(s *MemoryTaskSubscriber) {
 				event := protocol.StreamingMessageEvent{
 					Result: &protocol.Message{
 						Role: protocol.MessageRoleAgent,
@@ -625,9 +631,9 @@ func TestTaskSubscriber(t *testing.T) {
 					t.Errorf("Unexpected error sending event: %v", err)
 				}
 			},
-			validate: func(t *testing.T, s *TaskSubscriber) {
+			validate: func(t *testing.T, s *MemoryTaskSubscriber) {
 				select {
-				case receivedEvent := <-s.EventQueue:
+				case receivedEvent := <-s.eventQueue:
 					if receivedEvent.Result == nil {
 						t.Error("Expected event result but got nil")
 					}
@@ -640,11 +646,11 @@ func TestTaskSubscriber(t *testing.T) {
 			name:     "close subscriber",
 			taskID:   "test-task-3",
 			capacity: 5,
-			setup: func(s *TaskSubscriber) {
+			setup: func(s *MemoryTaskSubscriber) {
 				s.Close()
 			},
-			validate: func(t *testing.T, s *TaskSubscriber) {
-				if !s.IsClosed() {
+			validate: func(t *testing.T, s *MemoryTaskSubscriber) {
+				if !s.Closed() {
 					t.Error("Expected subscriber to be closed")
 				}
 
@@ -662,7 +668,7 @@ func TestTaskSubscriber(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			subscriber := NewTaskSubscriber(tt.taskID, tt.capacity)
+			subscriber := NewMemoryTaskSubscriber(tt.taskID, tt.capacity)
 
 			tt.setup(subscriber)
 			tt.validate(t, subscriber)
@@ -673,17 +679,13 @@ func TestTaskSubscriber(t *testing.T) {
 func TestCancellableTask(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	task := &CancellableTask{
-		Task: protocol.Task{
+	task := &MemoryCancellableTask{
+		task: protocol.Task{
 			ID:     "test-task",
 			Status: protocol.TaskStatus{State: protocol.TaskStateSubmitted},
 		},
 		cancelFunc: cancel,
 		ctx:        ctx,
-	}
-
-	if task.Ctx() != ctx {
-		t.Error("Expected context to match")
 	}
 
 	// Test cancellation

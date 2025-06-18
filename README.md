@@ -148,9 +148,9 @@ go run main.go --auth jwt --message "Custom message" --session-id "session123"
 
 ## Creating Your Own Agent
 
-### 1. Implement the TaskProcessor Interface
+### 1. Implement the MessageProcessor Interface
 
-This interface defines how your agent processes incoming tasks:
+This interface defines how your agent processes incoming messages:
 
 ```go
 import (
@@ -160,23 +160,49 @@ import (
     "trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
-// Implement the TaskProcessor interface
-type myTaskProcessor struct {
-    // Optional: add your custom fields
+// Implement the MessageProcessor interface
+type myMessageProcessor struct {
+    // Add your custom fields here
 }
 
-func (p *myTaskProcessor) Process(
+func (p *myMessageProcessor) ProcessMessage(
     ctx context.Context,
-    taskID string,
     message protocol.Message,
-    handle taskmanager.TaskHandle,
-) error {
-    // 1. Extract input data from message
-    // 2. Process data, generate results
-    // 3. Use handle to update task status and add artifacts
+    options taskmanager.ProcessOptions,
+    handle taskmanager.TaskHandler,
+) (*taskmanager.MessageProcessingResult, error) {
+    // Extract text from the incoming message
+    text := extractTextFromMessage(message)
+    
+    // Process the text (example: reverse it)
+    result := reverseString(text)
+    
+    // Return a simple response message
+    responseMessage := protocol.NewMessage(
+        protocol.MessageRoleAgent,
+        []protocol.Part{protocol.NewTextPart("Processed: " + result)},
+    )
+    
+    return &taskmanager.MessageProcessingResult{
+        Result: &responseMessage,
+    }, nil
+}
 
-    // Processing complete, return nil for success
-    return nil
+func extractTextFromMessage(message protocol.Message) string {
+    for _, part := range message.Parts {
+        if textPart, ok := part.(*protocol.TextPart); ok {
+            return textPart.Text
+        }
+    }
+    return ""
+}
+
+func reverseString(s string) string {
+    runes := []rune(s)
+    for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
+        runes[i], runes[j] = runes[j], runes[i]
+    }
+    return string(runes)
 }
 ```
 
@@ -195,6 +221,11 @@ func stringPtr(s string) *string {
     return &s
 }
 
+// Helper function to create bool pointers
+func boolPtr(b bool) *bool {
+    return &b
+}
+
 agentCard := server.AgentCard{
     Name: "My Agent",
     Description: stringPtr("Agent description"),
@@ -204,20 +235,17 @@ agentCard := server.AgentCard{
         Name: "Provider name",
     },
     Capabilities: server.AgentCapabilities{
-        Streaming: true,
-        StateTransitionHistory: true,
+        Streaming: boolPtr(true),
     },
-    DefaultInputModes: []string{string(protocol.PartTypeText)},
-    DefaultOutputModes: []string{string(protocol.PartTypeText)},
+    DefaultInputModes:  []string{protocol.KindText},
+    DefaultOutputModes: []string{protocol.KindText},
     Skills: []server.AgentSkill{
         {
-            ID: "my_skill",
-            Name: "Skill name",
-            Description: stringPtr("Skill description"),
-            Tags: []string{"tag1", "tag2"},
-            Examples: []string{"Example input"},
-            InputModes: []string{string(protocol.PartTypeText)},
-            OutputModes: []string{string(protocol.PartTypeText)},
+            ID:          "text_processing",
+            Name:        "Text Processing",
+            Description: stringPtr("Process and transform text input"),
+            InputModes:  []string{protocol.KindText},
+            OutputModes: []string{protocol.KindText},
         },
     },
 }
@@ -236,7 +264,7 @@ import (
 )
 
 // Create the task processor
-processor := &myTaskProcessor{}
+processor := &myMessageProcessor{}
 
 // Create task manager, inject processor
 taskManager, err := taskmanager.NewMemoryTaskManager(processor)

@@ -33,9 +33,9 @@ func (h *memoryTaskHandler) UpdateTaskState(
 	taskID *string,
 	state protocol.TaskState,
 	message *protocol.Message,
-) (*CancellableTask, error) {
+) error {
 	if taskID == nil || *taskID == "" {
-		return nil, fmt.Errorf("taskID cannot be nil or empty")
+		return fmt.Errorf("taskID cannot be nil or empty")
 	}
 
 	h.manager.taskMu.Lock()
@@ -43,27 +43,15 @@ func (h *memoryTaskHandler) UpdateTaskState(
 	if !exists {
 		h.manager.taskMu.Unlock()
 		log.Warnf("UpdateTaskState called for non-existent task %s", *taskID)
-		return nil, fmt.Errorf("task not found: %s", *taskID)
+		return fmt.Errorf("task not found: %s", *taskID)
 	}
 
-	// update task status
-	task.Status = protocol.TaskStatus{
+	originalTask := task.Task()
+	originalTask.Status = protocol.TaskStatus{
 		State:     state,
 		Message:   message,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
-
-	// create task copy for return
-	taskCopy := *task
-	if task.Artifacts != nil {
-		taskCopy.Artifacts = make([]protocol.Artifact, len(task.Artifacts))
-		copy(taskCopy.Artifacts, task.Artifacts)
-	}
-	if task.History != nil {
-		taskCopy.History = make([]protocol.Message, len(task.History))
-		copy(taskCopy.History, task.History)
-	}
-
 	h.manager.taskMu.Unlock()
 
 	log.Debugf("Updated task %s state to %s", *taskID, state)
@@ -72,50 +60,55 @@ func (h *memoryTaskHandler) UpdateTaskState(
 	finalState := isFinalState(state)
 	event := &protocol.TaskStatusUpdateEvent{
 		TaskID:    *taskID,
-		ContextID: task.ContextID,
-		Status:    task.Status,
+		ContextID: originalTask.ContextID,
+		Status:    originalTask.Status,
 		Kind:      protocol.KindTaskStatusUpdate,
 		Final:     &finalState,
 	}
 	streamEvent := protocol.StreamingMessageEvent{Result: event}
 	h.manager.notifySubscribers(*taskID, streamEvent)
-
-	return &taskCopy, nil
+	return nil
 }
 
-func (h *memoryTaskHandler) SubScribeTask(taskID *string) (*TaskSubscriber, error) {
+// SubScribeTask subscribes to the task
+func (h *memoryTaskHandler) SubScribeTask(taskID *string) (TaskSubscriber, error) {
 	if taskID == nil || *taskID == "" {
 		return nil, fmt.Errorf("taskID cannot be nil or empty")
 	}
 	if !h.manager.checkTaskExists(*taskID) {
 		return nil, fmt.Errorf("task not found: %s", *taskID)
 	}
-	subscriber := NewTaskSubscriber(*taskID, defaultTaskSubscriberBufferSize)
+	subscriber := NewMemoryTaskSubscriber(*taskID, defaultTaskSubscriberBufferSize)
 	h.manager.addSubscriber(*taskID, subscriber)
 	return subscriber, nil
 }
 
 // AddArtifact adds artifact to specified task
-func (h *memoryTaskHandler) AddArtifact(taskID *string, artifact protocol.Artifact, isFinal bool, needMoreData bool) error {
+func (h *memoryTaskHandler) AddArtifact(
+	taskID *string,
+	artifact protocol.Artifact,
+	isFinal bool,
+	needMoreData bool,
+) error {
 	if taskID == nil || *taskID == "" {
 		return fmt.Errorf("taskID cannot be nil or empty")
 	}
 
-	if !h.manager.checkTaskExists(*taskID) {
+	h.manager.taskMu.Lock()
+	task, exists := h.manager.Tasks[*taskID]
+	if !exists {
+		h.manager.taskMu.Unlock()
 		return fmt.Errorf("task not found: %s", *taskID)
 	}
-
-	task, err := h.manager.updateTaskArtifact(*taskID, artifact)
-	if err != nil {
-		return err
-	}
+	task.Task().Artifacts = append(task.Task().Artifacts, artifact)
+	h.manager.taskMu.Unlock()
 
 	log.Debugf("Added artifact %s to task %s", artifact.ArtifactID, *taskID)
 
 	// notify subscribers
 	event := &protocol.TaskArtifactUpdateEvent{
 		TaskID:    *taskID,
-		ContextID: task.ContextID,
+		ContextID: task.Task().ContextID,
 		Artifact:  artifact,
 		Kind:      protocol.KindTaskArtifactUpdate,
 		LastChunk: &isFinal,
@@ -128,10 +121,13 @@ func (h *memoryTaskHandler) AddArtifact(taskID *string, artifact protocol.Artifa
 }
 
 // GetTask gets task
-func (h *memoryTaskHandler) GetTask(taskID *string) (*CancellableTask, error) {
+func (h *memoryTaskHandler) GetTask(taskID *string) (CancellableTask, error) {
 	if taskID == nil || *taskID == "" {
 		return nil, fmt.Errorf("taskID cannot be nil or empty")
 	}
+
+	h.manager.taskMu.RLock()
+	defer h.manager.taskMu.RUnlock()
 
 	task, err := h.manager.getTask(*taskID)
 	if err != nil {
@@ -139,17 +135,21 @@ func (h *memoryTaskHandler) GetTask(taskID *string) (*CancellableTask, error) {
 	}
 
 	// return task copy to avoid external modification
-	taskCopy := *task
-	if task.Artifacts != nil {
-		taskCopy.Artifacts = make([]protocol.Artifact, len(task.Artifacts))
-		copy(taskCopy.Artifacts, task.Artifacts)
+	taskCopy := *task.Task()
+	if taskCopy.Artifacts != nil {
+		taskCopy.Artifacts = make([]protocol.Artifact, len(task.Task().Artifacts))
+		copy(taskCopy.Artifacts, task.Task().Artifacts)
 	}
-	if task.History != nil {
-		taskCopy.History = make([]protocol.Message, len(task.History))
-		copy(taskCopy.History, task.History)
+	if taskCopy.History != nil {
+		taskCopy.History = make([]protocol.Message, len(task.Task().History))
+		copy(taskCopy.History, task.Task().History)
 	}
 
-	return &taskCopy, nil
+	return &MemoryCancellableTask{
+		task:       taskCopy,
+		cancelFunc: task.cancelFunc,
+		ctx:        task.ctx,
+	}, nil
 }
 
 // GetContextID gets context ID
@@ -175,22 +175,22 @@ func (h *memoryTaskHandler) GetMessageHistory() []protocol.Message {
 }
 
 // BuildTask creates a new task and returns task object
-func (h *memoryTaskHandler) BuildTask(taskID *string, contextID *string) (*CancellableTask, error) {
+func (h *memoryTaskHandler) BuildTask(specificTaskID *string, contextID *string) (string, error) {
 	h.manager.taskMu.Lock()
 	defer h.manager.taskMu.Unlock()
 
 	// if no taskID provided, generate one
 	var actualTaskID string
-	if taskID == nil || *taskID == "" {
+	if specificTaskID == nil || *specificTaskID == "" {
 		actualTaskID = protocol.GenerateTaskID()
 	} else {
-		actualTaskID = *taskID
+		actualTaskID = *specificTaskID
 	}
 
 	// Check if task already exists to avoid duplicate WithCancel calls
-	if existingTask, exists := h.manager.Tasks[actualTaskID]; exists {
+	if _, exists := h.manager.Tasks[actualTaskID]; exists {
 		log.Warnf("Task %s already exists, returning existing task", actualTaskID)
-		return existingTask, nil
+		return "", fmt.Errorf("task already exists: %s", actualTaskID)
 	}
 
 	var actualContextID string
@@ -221,8 +221,7 @@ func (h *memoryTaskHandler) BuildTask(taskID *string, contextID *string) (*Cance
 
 	log.Debugf("Created new task %s with context %s", actualTaskID, actualContextID)
 
-	// return task copy
-	return cancellableTask, nil
+	return actualTaskID, nil
 }
 
 // CancelTask cancels the task.

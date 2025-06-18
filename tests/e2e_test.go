@@ -64,21 +64,21 @@ func (p *testProcessor) ProcessMessage(
 	}
 
 	// Create a task
-	task, err := handle.BuildTask(message.TaskID, message.ContextID)
+	taskID, err := handle.BuildTask(message.TaskID, message.ContextID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build task: %w", err)
 	}
 
 	if options.Streaming {
 		// For streaming requests, process in background and return StreamingEvents
-		subscriber, err := handle.SubScribeTask(stringPtr(task.ID))
+		subscriber, err := handle.SubScribeTask(stringPtr(taskID))
 		if err != nil {
 			return nil, fmt.Errorf("failed to subscribe to task: %w", err)
 		}
 
 		// Process task in background
 		go func() {
-			if err := p.processTask(task, message, inputText, subscriber, handle); err != nil {
+			if err := p.processTask(taskID, message, inputText, subscriber, handle); err != nil {
 				log.Printf("[testStreamingProcessor] Error processing task: %v", err)
 			}
 		}()
@@ -89,36 +89,29 @@ func (p *testProcessor) ProcessMessage(
 	} else {
 		// For non-streaming requests, process synchronously and return Result
 		// Process the task synchronously without auto-cleanup
-		if err := p.processTask(task, message, inputText, nil, handle); err != nil {
+		if err := p.processTask(taskID, message, inputText, nil, handle); err != nil {
 			return nil, fmt.Errorf("failed to process task: %w", err)
 		}
 
 		// Get the final task state
-		finalTask, err := handle.GetTask(stringPtr(task.ID))
+		finalTask, err := handle.GetTask(stringPtr(taskID))
 		if err != nil {
 			return nil, fmt.Errorf("failed to get final task: %w", err)
 		}
 
 		return &taskmanager.MessageProcessingResult{
-			Result: &finalTask.Task,
+			Result: finalTask.Task(),
 		}, nil
 	}
 }
 
 func (p *testProcessor) processTask(
-	task *taskmanager.CancellableTask,
+	taskID string,
 	message protocol.Message,
 	inputText string,
-	subscriber *taskmanager.TaskSubscriber,
+	subscriber taskmanager.TaskSubscriber,
 	handle taskmanager.TaskHandler,
 ) error {
-	defer func() {
-		// Cancel the task context when processing is done
-		task.Cancel()
-		// Note: We don't call CleanTask here because it would change the task state to "canceled"
-		// For completed tasks, we want to preserve the "completed" state
-	}()
-
 	reversedText := testReverseString(inputText)
 	log.Printf("[testStreamingProcessor] Input: '%s', Reversed: '%s'", inputText, reversedText)
 
@@ -139,7 +132,7 @@ func (p *testProcessor) processTask(
 		}
 
 		// Will notify the subscriber automatically
-		if _, err := handle.UpdateTaskState(stringPtr(task.ID), protocol.TaskStateWorking, statusMsg); err != nil {
+		if err := handle.UpdateTaskState(stringPtr(taskID), protocol.TaskStateWorking, statusMsg); err != nil {
 			log.Printf("[testStreamingProcessor] Error sending working status chunk: %v", err)
 			return err
 		}
@@ -154,7 +147,7 @@ func (p *testProcessor) processTask(
 		},
 	}
 
-	if err := handle.AddArtifact(stringPtr(task.ID), finalArtifact, true, false); err != nil {
+	if err := handle.AddArtifact(stringPtr(taskID), finalArtifact, true, false); err != nil {
 		log.Printf("[testStreamingProcessor] Error sending artifact: %v", err)
 		return err
 	}
@@ -164,17 +157,17 @@ func (p *testProcessor) processTask(
 		Role: protocol.MessageRoleAgent,
 		Parts: []protocol.Part{
 			protocol.NewTextPart(
-				fmt.Sprintf("Task %s completed successfully. Result: %s", task.ID, reversedText),
+				fmt.Sprintf("Task %s completed successfully. Result: %s", taskID, reversedText),
 			),
 		},
 	}
 
-	if _, err := handle.UpdateTaskState(stringPtr(task.ID), protocol.TaskStateCompleted, completionMsg); err != nil {
+	if err := handle.UpdateTaskState(stringPtr(taskID), protocol.TaskStateCompleted, completionMsg); err != nil {
 		log.Printf("[testStreamingProcessor] Error sending completed status: %v", err)
 		return err
 	}
 
-	log.Printf("[testStreamingProcessor] Finished processing task %s", task.ID)
+	log.Printf("[testStreamingProcessor] Finished processing task %s", taskID)
 	return nil
 }
 

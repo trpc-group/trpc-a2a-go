@@ -44,28 +44,24 @@ func TestMemoryTaskHandler_BuildTask(t *testing.T) {
 	handler, _ := setupTestHandler(t)
 
 	// Test building a task
-	task, err := handler.BuildTask(nil, nil)
+	taskID, err := handler.BuildTask(nil, nil)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
 
-	if task == nil {
-		t.Error("Expected task but got nil")
-	}
-
-	if task.ID == "" {
+	if taskID == "" {
 		t.Error("Expected task ID to be set")
 	}
 
 	// Test building task with custom ID
 	customID := "custom-task-id"
-	customTask, err := handler.BuildTask(&customID, nil)
+	customTaskID, err := handler.BuildTask(&customID, nil)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
 
-	if customTask.ID != customID {
-		t.Errorf("Expected task ID %s, got %s", customID, customTask.ID)
+	if customTaskID != customID {
+		t.Errorf("Expected task ID %s, got %s", customID, customTaskID)
 	}
 }
 
@@ -73,23 +69,25 @@ func TestMemoryTaskHandler_UpdateTaskState(t *testing.T) {
 	handler, _ := setupTestHandler(t)
 
 	// First create a task
-	task, err := handler.BuildTask(nil, nil)
+	taskID, err := handler.BuildTask(nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}
 
 	// Update task state
-	updatedTask, err := handler.UpdateTaskState(&task.ID, protocol.TaskStateWorking, nil)
+	err = handler.UpdateTaskState(&taskID, protocol.TaskStateWorking, nil)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
 
-	if updatedTask == nil {
-		t.Error("Expected updated task but got nil")
+	// Get the task to verify state was updated
+	updatedTask, err := handler.GetTask(&taskID)
+	if err != nil {
+		t.Errorf("Failed to get updated task: %v", err)
 	}
 
-	if updatedTask.Status.State != protocol.TaskStateWorking {
-		t.Errorf("Expected state %s, got %s", protocol.TaskStateWorking, updatedTask.Status.State)
+	if updatedTask.Task().Status.State != protocol.TaskStateWorking {
+		t.Errorf("Expected state %s, got %s", protocol.TaskStateWorking, updatedTask.Task().Status.State)
 	}
 }
 
@@ -97,7 +95,7 @@ func TestMemoryTaskHandler_AddArtifact(t *testing.T) {
 	handler, _ := setupTestHandler(t)
 
 	// First create a task
-	task, err := handler.BuildTask(nil, nil)
+	taskID, err := handler.BuildTask(nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}
@@ -110,23 +108,23 @@ func TestMemoryTaskHandler_AddArtifact(t *testing.T) {
 		},
 	}
 
-	err = handler.AddArtifact(&task.ID, artifact, false, true)
+	err = handler.AddArtifact(&taskID, artifact, false, true)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
 
 	// Verify artifact was added
-	retrievedTask, err := handler.GetTask(&task.ID)
+	retrievedTask, err := handler.GetTask(&taskID)
 	if err != nil {
 		t.Errorf("Failed to get task: %v", err)
 	}
 
-	if len(retrievedTask.Artifacts) == 0 {
+	if len(retrievedTask.Task().Artifacts) == 0 {
 		t.Error("Expected artifact to be added")
 	}
 
-	if retrievedTask.Artifacts[0].ArtifactID != artifact.ArtifactID {
-		t.Errorf("Expected artifact ID %s, got %s", artifact.ArtifactID, retrievedTask.Artifacts[0].ArtifactID)
+	if retrievedTask.Task().Artifacts[0].ArtifactID != artifact.ArtifactID {
+		t.Errorf("Expected artifact ID %s, got %s", artifact.ArtifactID, retrievedTask.Task().Artifacts[0].ArtifactID)
 	}
 }
 
@@ -134,23 +132,19 @@ func TestMemoryTaskHandler_SubScribeTask(t *testing.T) {
 	handler, _ := setupTestHandler(t)
 
 	// First create a task
-	task, err := handler.BuildTask(nil, nil)
+	taskID, err := handler.BuildTask(nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}
 
 	// Subscribe to task
-	subscriber, err := handler.SubScribeTask(&task.ID)
+	subscriber, err := handler.SubScribeTask(&taskID)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
 
 	if subscriber == nil {
 		t.Error("Expected subscriber but got nil")
-	}
-
-	if subscriber.TaskID != task.ID {
-		t.Errorf("Expected task ID %s, got %s", task.ID, subscriber.TaskID)
 	}
 
 	// Clean up
@@ -161,13 +155,13 @@ func TestMemoryTaskHandler_GetTask(t *testing.T) {
 	handler, _ := setupTestHandler(t)
 
 	// First create a task
-	task, err := handler.BuildTask(nil, nil)
+	taskID, err := handler.BuildTask(nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}
 
 	// Get the task
-	retrievedTask, err := handler.GetTask(&task.ID)
+	retrievedTask, err := handler.GetTask(&taskID)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -176,8 +170,8 @@ func TestMemoryTaskHandler_GetTask(t *testing.T) {
 		t.Error("Expected task but got nil")
 	}
 
-	if retrievedTask.ID != task.ID {
-		t.Errorf("Expected task ID %s, got %s", task.ID, retrievedTask.ID)
+	if retrievedTask.Task().ID != taskID {
+		t.Errorf("Expected task ID %s, got %s", taskID, retrievedTask.Task().ID)
 	}
 }
 
@@ -185,19 +179,19 @@ func TestMemoryTaskHandler_CleanTask(t *testing.T) {
 	handler, _ := setupTestHandler(t)
 
 	// First create a task
-	task, err := handler.BuildTask(nil, nil)
+	taskID, err := handler.BuildTask(nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}
 
 	// Clean the task
-	err = handler.CleanTask(&task.ID)
+	err = handler.CleanTask(&taskID)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
 
 	// Verify task was cleaned (should be deleted, not just canceled)
-	_, err = handler.GetTask(&task.ID)
+	_, err = handler.GetTask(&taskID)
 	if err == nil {
 		t.Error("Expected error when getting cleaned task, but got none")
 	}
@@ -292,7 +286,7 @@ func TestTaskHandlerErrors(t *testing.T) {
 
 	t.Run("UpdateTaskState_NonExistentTask", func(t *testing.T) {
 		nonExistentTaskID := "non-existent-task"
-		_, err := handler.UpdateTaskState(&nonExistentTaskID, protocol.TaskStateWorking, nil)
+		err := handler.UpdateTaskState(&nonExistentTaskID, protocol.TaskStateWorking, nil)
 		if err == nil {
 			t.Error("Expected error for non-existent task")
 		}
@@ -335,7 +329,7 @@ func TestTaskHandlerErrors(t *testing.T) {
 	})
 
 	t.Run("NilTaskID", func(t *testing.T) {
-		_, err := handler.UpdateTaskState(nil, protocol.TaskStateWorking, nil)
+		err := handler.UpdateTaskState(nil, protocol.TaskStateWorking, nil)
 		if err == nil {
 			t.Error("Expected error for nil task ID")
 		}

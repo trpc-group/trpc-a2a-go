@@ -13,7 +13,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"sort"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"trpc.group/trpc-go/trpc-a2a-go/log"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/server"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
@@ -40,13 +40,13 @@ func (p *streamingMessageProcessor) ProcessMessage(
 	options taskmanager.ProcessOptions,
 	handle taskmanager.TaskHandler,
 ) (*taskmanager.MessageProcessingResult, error) {
-	log.Printf("Processing streaming message...")
+	log.Infof("Processing streaming message...")
 
 	// Extract text from the incoming message.
 	text := extractText(message)
 	if text == "" {
 		errMsg := "input message must contain text"
-		log.Printf("Message processing failed: %s", errMsg)
+		log.Errorf("Message processing failed: %s", errMsg)
 
 		// Return error message directly
 		errorMessage := protocol.NewMessage(
@@ -61,21 +61,21 @@ func (p *streamingMessageProcessor) ProcessMessage(
 
 	// For non-streaming processing, use simplified flow
 	if !options.Streaming {
-		log.Printf("Using non-streaming mode")
+		log.Infof("Using non-streaming mode")
 		return p.processNonStreaming(ctx, text, handle)
 	}
 
 	// Continue with streaming process
-	log.Printf("Using streaming mode")
+	log.Infof("Using streaming mode")
 
 	// Create a task for streaming
-	task, err := handle.BuildTask(nil, nil)
+	taskID, err := handle.BuildTask(nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build task: %w", err)
 	}
 
 	// Subscribe to the task for streaming events
-	subscriber, err := handle.SubScribeTask(&task.Task.ID)
+	subscriber, err := handle.SubScribeTask(&taskID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to subscribe to task: %w", err)
 	}
@@ -83,16 +83,17 @@ func (p *streamingMessageProcessor) ProcessMessage(
 	// Start streaming processing in a goroutine
 	go func() {
 		defer func() {
-			if subscriber.EventQueue != nil {
-				close(subscriber.EventQueue)
+			if subscriber != nil {
+				subscriber.Close()
 			}
 		}()
 
+		contextID := handle.GetContextID()
 		// Send initial working status
 		workingEvent := protocol.StreamingMessageEvent{
 			Result: &protocol.TaskStatusUpdateEvent{
-				TaskID:    task.Task.ID,
-				ContextID: task.Task.ContextID,
+				TaskID:    taskID,
+				ContextID: contextID,
 				Kind:      "status-update",
 				Status: protocol.TaskStatus{
 					State: protocol.TaskStateWorking,
@@ -105,7 +106,10 @@ func (p *streamingMessageProcessor) ProcessMessage(
 				},
 			},
 		}
-		subscriber.EventQueue <- workingEvent
+		err = subscriber.Send(workingEvent)
+		if err != nil {
+			log.Errorf("Failed to send working event: %v", err)
+		}
 
 		// Split the text into chunks to simulate streaming processing
 		chunks := splitTextIntoChunks(text, 5) // Split into chunks of about 5 characters
@@ -115,11 +119,11 @@ func (p *streamingMessageProcessor) ProcessMessage(
 		for i, chunk := range chunks {
 			// Check for cancellation
 			if err := ctx.Err(); err != nil {
-				log.Printf("Task %s cancelled during streaming: %v", task.Task.ID, err)
+				log.Errorf("Task %s cancelled during streaming: %v", taskID, err)
 				cancelEvent := protocol.StreamingMessageEvent{
 					Result: &protocol.TaskStatusUpdateEvent{
-						TaskID:    task.Task.ID,
-						ContextID: task.Task.ContextID,
+						TaskID:    taskID,
+						ContextID: contextID,
 						Kind:      "status-update",
 						Status: protocol.TaskStatus{
 							State: protocol.TaskStateCanceled,
@@ -127,7 +131,10 @@ func (p *streamingMessageProcessor) ProcessMessage(
 						Final: boolPtr(true),
 					},
 				}
-				subscriber.EventQueue <- cancelEvent
+				err = subscriber.Send(cancelEvent)
+				if err != nil {
+					log.Errorf("Failed to send cancel event: %v", err)
+				}
 				return
 			}
 
@@ -141,8 +148,8 @@ func (p *streamingMessageProcessor) ProcessMessage(
 			// Send progress status update
 			progressEvent := protocol.StreamingMessageEvent{
 				Result: &protocol.TaskStatusUpdateEvent{
-					TaskID:    task.Task.ID,
-					ContextID: task.Task.ContextID,
+					TaskID:    taskID,
+					ContextID: contextID,
 					Kind:      "status-update",
 					Status: protocol.TaskStatus{
 						State: protocol.TaskStateWorking,
@@ -155,7 +162,10 @@ func (p *streamingMessageProcessor) ProcessMessage(
 					},
 				},
 			}
-			subscriber.EventQueue <- progressEvent
+			err = subscriber.Send(progressEvent)
+			if err != nil {
+				log.Errorf("Failed to send progress event: %v", err)
+			}
 
 			// Create an artifact for this chunk
 			isLastChunk := (i == totalChunks-1)
@@ -169,24 +179,27 @@ func (p *streamingMessageProcessor) ProcessMessage(
 			// Send artifact update event
 			artifactEvent := protocol.StreamingMessageEvent{
 				Result: &protocol.TaskArtifactUpdateEvent{
-					TaskID:    task.Task.ID,
-					ContextID: task.Task.ContextID,
+					TaskID:    taskID,
+					ContextID: contextID,
 					Kind:      "artifact-update",
 					Artifact:  chunkArtifact,
 					Append:    boolPtr(i > 0),       // Append after the first chunk
 					LastChunk: boolPtr(isLastChunk), // Mark the last chunk
 				},
 			}
-			subscriber.EventQueue <- artifactEvent
+			err = subscriber.Send(artifactEvent)
+			if err != nil {
+				log.Errorf("Failed to send artifact event: %v", err)
+			}
 
 			// Simulate processing time
 			select {
 			case <-ctx.Done():
-				log.Printf("Task %s cancelled during delay: %v", task.Task.ID, ctx.Err())
+				log.Infof("Task %s cancelled during delay: %v", taskID, ctx.Err())
 				cancelEvent := protocol.StreamingMessageEvent{
 					Result: &protocol.TaskStatusUpdateEvent{
-						TaskID:    task.Task.ID,
-						ContextID: task.Task.ContextID,
+						TaskID:    taskID,
+						ContextID: contextID,
 						Kind:      "status-update",
 						Status: protocol.TaskStatus{
 							State: protocol.TaskStateCanceled,
@@ -194,7 +207,10 @@ func (p *streamingMessageProcessor) ProcessMessage(
 						Final: boolPtr(true),
 					},
 				}
-				subscriber.EventQueue <- cancelEvent
+				err = subscriber.Send(cancelEvent)
+				if err != nil {
+					log.Errorf("Failed to send cancel event: %v", err)
+				}
 				return
 			case <-time.After(500 * time.Millisecond): // Simulate work with delay
 				// Continue processing
@@ -204,8 +220,8 @@ func (p *streamingMessageProcessor) ProcessMessage(
 		// Final completion status update
 		completeEvent := protocol.StreamingMessageEvent{
 			Result: &protocol.TaskStatusUpdateEvent{
-				TaskID:    task.Task.ID,
-				ContextID: task.Task.ContextID,
+				TaskID:    taskID,
+				ContextID: contextID,
 				Kind:      "status-update",
 				Status: protocol.TaskStatus{
 					State: protocol.TaskStateCompleted,
@@ -219,9 +235,12 @@ func (p *streamingMessageProcessor) ProcessMessage(
 				Final: boolPtr(true),
 			},
 		}
-		subscriber.EventQueue <- completeEvent
+		err = subscriber.Send(completeEvent)
+		if err != nil {
+			log.Errorf("Failed to send complete event: %v", err)
+		}
 
-		log.Printf("Task %s streaming completed successfully.", task.Task.ID)
+		log.Infof("Task %s streaming completed successfully.", taskID)
 	}()
 
 	return &taskmanager.MessageProcessingResult{
@@ -454,7 +473,7 @@ func main() {
 
 	// Start the server in a goroutine
 	go func() {
-		log.Printf("Starting streaming server on %s...", address)
+		log.Infof("Starting streaming server on %s...", address)
 		if err := srv.Start(address); err != nil {
 			log.Fatalf("Server error: %v", err)
 		}
@@ -462,7 +481,7 @@ func main() {
 
 	// Wait for shutdown signal
 	sig := <-sigChan
-	log.Printf("Received signal %v, shutting down server...", sig)
+	log.Infof("Received signal %v, shutting down server...", sig)
 
 	// Graceful shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -472,7 +491,7 @@ func main() {
 		log.Fatalf("Error during server shutdown: %v", err)
 	}
 
-	log.Println("Server shutdown complete")
+	log.Infof("Server shutdown complete")
 }
 
 // Helper functions to create pointers

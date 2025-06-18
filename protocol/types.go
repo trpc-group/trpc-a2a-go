@@ -88,6 +88,14 @@ func GenerateRPCID() string {
 	return id.String()
 }
 
+type UnaryMessageResult interface {
+	unaryMessageResultMarker()
+	GetKind() string
+}
+
+func (Message) unaryMessageResultMarker() {}
+func (Task) unaryMessageResultMarker()    {}
+
 // Part is an interface representing a segment of a message (text, file, or data).
 // It uses an unexported method to ensure only defined part types implement it.
 // See A2A Spec section on Message Parts.
@@ -732,7 +740,7 @@ type SendMessageConfiguration struct {
 
 // MessageResult represents the union type response for Message/Task.
 type MessageResult struct {
-	Result Event
+	Result UnaryMessageResult
 }
 
 // UnmarshalJSON implements custom unmarshalling logic for MessageResult

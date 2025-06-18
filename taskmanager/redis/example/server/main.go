@@ -112,19 +112,19 @@ func (p *ToLowerProcessor) processStreamingMode(
 	handle taskmanager.TaskHandler,
 ) (*taskmanager.MessageProcessingResult, error) {
 	// Build task for streaming mode
-	task, err := handle.BuildTask(nil, contextID)
+	taskID, err := handle.BuildTask(nil, contextID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build task: %w", err)
 	}
 
 	// Subscribe to the task
-	subscriber, err := handle.SubScribeTask(&task.ID)
+	subscriber, err := handle.SubScribeTask(&taskID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to subscribe to task: %w", err)
 	}
 
 	// Process asynchronously
-	go p.processTextAsync(inputText, task, handle)
+	go p.processTextAsync(inputText, taskID, handle)
 
 	return &taskmanager.MessageProcessingResult{
 		StreamingEvents: subscriber,
@@ -149,30 +149,18 @@ func (p *ToLowerProcessor) processNonStreamingMode(inputText string) *taskmanage
 
 func (p *ToLowerProcessor) processTextAsync(
 	inputText string,
-	task *taskmanager.CancellableTask,
+	taskID string,
 	handle taskmanager.TaskHandler,
 ) {
 	defer func() {
-		err := handle.CleanTask(&task.ID)
+		err := handle.CleanTask(&taskID)
 		if err != nil {
 			log.Printf("Failed to clean task: %v", err)
 		}
 	}()
 
-	taskID := task.ID
-	// Check if the task is cancelled
-	select {
-	case <-task.Ctx().Done():
-		err := handle.CleanTask(&taskID)
-		if err != nil {
-			log.Printf("Failed to clean task: %v", err)
-		}
-		return
-	default:
-	}
-
 	// Step 1: Starting processing
-	_, err := handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
+	err := handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
 		Role: protocol.MessageRoleAgent,
 		Parts: []protocol.Part{
 			protocol.NewTextPart(msgStarting),
@@ -187,7 +175,7 @@ func (p *ToLowerProcessor) processTextAsync(
 	time.Sleep(analysisDelay)
 
 	// Step 2: Analysis phase
-	_, err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
+	err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
 		Role: protocol.MessageRoleAgent,
 		Parts: []protocol.Part{
 			protocol.NewTextPart(fmt.Sprintf(msgAnalyzing, len(inputText))),
@@ -202,7 +190,7 @@ func (p *ToLowerProcessor) processTextAsync(
 	time.Sleep(processingDelay)
 
 	// Step 3: Processing phase
-	_, err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
+	err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
 		Role: protocol.MessageRoleAgent,
 		Parts: []protocol.Part{
 			protocol.NewTextPart(msgProcessing),
@@ -220,7 +208,7 @@ func (p *ToLowerProcessor) processTextAsync(
 	result := strings.ToLower(inputText)
 
 	// Step 4: Creating artifact
-	_, err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
+	err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
 		Role: protocol.MessageRoleAgent,
 		Parts: []protocol.Part{
 			protocol.NewTextPart(msgArtifact),
@@ -266,7 +254,7 @@ func (p *ToLowerProcessor) processTextAsync(
 	}
 
 	// Update task to completed state
-	_, err = handle.UpdateTaskState(&taskID, protocol.TaskStateCompleted, finalMessage)
+	err = handle.UpdateTaskState(&taskID, protocol.TaskStateCompleted, finalMessage)
 	if err != nil {
 		log.Printf("Failed to complete task: %v", err)
 	}

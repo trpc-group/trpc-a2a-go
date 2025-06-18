@@ -86,19 +86,19 @@ func (p *pushNotificationMessageProcessor) ProcessMessage(
 	}
 
 	// For streaming processing, create a task and process asynchronously
-	task, err := handle.BuildTask(nil, nil)
+	taskID, err := handle.BuildTask(nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build task: %w", err)
 	}
 
 	// Subscribe to the task for streaming events
-	subscriber, err := handle.SubScribeTask(&task.Task.ID)
+	subscriber, err := handle.SubScribeTask(&taskID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to subscribe to task: %w", err)
 	}
 
 	// Start asynchronous processing
-	go p.processTaskAsync(ctx, task.Task.ID, payload, subscriber)
+	go p.processTaskAsync(ctx, taskID, payload, subscriber)
 
 	return &taskmanager.MessageProcessingResult{
 		StreamingEvents: subscriber,
@@ -131,11 +131,11 @@ func (p *pushNotificationMessageProcessor) processTaskAsync(
 	ctx context.Context,
 	taskID string,
 	payload map[string]interface{},
-	subscriber *taskmanager.TaskSubscriber,
+	subscriber taskmanager.TaskSubscriber,
 ) {
 	defer func() {
-		if subscriber.EventQueue != nil {
-			close(subscriber.EventQueue)
+		if subscriber != nil {
+			subscriber.Close()
 		}
 	}()
 
@@ -158,7 +158,10 @@ func (p *pushNotificationMessageProcessor) processTaskAsync(
 			},
 		},
 	}
-	subscriber.EventQueue <- workingEvent
+	err := subscriber.Send(workingEvent)
+	if err != nil {
+		log.Errorf("Failed to send working event: %v", err)
+	}
 
 	// Process the task (simulating work)
 	time.Sleep(5 * time.Second) // Longer processing time to demonstrate async behavior
@@ -187,7 +190,10 @@ func (p *pushNotificationMessageProcessor) processTaskAsync(
 			Final: boolPtr(true),
 		},
 	}
-	subscriber.EventQueue <- completedEvent
+	err = subscriber.Send(completedEvent)
+	if err != nil {
+		log.Errorf("Failed to send completed event: %v", err)
+	}
 
 	// Send push notification
 	p.manager.sendPushNotification(ctx, taskID, string(protocol.TaskStateCompleted))

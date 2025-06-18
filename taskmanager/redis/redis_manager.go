@@ -30,7 +30,7 @@ const (
 	subscriberPrefix       = "sub:"
 
 	// Default expiration time for Redis keys (30 days).
-	defaultExpiration = 30 * 24 * time.Hour
+	defaultExpiration = 1 * time.Hour
 
 	// Default configuration values.
 	defaultMaxHistoryLength         = 100
@@ -52,7 +52,7 @@ type RedisTaskManager struct {
 	// subMu is a mutex for the subscribers map.
 	subMu sync.RWMutex
 	// subscribers is a map of task IDs to subscriber channels.
-	subscribers map[string][]*taskmanager.TaskSubscriber
+	subscribers map[string][]*RedisTaskSubscriber
 
 	// cancelMu is a mutex for the cancels map.
 	cancelMu sync.RWMutex
@@ -67,6 +67,7 @@ type RedisTaskManager struct {
 func NewRedisTaskManager(
 	client *redis.Client,
 	processor taskmanager.MessageProcessor,
+	opts ...RedisTaskManagerOption,
 ) (*RedisTaskManager, error) {
 	if processor == nil {
 		return nil, errors.New("processor cannot be nil")
@@ -80,13 +81,24 @@ func NewRedisTaskManager(
 		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 	}
 
+	// Apply default options
+	options := DefaultRedisTaskManagerOptions()
+
+	// Apply user options
+	for _, opt := range opts {
+		opt(options)
+	}
+
+	// Use expiration time from options
+	expiration := options.ExpireTime
+
 	manager := &RedisTaskManager{
 		processor:        processor,
 		client:           client,
-		expiration:       defaultExpiration,
-		subscribers:      make(map[string][]*taskmanager.TaskSubscriber),
+		expiration:       expiration,
+		subscribers:      make(map[string][]*RedisTaskSubscriber),
 		cancels:          make(map[string]context.CancelFunc),
-		maxHistoryLength: defaultMaxHistoryLength,
+		maxHistoryLength: options.MaxHistoryLength,
 	}
 
 	return manager, nil
@@ -180,7 +192,7 @@ func (m *RedisTaskManager) OnSendMessageStream(
 		return nil, fmt.Errorf("processor returned nil result")
 	}
 
-	return result.StreamingEvents.EventQueue, nil
+	return result.StreamingEvents.Channel(), nil
 }
 
 // OnGetTask handles the tasks/get request.
@@ -318,12 +330,12 @@ func (m *RedisTaskManager) OnResubscribe(
 		return nil, err
 	}
 
-	subscriber := taskmanager.NewTaskSubscriber(params.ID, defaultTaskSubscriberBufferSize)
+	subscriber := NewRedisTaskSubscriber(params.ID, defaultTaskSubscriberBufferSize)
 
 	// Add to subscribers list.
 	m.addSubscriber(params.ID, subscriber)
 
-	return subscriber.EventQueue, nil
+	return subscriber.Channel(), nil
 }
 
 // OnSendTask deprecated method empty implementation.
@@ -345,7 +357,6 @@ func (m *RedisTaskManager) processConfiguration(config *protocol.SendMessageConf
 	result := taskmanager.ProcessOptions{
 		Blocking:      false,
 		HistoryLength: 0,
-		Metadata:      metadata,
 	}
 
 	if config == nil {
@@ -536,12 +547,12 @@ func isFinalState(state protocol.TaskState) bool {
 }
 
 // addSubscriber adds a subscriber to the list.
-func (m *RedisTaskManager) addSubscriber(taskID string, sub *taskmanager.TaskSubscriber) {
+func (m *RedisTaskManager) addSubscriber(taskID string, sub *RedisTaskSubscriber) {
 	m.subMu.Lock()
 	defer m.subMu.Unlock()
 
 	if _, exists := m.subscribers[taskID]; !exists {
-		m.subscribers[taskID] = make([]*taskmanager.TaskSubscriber, 0)
+		m.subscribers[taskID] = make([]*RedisTaskSubscriber, 0)
 	}
 	m.subscribers[taskID] = append(m.subscribers[taskID], sub)
 	log.Debugf("Added subscriber for task %s", taskID)
@@ -570,16 +581,16 @@ func (m *RedisTaskManager) notifySubscribers(taskID string, event protocol.Strea
 		return
 	}
 
-	subsCopy := make([]*taskmanager.TaskSubscriber, len(subs))
+	subsCopy := make([]*RedisTaskSubscriber, len(subs))
 	copy(subsCopy, subs)
 	m.subMu.RUnlock()
 
 	log.Debugf("Notifying %d subscribers for task %s (Event Type: %T)", len(subsCopy), taskID, event.Result)
 
-	var failedSubscribers []*taskmanager.TaskSubscriber
+	var failedSubscribers []*RedisTaskSubscriber
 
 	for _, sub := range subsCopy {
-		if sub.IsClosed() {
+		if sub.Closed() {
 			log.Debugf("Subscriber for task %s is already closed, marking for removal", taskID)
 			failedSubscribers = append(failedSubscribers, sub)
 			continue
@@ -599,7 +610,7 @@ func (m *RedisTaskManager) notifySubscribers(taskID string, event protocol.Strea
 }
 
 // cleanupFailedSubscribers cleans up failed or closed subscribers.
-func (m *RedisTaskManager) cleanupFailedSubscribers(taskID string, failedSubscribers []*taskmanager.TaskSubscriber) {
+func (m *RedisTaskManager) cleanupFailedSubscribers(taskID string, failedSubscribers []*RedisTaskSubscriber) {
 	m.subMu.Lock()
 	defer m.subMu.Unlock()
 
@@ -609,7 +620,7 @@ func (m *RedisTaskManager) cleanupFailedSubscribers(taskID string, failedSubscri
 	}
 
 	// Filter out failed subscribers.
-	filteredSubs := make([]*taskmanager.TaskSubscriber, 0, len(subs))
+	filteredSubs := make([]*RedisTaskSubscriber, 0, len(subs))
 	removedCount := 0
 
 	for _, sub := range subs {
@@ -654,7 +665,7 @@ func (m *RedisTaskManager) Close() error {
 			sub.Close()
 		}
 	}
-	m.subscribers = make(map[string][]*taskmanager.TaskSubscriber)
+	m.subscribers = make(map[string][]*RedisTaskSubscriber)
 	m.subMu.Unlock()
 
 	// Close the Redis client.

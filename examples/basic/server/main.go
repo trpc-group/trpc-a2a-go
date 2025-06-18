@@ -94,12 +94,11 @@ func (p *basicMessageProcessor) ProcessMessage(
 
 	if options.Streaming {
 		// Streaming mode - use task-based processing with full features
-		task, err := handle.BuildTask(nil, &contextID)
+		taskID, err := handle.BuildTask(nil, &contextID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build task: %w", err)
 		}
 
-		taskID := task.ID
 		log.Infof("Created streaming task %s for processing", taskID)
 
 		// Subscribe to the task for streaming events
@@ -129,12 +128,11 @@ func (p *basicMessageProcessor) ProcessMessage(
 
 		if command == modeMultiStep || command == modeInputExample {
 			// Create task for multi-turn interaction even in non-streaming mode
-			task, err := handle.BuildTask(nil, &contextID)
+			taskID, err := handle.BuildTask(nil, &contextID)
 			if err != nil {
 				return nil, fmt.Errorf("failed to build task: %w", err)
 			}
 
-			taskID := task.ID
 			go p.processMessageAsync(ctx, text, contextID, taskID, handle)
 
 			// Return a message indicating async processing
@@ -184,12 +182,11 @@ func (p *basicMessageProcessor) processMultiTurnSession(
 	options taskmanager.ProcessOptions,
 ) (*taskmanager.MessageProcessingResult, error) {
 	// Create task for multi-turn processing
-	task, err := handle.BuildTask(nil, &contextID)
+	taskID, err := handle.BuildTask(nil, &contextID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build task: %w", err)
 	}
 
-	taskID := task.ID
 	go p.handleMultiTurnSessionAsync(ctx, taskID, text, contextID, handle, session)
 
 	// Return message indicating processing
@@ -568,7 +565,7 @@ func (p *basicMessageProcessor) processMessageAsync(
 	handle taskmanager.TaskHandler,
 ) {
 	// Update task to working state
-	_, err := handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, nil)
+	err := handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, nil)
 	if err != nil {
 		log.Errorf("Failed to update task state: %v", err)
 		return
@@ -609,7 +606,7 @@ func (p *basicMessageProcessor) handleMultiTurnSessionAsync(
 		)
 
 		// Update task to input-required state
-		_, err := handle.UpdateTaskState(&taskID, protocol.TaskStateInputRequired, &msg)
+		err := handle.UpdateTaskState(&taskID, protocol.TaskStateInputRequired, &msg)
 		if err != nil {
 			log.Errorf("Failed to update task status: %v", err)
 			return
@@ -654,7 +651,7 @@ func (p *basicMessageProcessor) handleMultiTurnSessionAsync(
 		}
 
 		// Update task to completed state
-		_, err := handle.UpdateTaskState(&taskID, protocol.TaskStateCompleted, &finalMsg)
+		err := handle.UpdateTaskState(&taskID, protocol.TaskStateCompleted, &finalMsg)
 		if err != nil {
 			log.Errorf("Failed to complete task: %v", err)
 		}
@@ -675,7 +672,7 @@ func (p *basicMessageProcessor) handleNewInteractionAsync(
 	// Check for cancellation via context
 	if err := ctx.Err(); err != nil {
 		log.Errorf("Task %s cancelled during processing: %v", taskID, err)
-		_, _ = handle.UpdateTaskState(&taskID, protocol.TaskStateCanceled, nil)
+		_ = handle.UpdateTaskState(&taskID, protocol.TaskStateCanceled, nil)
 		return
 	}
 
@@ -705,7 +702,7 @@ func (p *basicMessageProcessor) handleNewInteractionAsync(
 		)
 
 		// Update task to input-required state
-		_, err := handle.UpdateTaskState(&taskID, protocol.TaskStateInputRequired, &msg)
+		err := handle.UpdateTaskState(&taskID, protocol.TaskStateInputRequired, &msg)
 		if err != nil {
 			log.Errorf("Failed to update task status: %v", err)
 		}
@@ -720,7 +717,7 @@ func (p *basicMessageProcessor) handleNewInteractionAsync(
 		)
 
 		// Update task to input-required state
-		_, err := handle.UpdateTaskState(&taskID, protocol.TaskStateInputRequired, &msg)
+		err := handle.UpdateTaskState(&taskID, protocol.TaskStateInputRequired, &msg)
 		if err != nil {
 			log.Errorf("Failed to update task status: %v", err)
 		}
@@ -776,7 +773,7 @@ func (p *basicMessageProcessor) handleNewInteractionAsync(
 	)
 
 	// Update task to completed state
-	_, err := handle.UpdateTaskState(&taskID, protocol.TaskStateCompleted, &finalMsg)
+	err := handle.UpdateTaskState(&taskID, protocol.TaskStateCompleted, &finalMsg)
 	if err != nil {
 		log.Errorf("Failed to complete task: %v", err)
 	}

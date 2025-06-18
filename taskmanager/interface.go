@@ -26,35 +26,38 @@ type ProcessOptions struct {
 	// PushNotificationConfig contains push notification configuration
 	PushNotificationConfig *protocol.PushNotificationConfig
 
-	// Metadata contains request metadata
-	Metadata map[string]interface{}
-
 	// Streaming indicates whether this is a streaming request
 	// If true, the user should return event streams through the StreamingEvents channel
 	// If false, the user should return a single result through Result
 	Streaming bool
 }
 
+// CancellableTask is a task that can be cancelled
+type CancellableTask interface {
+	// Task returns the original task.
+	Task() *protocol.Task
+
+	// Cancel cancels the task.
+	Cancel()
+}
+
 // TaskHandler provides methods for the agent logic (MessageProcessor) to interact
 // with the task manager during processing. It encapsulates the necessary callbacks.
 type TaskHandler interface {
-	// BuildTask creates a new task and returns the task object.
-	BuildTask(taskID *string, contextID *string) (*CancellableTask, error)
+	// BuildTask creates a new task and returns the task ID.
+	BuildTask(specificTaskID *string, contextID *string) (string, error)
 
-	// UpdateTaskState updates the task's state and returns the updated task.
-	// This method is mainly for backward compatibility.
-	UpdateTaskState(taskID *string, state protocol.TaskState, message *protocol.Message) (*CancellableTask, error)
+	// UpdateTaskState updates the task's state and returns the updated task ID.
+	UpdateTaskState(taskID *string, state protocol.TaskState, message *protocol.Message) error
 
 	// AddArtifact adds an artifact to the specified task.
-	// This method is mainly for backward compatibility.
 	AddArtifact(taskID *string, artifact protocol.Artifact, isFinal bool, needMoreData bool) error
 
-	// SubScribeTask subscribes to the task.
-	SubScribeTask(taskID *string) (*TaskSubscriber, error)
+	// SubScribeTask subscribes to the task and returns the task subscriber.
+	SubScribeTask(taskID *string) (TaskSubscriber, error)
 
-	// GetTask returns the task by taskID.
-	// Returns an error if the task cannot be found.
-	GetTask(taskID *string) (*CancellableTask, error)
+	// GetTask returns the task by taskID. Returns an error if the task cannot be found.
+	GetTask(taskID *string) (CancellableTask, error)
 
 	// CleanTask cleans up the task from storage.
 	CleanTask(taskID *string) error
@@ -71,12 +74,27 @@ type MessageProcessingResult struct {
 	// Result can be Message or Task
 	// When Streaming=false, use this field
 	// The framework will automatically handle whether to wait for the task to complete based on ProcessOptions.Blocking
-	Result protocol.Event
+	Result protocol.UnaryMessageResult
 
 	// StreamingEvents streaming event tunnel
 	// When Streaming=true, use this field
 	// Message、Task、TaskStatusUpdateEvent、TaskArtifactUpdateEvent is allowed to sent.
-	StreamingEvents *TaskSubscriber
+	StreamingEvents TaskSubscriber
+}
+
+// TaskSubscriber is a subscriber for a task
+type TaskSubscriber interface {
+	// Send sends an event to the task subscriber, could be blocked if the channel is full
+	Send(event protocol.StreamingMessageEvent) error
+
+	// Channel returns the channel of the task subscriber
+	Channel() <-chan protocol.StreamingMessageEvent
+
+	// Closed returns true if the task subscriber is closed
+	Closed() bool
+
+	// Close close the task subscriber
+	Close()
 }
 
 // MessageProcessor defines the interface for processing A2A messages.
@@ -98,18 +116,21 @@ type MessageProcessor interface {
 	//      * protocol.TaskArtifactUpdateEvent - artifact update
 	//    - Users are responsible for closing the channel to end streaming transmission
 	//
-	// Note: The options.Blocking configuration is now only used for log reminders, the framework no longer actually waits for task completion.
-	//
 	// Parameters:
 	//   - ctx: Request context
 	//   - message: The incoming message to process
 	//   - options: Processing options including blocking, streaming, history length, etc.
-	//   - handle: Handle for accessing context, history, and task operations
+	//   - taskHandler: Task handler for accessing context, history, and task operations
 	//
 	// Returns:
 	//   - MessageProcessingResult: Contains the result or streaming channel
 	//   - error: Any error that occurred during processing
-	ProcessMessage(ctx context.Context, message protocol.Message, options ProcessOptions, handle TaskHandler) (*MessageProcessingResult, error)
+	ProcessMessage(
+		ctx context.Context,
+		message protocol.Message,
+		options ProcessOptions,
+		taskHandler TaskHandler,
+	) (*MessageProcessingResult, error)
 }
 
 // MessageProcessorWithStatusUpdate is an optional interface that can be implemented by TaskProcessor
@@ -119,7 +140,12 @@ type MessageProcessorWithStatusUpdate interface {
 	// OnTaskStatusUpdate is called when the task status changes.
 	// It receives the task ID, the new state, and the optional message.
 	// It should return an error if the status update fails.
-	OnTaskStatusUpdate(ctx context.Context, taskID string, state protocol.TaskState, message *protocol.Message) error
+	OnTaskStatusUpdate(
+		ctx context.Context,
+		taskID string,
+		state protocol.TaskState,
+		message *protocol.Message,
+	) error
 }
 
 // TaskManager defines the interface for managing A2A task lifecycles based on the protocol.
@@ -132,46 +158,73 @@ type TaskManager interface {
 	// OnSendMessage handles a request corresponding to the 'message/send' RPC method.
 	// It creates and potentially starts processing a new message via the MessageProcessor.
 	// It returns the initial state of the message, possibly reflecting immediate processing results.
-	OnSendMessage(ctx context.Context, request protocol.SendMessageParams) (*protocol.MessageResult, error)
+	OnSendMessage(
+		ctx context.Context,
+		request protocol.SendMessageParams,
+	) (*protocol.MessageResult, error)
 
 	// OnSendMessageStream handles a request corresponding to the 'message/stream' RPC method.
 	// It creates a new message and returns a channel for receiving MessageEvent updates (streaming).
 	// It initiates asynchronous processing via the MessageProcessor.
 	// The channel will be closed when the message reaches a final state or an error occurs during setup/processing.
-	OnSendMessageStream(ctx context.Context, request protocol.SendMessageParams) (<-chan protocol.StreamingMessageEvent, error)
+	OnSendMessageStream(
+		ctx context.Context,
+		request protocol.SendMessageParams,
+	) (<-chan protocol.StreamingMessageEvent, error)
 
 	// OnGetTask handles a request corresponding to the 'tasks/get' RPC method.
 	// It retrieves the current state of an existing task.
-	OnGetTask(ctx context.Context, params protocol.TaskQueryParams) (*protocol.Task, error)
+	OnGetTask(
+		ctx context.Context,
+		params protocol.TaskQueryParams,
+	) (*protocol.Task, error)
 
 	// OnCancelTask handles a request corresponding to the 'tasks/cancel' RPC method.
 	// It requests the cancellation of an ongoing task.
 	// This typically involves canceling the context passed to the MessageProcessor.
 	// It returns the task state after the cancellation attempt.
-	OnCancelTask(ctx context.Context, params protocol.TaskIDParams) (*protocol.Task, error)
+	OnCancelTask(
+		ctx context.Context,
+		params protocol.TaskIDParams,
+	) (*protocol.Task, error)
 
 	// OnPushNotificationSet handles a request corresponding to the 'tasks/pushNotification/set' RPC method.
 	// It configures push notifications for a specific task.
-	OnPushNotificationSet(ctx context.Context, params protocol.TaskPushNotificationConfig) (*protocol.TaskPushNotificationConfig, error)
+	OnPushNotificationSet(
+		ctx context.Context,
+		params protocol.TaskPushNotificationConfig,
+	) (*protocol.TaskPushNotificationConfig, error)
 
 	// OnPushNotificationGet handles a request corresponding to the 'tasks/pushNotification/get' RPC method.
 	// It retrieves the current push notification configuration for a task.
-	OnPushNotificationGet(ctx context.Context, params protocol.TaskIDParams) (*protocol.TaskPushNotificationConfig, error)
+	OnPushNotificationGet(
+		ctx context.Context,
+		params protocol.TaskIDParams,
+	) (*protocol.TaskPushNotificationConfig, error)
 
 	// OnResubscribe handles a request corresponding to the 'tasks/resubscribe' RPC method.
 	// It reestablishes an SSE stream for an existing task.
-	OnResubscribe(ctx context.Context, params protocol.TaskIDParams) (<-chan protocol.StreamingMessageEvent, error)
+	OnResubscribe(
+		ctx context.Context,
+		params protocol.TaskIDParams,
+	) (<-chan protocol.StreamingMessageEvent, error)
 
 	// deprecated
 	// OnSendTask handles a request corresponding to the 'tasks/send' RPC method.
 	// It creates and potentially starts processing a new task via the MessageProcessor.
 	// It returns the initial state of the task, possibly reflecting immediate processing results.
-	OnSendTask(ctx context.Context, request protocol.SendTaskParams) (*protocol.Task, error)
+	OnSendTask(
+		ctx context.Context,
+		request protocol.SendTaskParams,
+	) (*protocol.Task, error)
 
 	// deprecated
 	// OnSendTaskSubscribe handles a request corresponding to the 'tasks/sendSubscribe' RPC method.
 	// It creates a new task and returns a channel for receiving TaskEvent updates (streaming).
 	// It initiates asynchronous processing via the MessageProcessor.
 	// The channel will be closed when the task reaches a final state or an error occurs during setup/processing.
-	OnSendTaskSubscribe(ctx context.Context, request protocol.SendTaskParams) (<-chan protocol.TaskEvent, error)
+	OnSendTaskSubscribe(
+		ctx context.Context,
+		request protocol.SendTaskParams,
+	) (<-chan protocol.TaskEvent, error)
 }

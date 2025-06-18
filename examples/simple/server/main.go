@@ -11,13 +11,13 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/google/uuid"
 
+	"trpc.group/trpc-go/trpc-a2a-go/log"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/server"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
@@ -37,7 +37,7 @@ func (p *simpleMessageProcessor) ProcessMessage(
 	text := extractText(message)
 	if text == "" {
 		errMsg := "input message must contain text."
-		log.Printf("Message processing failed: %s", errMsg)
+		log.Errorf("Message processing failed: %s", errMsg)
 
 		// Return error message directly
 		errorMessage := protocol.NewMessage(
@@ -50,7 +50,7 @@ func (p *simpleMessageProcessor) ProcessMessage(
 		}, nil
 	}
 
-	log.Printf("Processing message with input: %s", text)
+	log.Infof("Processing message with input: %s", text)
 
 	// Process the input text (in this simple example, we'll just reverse it).
 	result := reverseString(text)
@@ -69,13 +69,13 @@ func (p *simpleMessageProcessor) ProcessMessage(
 	}
 
 	// For streaming processing, create a task and subscribe to it
-	task, err := handle.BuildTask(nil, nil)
+	taskID, err := handle.BuildTask(nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build task: %w", err)
 	}
 
 	// Subscribe to the task for streaming events
-	subscriber, err := handle.SubScribeTask(&task.Task.ID)
+	subscriber, err := handle.SubScribeTask(&taskID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to subscribe to task: %w", err)
 	}
@@ -83,23 +83,26 @@ func (p *simpleMessageProcessor) ProcessMessage(
 	// Start processing in a goroutine
 	go func() {
 		defer func() {
-			if subscriber.EventQueue != nil {
-				close(subscriber.EventQueue)
+			if subscriber != nil {
+				subscriber.Close()
 			}
 		}()
 
 		// Send task status update - working
 		workingEvent := protocol.StreamingMessageEvent{
 			Result: &protocol.TaskStatusUpdateEvent{
-				TaskID:    task.Task.ID,
-				ContextID: task.Task.ContextID,
+				TaskID:    taskID,
+				ContextID: "",
 				Kind:      "status-update",
 				Status: protocol.TaskStatus{
 					State: protocol.TaskStateWorking,
 				},
 			},
 		}
-		subscriber.EventQueue <- workingEvent
+		err := subscriber.Send(workingEvent)
+		if err != nil {
+			log.Errorf("Failed to send working event: %v", err)
+		}
 
 		// Create response message
 		responseMessage := protocol.NewMessage(
@@ -110,8 +113,8 @@ func (p *simpleMessageProcessor) ProcessMessage(
 		// Send task completion
 		completedEvent := protocol.StreamingMessageEvent{
 			Result: &protocol.TaskStatusUpdateEvent{
-				TaskID:    task.Task.ID,
-				ContextID: task.Task.ContextID,
+				TaskID:    taskID,
+				ContextID: "",
 				Kind:      "status-update",
 				Status: protocol.TaskStatus{
 					State:   protocol.TaskStateCompleted,
@@ -120,7 +123,10 @@ func (p *simpleMessageProcessor) ProcessMessage(
 				Final: boolPtr(true),
 			},
 		}
-		subscriber.EventQueue <- completedEvent
+		err = subscriber.Send(completedEvent)
+		if err != nil {
+			log.Errorf("Failed to send completed event: %v", err)
+		}
 
 		// Add artifact
 		artifact := protocol.Artifact{
@@ -132,14 +138,17 @@ func (p *simpleMessageProcessor) ProcessMessage(
 
 		artifactEvent := protocol.StreamingMessageEvent{
 			Result: &protocol.TaskArtifactUpdateEvent{
-				TaskID:    task.Task.ID,
-				ContextID: task.Task.ContextID,
+				TaskID:    taskID,
+				ContextID: "",
 				Kind:      "artifact-update",
 				Artifact:  artifact,
 				LastChunk: boolPtr(true),
 			},
 		}
-		subscriber.EventQueue <- artifactEvent
+		err = subscriber.Send(artifactEvent)
+		if err != nil {
+			log.Errorf("Failed to send artifact event: %v", err)
+		}
 	}()
 
 	return &taskmanager.MessageProcessingResult{
@@ -233,7 +242,7 @@ func main() {
 	// Start the server in a goroutine.
 	go func() {
 		serverAddr := fmt.Sprintf("%s:%d", *host, *port)
-		log.Printf("Starting server on %s...", serverAddr)
+		log.Infof("Starting server on %s...", serverAddr)
 		if err := srv.Start(serverAddr); err != nil {
 			log.Fatalf("Server failed: %v", err)
 		}
@@ -241,5 +250,5 @@ func main() {
 
 	// Wait for termination signal.
 	sig := <-sigChan
-	log.Printf("Received signal %v, shutting down...", sig)
+	log.Infof("Received signal %v, shutting down...", sig)
 }

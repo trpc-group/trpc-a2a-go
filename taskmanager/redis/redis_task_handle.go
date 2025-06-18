@@ -27,26 +27,22 @@ type redisTaskHandle struct {
 
 var _ taskmanager.TaskHandler = (*redisTaskHandle)(nil)
 
-// BuildTask creates a new task and returns the task object.
-func (h *redisTaskHandle) BuildTask(taskID *string, contextID *string) (*taskmanager.CancellableTask, error) {
+// BuildTask creates a new task and returns the task ID.
+func (h *redisTaskHandle) BuildTask(specificTaskID *string, contextID *string) (string, error) {
 	// If no taskID provided, generate one.
 	var actualTaskID string
-	if taskID == nil || *taskID == "" {
+	if specificTaskID == nil || *specificTaskID == "" {
 		actualTaskID = protocol.GenerateTaskID()
 	} else {
-		actualTaskID = *taskID
+		actualTaskID = *specificTaskID
 	}
 
 	// Check if task already exists.
-	existingTask, err := h.manager.getTaskInternal(h.ctx, actualTaskID)
+	_, err := h.manager.getTaskInternal(h.ctx, actualTaskID)
 	if err == nil {
-		// Task exists, return it as CancellableTask.
-		log.Warnf("Task %s already exists, returning existing task", actualTaskID)
-		return &taskmanager.CancellableTask{
-			Task: *existingTask,
-			// Note: We can't recover the original cancel function, so create a new one.
-			// This might cause issues with proper cancellation of existing tasks.
-		}, nil
+		// Task exists, return the existing task ID.
+		log.Warnf("Task %s already exists, returning existing task ID", actualTaskID)
+		return actualTaskID, nil
 	}
 
 	var actualContextID string
@@ -76,7 +72,7 @@ func (h *redisTaskHandle) BuildTask(taskID *string, contextID *string) (*taskman
 	// Store task in Redis.
 	if err := h.manager.storeTask(h.ctx, task); err != nil {
 		cancel() // Clean up the context.
-		return nil, fmt.Errorf("failed to store task: %w", err)
+		return "", fmt.Errorf("failed to store task: %w", err)
 	}
 
 	// Store the cancel function.
@@ -86,24 +82,23 @@ func (h *redisTaskHandle) BuildTask(taskID *string, contextID *string) (*taskman
 
 	log.Debugf("Created new task %s with context %s", actualTaskID, actualContextID)
 
-	// Return as CancellableTask.
-	return taskmanager.NewCancellableTask(*task), nil
+	return actualTaskID, nil
 }
 
-// UpdateTaskState updates the task's state and returns the updated task.
+// UpdateTaskState updates the task's state and returns an error if failed.
 func (h *redisTaskHandle) UpdateTaskState(
 	taskID *string,
 	state protocol.TaskState,
 	message *protocol.Message,
-) (*taskmanager.CancellableTask, error) {
+) error {
 	if taskID == nil || *taskID == "" {
-		return nil, fmt.Errorf("taskID cannot be nil or empty")
+		return fmt.Errorf("taskID cannot be nil or empty")
 	}
 
 	task, err := h.manager.getTaskInternal(h.ctx, *taskID)
 	if err != nil {
 		log.Warnf("UpdateTaskState called for non-existent task %s", *taskID)
-		return nil, fmt.Errorf("task not found: %s", *taskID)
+		return fmt.Errorf("task not found: %s", *taskID)
 	}
 
 	// Update task status.
@@ -115,7 +110,7 @@ func (h *redisTaskHandle) UpdateTaskState(
 
 	// Store updated task.
 	if err := h.manager.storeTask(h.ctx, task); err != nil {
-		return nil, fmt.Errorf("failed to update task status: %w", err)
+		return fmt.Errorf("failed to update task status: %w", err)
 	}
 
 	log.Debugf("Updated task %s state to %s", *taskID, state)
@@ -143,10 +138,7 @@ func (h *redisTaskHandle) UpdateTaskState(
 		h.manager.cancelMu.Unlock()
 	}
 
-	// Return as CancellableTask.
-	return &taskmanager.CancellableTask{
-		Task: *task,
-	}, nil
+	return nil
 }
 
 // AddArtifact adds an artifact to the specified task.
@@ -188,8 +180,8 @@ func (h *redisTaskHandle) AddArtifact(taskID *string, artifact protocol.Artifact
 	return nil
 }
 
-// SubScribeTask subscribes to the task.
-func (h *redisTaskHandle) SubScribeTask(taskID *string) (*taskmanager.TaskSubscriber, error) {
+// SubScribeTask subscribes to the task and returns a TaskSubscriber.
+func (h *redisTaskHandle) SubScribeTask(taskID *string) (taskmanager.TaskSubscriber, error) {
 	if taskID == nil || *taskID == "" {
 		return nil, fmt.Errorf("taskID cannot be nil or empty")
 	}
@@ -200,13 +192,13 @@ func (h *redisTaskHandle) SubScribeTask(taskID *string) (*taskmanager.TaskSubscr
 		return nil, fmt.Errorf("task not found: %s", *taskID)
 	}
 
-	subscriber := taskmanager.NewTaskSubscriber(*taskID, defaultTaskSubscriberBufferSize)
+	subscriber := NewRedisTaskSubscriber(*taskID, defaultTaskSubscriberBufferSize)
 	h.manager.addSubscriber(*taskID, subscriber)
 	return subscriber, nil
 }
 
-// GetTask returns the task by taskID.
-func (h *redisTaskHandle) GetTask(taskID *string) (*taskmanager.CancellableTask, error) {
+// GetTask returns the task by taskID as a CancellableTask.
+func (h *redisTaskHandle) GetTask(taskID *string) (taskmanager.CancellableTask, error) {
 	if taskID == nil || *taskID == "" {
 		return nil, fmt.Errorf("taskID cannot be nil or empty")
 	}
@@ -216,10 +208,17 @@ func (h *redisTaskHandle) GetTask(taskID *string) (*taskmanager.CancellableTask,
 		return nil, err
 	}
 
-	// Return as CancellableTask.
-	return &taskmanager.CancellableTask{
-		Task: *task,
-	}, nil
+	// Get the cancel function for the task if it exists.
+	h.manager.cancelMu.RLock()
+	cancel, exists := h.manager.cancels[*taskID]
+	h.manager.cancelMu.RUnlock()
+
+	if !exists {
+		// Create a no-op cancel function if one doesn't exist.
+		cancel = func() {}
+	}
+
+	return NewRedisCancellableTask(task, cancel), nil
 }
 
 // CleanTask deletes the task and cleans up all associated resources.
