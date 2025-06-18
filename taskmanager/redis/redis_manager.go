@@ -5,7 +5,6 @@
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
 // Package redis provides a Redis-based implementation of the A2A TaskManager interface.
-
 package redis
 
 import (

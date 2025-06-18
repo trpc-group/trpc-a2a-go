@@ -123,7 +123,7 @@ func main() {
 	// Test based on flags
 	if !*streamingOnly {
 		fmt.Println("Test 1: Non-streaming conversion")
-		testNonStreaming(ctx, a2aClient, *inputText, *verbose)
+		runNonStreamingDemo(ctx, a2aClient, *inputText, *verbose)
 
 		if !*nonStreamingOnly {
 			fmt.Println("\n" + strings.Repeat("=", 50) + "\n")
@@ -132,11 +132,11 @@ func main() {
 
 	if !*nonStreamingOnly {
 		fmt.Println("Test 2: Streaming conversion with task updates")
-		testStreaming(ctx, a2aClient, *inputText, *verbose)
+		runStreamingDemo(ctx, a2aClient, *inputText, *verbose)
 	}
 }
 
-func testNonStreaming(ctx context.Context, client *client.A2AClient, inputText string, verbose bool) {
+func runNonStreamingDemo(ctx context.Context, client *client.A2AClient, inputText string, verbose bool) {
 	message := protocol.Message{
 		Role: protocol.MessageRoleUser,
 		Parts: []protocol.Part{
@@ -177,7 +177,26 @@ func testNonStreaming(ctx context.Context, client *client.A2AClient, inputText s
 	}
 }
 
-func testStreaming(ctx context.Context, client *client.A2AClient, inputText string, verbose bool) {
+func runStreamingDemo(ctx context.Context, client *client.A2AClient, inputText string, verbose bool) {
+	eventChan, err := startStreamingRequest(ctx, client, inputText, verbose)
+	if err != nil {
+		log.Printf("Failed to start streaming: %v", err)
+		return
+	}
+
+	streamProcessor := &streamEventProcessor{
+		verbose:        verbose,
+		startTime:      time.Now(),
+		timeout:        time.After(clientTimeout),
+		progressTicker: time.NewTicker(progressInterval),
+	}
+	defer streamProcessor.progressTicker.Stop()
+
+	streamProcessor.processEvents(eventChan)
+}
+
+// startStreamingRequest initiates a streaming request and returns the event channel
+func startStreamingRequest(ctx context.Context, client *client.A2AClient, inputText string, verbose bool) (<-chan protocol.StreamingMessageEvent, error) {
 	message := protocol.Message{
 		Role: protocol.MessageRoleUser,
 		Parts: []protocol.Part{
@@ -196,112 +215,149 @@ func testStreaming(ctx context.Context, client *client.A2AClient, inputText stri
 		fmt.Printf("-> Starting streaming request...\n")
 	}
 
-	start := time.Now()
-	eventChan, err := client.StreamMessage(ctx, params)
-	if err != nil {
-		log.Printf("Failed to start streaming: %v", err)
-		return
-	}
+	return client.StreamMessage(ctx, params)
+}
 
+// streamEventProcessor handles processing of streaming events
+type streamEventProcessor struct {
+	verbose        bool
+	startTime      time.Time
+	timeout        <-chan time.Time
+	progressTicker *time.Ticker
+	taskID         string
+	eventCount     int
+	progressIndex  int
+}
+
+// processEvents processes streaming events from the event channel
+func (p *streamEventProcessor) processEvents(eventChan <-chan protocol.StreamingMessageEvent) {
 	fmt.Printf("%s Processing events:\n", prefixStreaming)
-	timeout := time.After(clientTimeout)
-
-	var taskID string
-	eventCount := 0
-	progressIndex := 0
-
-	// Progress indicator ticker
-	progressTicker := time.NewTicker(progressInterval)
-	defer progressTicker.Stop()
 
 	for {
 		select {
-		case <-progressTicker.C:
-			if eventCount > 0 && verbose {
-				progressIndex = (progressIndex + 1) % len(progressChars)
-				fmt.Printf("\r%s %s", prefixProcessing, progressChars[progressIndex])
-			}
+		case <-p.progressTicker.C:
+			p.handleProgressTick()
 
 		case event, ok := <-eventChan:
 			if !ok {
-				duration := time.Since(start)
-				if verbose {
-					fmt.Printf("\r")
-				}
-				fmt.Printf("%s Stream finished (%d events, %v total)\n", prefixCompleted, eventCount, duration)
+				p.handleStreamComplete()
 				return
 			}
+			p.handleStreamEvent(event)
 
-			eventCount++
-
-			// Clear progress indicator
-			if verbose && eventCount > 1 {
-				fmt.Printf("\r")
-			}
-
-			switch result := event.Result.(type) {
-			case *protocol.TaskStatusUpdateEvent:
-				if taskID == "" {
-					taskID = result.TaskID
-					if verbose {
-						fmt.Printf("%s ID: %s\n", prefixTask, result.TaskID)
-					}
-				}
-
-				statusPrefix := getStatusPrefix(result.Status.State)
-				fmt.Printf("[%s] Task State: %s", statusPrefix, result.Status.State)
-
-				if verbose {
-					fmt.Printf(" (Event #%d)", eventCount)
-				}
-				fmt.Println()
-
-				if result.Status.Message != nil {
-					for _, part := range result.Status.Message.Parts {
-						if textPart, ok := part.(*protocol.TextPart); ok {
-							fmt.Printf("   %s %s\n", prefixMessage, textPart.Text)
-						}
-					}
-				}
-
-				if result.IsFinal() {
-					duration := time.Since(start)
-					fmt.Printf("%s Task completed! (Total time: %v)\n", prefixFinished, duration)
-					return
-				}
-
-			case *protocol.TaskArtifactUpdateEvent:
-				fmt.Printf("%s ID: %s\n", prefixArtifact, result.Artifact.ArtifactID)
-
-				if result.Artifact.Name != nil {
-					fmt.Printf("   %s %s\n", prefixName, *result.Artifact.Name)
-				}
-
-				if result.Artifact.Description != nil {
-					fmt.Printf("   %s %s\n", prefixDesc, *result.Artifact.Description)
-				}
-
-				for _, part := range result.Artifact.Parts {
-					if textPart, ok := part.(*protocol.TextPart); ok {
-						fmt.Printf("   %s '%s'\n", prefixContent, textPart.Text)
-					}
-				}
-
-				// Show metadata if available and verbose mode is on
-				if len(result.Artifact.Metadata) > 0 && verbose {
-					fmt.Printf("   %s\n", prefixMetadata)
-					for key, value := range result.Artifact.Metadata {
-						fmt.Printf("      %s: %v\n", key, value)
-					}
-				}
-
-			default:
-				fmt.Printf("%s Event type: %T\n", prefixUnknown, result)
-			}
-
-		case <-timeout:
+		case <-p.timeout:
 			fmt.Printf("%s Waiting for events\n", prefixTimeout)
 			return
+		}
+	}
+}
+
+// handleProgressTick updates the progress indicator
+func (p *streamEventProcessor) handleProgressTick() {
+	if p.eventCount > 0 && p.verbose {
+		p.progressIndex = (p.progressIndex + 1) % len(progressChars)
+		fmt.Printf("\r%s %s", prefixProcessing, progressChars[p.progressIndex])
+	}
+}
+
+// handleStreamComplete handles stream completion
+func (p *streamEventProcessor) handleStreamComplete() {
+	duration := time.Since(p.startTime)
+	if p.verbose {
+		fmt.Printf("\r")
+	}
+	fmt.Printf("%s Stream finished (%d events, %v total)\n", prefixCompleted, p.eventCount, duration)
+}
+
+// handleStreamEvent processes a single stream event
+func (p *streamEventProcessor) handleStreamEvent(event protocol.StreamingMessageEvent) {
+	p.eventCount++
+
+	// Clear progress indicator
+	if p.verbose && p.eventCount > 1 {
+		fmt.Printf("\r")
+	}
+
+	switch result := event.Result.(type) {
+	case *protocol.TaskStatusUpdateEvent:
+		p.handleTaskStatusEvent(result)
+	case *protocol.TaskArtifactUpdateEvent:
+		p.handleTaskArtifactEvent(result)
+	default:
+		fmt.Printf("%s Event type: %T\n", prefixUnknown, result)
+	}
+}
+
+// handleTaskStatusEvent processes task status update events
+func (p *streamEventProcessor) handleTaskStatusEvent(event *protocol.TaskStatusUpdateEvent) {
+	if p.taskID == "" {
+		p.taskID = event.TaskID
+		if p.verbose {
+			fmt.Printf("%s ID: %s\n", prefixTask, event.TaskID)
+		}
+	}
+
+	statusPrefix := getStatusPrefix(event.Status.State)
+	fmt.Printf("[%s] Task State: %s", statusPrefix, event.Status.State)
+
+	if p.verbose {
+		fmt.Printf(" (Event #%d)", p.eventCount)
+	}
+	fmt.Println()
+
+	p.displayTaskMessage(event.Status.Message)
+
+	if event.IsFinal() {
+		duration := time.Since(p.startTime)
+		fmt.Printf("%s Task completed! (Total time: %v)\n", prefixFinished, duration)
+	}
+}
+
+// handleTaskArtifactEvent processes task artifact update events
+func (p *streamEventProcessor) handleTaskArtifactEvent(event *protocol.TaskArtifactUpdateEvent) {
+	fmt.Printf("%s ID: %s\n", prefixArtifact, event.Artifact.ArtifactID)
+
+	if event.Artifact.Name != nil {
+		fmt.Printf("   %s %s\n", prefixName, *event.Artifact.Name)
+	}
+
+	if event.Artifact.Description != nil {
+		fmt.Printf("   %s %s\n", prefixDesc, *event.Artifact.Description)
+	}
+
+	p.displayArtifactContent(event.Artifact.Parts)
+
+	if p.verbose {
+		p.displayArtifactMetadata(event.Artifact.Metadata)
+	}
+}
+
+// displayTaskMessage displays task status message if present
+func (p *streamEventProcessor) displayTaskMessage(message *protocol.Message) {
+	if message != nil {
+		for _, part := range message.Parts {
+			if textPart, ok := part.(*protocol.TextPart); ok {
+				fmt.Printf("   %s %s\n", prefixMessage, textPart.Text)
+			}
+		}
+	}
+}
+
+// displayArtifactContent displays artifact content parts
+func (p *streamEventProcessor) displayArtifactContent(parts []protocol.Part) {
+	for _, part := range parts {
+		if textPart, ok := part.(*protocol.TextPart); ok {
+			fmt.Printf("   %s '%s'\n", prefixContent, textPart.Text)
+		}
+	}
+}
+
+// displayArtifactMetadata displays artifact metadata if available
+func (p *streamEventProcessor) displayArtifactMetadata(metadata map[string]interface{}) {
+	if len(metadata) > 0 {
+		fmt.Printf("   %s\n", prefixMetadata)
+		for key, value := range metadata {
+			fmt.Printf("      %s: %v\n", key, value)
 		}
 	}
 }
