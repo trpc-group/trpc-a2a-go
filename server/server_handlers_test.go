@@ -33,10 +33,6 @@ func stringPtr(s string) *string {
 	return &s
 }
 
-func boolPtr(b bool) *bool {
-	return &b
-}
-
 // setupTestServer creates a test server with the given task manager and options.
 // Returns the test server and the A2A server for use in tests.
 func setupTestServer(t *testing.T, tm taskmanager.TaskManager, opts ...Option) (*httptest.Server, *A2AServer) {
@@ -131,7 +127,7 @@ func testJSONRPCErrorResponse(t *testing.T, server *httptest.Server, method stri
 }
 
 // verifyPushNotificationConfig verifies a push notification configuration response
-func verifyPushNotificationConfig(t *testing.T, resp *jsonrpc.Response, expectedID, expectedURL string) {
+func verifyPushNotificationConfig(t *testing.T, resp *jsonrpc.Response, expectedTaskID, expectedURL string) {
 	t.Helper()
 
 	// Verify response basics
@@ -146,7 +142,7 @@ func verifyPushNotificationConfig(t *testing.T, resp *jsonrpc.Response, expected
 	err = json.Unmarshal(resultBytes, &config)
 	require.NoError(t, err)
 
-	assert.Equal(t, expectedID, config.ID)
+	assert.Equal(t, expectedTaskID, config.TaskID)
 	assert.Equal(t, expectedURL, config.PushNotificationConfig.URL)
 }
 
@@ -308,7 +304,7 @@ func TestA2AServer_PushNotifications(t *testing.T) {
 	t.Run("PushNotification_Set", func(t *testing.T) {
 		// Configure mock task manager
 		mockTM.pushNotificationSetResponse = &protocol.TaskPushNotificationConfig{
-			ID: "test-push-task",
+			TaskID: "test-push-task",
 			PushNotificationConfig: protocol.PushNotificationConfig{
 				URL: "https://example.com/webhook",
 			},
@@ -317,7 +313,7 @@ func TestA2AServer_PushNotifications(t *testing.T) {
 
 		// Create request
 		params := protocol.TaskPushNotificationConfig{
-			ID: "test-push-task",
+			TaskID: "test-push-task",
 			PushNotificationConfig: protocol.PushNotificationConfig{
 				URL: "https://example.com/webhook",
 			},
@@ -339,7 +335,7 @@ func TestA2AServer_PushNotifications(t *testing.T) {
 	t.Run("PushNotification_Get", func(t *testing.T) {
 		// Configure mock task manager
 		mockTM.pushNotificationGetResponse = &protocol.TaskPushNotificationConfig{
-			ID: "test-push-task",
+			TaskID: "test-push-task",
 			PushNotificationConfig: protocol.PushNotificationConfig{
 				URL: "https://example.com/webhook",
 			},
@@ -400,16 +396,23 @@ func TestA2AServer_Resubscribe(t *testing.T) {
 	t.Run("Resubscribe_Success", func(t *testing.T) {
 		// Configure mock events
 		workingEvent := protocol.TaskStatusUpdateEvent{
-			ID:     "resubscribe-task",
-			Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
-			Final:  false,
+			TaskID:    "resubscribe-task",
+			ContextID: "test-context",
+			Kind:      protocol.KindTaskStatusUpdate,
+			Status:    protocol.TaskStatus{State: protocol.TaskStateWorking},
 		}
+		finalPtr := true
 		completedEvent := protocol.TaskStatusUpdateEvent{
-			ID:     "resubscribe-task",
-			Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
-			Final:  true,
+			TaskID:    "resubscribe-task",
+			ContextID: "test-context",
+			Kind:      protocol.KindTaskStatusUpdate,
+			Status:    protocol.TaskStatus{State: protocol.TaskStateCompleted},
+			Final:     &finalPtr,
 		}
-		mockTM.SubscribeEvents = []protocol.TaskEvent{workingEvent, completedEvent}
+		mockTM.SubscribeEvents = []protocol.StreamingMessageEvent{
+			{Result: &workingEvent},
+			{Result: &completedEvent},
+		}
 		mockTM.SubscribeError = nil
 
 		// Add task to mock task manager to ensure it exists
@@ -529,23 +532,28 @@ func TestA2AServer_HandleTasksSendSubscribe(t *testing.T) {
 	t.Run("Successful Subscription", func(t *testing.T) {
 		// Create SSE event to be sent
 		statusUpdate := protocol.TaskStatusUpdateEvent{
-			ID:     "test-sub-task",
-			Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
-			Final:  false,
+			TaskID:    "test-sub-task",
+			ContextID: "test-context",
+			Kind:      protocol.KindTaskStatusUpdate,
+			Status:    protocol.TaskStatus{State: protocol.TaskStateWorking},
 		}
 		artifactUpdate := protocol.TaskArtifactUpdateEvent{
-			ID: "test-sub-task",
+			TaskID:    "test-sub-task",
+			ContextID: "test-context",
+			Kind:      protocol.KindTaskArtifactUpdate,
 			Artifact: protocol.Artifact{
-				Name:      stringPtr("test-artifact"),
-				LastChunk: boolPtr(true),
-				Parts:     []protocol.Part{protocol.NewTextPart("Artifact content")},
+				ArtifactID: "test-artifact-1",
+				Name:       stringPtr("test-artifact"),
+				Parts:      []protocol.Part{protocol.NewTextPart("Artifact content")},
 			},
-			Final: false,
 		}
+		finalPtr := true
 		finalUpdate := protocol.TaskStatusUpdateEvent{
-			ID:     "test-sub-task",
-			Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
-			Final:  true,
+			TaskID:    "test-sub-task",
+			ContextID: "test-context",
+			Kind:      protocol.KindTaskStatusUpdate,
+			Status:    protocol.TaskStatus{State: protocol.TaskStateCompleted},
+			Final:     &finalPtr,
 		}
 
 		params := protocol.SendTaskParams{
@@ -592,10 +600,10 @@ func TestA2AServer_HandleTasksSendSubscribe(t *testing.T) {
 			assert.Equal(t, http.StatusOK, resp.StatusCode)
 			assert.Equal(t, "text/event-stream", resp.Header.Get("Content-Type"))
 
-			// Send test events through channel
-			events <- statusUpdate
-			events <- artifactUpdate
-			events <- finalUpdate
+			// Send test events through channel - use pointers for all events
+			events <- &statusUpdate
+			events <- &artifactUpdate // Fix: use pointer
+			events <- &finalUpdate
 
 			// Read the SSE events
 			reader := bufio.NewReader(resp.Body)

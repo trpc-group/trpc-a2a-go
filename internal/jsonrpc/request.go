@@ -6,7 +6,11 @@
 
 package jsonrpc
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+)
 
 // Request represents a JSON-RPC request object.
 type Request struct {
@@ -21,10 +25,13 @@ type Request struct {
 
 // NewRequest creates a new JSON-RPC request with the given method and ID.
 func NewRequest(method string, id interface{}) *Request {
+	if id == nil {
+		id = protocol.GenerateRPCID()
+	}
 	return &Request{
 		Message: Message{
-			JSONRPC: Version,
 			ID:      id,
+			JSONRPC: Version,
 		},
 		Method: method,
 	}

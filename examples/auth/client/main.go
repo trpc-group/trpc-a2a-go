@@ -83,43 +83,62 @@ func main() {
 	textPart := protocol.NewTextPart(config.TaskMessage)
 	message := protocol.NewMessage(protocol.MessageRoleUser, []protocol.Part{textPart})
 
-	// Prepare task parameters
-	taskParams := protocol.SendTaskParams{
-		ID:      config.TaskID,
+	// Prepare message parameters
+	params := protocol.SendMessageParams{
 		Message: message,
 	}
 
-	// Add session ID if provided
+	// Add context ID if session ID is provided
 	if config.SessionID != "" {
-		taskParams.SessionID = &config.SessionID
+		// In the new protocol, we use contextID instead of sessionID
+		params.Message.ContextID = &config.SessionID
 	}
 
-	// Send the task
+	// Send the message
 	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
 	defer cancel()
 
-	task, err := a2aClient.SendTasks(ctx, taskParams)
+	result, err := a2aClient.SendMessage(ctx, params)
 
 	if err != nil {
-		log.Fatalf("Failed to send task: %v", err)
+		log.Fatalf("Failed to send message: %v", err)
 	}
 
-	fmt.Printf("Task ID: %s, Status: %s\n", task.ID, task.Status.State)
-	if task.SessionID != nil {
-		fmt.Printf("Session ID: %s\n", *task.SessionID)
-	}
+	// Handle the response based on its type
+	switch response := result.Result.(type) {
+	case *protocol.Message:
+		fmt.Printf("Message Response: %s\n", response.MessageID)
+		if response.ContextID != nil {
+			fmt.Printf("Context ID: %s\n", *response.ContextID)
+		}
+		// Print message parts
+		for _, part := range response.Parts {
+			if textPart, ok := part.(*protocol.TextPart); ok {
+				fmt.Printf("Response: %s\n", textPart.Text)
+			}
+		}
 
-	// For demonstration purposes, get the task status
-	taskQuery := protocol.TaskQueryParams{
-		ID: task.ID,
-	}
+	case *protocol.Task:
+		fmt.Printf("Task ID: %s, Status: %s\n", response.ID, response.Status.State)
+		if response.ContextID != "" {
+			fmt.Printf("Context ID: %s\n", response.ContextID)
+		}
 
-	updatedTask, err := a2aClient.GetTasks(ctx, taskQuery)
-	if err != nil {
-		log.Fatalf("Failed to get task: %v", err)
-	}
+		// For demonstration purposes, get the task status
+		taskQuery := protocol.TaskQueryParams{
+			ID: response.ID,
+		}
 
-	fmt.Printf("Updated task status: %s\n", updatedTask.Status.State)
+		updatedTask, err := a2aClient.GetTasks(ctx, taskQuery)
+		if err != nil {
+			log.Fatalf("Failed to get task: %v", err)
+		}
+
+		fmt.Printf("Updated task status: %s\n", updatedTask.Status.State)
+
+	default:
+		fmt.Printf("Unknown response type: %T\n", response)
+	}
 }
 
 // parseFlags parses command-line flags and returns a Config.

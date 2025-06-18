@@ -13,42 +13,109 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 )
 
-// TaskHandle provides methods for the agent logic (TaskProcessor) to interact
+// ProcessOptions contains configuration options for processing messages
+type ProcessOptions struct {
+	// Blocking indicates whether this is a blocking request
+	// If true, the user should wait for processing completion before returning the final result
+	// If false, the user can immediately return the initial state and update later through other means
+	Blocking bool
+
+	// HistoryLength indicates the length of historical messages requested by the client
+	HistoryLength int
+
+	// PushNotificationConfig contains push notification configuration
+	PushNotificationConfig *protocol.PushNotificationConfig
+
+	// Metadata contains request metadata
+	Metadata map[string]interface{}
+
+	// Streaming indicates whether this is a streaming request
+	// If true, the user should return event streams through the StreamingEvents channel
+	// If false, the user should return a single result through Result
+	Streaming bool
+}
+
+// TaskHandler provides methods for the agent logic (MessageProcessor) to interact
 // with the task manager during processing. It encapsulates the necessary callbacks.
-type TaskHandle interface {
-	// UpdateStatus updates the task's state and optional message.
-	// Returns an error if the task cannot be found or updated.
-	UpdateStatus(state protocol.TaskState, msg *protocol.Message) error
+type TaskHandler interface {
+	// BuildTask creates a new task and returns the task object.
+	BuildTask(taskID *string, contextID *string) (*CancellableTask, error)
 
-	// AddArtifact adds a new artifact to the task.
-	// Returns an error if the task cannot be found or updated.
-	AddArtifact(artifact protocol.Artifact) error
+	// UpdateTaskState updates the task's state and returns the updated task.
+	// This method is mainly for backward compatibility.
+	UpdateTaskState(taskID *string, state protocol.TaskState, message *protocol.Message) (*CancellableTask, error)
 
-	// IsStreamingRequest returns true if the task was initiated via a streaming request
-	// (OnSendTaskSubscribe) rather than a synchronous request (OnSendTask).
-	// This allows the TaskProcessor to adapt its behavior based on the request type.
-	IsStreamingRequest() bool
+	// AddArtifact adds an artifact to the specified task.
+	// This method is mainly for backward compatibility.
+	AddArtifact(taskID *string, artifact protocol.Artifact, isFinal bool, needMoreData bool) error
 
-	// GetSessionID returns the session ID for the task.
-	// If the task is not associated with a session, it returns nil.
-	GetSessionID() *string
+	// SubScribeTask subscribes to the task.
+	SubScribeTask(taskID *string) (*TaskSubscriber, error)
+
+	// GetTask returns the task by taskID.
+	// Returns an error if the task cannot be found.
+	GetTask(taskID *string) (*CancellableTask, error)
+
+	// CleanTask cleans up the task from storage.
+	CleanTask(taskID *string) error
+
+	// GetMessageHistory returns the conversation history for the current context.
+	GetMessageHistory() []protocol.Message
+
+	// GetContextID returns the context ID of the current message, if any.
+	GetContextID() string
 }
 
-// TaskProcessor defines the interface for the core agent logic that processes a task.
-// Implementations of this interface are injected into a TaskManager.
-type TaskProcessor interface {
-	// Process executes the specific logic for a task.
-	// It receives the task ID, the initial message, and a TaskHandle for callbacks.
-	// It should use handle.Context() to check for cancellation.
-	// It should report progress and results via handle.UpdateStatus and handle.AddArtifact.
-	// Returning an error indicates the processing failed fundamentally.
-	Process(ctx context.Context, taskID string, initialMsg protocol.Message, handle TaskHandle) error
+// MessageProcessingResult represents the result of processing a message.
+type MessageProcessingResult struct {
+	// Result can be Message or Task
+	// When Streaming=false, use this field
+	// The framework will automatically handle whether to wait for the task to complete based on ProcessOptions.Blocking
+	Result protocol.Event
+
+	// StreamingEvents streaming event tunnel
+	// When Streaming=true, use this field
+	// Message、Task、TaskStatusUpdateEvent、TaskArtifactUpdateEvent is allowed to sent.
+	StreamingEvents *TaskSubscriber
 }
 
-// TaskProcessorWithStatusUpdate is an optional interface that can be implemented by TaskProcessor
+// MessageProcessor defines the interface for processing A2A messages.
+// This interface should be implemented by users to define their agent's behavior.
+type MessageProcessor interface {
+	// ProcessMessage processes an incoming message and returns the result.
+	//
+	// Processing modes:
+	// 1. Non-streaming (options.Streaming=false):
+	//    - Return MessageProcessingResult.Result (Message or Task)
+	//    - The framework directly returns the user's result (if it's a non-final Task state, a reminder log will be printed)
+	//
+	// 2. Streaming (options.Streaming=true):
+	//    - Return MessageProcessingResult.StreamingEvents channel
+	//    - Multiple types of events can be sent through the channel:
+	//      * protocol.Message - direct message reply
+	//      * protocol.Task - task status
+	//      * protocol.TaskStatusUpdateEvent - task status update
+	//      * protocol.TaskArtifactUpdateEvent - artifact update
+	//    - Users are responsible for closing the channel to end streaming transmission
+	//
+	// Note: The options.Blocking configuration is now only used for log reminders, the framework no longer actually waits for task completion.
+	//
+	// Parameters:
+	//   - ctx: Request context
+	//   - message: The incoming message to process
+	//   - options: Processing options including blocking, streaming, history length, etc.
+	//   - handle: Handle for accessing context, history, and task operations
+	//
+	// Returns:
+	//   - MessageProcessingResult: Contains the result or streaming channel
+	//   - error: Any error that occurred during processing
+	ProcessMessage(ctx context.Context, message protocol.Message, options ProcessOptions, handle TaskHandler) (*MessageProcessingResult, error)
+}
+
+// MessageProcessorWithStatusUpdate is an optional interface that can be implemented by TaskProcessor
 // to receive notifications when the task status changes.
-type TaskProcessorWithStatusUpdate interface {
-	TaskProcessor
+type MessageProcessorWithStatusUpdate interface {
+	MessageProcessor
 	// OnTaskStatusUpdate is called when the task status changes.
 	// It receives the task ID, the new state, and the optional message.
 	// It should return an error if the status update fails.
@@ -57,20 +124,21 @@ type TaskProcessorWithStatusUpdate interface {
 
 // TaskManager defines the interface for managing A2A task lifecycles based on the protocol.
 // Implementations handle task creation, updates, retrieval, cancellation, and events,
-// delegating the actual processing logic to an injected TaskProcessor.
+// delegating the actual processing logic to an injected MessageProcessor.
 // This interface corresponds to the Task Service defined in the A2A Specification.
 // Exported interface.
 type TaskManager interface {
-	// OnSendTask handles a request corresponding to the 'tasks/send' RPC method.
-	// It creates and potentially starts processing a new task via the TaskProcessor.
-	// It returns the initial state of the task, possibly reflecting immediate processing results.
-	OnSendTask(ctx context.Context, request protocol.SendTaskParams) (*protocol.Task, error)
 
-	// OnSendTaskSubscribe handles a request corresponding to the 'tasks/sendSubscribe' RPC method.
-	// It creates a new task and returns a channel for receiving TaskEvent updates (streaming).
-	// It initiates asynchronous processing via the TaskProcessor.
-	// The channel will be closed when the task reaches a final state or an error occurs during setup/processing.
-	OnSendTaskSubscribe(ctx context.Context, request protocol.SendTaskParams) (<-chan protocol.TaskEvent, error)
+	// OnSendMessage handles a request corresponding to the 'message/send' RPC method.
+	// It creates and potentially starts processing a new message via the MessageProcessor.
+	// It returns the initial state of the message, possibly reflecting immediate processing results.
+	OnSendMessage(ctx context.Context, request protocol.SendMessageParams) (*protocol.MessageResult, error)
+
+	// OnSendMessageStream handles a request corresponding to the 'message/stream' RPC method.
+	// It creates a new message and returns a channel for receiving MessageEvent updates (streaming).
+	// It initiates asynchronous processing via the MessageProcessor.
+	// The channel will be closed when the message reaches a final state or an error occurs during setup/processing.
+	OnSendMessageStream(ctx context.Context, request protocol.SendMessageParams) (<-chan protocol.StreamingMessageEvent, error)
 
 	// OnGetTask handles a request corresponding to the 'tasks/get' RPC method.
 	// It retrieves the current state of an existing task.
@@ -78,7 +146,7 @@ type TaskManager interface {
 
 	// OnCancelTask handles a request corresponding to the 'tasks/cancel' RPC method.
 	// It requests the cancellation of an ongoing task.
-	// This typically involves canceling the context passed to the TaskProcessor.
+	// This typically involves canceling the context passed to the MessageProcessor.
 	// It returns the task state after the cancellation attempt.
 	OnCancelTask(ctx context.Context, params protocol.TaskIDParams) (*protocol.Task, error)
 
@@ -92,5 +160,18 @@ type TaskManager interface {
 
 	// OnResubscribe handles a request corresponding to the 'tasks/resubscribe' RPC method.
 	// It reestablishes an SSE stream for an existing task.
-	OnResubscribe(ctx context.Context, params protocol.TaskIDParams) (<-chan protocol.TaskEvent, error)
+	OnResubscribe(ctx context.Context, params protocol.TaskIDParams) (<-chan protocol.StreamingMessageEvent, error)
+
+	// deprecated
+	// OnSendTask handles a request corresponding to the 'tasks/send' RPC method.
+	// It creates and potentially starts processing a new task via the MessageProcessor.
+	// It returns the initial state of the task, possibly reflecting immediate processing results.
+	OnSendTask(ctx context.Context, request protocol.SendTaskParams) (*protocol.Task, error)
+
+	// deprecated
+	// OnSendTaskSubscribe handles a request corresponding to the 'tasks/sendSubscribe' RPC method.
+	// It creates a new task and returns a channel for receiving TaskEvent updates (streaming).
+	// It initiates asynchronous processing via the MessageProcessor.
+	// The channel will be closed when the task reaches a final state or an error occurs during setup/processing.
+	OnSendTaskSubscribe(ctx context.Context, request protocol.SendTaskParams) (<-chan protocol.TaskEvent, error)
 }

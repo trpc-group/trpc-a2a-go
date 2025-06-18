@@ -584,129 +584,126 @@ func startWebhookServer(cfg *Config, handler http.Handler) {
 	}()
 }
 
-func main() {
-	// Parse command line flags
-	cfg := Config{
-		ServerHost:  defaultServerHost,
-		ServerPort:  defaultServerPort,
-		WebhookHost: defaultWebhookHost,
-		WebhookPort: defaultWebhookPort,
-		WebhookPath: defaultWebhookPath,
+// sendTaskToServer demonstrates sending a task using the new message API
+func sendTaskToServer(ctx context.Context, a2aClient *client.A2AClient, content string) (string, error) {
+	log.Infof("Sending message with content: %s", content)
+
+	// Create a message with the content
+	message := protocol.NewMessage(
+		protocol.MessageRoleUser,
+		[]protocol.Part{protocol.NewTextPart(content)},
+	)
+
+	// Create send message parameters
+	params := protocol.SendMessageParams{
+		Message: message,
 	}
 
+	// Send the message
+	result, err := a2aClient.SendMessage(ctx, params)
+	if err != nil {
+		return "", fmt.Errorf("failed to send message: %w", err)
+	}
+
+	// Check the result type
+	switch response := result.Result.(type) {
+	case *protocol.Message:
+		log.Infof("Received direct message response")
+		return "", nil // No task ID for direct message responses
+
+	case *protocol.Task:
+		log.Infof("Task created: %s (State: %s)", response.ID, response.Status.State)
+		return response.ID, nil
+
+	default:
+		return "", fmt.Errorf("unexpected response type: %T", response)
+	}
+}
+
+func main() {
+	// Parse command line flags
+	var cfg Config
 	flag.StringVar(&cfg.ServerHost, "server-host", defaultServerHost, "A2A server host")
 	flag.IntVar(&cfg.ServerPort, "server-port", defaultServerPort, "A2A server port")
 	flag.StringVar(&cfg.WebhookHost, "webhook-host", defaultWebhookHost, "Webhook server host")
 	flag.IntVar(&cfg.WebhookPort, "webhook-port", defaultWebhookPort, "Webhook server port")
-	flag.StringVar(&cfg.WebhookPath, "webhook-path", defaultWebhookPath, "Webhook endpoint path")
+	flag.StringVar(&cfg.WebhookPath, "webhook-path", defaultWebhookPath, "Webhook path")
+	flag.StringVar(&cfg.JWKSEndpoint, "jwks-endpoint", "", "JWKS endpoint (default: derived from server)")
 	flag.Parse()
 
-	// Set JWKS endpoint URL
-	cfg.JWKSEndpoint = fmt.Sprintf("http://%s:%d/.well-known/jwks.json",
-		cfg.ServerHost, cfg.ServerPort)
+	// Set default JWKS endpoint if not provided
+	if cfg.JWKSEndpoint == "" {
+		cfg.JWKSEndpoint = fmt.Sprintf("http://%s:%d/.well-known/jwks.json", cfg.ServerHost, cfg.ServerPort)
+	}
 
-	// Construct webhook URL
-	webhookURL := fmt.Sprintf("http://%s:%d%s",
-		cfg.WebhookHost, cfg.WebhookPort, cfg.WebhookPath)
+	log.Infof("Starting JWKS client with config: %+v", cfg)
 
-	// Create webhook handler
-	handler := NewWebhookHandler(cfg.JWKSEndpoint)
-
-	// Start webhook server
-	startWebhookServer(&cfg, handler)
-
-	// Create A2A client
-	a2aClient, err := client.NewA2AClient(
-		fmt.Sprintf("http://%s:%d/", cfg.ServerHost, cfg.ServerPort),
-		client.WithTimeout(30*time.Second),
-	)
+	// Create an A2A client
+	serverURL := fmt.Sprintf("http://%s:%d/", cfg.ServerHost, cfg.ServerPort)
+	a2aClient, err := client.NewA2AClient(serverURL)
 	if err != nil {
 		log.Fatalf("Failed to create A2A client: %v", err)
 	}
 
-	// Generate task ID
-	taskID := fmt.Sprintf("task-%d", time.Now().Unix())
-	log.Infof("Task ID: %s", taskID)
+	// Create webhook handler that will receive push notifications
+	webhookHandler := NewWebhookHandler(cfg.JWKSEndpoint)
 
-	// Create task payload
-	payload := map[string]interface{}{
-		"content": "Test task with push notification",
-	}
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		log.Fatalf("Failed to marshal payload: %v", err)
-	}
+	// Start webhook server
+	webhookURL := fmt.Sprintf("http://%s:%d%s", cfg.WebhookHost, cfg.WebhookPort, cfg.WebhookPath)
+	startWebhookServer(&cfg, webhookHandler)
 
-	// Start tracking this task
-	handler.TrackTask(taskID)
+	// Demonstrate sending multiple tasks
+	for i := 1; i <= 3; i++ {
+		content := fmt.Sprintf("Task %d: Process this message asynchronously", i)
 
-	// Create task parameters
-	params := protocol.SendTaskParams{
-		ID: taskID,
-		Message: protocol.NewMessage(
-			protocol.MessageRoleUser,
-			[]protocol.Part{
-				protocol.NewTextPart(string(payloadBytes)),
-			},
-		),
-	}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		taskID, err := sendTaskToServer(ctx, a2aClient, content)
+		cancel()
 
-	// Step 1: Set up push notification configuration BEFORE sending the task
-	pushConfig := protocol.TaskPushNotificationConfig{
-		ID: taskID,
-		PushNotificationConfig: protocol.PushNotificationConfig{
-			URL: webhookURL,
-			// Explicitly set up JWT authentication
-			Authentication: &protocol.AuthenticationInfo{
-				Schemes: []string{"bearer"},
-			},
-			// Include metadata to help with JWT auth setup
-			Metadata: map[string]interface{}{
-				"jwksUrl": cfg.JWKSEndpoint,
-			},
-		},
-	}
-
-	// Step 1.1: Register for push notifications
-	log.Infof("1. Registering for push notifications at: %s", webhookURL)
-	_, err = a2aClient.SetPushNotification(context.Background(), pushConfig)
-	if err != nil {
-		log.Fatalf("Failed to set push notification: %v", err)
-	}
-	log.Infof("   ✓ Successfully registered for push notifications")
-
-	// Step 2: Send the task (using non-streaming API)
-	log.Infof("2. Sending task to %s:%d using non-streaming API (tasks/send)...", cfg.ServerHost, cfg.ServerPort)
-	task, err := a2aClient.SendTasks(context.Background(), params)
-	if err != nil {
-		log.Fatalf("Failed to send task: %v", err)
-	}
-	log.Infof("   ✓ Task sent successfully, initial status: %s", task.Status.State)
-
-	// Step 3: Client can do other work while waiting for push notification
-	log.Infof("3. Task is being processed asynchronously on the server")
-	log.Infof("   Client is free to do other work or disconnect")
-	log.Infof("   Waiting for push notifications via webhook...")
-
-	// Poll for task status updates periodically to demonstrate client activity
-	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-
-		for range ticker.C {
-			status := handler.GetTaskStatus(taskID)
-			if status == "completed" || status == "failed" || status == "canceled" {
-				log.Infof("4. Task is complete! Final status: %s (received via push notification)", status)
-				return
-			}
-			log.Infof("   ... client still waiting for push notification, current tracked status: %s", status)
+		if err != nil {
+			log.Errorf("Failed to send task %d: %v", i, err)
+			continue
 		}
-	}()
 
-	// Wait for termination signal
+		if taskID != "" {
+			// Track the task in our webhook handler
+			webhookHandler.TrackTask(taskID)
+
+			// Set push notification for the task
+			pushConfig := protocol.TaskPushNotificationConfig{
+				TaskID: taskID,
+				PushNotificationConfig: protocol.PushNotificationConfig{
+					URL: webhookURL,
+				},
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_, err = a2aClient.SetPushNotification(ctx, pushConfig)
+			cancel()
+
+			if err != nil {
+				log.Errorf("Failed to set push notification for task %s: %v", taskID, err)
+			} else {
+				log.Infof("Push notification set for task %s", taskID)
+			}
+		}
+
+		// Add a small delay between tasks
+		time.Sleep(1 * time.Second)
+	}
+
+	log.Infof("All tasks sent. Waiting for push notifications...")
+
+	// Keep the client running to receive notifications
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
 
-	log.Infof("Shutting down...")
+	select {
+	case sig := <-sigCh:
+		log.Infof("Received signal %v, shutting down...", sig)
+	case <-time.After(2 * time.Minute):
+		log.Infof("Timeout reached, shutting down...")
+	}
+
+	log.Infof("Client shutting down.")
 }

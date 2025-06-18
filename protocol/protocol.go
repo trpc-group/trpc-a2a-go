@@ -7,21 +7,42 @@
 // Package protocol defines constants and potentially shared types for the A2A protocol itself.
 package protocol
 
-// A2A RPC Method Names define the standard method strings used in the A2A protocol's Task Service.
+// Method names for A2A 0.2.2 specification.
 const (
-	MethodTasksSend                = "tasks/send"
-	MethodTasksSendSubscribe       = "tasks/sendSubscribe"
-	MethodTasksGet                 = "tasks/get"
-	MethodTasksCancel              = "tasks/cancel"
-	MethodTasksPushNotificationSet = "tasks/pushNotification/set"
-	MethodTasksPushNotificationGet = "tasks/pushNotification/get"
-	MethodTasksResubscribe         = "tasks/resubscribe"
+	// MethodMessageSend corresponds to the 'message/send' RPC method.
+	MethodMessageSend = "message/send"
+	// MethodMessageStream corresponds to the 'message/stream' RPC method.
+	MethodMessageStream = "message/stream"
+	// MethodTasksGet corresponds to the 'tasks/get' RPC method.
+	MethodTasksGet = "tasks/get"
+	// MethodTasksCancel corresponds to the 'tasks/cancel' RPC method.
+	MethodTasksCancel = "tasks/cancel"
+	// MethodTasksPushNotificationConfigSet corresponds to the 'tasks/pushNotificationConfig/set' RPC method.
+	MethodTasksPushNotificationConfigSet = "tasks/pushNotificationConfig/set"
+	// MethodTasksPushNotificationConfigGet corresponds to the 'tasks/pushNotificationConfig/get' RPC method.
+	MethodTasksPushNotificationConfigGet = "tasks/pushNotificationConfig/get"
+	// MethodTasksResubscribe corresponds to the 'tasks/resubscribe' RPC method.
+	MethodTasksResubscribe = "tasks/resubscribe"
+	// MethodAgentAuthenticatedExtendedCard corresponds to the 'agent/authenticatedExtendedCard' HTTP GET endpoint.
+	MethodAgentAuthenticatedExtendedCard = "agent/authenticatedExtendedCard"
+
+	// deprecated methods
+	MethodTasksSend = "tasks/send" // Deprecated: use MethodMessageSend
+	// deprecated methods
+	MethodTasksSendSubscribe = "tasks/sendSubscribe" // Deprecated: use MethodMessageStream
+	// deprecated methods
+	MethodTasksPushNotificationSet = "tasks/pushNotification/set" // Deprecated: use MethodTasksPushNotificationConfigSet
+	// deprecated methods
+	MethodTasksPushNotificationGet = "tasks/pushNotification/get" // Deprecated: use MethodTasksPushNotificationConfigGet
 )
 
 // A2A SSE Event Types define the standard event type strings used in A2A SSE streams.
 const (
-	EventTaskStatusUpdate   = "task_status_update"
-	EventTaskArtifactUpdate = "task_artifact_update"
+	EventStatusUpdate   = "task_status_update"
+	EventArtifactUpdate = "task_artifact_update"
+	EventTask           = "task"
+	EventMessage        = "message"
+
 	// EventClose is used internally by this implementation's server to signal stream closure.
 	// Note: This might not be part of the formal A2A spec but is used in server logic.
 	EventClose = "close"

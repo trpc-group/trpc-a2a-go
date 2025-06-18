@@ -70,12 +70,14 @@ func NewA2AClient(agentURL string, opts ...Option) (*A2AClient, error) {
 }
 
 // SendTasks sends a message using the tasks/send method.
+// deprecated: use SendTask instead
 // It returns the initial task state received from the agent.
 func (c *A2AClient) SendTasks(
 	ctx context.Context,
 	params protocol.SendTaskParams,
 ) (*protocol.Task, error) {
-	request := jsonrpc.NewRequest(protocol.MethodTasksSend, params.ID)
+	log.Info("SendTasks is deprecated in a2a specification, use SendMessage instead")
+	request := jsonrpc.NewRequest(protocol.MethodTasksSend, params.RPCID)
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.SendTasks: failed to marshal params: %w", err)
@@ -90,12 +92,30 @@ func (c *A2AClient) SendTasks(
 	return task, nil
 }
 
+// SendMessage sends a message using the message/send method.
+func (c *A2AClient) SendMessage(
+	ctx context.Context,
+	params protocol.SendMessageParams,
+) (*protocol.MessageResult, error) {
+	request := jsonrpc.NewRequest(protocol.MethodMessageSend, params.RPCID)
+	paramsBytes, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.SendMessage: failed to marshal params: %w", err)
+	}
+	request.Params = paramsBytes
+	message, err := c.doRequestAndDecodeMessage(ctx, request)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.SendMessage: %w", err)
+	}
+	return message, nil
+}
+
 // GetTasks retrieves the status of a task using the tasks_get method.
 func (c *A2AClient) GetTasks(
 	ctx context.Context,
 	params protocol.TaskQueryParams,
 ) (*protocol.Task, error) {
-	request := jsonrpc.NewRequest(protocol.MethodTasksGet, params.ID)
+	request := jsonrpc.NewRequest(protocol.MethodTasksGet, params.RPCID)
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.GetTasks: failed to marshal params: %w", err)
@@ -114,7 +134,7 @@ func (c *A2AClient) CancelTasks(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (*protocol.Task, error) {
-	request := jsonrpc.NewRequest(protocol.MethodTasksCancel, params.ID)
+	request := jsonrpc.NewRequest(protocol.MethodTasksCancel, params.RPCID)
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.CancelTasks: failed to marshal params: %w", err)
@@ -128,33 +148,65 @@ func (c *A2AClient) CancelTasks(
 }
 
 // StreamTask sends a message using tasks_sendSubscribe and returns a channel for receiving SSE events.
+// deprecated: use StreamMessage instead
 // It handles setting up the SSE connection and parsing events.
 // The returned channel will be closed when the stream ends (task completion, error, or context cancellation).
 func (c *A2AClient) StreamTask(
 	ctx context.Context,
 	params protocol.SendTaskParams,
 ) (<-chan protocol.TaskEvent, error) {
+	log.Info("StreamTask is deprecated in a2a specification, use StreamMessage instead")
 	// Create the JSON-RPC request.
-	request := jsonrpc.NewRequest(protocol.MethodTasksSendSubscribe, params.ID)
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.StreamTask: failed to marshal params: %w", err)
 	}
+	resp, err := c.sendA2AStreamRequest(ctx, params.RPCID, paramsBytes)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.StreamTask: failed to build stream request: %w", err)
+	}
+	// Create the channel to send events back to the caller.
+	eventsChan := make(chan protocol.TaskEvent, 10) // Buffered channel.
+	// Start a goroutine to read from the SSE stream.
+	go processSSEStream(ctx, resp, params.ID, eventsChan)
+	return eventsChan, nil
+}
+
+// StreamMessage sends a message using message/streamSubscribe and returns a channel for receiving SSE events.
+// It handles setting up the SSE connection and parsing events.
+// The returned channel will be closed when the stream ends (task completion, error, or context cancellation).
+func (c *A2AClient) StreamMessage(
+	ctx context.Context,
+	params protocol.SendMessageParams,
+) (<-chan protocol.StreamingMessageEvent, error) {
+	// Create the JSON-RPC request.
+	paramsBytes, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.StreamMessage: failed to marshal params: %w", err)
+	}
+	resp, err := c.sendA2AStreamRequest(ctx, params.RPCID, paramsBytes)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.StreamTask: failed to build stream request: %w", err)
+	}
+	eventsChan := make(chan protocol.StreamingMessageEvent, 10) // Buffered channel.
+	// Start a goroutine to read from the SSE stream.
+	go processSSEStream(ctx, resp, params.RPCID, eventsChan)
+	return eventsChan, nil
+}
+
+func (c *A2AClient) sendA2AStreamRequest(ctx context.Context, id string, paramsBytes []byte) (*http.Response, error) {
+	// Create the JSON-RPC request.
+	request := jsonrpc.NewRequest(protocol.MethodMessageStream, id)
 	request.Params = paramsBytes
 	reqBody, err := json.Marshal(request)
 	if err != nil {
-		return nil, fmt.Errorf("a2aClient.StreamTask: failed to marshal request body: %w", err)
+		return nil, fmt.Errorf("a2aClient.sendA2AStreamRequest: failed to marshal request body: %w", err)
 	}
 	// Construct the target URL.
 	targetURL := c.baseURL.String()
-	req, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodPost,
-		targetURL,
-		bytes.NewReader(reqBody),
-	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(reqBody))
 	if err != nil {
-		return nil, fmt.Errorf("a2aClient.StreamTask: failed to create http request: %w", err)
+		return nil, fmt.Errorf("a2aClient.sendA2AStreamRequest: failed to create http request: %w", err)
 	}
 	// Set headers, including Accept for event stream.
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
@@ -163,13 +215,13 @@ func (c *A2AClient) StreamTask(
 		req.Header.Set("User-Agent", c.userAgent)
 	}
 	log.Debugf("A2A Client Stream Request -> Method: %s, ID: %v, URL: %s", request.Method, request.ID, targetURL)
-	// Make the initial request to establish the stream.
+
 	resp, err := c.httpReqHandler.Handle(ctx, c.httpClient, req)
 	if err != nil {
-		return nil, fmt.Errorf("a2aClient.StreamTask: http request failed: %w", err)
+		return nil, fmt.Errorf("a2aClient.sendA2AStreamRequest: http request failed: %w", err)
 	}
 	if resp == nil || resp.Body == nil {
-		return nil, fmt.Errorf("a2aClient.StreamTask: unexpected nil response")
+		return nil, fmt.Errorf("a2aClient.sendA2AStreamRequest: unexpected nil response")
 	}
 	// Check for non-success HTTP status codes.
 	// For SSE, a successful setup should result in 200 OK.
@@ -178,7 +230,7 @@ func (c *A2AClient) StreamTask(
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		return nil, fmt.Errorf(
-			"a2aClient.StreamTask: unexpected http status %d establishing stream: %s",
+			"a2aClient.sendA2AStreamRequest: unexpected http status %d establishing stream: %s",
 			resp.StatusCode, string(bodyBytes),
 		)
 	}
@@ -186,26 +238,21 @@ func (c *A2AClient) StreamTask(
 	if !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
 		resp.Body.Close()
 		return nil, fmt.Errorf(
-			"a2aClient.StreamTask: server did not respond with Content-Type 'text/event-stream', got %s",
+			"a2aClient.sendA2AStreamRequest: server did not respond with Content-Type 'text/event-stream', got %s",
 			resp.Header.Get("Content-Type"),
 		)
 	}
-	log.Debugf("A2A Client Stream Response <- Status: %d, ID: %v. Stream established.", resp.StatusCode, request.ID)
-	// Create the channel to send events back to the caller.
-	eventsChan := make(chan protocol.TaskEvent, 10) // Buffered channel.
-	// Start a goroutine to read from the SSE stream.
-	go c.processSSEStream(ctx, resp, params.ID, eventsChan)
-	return eventsChan, nil
+	log.Debugf("A2A Client Stream Response <- Status: %d, ID: %v. Stream established.", resp.StatusCode, id)
+	return resp, nil
 }
 
 // processSSEStream reads Server-Sent Events from the response body and sends them
 // onto the provided channel. It handles closing the channel and response body.
 // Runs in its own goroutine.
-func (c *A2AClient) processSSEStream(
-	ctx context.Context,
+func processSSEStream[T interface{}](ctx context.Context,
 	resp *http.Response,
 	taskID string,
-	eventsChan chan<- protocol.TaskEvent,
+	eventsChan chan<- T,
 ) {
 	// Ensure resources are cleaned up when the goroutine exits.
 	defer resp.Body.Close()
@@ -253,16 +300,10 @@ func (c *A2AClient) processSSEStream(
 
 			// If this is a valid JSON-RPC response, extract the result for further processing
 			if jsonRPCErr == nil && jsonRPCResponse.JSONRPC == jsonrpc.Version {
-				log.Debugf(
-					"Received JSON-RPC wrapped event for task %s. Type: %s",
-					taskID, eventType,
-				)
+				log.Debugf("Received JSON-RPC wrapped event for task %s. Type: %s", taskID, eventType)
 				// Check for errors in the JSON-RPC response
 				if jsonRPCResponse.Error != nil {
-					log.Errorf(
-						"JSON-RPC error in SSE event for task %s: %v",
-						taskID, jsonRPCResponse.Error,
-					)
+					log.Errorf("JSON-RPC error in SSE event for task %s: %v", taskID, jsonRPCResponse.Error)
 					continue // Skip events with JSON-RPC errors
 				}
 				// Use the result field directly for further processing
@@ -270,40 +311,19 @@ func (c *A2AClient) processSSEStream(
 			}
 
 			// Deserialize the event data based on the event type from SSE.
-			var taskEvent protocol.TaskEvent
-			switch eventType {
-			case protocol.EventTaskStatusUpdate:
-				var statusEvent protocol.TaskStatusUpdateEvent
-				if err := json.Unmarshal(eventBytes, &statusEvent); err != nil {
-					log.Errorf(
-						"Error unmarshaling TaskStatusUpdateEvent for task %s: %v. Data: %s",
-						taskID, err, string(eventBytes),
-					)
-					continue // Skip malformed event.
-				}
-				taskEvent = statusEvent
-			case protocol.EventTaskArtifactUpdate:
-				var artifactEvent protocol.TaskArtifactUpdateEvent
-				if err := json.Unmarshal(eventBytes, &artifactEvent); err != nil {
-					log.Errorf(
-						"Error unmarshaling TaskArtifactUpdateEvent for task %s: %v. Data: %s",
-						taskID, err, string(eventBytes),
-					)
-					continue // Skip malformed event.
-				}
-				taskEvent = artifactEvent
-			default:
-				log.Warnf(
-					"Received unknown SSE event type '%s' for task %s. Data: %s",
-					eventType, taskID, string(eventBytes),
-				)
-				continue // Skip unknown event types.
+			event, err := unmarshalSSEEvent[T](eventBytes, eventType)
+			if err != nil {
+				log.Errorf("Error unmarshaling event for task:%s data:%s, error:%v", taskID, string(eventBytes), err)
+				continue
 			}
+
+			log.Debugf("Received event for task %s: %v", taskID, event)
+
 			// Send the deserialized event to the caller's channel.
 			// Use a select to avoid blocking if the caller isn't reading fast enough
 			// or if the context was canceled concurrently.
 			select {
-			case eventsChan <- taskEvent:
+			case eventsChan <- event:
 				// Event sent successfully.
 			case <-ctx.Done():
 				log.Debugf(
@@ -314,6 +334,73 @@ func (c *A2AClient) processSSEStream(
 			}
 		}
 	}
+}
+
+func unmarshalSSEEvent[T interface{}](eventBytes []byte, eventType string) (T, error) {
+	// Check if T is StreamingMessageEvent type - use V2 for new message API
+	var result T
+	switch any(result).(type) {
+	case protocol.StreamingMessageEvent:
+		return unmarshalSSEEventV2[T](eventBytes, eventType)
+	default:
+		// For backward compatibility with old task APIs, use V1
+		if len(eventBytes) > 0 {
+			return unmarshalSSEEventV1[T](eventBytes, eventType)
+		}
+		return unmarshalSSEEventV2[T](eventBytes, eventType)
+	}
+}
+
+func unmarshalSSEEventV2[T interface{}](eventBytes []byte, _ string) (T, error) {
+	var result T
+	if err := json.Unmarshal(eventBytes, &result); err != nil {
+		return result, fmt.Errorf("failed to unmarshal event: %w", err)
+	}
+	return result, nil
+}
+
+// todo: remove with StreamTask
+func unmarshalSSEEventV1[T interface{}](eventBytes []byte, eventType string) (T, error) {
+	var result T
+
+	// First try to unmarshal as StreamingMessageEvent
+	var streamEvent protocol.StreamingMessageEvent
+	if err := json.Unmarshal(eventBytes, &streamEvent); err == nil {
+		// If it's a StreamingMessageEvent, extract the Result
+		if taskEvent, ok := streamEvent.Result.(protocol.TaskEvent); ok {
+			if converted, ok := taskEvent.(T); ok {
+				return converted, nil
+			}
+		}
+		// Try to convert Result directly
+		if converted, ok := streamEvent.Result.(T); ok {
+			return converted, nil
+		}
+	}
+
+	// Fallback to direct unmarshaling based on event type
+	var event interface{}
+	switch eventType {
+	case protocol.EventStatusUpdate:
+		statusEvent := &protocol.TaskStatusUpdateEvent{}
+		if err := json.Unmarshal(eventBytes, statusEvent); err != nil {
+			return result, fmt.Errorf("failed to unmarshal TaskStatusUpdateEvent: %w", err)
+		}
+		event = statusEvent
+	case protocol.EventArtifactUpdate:
+		artifactEvent := &protocol.TaskArtifactUpdateEvent{}
+		if err := json.Unmarshal(eventBytes, artifactEvent); err != nil {
+			return result, fmt.Errorf("failed to unmarshal TaskArtifactUpdateEvent: %w", err)
+		}
+		event = artifactEvent
+	default:
+		return result, fmt.Errorf("unknown SSE event type: %s", eventType)
+	}
+	converted, ok := event.(T)
+	if !ok {
+		return result, fmt.Errorf("failed to convert event to %T", result)
+	}
+	return converted, nil
 }
 
 func (c *A2AClient) doRequestAndDecodeTask(
@@ -345,14 +432,35 @@ func (c *A2AClient) doRequestAndDecodeTask(
 	return task, nil
 }
 
+func (c *A2AClient) doRequestAndDecodeMessage(
+	ctx context.Context,
+	request *jsonrpc.Request,
+) (*protocol.MessageResult, error) {
+	fullResponse, err := c.doRequest(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	if fullResponse.Error != nil {
+		return nil, fullResponse.Error
+	}
+	if len(fullResponse.Result) == 0 {
+		return nil, fmt.Errorf("rpc response missing required 'result' field for id %v", request.ID)
+	}
+	messageResp := &protocol.MessageResult{}
+	if err := json.Unmarshal(fullResponse.Result, messageResp); err != nil {
+		return nil, fmt.Errorf(
+			"failed to unmarshal rpc result: %w. Raw result: %s", err, string(fullResponse.Result),
+		)
+	}
+	return messageResp, nil
+}
+
 // doRequest performs the HTTP POST request for a JSON-RPC call.
 // It handles request marshaling, setting headers, sending the request,
 // checking the HTTP status, and decoding the base JSON response structure.
 // It does NOT specifically handle the 'result' or 'error' fields, leaving that
 // to the caller or doRequestAndDecodeResult.
-func (c *A2AClient) doRequest(
-	ctx context.Context, request *jsonrpc.Request,
-) (*jsonrpc.RawResponse, error) {
+func (c *A2AClient) doRequest(ctx context.Context, request *jsonrpc.Request) (*jsonrpc.RawResponse, error) {
 	reqBody, err := json.Marshal(request)
 	if err != nil {
 		// Use a more specific error message prefix.
@@ -421,7 +529,7 @@ func (c *A2AClient) SetPushNotification(
 	ctx context.Context,
 	params protocol.TaskPushNotificationConfig,
 ) (*protocol.TaskPushNotificationConfig, error) {
-	request := jsonrpc.NewRequest(protocol.MethodTasksPushNotificationSet, params.ID)
+	request := jsonrpc.NewRequest(protocol.MethodTasksPushNotificationConfigSet, params.RPCID)
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.SetPushNotification: failed to marshal params: %w", err)
@@ -461,7 +569,7 @@ func (c *A2AClient) GetPushNotification(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (*protocol.TaskPushNotificationConfig, error) {
-	request := jsonrpc.NewRequest(protocol.MethodTasksPushNotificationGet, params.ID)
+	request := jsonrpc.NewRequest(protocol.MethodTasksPushNotificationConfigGet, params.RPCID)
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.GetPushNotification: failed to marshal params: %w", err)
@@ -498,7 +606,6 @@ func (c *A2AClient) GetPushNotification(
 
 // httpRequestHandler is the HTTP request handler for a2a client.
 type httpRequestHandler struct {
-	handler HTTPReqHandler
 }
 
 // Handle is the HTTP request handler for a2a client.

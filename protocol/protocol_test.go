@@ -38,9 +38,9 @@ func TestMethodConstants(t *testing.T) {
 // and maintain their expected values.
 func TestEventTypeConstants(t *testing.T) {
 	// Test SSE event type constants
-	assert.Equal(t, "task_status_update", protocol.EventTaskStatusUpdate,
+	assert.Equal(t, "task_status_update", protocol.EventStatusUpdate,
 		"EventTaskStatusUpdate should be 'task_status_update'")
-	assert.Equal(t, "task_artifact_update", protocol.EventTaskArtifactUpdate,
+	assert.Equal(t, "task_artifact_update", protocol.EventArtifactUpdate,
 		"EventTaskArtifactUpdate should be 'task_artifact_update'")
 	assert.Equal(t, "close", protocol.EventClose, "EventClose should be 'close'")
 }
@@ -63,11 +63,11 @@ func TestConstantRelationships(t *testing.T) {
 		"Push notification set and get methods should be distinct")
 
 	// Test that event types are distinct
-	assert.True(t, protocol.EventTaskStatusUpdate != protocol.EventTaskArtifactUpdate,
+	assert.True(t, protocol.EventStatusUpdate != protocol.EventArtifactUpdate,
 		"Status and artifact event types should be distinct")
-	assert.True(t, protocol.EventTaskStatusUpdate != protocol.EventClose,
+	assert.True(t, protocol.EventStatusUpdate != protocol.EventClose,
 		"Status update and close event types should be distinct")
-	assert.True(t, protocol.EventTaskArtifactUpdate != protocol.EventClose,
+	assert.True(t, protocol.EventArtifactUpdate != protocol.EventClose,
 		"Artifact update and close event types should be distinct")
 
 	// Test that HTTP endpoint paths are distinct

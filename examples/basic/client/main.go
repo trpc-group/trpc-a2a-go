@@ -20,8 +20,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
 	"trpc.group/trpc-go/trpc-a2a-go/client"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/server"
@@ -32,7 +30,7 @@ type Config struct {
 	AgentURL         string
 	Timeout          time.Duration
 	ForceNoStreaming bool
-	SessionID        string
+	ContextID        string
 	UseTasksGet      bool
 	HistoryLength    int
 	ServerPort       int
@@ -43,7 +41,7 @@ type Config struct {
 const (
 	cmdExit    = "exit"
 	cmdHelp    = "help"
-	cmdSession = "session"
+	cmdContext = "context"
 	cmdMode    = "mode"
 	cmdCancel  = "cancel"
 	cmdGet     = "get"
@@ -89,16 +87,16 @@ func parseFlags() Config {
 	flag.StringVar(&config.AgentURL, "agent", "http://localhost:8080/", "Target A2A agent URL")
 	flag.DurationVar(&config.Timeout, "timeout", 60*time.Second, "Request timeout (e.g., 30s, 1m)")
 	flag.BoolVar(&config.ForceNoStreaming, "no-stream", false, "Disable streaming mode")
-	flag.StringVar(&config.SessionID, "session", "", "Use specific session ID (empty = generate new)")
+	flag.StringVar(&config.ContextID, "context", "", "Use specific context ID (empty = generate new)")
 	flag.BoolVar(&config.UseTasksGet, "use-tasks-get", true, "Use tasks/get to fetch final state")
 	flag.IntVar(&config.HistoryLength, "history", 0, "Number of history messages to request (0 = none)")
 	flag.IntVar(&config.ServerPort, "port", 8090, "Port for push notification server")
 	flag.StringVar(&config.ServerHost, "host", "localhost", "Host for push notification server")
 	flag.Parse()
 
-	// Generate a session ID if not provided
-	if config.SessionID == "" {
-		config.SessionID = generateSessionID()
+	// Generate a context ID if not provided
+	if config.ContextID == "" {
+		config.ContextID = protocol.GenerateContextID()
 	}
 
 	return config
@@ -151,8 +149,8 @@ func fetchAgentCard(baseURL string) (*server.AgentCard, error) {
 func displayAgentCapabilities(card *server.AgentCard) {
 	fmt.Println("Agent Capabilities:")
 	fmt.Printf("  Name: %s\n", card.Name)
-	if card.Description != nil {
-		fmt.Printf("  Description: %s\n", *card.Description)
+	if card.Description != "" {
+		fmt.Printf("  Description: %s\n", card.Description)
 	}
 	fmt.Printf("  Version: %s\n", card.Version)
 
@@ -161,10 +159,23 @@ func displayAgentCapabilities(card *server.AgentCard) {
 		fmt.Printf("  Provider: %s\n", card.Provider.Organization)
 	}
 
-	// Print capabilities
-	fmt.Printf("  Streaming: %t\n", card.Capabilities.Streaming)
-	fmt.Printf("  Push Notifications: %t\n", card.Capabilities.PushNotifications)
-	fmt.Printf("  State Transition History: %t\n", card.Capabilities.StateTransitionHistory)
+	// Print capabilities - handle new *bool types
+	streaming := false
+	if card.Capabilities.Streaming != nil {
+		streaming = *card.Capabilities.Streaming
+	}
+	pushNotifications := false
+	if card.Capabilities.PushNotifications != nil {
+		pushNotifications = *card.Capabilities.PushNotifications
+	}
+	stateHistory := false
+	if card.Capabilities.StateTransitionHistory != nil {
+		stateHistory = *card.Capabilities.StateTransitionHistory
+	}
+
+	fmt.Printf("  Streaming: %t\n", streaming)
+	fmt.Printf("  Push Notifications: %t\n", pushNotifications)
+	fmt.Printf("  State Transition History: %t\n", stateHistory)
 
 	// Print input/output modes
 	fmt.Printf("  Input Modes: %s\n", strings.Join(card.DefaultInputModes, ", "))
@@ -193,7 +204,7 @@ func displayAgentCapabilities(card *server.AgentCard) {
 // displayWelcomeMessage prints the welcome message with connection details.
 func displayWelcomeMessage(config Config) {
 	log.Printf("Connecting to agent: %s (Timeout: %v)", config.AgentURL, config.Timeout)
-	fmt.Printf("Session ID: %s\n", config.SessionID)
+	fmt.Printf("Context ID: %s\n", config.ContextID)
 	fmt.Printf("Streaming mode: %v\n", !config.ForceNoStreaming)
 	fmt.Println("Enter text to send to the agent. Type 'help' for commands or 'exit' to quit.")
 	fmt.Println(strings.Repeat("-", 60))
@@ -202,18 +213,73 @@ func displayWelcomeMessage(config Config) {
 // runInteractiveSession runs the main interactive session loop.
 func runInteractiveSession(a2aClient *client.A2AClient, config Config) {
 	reader := bufio.NewReader(os.Stdin)
-	sessionID := config.SessionID
+	contextID := config.ContextID
 	var lastTaskID string
 	var lastTaskState protocol.TaskState
 	var useStreaming = !config.ForceNoStreaming
 
-	for {
-		// Display prompt with indicator if we're continuing a task
-		if lastTaskState == protocol.TaskStateInputRequired {
-			fmt.Print("[Continuing task - input required] > ")
-		} else {
-			fmt.Print("> ")
+	// Check if input is from a pipe/redirect or interactive terminal
+	stat, err := os.Stdin.Stat()
+	isInteractive := err == nil && (stat.Mode()&os.ModeCharDevice) != 0
+
+	if !isInteractive {
+		// Non-interactive mode: process all piped input at once
+		log.Println("Running in non-interactive mode (piped input)")
+		scanner := bufio.NewScanner(os.Stdin)
+		inputs := []string{}
+
+		// Read all inputs first
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line != "" {
+				inputs = append(inputs, line)
+			}
 		}
+
+		// Process each input
+		for i, input := range inputs {
+			log.Printf("Processing input %d/%d: %s", i+1, len(inputs), input)
+
+			// Process built-in commands
+			if cmdResult := processCommand(
+				a2aClient,
+				input,
+				&config,
+				&contextID,
+				&useStreaming,
+				lastTaskID,
+			); cmdResult {
+				lastTaskState = ""
+				continue
+			}
+
+			// Process the user input and handle the agent interaction
+			taskID := processUserInput(a2aClient, input, contextID, config, useStreaming)
+
+			// Update the last task ID and check task state if a task was created
+			if taskID != "" {
+				lastTaskID = taskID
+
+				// Get the current task state to check if it's input-required
+				ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+				task, err := a2aClient.GetTasks(ctx, protocol.TaskQueryParams{ID: taskID})
+				cancel()
+
+				if err == nil && task != nil {
+					lastTaskState = task.Status.State
+				} else {
+					lastTaskState = ""
+				}
+			}
+		}
+		return
+	}
+
+	// Interactive mode: continuous loop
+	log.Println("Running in interactive mode")
+	for {
+		// Display prompt
+		fmt.Print("> ")
 
 		input, readErr := reader.ReadString('\n')
 
@@ -236,7 +302,7 @@ func runInteractiveSession(a2aClient *client.A2AClient, config Config) {
 			a2aClient,
 			input,
 			&config,
-			&sessionID,
+			&contextID,
 			&useStreaming,
 			lastTaskID,
 		); cmdResult {
@@ -246,32 +312,28 @@ func runInteractiveSession(a2aClient *client.A2AClient, config Config) {
 		}
 
 		// Process the user input and handle the agent interaction
-		// If we're in input-required state, use the existing task ID
-		var taskID string
-		if lastTaskState == protocol.TaskStateInputRequired {
-			taskID = processUserInput(a2aClient, input, sessionID, config, useStreaming, lastTaskID)
-		} else {
-			taskID = processUserInput(a2aClient, input, sessionID, config, useStreaming, "")
-		}
+		taskID := processUserInput(a2aClient, input, contextID, config, useStreaming)
 
-		// Update the last task ID and check task state
-		lastTaskID = taskID
+		// Update the last task ID and check task state if a task was created
+		if taskID != "" {
+			lastTaskID = taskID
 
-		// Get the current task state to check if it's input-required
-		ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
-		task, err := a2aClient.GetTasks(ctx, protocol.TaskQueryParams{ID: taskID})
-		cancel()
+			// Get the current task state to check if it's input-required
+			ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+			task, err := a2aClient.GetTasks(ctx, protocol.TaskQueryParams{ID: taskID})
+			cancel()
 
-		if err == nil && task != nil {
-			lastTaskState = task.Status.State
+			if err == nil && task != nil {
+				lastTaskState = task.Status.State
 
-			// Display a message if input is required
-			if lastTaskState == protocol.TaskStateInputRequired {
-				fmt.Println(strings.Repeat("-", 60))
-				fmt.Println("[Additional input required to complete this task. Continue typing.]")
+				// Display a message if input is required
+				if lastTaskState == protocol.TaskStateInputRequired {
+					fmt.Println(strings.Repeat("-", 60))
+					fmt.Println("[Additional input required to complete this task. Continue typing.]")
+				}
+			} else {
+				lastTaskState = ""
 			}
-		} else {
-			lastTaskState = ""
 		}
 	}
 }
@@ -281,7 +343,7 @@ func processCommand(
 	a2aClient *client.A2AClient,
 	input string,
 	config *Config,
-	sessionID *string,
+	contextID *string,
 	useStreaming *bool,
 	lastTaskID string,
 ) bool {
@@ -302,15 +364,15 @@ func processCommand(
 		displayHelpMessage()
 		return true
 
-	case cmdSession:
+	case cmdContext:
 		if len(parts) > 1 {
-			// Set new session ID
-			*sessionID = parts[1]
-			fmt.Printf("Session ID set to: %s\n", *sessionID)
+			// Set new context ID
+			*contextID = parts[1]
+			fmt.Printf("Context ID set to: %s\n", *contextID)
 		} else {
-			// Generate new session ID
-			*sessionID = generateSessionID()
-			fmt.Printf("Generated new session ID: %s\n", *sessionID)
+			// Generate new context ID
+			*contextID = protocol.GenerateContextID()
+			fmt.Printf("Generated new context ID: %s\n", *contextID)
 		}
 		return true
 
@@ -408,8 +470,9 @@ func processCommand(
 		return true
 
 	case "new":
-		// Force start a new task (ignore current input-required state)
-		fmt.Println("Starting a new task on next input.")
+		// Force start a new context
+		*contextID = protocol.GenerateContextID()
+		fmt.Printf("Starting a new context: %s\n", *contextID)
 		return true
 
 	case cmdServer:
@@ -450,7 +513,7 @@ func displayHelpMessage() {
 	fmt.Println("Available commands:")
 	fmt.Println("  help                     - Show this help message")
 	fmt.Println("  exit                     - Exit the program")
-	fmt.Println("  session [id]             - Set or generate a new session ID")
+	fmt.Println("  context [id]             - Set or generate a new context ID")
 	fmt.Println("  mode [stream|sync]       - Set interaction mode (streaming or standard)")
 	fmt.Println("  cancel [task-id]         - Cancel a task (uses last task ID if not specified)")
 	fmt.Println("  get [task-id] [history]  - Get task details (uses last task ID if not specified)")
@@ -459,10 +522,10 @@ func displayHelpMessage() {
 	fmt.Println("  getpush <task-id>        - Get push notification configuration for a task")
 	fmt.Println("  server start             - Start push notification server")
 	fmt.Println("  server stop              - Stop push notification server")
-	fmt.Println("  new                      - Start a new task (ignore current input-required state)")
+	fmt.Println("  new                      - Start a new context")
 	fmt.Println("")
 	fmt.Println("For normal interaction, just type your message and press Enter.")
-	fmt.Println("When a task requires additional input, your next message will continue the same task.")
+	fmt.Println("Messages in the same context will maintain conversation history.")
 	fmt.Println(strings.Repeat("-", 60))
 }
 
@@ -470,57 +533,43 @@ func displayHelpMessage() {
 func processUserInput(
 	a2aClient *client.A2AClient,
 	input,
-	sessionID string,
+	contextID string,
 	config Config,
 	useStreaming bool,
-	existingTaskID string,
 ) string {
-	// Generate unique task ID or use existing one if provided
-	var taskID string
-	if existingTaskID != "" {
-		taskID = existingTaskID
-	} else {
-		taskID = generateTaskID()
-	}
+	// Create message with context
+	message := protocol.NewMessageWithContext(
+		protocol.MessageRoleUser,
+		[]protocol.Part{protocol.NewTextPart(input)},
+		nil, // taskID
+		&contextID,
+	)
 
-	// Create message and parameters.
-	params := createTaskParams(taskID, sessionID, input, config.HistoryLength)
+	// Create message parameters
+	params := createMessageParams(message, config.HistoryLength)
 
 	// Send the request and process the response based on mode
+	var taskID string
 	if useStreaming && !config.ForceNoStreaming {
-		handleStreamingInteraction(a2aClient, params, taskID, config)
+		taskID = handleStreamingInteraction(a2aClient, params, config)
 	} else {
-		handleStandardInteraction(a2aClient, params, taskID, config)
+		taskID = handleStandardInteraction(a2aClient, params, config)
 	}
 
 	return taskID
 }
 
-// generateSessionID creates a new unique session ID.
-func generateSessionID() string {
-	return fmt.Sprintf("cli-session-%d-%s", time.Now().Unix(), uuid.New().String())
-}
-
-// generateTaskID creates a new unique task ID.
-func generateTaskID() string {
-	return fmt.Sprintf("cli-task-%d-%s", time.Now().UnixNano(), uuid.New().String())
-}
-
-// createTaskParams creates the parameters for sending a task.
-func createTaskParams(taskID, sessionID, input string, historyLength int) protocol.SendTaskParams {
-	message := protocol.NewMessage(
-		protocol.MessageRoleUser,
-		[]protocol.Part{protocol.NewTextPart(input)},
-	)
-
-	params := protocol.SendTaskParams{
-		ID:        taskID,
-		SessionID: &sessionID,
-		Message:   message,
+// createMessageParams creates the parameters for sending a message.
+func createMessageParams(message protocol.Message, historyLength int) protocol.SendMessageParams {
+	params := protocol.SendMessageParams{
+		Message: message,
 	}
 
+	// Add configuration if needed
 	if historyLength > 0 {
-		params.HistoryLength = &historyLength
+		params.Configuration = &protocol.SendMessageConfiguration{
+			HistoryLength: &historyLength,
+		}
 	}
 
 	return params
@@ -529,120 +578,127 @@ func createTaskParams(taskID, sessionID, input string, historyLength int) protoc
 // handleStreamingInteraction sends a streaming request to the agent and processes the response.
 func handleStreamingInteraction(
 	a2aClient *client.A2AClient,
-	params protocol.SendTaskParams,
-	taskID string,
+	params protocol.SendMessageParams,
 	config Config,
-) {
+) string {
 	// Create context for the stream.
 	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout*2)
 	defer cancel()
 
-	log.Printf("Sending stream request for task %s (Session: %s)...", taskID, *params.SessionID)
-	eventChan, streamErr := a2aClient.StreamTask(ctx, params)
+	log.Printf("Sending stream request for message %s (Context: %s)...", params.Message.MessageID, *params.Message.ContextID)
+	eventChan, streamErr := a2aClient.StreamMessage(ctx, params)
 
 	if streamErr != nil {
-		log.Printf("ERROR: StreamTask request failed: %v", streamErr)
+		log.Printf("ERROR: StreamMessage request failed: %v", streamErr)
 		fmt.Println(strings.Repeat("-", 60))
-		return
+		return ""
 	}
 
 	// Process the stream response.
-	finalTaskState, finalArtifacts := processStreamResponse(ctx, eventChan)
+	taskID := processStreamResponse(ctx, eventChan)
 
-	// Get the final task state if configured to do so.
-	if config.UseTasksGet {
-		getFinalTaskState(a2aClient, taskID, config.Timeout, finalTaskState, finalArtifacts, config.HistoryLength)
-	}
-
-	log.Printf("Stream processing finished for task %s", taskID)
+	log.Printf("Stream processing finished for message %s", params.Message.MessageID)
 	fmt.Println(strings.Repeat("-", 60))
+
+	return taskID
 }
 
 // handleStandardInteraction sends a standard (non-streaming) request to the agent.
 func handleStandardInteraction(
 	a2aClient *client.A2AClient,
-	params protocol.SendTaskParams,
-	taskID string,
+	params protocol.SendMessageParams,
 	config Config,
-) {
+) string {
 	// Create context for the request.
 	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
 	defer cancel()
 
-	log.Printf("Sending standard request for task %s (Session: %s)...", taskID, *params.SessionID)
+	log.Printf("Sending standard request for message %s (Context: %s)...", params.Message.MessageID, *params.Message.ContextID)
 
-	// Send the task
-	task, err := a2aClient.SendTasks(ctx, params)
+	// Send the message
+	result, err := a2aClient.SendMessage(ctx, params)
 
 	if err != nil {
-		log.Printf("ERROR: SendTasks request failed: %v", err)
+		log.Printf("ERROR: SendMessage request failed: %v", err)
 		fmt.Println(strings.Repeat("-", 60))
-		return
+		return ""
 	}
 
 	// Process the response
 	fmt.Println("\n<< Agent Response:")
 	fmt.Println(strings.Repeat("-", 10))
 
-	// Display task state
-	fmt.Printf("  State: %s (%s)\n", task.Status.State, formatTimestamp(task.Status.Timestamp))
+	var taskID string
+	switch response := result.Result.(type) {
+	case *protocol.Message:
+		fmt.Println("  Message Response:")
+		printMessage(*response)
 
-	// Display message if present
-	if task.Status.Message != nil {
-		fmt.Println("  Message:")
-		printMessage(*task.Status.Message)
-	}
+	case *protocol.Task:
+		taskID = response.ID
+		// Display task state
+		fmt.Printf("  Task %s State: %s (%s)\n", response.ID, response.Status.State, formatTimestamp(response.Status.Timestamp))
 
-	// Display artifacts if present
-	if len(task.Artifacts) > 0 {
-		fmt.Println("  Artifacts:")
-		for i, artifact := range task.Artifacts {
-			name := fmt.Sprintf("Artifact #%d", i+1)
-			if artifact.Name != nil {
-				name = *artifact.Name
-			}
-			fmt.Printf("    [%s]\n", name)
-			printParts(artifact.Parts)
+		// Display message if present
+		if response.Status.Message != nil {
+			fmt.Println("  Message:")
+			printMessage(*response.Status.Message)
 		}
-	}
 
-	// Display history if present
-	if task.History != nil && len(task.History) > 0 {
-		fmt.Println("  History:")
-		for i, msg := range task.History {
-			role := "User"
-			if msg.Role == protocol.MessageRoleAgent {
-				role = "Agent"
+		// Display artifacts if present
+		if len(response.Artifacts) > 0 {
+			fmt.Println("  Artifacts:")
+			for i, artifact := range response.Artifacts {
+				name := fmt.Sprintf("Artifact #%d", i+1)
+				if artifact.Name != nil {
+					name = *artifact.Name
+				}
+				fmt.Printf("    [%s]\n", name)
+				printParts(artifact.Parts)
 			}
-			fmt.Printf("    [%d] %s:\n", i+1, role)
-			printParts(msg.Parts)
 		}
-	}
 
-	// Add special handling for input-required state
-	if task.Status.State == protocol.TaskStateInputRequired {
-		fmt.Println("  [Additional input required]")
+		// Display history if present
+		if response.History != nil && len(response.History) > 0 {
+			fmt.Println("  History:")
+			for i, msg := range response.History {
+				role := "User"
+				if msg.Role == protocol.MessageRoleAgent {
+					role = "Agent"
+				}
+				fmt.Printf("    [%d] %s:\n", i+1, role)
+				printParts(msg.Parts)
+			}
+		}
+
+		// Add special handling for input-required state
+		if response.Status.State == protocol.TaskStateInputRequired {
+			fmt.Println("  [Additional input required]")
+		}
+
+	default:
+		fmt.Printf("  Unknown response type: %T\n", response)
 	}
 
 	fmt.Println(strings.Repeat("-", 60))
+	return taskID
 }
 
 // processStreamResponse processes the stream of events from the agent.
 func processStreamResponse(
-	ctx context.Context, eventChan <-chan protocol.TaskEvent,
-) (protocol.TaskState, []protocol.Artifact) {
+	ctx context.Context, eventChan <-chan protocol.StreamingMessageEvent,
+) string {
 	fmt.Println("\n<< Agent Response Stream:")
 	fmt.Println(strings.Repeat("-", 10))
 
-	var finalTaskState protocol.TaskState
-	finalArtifacts := []protocol.Artifact{}
+	var taskID string
 
 	for {
 		select {
 		case <-ctx.Done():
 			// Context timed out or was cancelled
 			log.Printf("ERROR: Context timeout or cancellation while waiting for stream events: %v", ctx.Err())
-			return finalTaskState, finalArtifacts
+			return taskID
 
 		case event, ok := <-eventChan:
 			if !ok {
@@ -651,27 +707,35 @@ func processStreamResponse(
 				if ctx.Err() != nil {
 					log.Printf("Context error after stream close: %v", ctx.Err())
 				}
-				return finalTaskState, finalArtifacts
+				return taskID
 			}
 
 			// Process the received event based on its type
-			switch e := event.(type) {
-			case protocol.TaskStatusUpdateEvent:
+			switch e := event.Result.(type) {
+			case *protocol.Message:
+				fmt.Println("  [Message Response:]")
+				printMessage(*e)
+
+			case *protocol.Task:
+				taskID = e.ID
+				fmt.Printf("  [Task %s State: %s (%s)]\n", e.ID, e.Status.State, formatTimestamp(e.Status.Timestamp))
+				if e.Status.Message != nil {
+					printMessage(*e.Status.Message)
+				}
+
+			case *protocol.TaskStatusUpdateEvent:
+				taskID = e.TaskID
 				fmt.Printf("  [Status Update: %s (%s)]\n", e.Status.State, formatTimestamp(e.Status.Timestamp))
 				if e.Status.Message != nil {
 					printMessage(*e.Status.Message)
 				}
 
-				// Update the task state
-				finalTaskState = e.Status.State
-
 				// Handle final states and input-required state
 				if e.Status.State == protocol.TaskStateInputRequired {
-					// This is not a final state, but we need to store it
 					fmt.Println("  [Additional input required]")
-					return finalTaskState, finalArtifacts
-				} else if e.IsFinal() {
-					log.Printf("Final status received: %s", finalTaskState)
+					return taskID
+				} else if e.Final != nil && *e.Final {
+					log.Printf("Final status received: %s", e.Status.State)
 
 					// Print a message indicating task completion state
 					if e.Status.State == protocol.TaskStateCompleted {
@@ -681,59 +745,27 @@ func processStreamResponse(
 					} else if e.Status.State == protocol.TaskStateCanceled {
 						fmt.Println("  [Task was canceled]")
 					}
-					return finalTaskState, finalArtifacts
+					return taskID
 				}
 
-			case protocol.TaskArtifactUpdateEvent:
+			case *protocol.TaskArtifactUpdateEvent:
+				taskID = e.TaskID
 				// Get the artifact name or use a default
 				name := getArtifactName(e.Artifact)
 
-				// Show if this is an append operation
-				if e.Artifact.Append != nil && *e.Artifact.Append {
-					fmt.Printf("  [Artifact Update: %s (Appending)]\n", name)
-				} else {
-					fmt.Printf("  [Artifact Update: %s]\n", name)
-				}
+				fmt.Printf("  [Artifact Update: %s]\n", name)
 
 				// Print the artifact parts
 				printParts(e.Artifact.Parts)
 
-				// Handle artifact storage for return value
-				if e.Artifact.Append != nil && *e.Artifact.Append && len(finalArtifacts) > 0 {
-					// Find existing artifact with same index to append to
-					for i, art := range finalArtifacts {
-						if art.Index == e.Artifact.Index {
-							// Append parts
-							combinedParts := append(art.Parts, e.Artifact.Parts...)
-							finalArtifacts[i].Parts = combinedParts
-
-							// Update other fields if needed
-							if e.Artifact.Name != nil {
-								finalArtifacts[i].Name = e.Artifact.Name
-							}
-							if e.Artifact.Description != nil {
-								finalArtifacts[i].Description = e.Artifact.Description
-							}
-							if e.Artifact.LastChunk != nil {
-								finalArtifacts[i].LastChunk = e.Artifact.LastChunk
-							}
-
-							// Break after updating
-							break
-						}
-					}
-				} else {
-					finalArtifacts = append(finalArtifacts, e.Artifact)
-				}
-
 				// For artifact updates, we note it's the final artifact,
 				// but we don't exit yet - per A2A spec, we should wait for the final status update
-				if e.IsFinal() {
-					log.Printf("Final artifact received for index %d", e.Artifact.Index)
+				if e.LastChunk != nil && *e.LastChunk {
+					log.Printf("Final artifact received with ID %s", e.Artifact.ArtifactID)
 				}
 
 			default:
-				log.Printf("Warning: Received unknown event type: %T\n", event)
+				log.Printf("Warning: Received unknown event type: %T\n", event.Result)
 			}
 		}
 	}
@@ -744,44 +776,7 @@ func getArtifactName(artifact protocol.Artifact) string {
 	if artifact.Name != nil {
 		return *artifact.Name
 	}
-	return fmt.Sprintf("Artifact #%d", artifact.Index+1)
-}
-
-// getFinalTaskState fetches and displays the final task state.
-func getFinalTaskState(
-	a2aClient *client.A2AClient,
-	taskID string,
-	timeout time.Duration,
-	streamState protocol.TaskState,
-	streamArtifacts []protocol.Artifact,
-	historyLength int,
-) {
-	finalCtx, finalCancel := context.WithTimeout(context.Background(), timeout)
-	defer finalCancel()
-
-	params := protocol.TaskQueryParams{ID: taskID}
-	if historyLength > 0 {
-		params.HistoryLength = &historyLength
-	}
-
-	finalTask, getErr := a2aClient.GetTasks(finalCtx, params)
-
-	fmt.Println(strings.Repeat("-", 10))
-	fmt.Println("<< Final Result (from GetTask):")
-
-	if getErr != nil {
-		log.Printf("ERROR: Failed to get final task state for %s: %v", taskID, getErr)
-		fmt.Printf("  State: %s (from stream)\n", streamState)
-		return
-	}
-
-	if finalTask == nil {
-		log.Printf("WARNING: TasksGet for %s returned nil task without error.", taskID)
-		fmt.Printf("  State: %s (from stream)\n", streamState)
-		return
-	}
-
-	displayFinalTaskState(finalTask)
+	return fmt.Sprintf("Artifact %s", artifact.ArtifactID)
 }
 
 // cancelTask attempts to cancel a running task.
@@ -878,87 +873,26 @@ func printParts(parts []protocol.Part) {
 	}
 }
 
-// printPart handles the printing logic based on the concrete part type.
-// It includes fallbacks for map[string]interface{} representations.
+// printPart prints a single part with proper indentation.
 func printPart(part interface{}) {
-	indent := "  " // Indentation for nested content.
-
-	// Handle direct types from taskmanager first (preferred).
+	const indent = "    "
 	switch p := part.(type) {
+	case *protocol.TextPart:
+		fmt.Println(indent + p.Text)
 	case protocol.TextPart:
 		fmt.Println(indent + p.Text)
-	case protocol.FilePart:
-		printFilePart(p, indent)
-	case protocol.DataPart:
-		printDataPart(p, indent)
 	case map[string]interface{}:
-		printMapPart(p, indent)
-	default:
-		fmt.Printf("%s[Unknown Part Type: %T]\n", indent, p)
-	}
-}
-
-// printFilePart prints a file part.
-func printFilePart(p protocol.FilePart, indent string) {
-	name := "(unnamed file)"
-	if p.File.Name != nil {
-		name = *p.File.Name
-	}
-	mime := "(unknown type)"
-	if p.File.MimeType != nil {
-		mime = *p.File.MimeType
-	}
-	fmt.Printf("%s[File: %s (%s)]\n", indent, name, mime)
-	if p.File.URI != nil {
-		fmt.Printf("%s  URI: %s\n", indent, *p.File.URI)
-	}
-	if p.File.Bytes != nil {
-		fmt.Printf("%s  Bytes: %d bytes\n", indent, len(*p.File.Bytes))
-	}
-}
-
-// printDataPart prints a data part.
-func printDataPart(p protocol.DataPart, indent string) {
-	fmt.Printf("%s[Structured Data]\n", indent)
-	dataContent, err := json.MarshalIndent(p.Data, indent, "  ")
-	if err == nil {
-		fmt.Printf("%s%s\n", indent, string(dataContent))
-	} else {
-		fmt.Printf("%s  Error marshaling data: %v\n", indent, err)
-		fmt.Printf("%s  Raw: %+v\n", indent, p.Data)
-	}
-}
-
-// printMapPart prints a part represented as a map.
-func printMapPart(p map[string]interface{}, indent string) {
-	if typeStr, ok := p["type"].(string); ok {
-		switch typeStr {
-		case string(protocol.PartTypeText):
+		// Handle parts that come as maps (from JSON)
+		if typeStr, ok := p["type"].(string); ok && typeStr == "text" {
 			if text, ok := p["text"].(string); ok {
 				fmt.Println(indent + text)
 			}
-		case string(protocol.PartTypeFile):
-			fmt.Printf("%s[File (from map)]\n", indent)
-			fileData, err := json.MarshalIndent(p["file"], indent, "  ")
-			if err == nil {
-				fmt.Printf("%s%s\n", indent, string(fileData))
-			} else if p["file"] != nil {
-				fmt.Printf("%s  %+v\n", indent, p["file"])
-			}
-		case string(protocol.PartTypeData):
-			fmt.Printf("%s[Structured Data (from map)]\n", indent)
-			dataContent, err := json.MarshalIndent(p["data"], indent, "  ")
-			if err == nil {
-				fmt.Printf("%s%s\n", indent, string(dataContent))
-			} else if p["data"] != nil {
-				fmt.Printf("%s  %+v\n", indent, p["data"])
-			}
-		default:
-			fmt.Printf("%s[Unknown map part type: %s]\n", indent, typeStr)
+		} else {
+			// For other types, just print the map
+			fmt.Printf("%s[Structured Content: %+v]\n", indent, p)
 		}
-	} else {
-		mapData, _ := json.MarshalIndent(p, indent, "  ")
-		fmt.Printf("%s[Unknown map structure]:\n%s%s\n", indent, indent, string(mapData))
+	default:
+		fmt.Printf("%s[Unknown Part Type: %T]\n", indent, p)
 	}
 }
 
@@ -1134,9 +1068,9 @@ func setPushNotification(
 		pushConfig.Token = *token
 	}
 
-	// Create the task push notification configuration
+	// Create the task push notification configuration using TaskID field
 	taskPushConfig := protocol.TaskPushNotificationConfig{
-		ID:                     taskID,
+		TaskID:                 taskID,
 		PushNotificationConfig: pushConfig,
 	}
 
@@ -1150,7 +1084,7 @@ func setPushNotification(
 
 	// Display success
 	fmt.Println("Push notification set successfully:")
-	fmt.Printf("  Task ID: %s\n", result.ID)
+	fmt.Printf("  Task ID: %s\n", result.TaskID)
 	fmt.Printf("  URL: %s\n", result.PushNotificationConfig.URL)
 	if result.PushNotificationConfig.Token != "" {
 		fmt.Printf("  Token: %s\n", result.PushNotificationConfig.Token)
@@ -1179,7 +1113,7 @@ func getPushNotification(a2aClient *client.A2AClient, taskID string, timeout tim
 
 	// Display the push notification configuration
 	fmt.Println("Push notification configuration:")
-	fmt.Printf("  Task ID: %s\n", result.ID)
+	fmt.Printf("  Task ID: %s\n", result.TaskID)
 	fmt.Printf("  URL: %s\n", result.PushNotificationConfig.URL)
 	if result.PushNotificationConfig.Token != "" {
 		fmt.Printf("  Token: %s\n", result.PushNotificationConfig.Token)

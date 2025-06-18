@@ -16,7 +16,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
-// rootAgentProcessor implements the taskmanager.TaskProcessor interface.
+// rootAgentProcessor implements the taskmanager.MessageProcessor interface.
 type rootAgentProcessor struct {
 	// LLM client for decision making
 	llm *googleai.GoogleAI
@@ -26,29 +26,30 @@ type rootAgentProcessor struct {
 	reimbursementClient *client.A2AClient
 }
 
-// Process implements the taskmanager.TaskProcessor interface to process incoming tasks.
-func (p *rootAgentProcessor) Process(
+// ProcessMessage implements the taskmanager.MessageProcessor interface
+func (p *rootAgentProcessor) ProcessMessage(
 	ctx context.Context,
-	taskID string,
 	message protocol.Message,
-	handle taskmanager.TaskHandle,
-) error {
+	options taskmanager.ProcessOptions,
+	handle taskmanager.TaskHandler,
+) (*taskmanager.MessageProcessingResult, error) {
 	// Extract text from the incoming message
 	text := extractText(message)
 	if text == "" {
 		errMsg := "input message must contain text"
-		log.Error("Task %s failed: %s", taskID, errMsg)
+		log.Error("Message processing failed: %s", errMsg)
 
-		// Update status to Failed via handle
-		failedMessage := protocol.NewMessage(
+		// Return error message directly
+		errorMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
 			[]protocol.Part{protocol.NewTextPart(errMsg)},
 		)
-		_ = handle.UpdateStatus(protocol.TaskStateFailed, &failedMessage)
-		return fmt.Errorf(errMsg)
+		return &taskmanager.MessageProcessingResult{
+			Result: &errorMessage,
+		}, nil
 	}
 
-	log.Info("RootAgent received new task: %s", text)
+	log.Info("RootAgent received new request: %s", text)
 
 	// Use Gemini or rule-based routing to decide which subagent to route the task to
 	subagent, err := p.routeTaskToSubagent(ctx, text)
@@ -59,8 +60,9 @@ func (p *rootAgentProcessor) Process(
 			protocol.MessageRoleAgent,
 			[]protocol.Part{protocol.NewTextPart(errMsg)},
 		)
-		_ = handle.UpdateStatus(protocol.TaskStateFailed, &errMessage)
-		return err
+		return &taskmanager.MessageProcessingResult{
+			Result: &errMessage,
+		}, nil
 	}
 
 	var result string
@@ -90,8 +92,9 @@ func (p *rootAgentProcessor) Process(
 			protocol.MessageRoleAgent,
 			[]protocol.Part{protocol.NewTextPart(errMsg)},
 		)
-		_ = handle.UpdateStatus(protocol.TaskStateFailed, &errMessage)
-		return err
+		return &taskmanager.MessageProcessingResult{
+			Result: &errMessage,
+		}, nil
 	}
 
 	// Create response message
@@ -100,12 +103,9 @@ func (p *rootAgentProcessor) Process(
 		[]protocol.Part{protocol.NewTextPart(result)},
 	)
 
-	// Update task status to completed
-	if err := handle.UpdateStatus(protocol.TaskStateCompleted, &responseMessage); err != nil {
-		return fmt.Errorf("failed to update task status: %w", err)
-	}
-
-	return nil
+	return &taskmanager.MessageProcessingResult{
+		Result: &responseMessage,
+	}, nil
 }
 
 // routeTaskToSubagent uses the LLM to decide which subagent should handle the task.
@@ -232,7 +232,7 @@ func (p *rootAgentProcessor) callReimbursementAgent(ctx context.Context, text st
 // extractText extracts the text content from a message.
 func extractText(message protocol.Message) string {
 	for _, part := range message.Parts {
-		if textPart, ok := part.(protocol.TextPart); ok {
+		if textPart, ok := part.(*protocol.TextPart); ok {
 			return textPart.Text
 		}
 	}
@@ -243,24 +243,29 @@ func extractText(message protocol.Message) string {
 func getAgentCard() server.AgentCard {
 	return server.AgentCard{
 		Name:        "Multi-Agent Router",
-		Description: stringPtr("An agent that routes tasks to appropriate subagents."),
+		Description: "An agent that routes tasks to appropriate subagents.",
 		URL:         "http://localhost:8080",
 		Version:     "1.0.0",
 		Capabilities: server.AgentCapabilities{
-			Streaming:              false,
-			PushNotifications:      false,
-			StateTransitionHistory: true,
+			Streaming:              boolPtr(false),
+			PushNotifications:      boolPtr(false),
+			StateTransitionHistory: boolPtr(true),
 		},
+		DefaultInputModes:  []string{"text"},
+		DefaultOutputModes: []string{"text"},
 		Skills: []server.AgentSkill{
 			{
 				ID:          "route",
 				Name:        "Task Routing",
 				Description: stringPtr("Routes tasks to the appropriate specialized agent."),
+				Tags:        []string{"routing", "multi-agent", "orchestration"},
 				Examples: []string{
 					"Write a poem about autumn",
 					"What's the exchange rate from USD to EUR?",
 					"I need to get reimbursed for a $50 business lunch",
 				},
+				InputModes:  []string{"text"},
+				OutputModes: []string{"text"},
 			},
 		},
 	}
@@ -269,6 +274,11 @@ func getAgentCard() server.AgentCard {
 // stringPtr is a helper function to get a pointer to a string.
 func stringPtr(s string) *string {
 	return &s
+}
+
+// boolPtr is a helper function to get a pointer to a bool.
+func boolPtr(b bool) *bool {
+	return &b
 }
 
 func main() {

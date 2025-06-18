@@ -14,18 +14,18 @@ import (
 
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/llms/googleai"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/log"
+	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/server"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
-// exchangeProcessor implements the taskmanager.TaskProcessor interface.
+// exchangeProcessor implements the taskmanager.MessageProcessor interface
 type exchangeProcessor struct {
 	llm llms.Model
 }
 
-// newExchangeProcessor creates a new exchange processor with LangChain.
+// newExchangeProcessor creates a new exchange processor with LangChain
 func newExchangeProcessor() (*exchangeProcessor, error) {
 	// Initialize Google Gemini model
 	llm, err := googleai.New(
@@ -45,29 +45,30 @@ func getAPIKey() string {
 	return os.Getenv("GOOGLE_API_KEY")
 }
 
-// Process implements the taskmanager.TaskProcessor interface.
-func (p *exchangeProcessor) Process(
+// ProcessMessage implements the taskmanager.MessageProcessor interface
+func (p *exchangeProcessor) ProcessMessage(
 	ctx context.Context,
-	taskID string,
 	message protocol.Message,
-	handle taskmanager.TaskHandle,
-) error {
+	options taskmanager.ProcessOptions,
+	handle taskmanager.TaskHandler,
+) (*taskmanager.MessageProcessingResult, error) {
 	// Extract text from the incoming message.
 	query := extractText(message)
 	if query == "" {
 		errMsg := "input message must contain text."
-		log.Error("Task %s failed: %s", taskID, errMsg)
+		log.Error("Message processing failed: %s", errMsg)
 
-		// Update status to Failed via handle.
-		failedMessage := protocol.NewMessage(
+		// Return error message directly
+		errorMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
 			[]protocol.Part{protocol.NewTextPart(errMsg)},
 		)
-		_ = handle.UpdateStatus(protocol.TaskStateFailed, &failedMessage)
-		return fmt.Errorf(errMsg)
+		return &taskmanager.MessageProcessingResult{
+			Result: &errorMessage,
+		}, nil
 	}
 
-	log.Info("Processing exchange task %s with query: %s", taskID, query)
+	log.Info("Processing exchange request with query: %s", query)
 
 	// First attempt to use the LLM to enhance understanding
 	prompt := fmt.Sprintf(
@@ -130,7 +131,9 @@ func (p *exchangeProcessor) Process(
 				protocol.MessageRoleAgent,
 				[]protocol.Part{protocol.NewTextPart(completion)},
 			)
-			return handle.UpdateStatus(protocol.TaskStateCompleted, &responseMessage)
+			return &taskmanager.MessageProcessingResult{
+				Result: &responseMessage,
+			}, nil
 		}
 	}
 
@@ -142,7 +145,9 @@ func (p *exchangeProcessor) Process(
 			protocol.MessageRoleAgent,
 			[]protocol.Part{protocol.NewTextPart(fmt.Sprintf("Error processing request: %v", err))},
 		)
-		return handle.UpdateStatus(protocol.TaskStateFailed, &errorMessage)
+		return &taskmanager.MessageProcessingResult{
+			Result: &errorMessage,
+		}, nil
 	}
 
 	// Format response with some explanation
@@ -151,30 +156,15 @@ func (p *exchangeProcessor) Process(
 
 	log.Info("Responding with: %s", finalResponse)
 
-	// Update task status to completed with the response
+	// Create response message
 	responseMessage := protocol.NewMessage(
 		protocol.MessageRoleAgent,
 		[]protocol.Part{protocol.NewTextPart(finalResponse)},
 	)
 
-	if err := handle.UpdateStatus(protocol.TaskStateCompleted, &responseMessage); err != nil {
-		return fmt.Errorf("failed to update task status: %w", err)
-	}
-
-	// Add the exchange rate data as an artifact
-	artifact := protocol.Artifact{
-		Name:        stringPtr("Exchange Rate Data"),
-		Description: stringPtr(fmt.Sprintf("Exchange rate from %s to %s", fromCurrency, toCurrency)),
-		Index:       0,
-		Parts:       []protocol.Part{protocol.NewTextPart(result)},
-		LastChunk:   boolPtr(true),
-	}
-
-	if err := handle.AddArtifact(artifact); err != nil {
-		log.Error("Error adding artifact for task %s: %v", taskID, err)
-	}
-
-	return nil
+	return &taskmanager.MessageProcessingResult{
+		Result: &responseMessage,
+	}, nil
 }
 
 // parseExchangeQuery attempts to parse a natural language query to extract currency info.
@@ -294,30 +284,33 @@ func boolPtr(b bool) *bool {
 	return &b
 }
 
-// getAgentCard returns the agent's metadata.
+// getAgentCard returns the agent's metadata
 func getAgentCard() server.AgentCard {
 	return server.AgentCard{
-		Name:        "Currency Exchange Agent",
-		Description: stringPtr("An agent that can fetch and display currency exchange rates."),
-		URL:         "http://localhost:8081",
+		Name:        "Exchange Rate Agent",
+		Description: "An agent that can fetch and display currency exchange rates.",
+		URL:         "http://localhost:8084",
 		Version:     "1.0.0",
 		Capabilities: server.AgentCapabilities{
-			Streaming:              false,
-			PushNotifications:      false,
-			StateTransitionHistory: true,
+			Streaming:              boolPtr(false),
+			PushNotifications:      boolPtr(false),
+			StateTransitionHistory: boolPtr(true),
 		},
-		DefaultInputModes:  []string{string(protocol.PartTypeText)},
-		DefaultOutputModes: []string{string(protocol.PartTypeText)},
+		DefaultInputModes:  []string{"text"},
+		DefaultOutputModes: []string{"text"},
 		Skills: []server.AgentSkill{
 			{
-				ID:          "exchange_rate",
+				ID:          "exchange_rates",
 				Name:        "Currency Exchange Rates",
-				Description: stringPtr("Gets the current or historical exchange rates between currencies."),
+				Description: stringPtr("Fetches current or historical currency exchange rates"),
+				Tags:        []string{"currency", "exchange", "rates", "finance"},
 				Examples: []string{
-					"What is the exchange rate from USD to EUR?",
+					"What's the USD to EUR exchange rate?",
 					"Convert 100 USD to JPY",
-					"What was the rate of GBP to USD on 2023-01-01?",
+					"EUR to GBP rate for 2023-10-15",
 				},
+				InputModes:  []string{"text"},
+				OutputModes: []string{"text"},
 			},
 		},
 	}

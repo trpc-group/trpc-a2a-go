@@ -1,139 +1,184 @@
-# Redis Task Manager for A2A
+# Redis TaskManager
 
-This package provides a Redis-based implementation of the A2A TaskManager interface, allowing for persistent storage of tasks and messages using Redis.
+Redis TaskManager 是 A2A TaskManager 接口的 Redis 实现，提供了基于 Redis 的消息、任务和会话管理功能。
 
-## Features
+## 特性
 
-- Persistent storage of tasks and task history
-- Support for all TaskManager operations (send task, subscribe, cancel, etc.)
-- Configurable key expiration time
-- Compatible with Redis clusters, sentinel, and standalone configurations
-- Thread-safe implementation
-- Graceful cleanup of resources
+- **持久化存储**: 使用 Redis 持久化存储消息、任务和会话历史
+- **分布式支持**: 支持多实例部署，通过 Redis 共享状态
+- **高性能**: 利用 Redis 的高性能特性处理大量并发请求
+- **灵活配置**: 支持自定义过期时间、历史长度等配置
+- **接口兼容**: 完全实现 TaskManager 接口，与 MemoryTaskManager 兼容
 
-## Requirements
+## 安装
 
-- Go 1.21 or later
-- Redis 6.0 or later (recommended)
-- github.com/redis/go-redis/v9 library
-
-## Installation
-
-```bash
-go get trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis
+```go
+import "trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis"
 ```
 
-## Usage
+## 使用方法
 
-### Basic Usage
+### 1. 实现 RedisClient 接口
+
+首先需要实现 `RedisClient` 接口，或者使用提供的适配器包装现有的 Redis 客户端：
 
 ```go
 import (
-    "context"
-    "log"
-    "time"
-
     "github.com/redis/go-redis/v9"
-    "trpc.group/trpc-go/trpc-a2a-go/taskmanager"
-    redismgr "trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis"
+    redisTaskManager "trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis"
 )
 
-func main() {
-    // Create your task processor implementation.
-    processor := &MyTaskProcessor{}
+// 创建 Redis 客户端
+rdb := redis.NewClient(&redis.Options{
+    Addr:     "localhost:6379",
+    Password: "", // 如果有密码
+    DB:       0,  // 使用默认数据库
+})
 
-    // Configure Redis connection.
-    redisOptions := &redis.UniversalOptions{
-        Addrs:    []string{"localhost:6379"},
-        Password: "", // no password
-        DB:       0,  // use default DB
+// 包装为 RedisClient 接口
+redisClient := redisTaskManager.NewRedisClientAdapter(rdb)
+```
+
+### 2. 创建 MessageProcessor
+
+实现 `MessageProcessor` 接口来处理具体的业务逻辑：
+
+```go
+type MyMessageProcessor struct{}
+
+func (p *MyMessageProcessor) ProcessMessage(
+    ctx context.Context,
+    message protocol.Message,
+    options taskmanager.ProcessOptions,
+    handle taskmanager.TaskHandle,
+) (*taskmanager.MessageProcessingResult, error) {
+    // 处理消息的业务逻辑
+    // ...
+    
+    if options.Streaming {
+        // 流式处理
+        subscriber, err := handle.SubScribeTask(&taskID)
+        if err != nil {
+            return nil, err
+        }
+        
+        // 异步处理任务
+        go func() {
+            defer subscriber.Close()
+            // 处理逻辑...
+        }()
+        
+        return &taskmanager.MessageProcessingResult{
+            StreamingEvents: subscriber,
+        }, nil
+    } else {
+        // 非流式处理
+        result := &protocol.Message{
+            Role: protocol.MessageRoleAgent,
+            Parts: []protocol.Part{
+                protocol.NewTextPart("处理完成"),
+            },
+        }
+        
+        return &taskmanager.MessageProcessingResult{
+            Result: result,
+        }, nil
     }
-
-    // Create Redis task manager.
-    manager, err := redismgr.NewRedisTaskManager(processor, redismgr.Options{
-        RedisOptions: redisOptions,
-    })
-    if err != nil {
-        log.Fatalf("Failed to create Redis task manager: %v", err)
-    }
-    defer manager.Close()
-
-    // Use the task manager...
 }
 ```
 
-### Configuring Key Expiration
-
-By default, task and message data in Redis will expire after 30 days. You can customize this:
+### 3. 创建 Redis TaskManager
 
 ```go
-// Set custom expiration time.
-expiration := 7 * 24 * time.Hour // 7 days
-
-manager, err := redismgr.NewRedisTaskManager(processor, redismgr.Options{
-    RedisOptions: redisOptions,
-    Expiration:   &expiration,
-})
+// 创建 Redis TaskManager
+taskManager, err := redis.NewRedisTaskManager(
+    redisClient,
+    &MyMessageProcessor{},
+    redis.WithExpiration(24*time.Hour),     // 设置过期时间
+    redis.WithMaxHistoryLength(200),        // 设置最大历史长度
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer taskManager.Close()
 ```
 
-### Using with Redis Cluster
+### 4. 使用 TaskManager
 
 ```go
-redisOptions := &redis.UniversalOptions{
-    Addrs: []string{
-        "redis-node-1:6379",
-        "redis-node-2:6379",
-        "redis-node-3:6379",
+// 发送消息
+result, err := taskManager.OnSendMessage(ctx, protocol.SendMessageParams{
+    Message: protocol.Message{
+        MessageID: "msg-123",
+        ContextID: &contextID,
+        Role:      protocol.MessageRoleUser,
+        Parts: []protocol.Part{
+            protocol.NewTextPart("Hello, world!"),
+        },
     },
-    RouteByLatency: true,
+})
+
+// 流式处理
+eventChan, err := taskManager.OnSendMessageStream(ctx, protocol.SendMessageParams{
+    Message: message,
+})
+if err != nil {
+    log.Fatal(err)
 }
 
-manager, err := redismgr.NewRedisTaskManager(processor, redismgr.Options{
-    RedisOptions: redisOptions,
-})
+// 监听事件
+for event := range eventChan {
+    switch result := event.Result.(type) {
+    case *protocol.Message:
+        fmt.Printf("收到消息: %v\n", result)
+    case *protocol.TaskStatusUpdateEvent:
+        fmt.Printf("任务状态更新: %s -> %s\n", result.TaskID, result.Status.State)
+    case *protocol.TaskArtifactUpdateEvent:
+        fmt.Printf("收到工件: %s\n", result.Artifact.ArtifactID)
+    }
+}
 ```
 
-### Using with Redis Sentinel
+## 配置选项
+
+### WithExpiration
+
+设置 Redis 键的过期时间：
 
 ```go
-redisOptions := &redis.UniversalOptions{
-    Addrs:      []string{"sentinel-1:26379", "sentinel-2:26379"},
-    MasterName: "mymaster",
-}
-
-manager, err := redismgr.NewRedisTaskManager(processor, redismgr.Options{
-    RedisOptions: redisOptions,
-})
+redis.WithExpiration(7 * 24 * time.Hour) // 7天过期
 ```
 
-## Implementation Details
+### WithMaxHistoryLength
 
-### Redis Key Prefixes
+设置每个会话的最大历史消息数量：
 
-The implementation uses the following key patterns in Redis:
-
-- `task:ID` - Stores the serialized Task object
-- `msg:ID` - Stores the message history as a Redis list
-- `push:ID` - Stores push notification configuration
-
-### Task Subscribers
-
-While tasks and messages are stored in Redis, subscribers for streaming updates are maintained in memory. If your application requires distributed subscription handling, consider implementing a custom solution using Redis Pub/Sub.
-
-## Testing
-
-The package includes comprehensive tests that use an in-memory Redis server for testing. To run the tests:
-
-```bash
-go test -v
+```go
+redis.WithMaxHistoryLength(500) // 最多保存500条历史消息
 ```
 
-For end-to-end testing, the package uses [miniredis](https://github.com/alicebob/miniredis), which provides a fully featured in-memory Redis implementation perfect for testing without external dependencies.
+## Redis 键结构
 
-## Full Example
+Redis TaskManager 使用以下键前缀：
 
-See the [example directory](./example) for a complete working example.
+- `msg:` - 存储消息内容
+- `conv:` - 存储会话历史（消息ID列表）
+- `task:` - 存储任务信息
+- `push:` - 存储推送通知配置
 
-## License
+## 性能考虑
 
-This package is part of the A2A Go implementation and follows the same license. 
+1. **连接池**: 确保 Redis 客户端使用连接池来处理并发请求
+2. **内存使用**: 定期清理过期的键，避免内存泄漏
+3. **网络延迟**: 考虑 Redis 服务器的网络延迟对性能的影响
+4. **数据序列化**: 使用高效的序列化方式（当前使用 JSON）
+
+## 故障处理
+
+1. **Redis 连接失败**: TaskManager 会在创建时测试连接，确保 Redis 可用
+2. **数据丢失**: 考虑使用 Redis 持久化（RDB/AOF）来防止数据丢失
+3. **网络分区**: 实现适当的重试和降级策略
+
+## 示例
+
+完整的使用示例请参考 `example_redis_client.go` 文件。 

@@ -5,15 +5,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"math/rand"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
 
-	"github.com/tmc/langchaingo/llms"
-	"github.com/tmc/langchaingo/llms/googleai"
 	"trpc.group/trpc-go/trpc-a2a-go/log"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/server"
@@ -23,222 +20,143 @@ import (
 // Store request IDs for demonstration purposes
 var requestIDs = make(map[string]bool)
 
-// reimbursementProcessor implements the taskmanager.TaskProcessor interface
-type reimbursementProcessor struct {
-	llm llms.Model
-}
+// reimbursementProcessor implements the taskmanager.MessageProcessor interface
+type reimbursementProcessor struct{}
 
-// newReimbursementProcessor creates a new reimbursement processor with LangChain
-func newReimbursementProcessor() (*reimbursementProcessor, error) {
-	// Initialize Google Gemini model
-	llm, err := googleai.New(
-		context.Background(),
-		googleai.WithAPIKey(getAPIKey()),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize Gemini model: %w", err)
-	}
-
-	return &reimbursementProcessor{
-		llm: llm,
-	}, nil
-}
-
-func getAPIKey() string {
-	return os.Getenv("GOOGLE_API_KEY")
-}
-
-// Process implements the taskmanager.TaskProcessor interface
-func (p *reimbursementProcessor) Process(
+// ProcessMessage implements the taskmanager.MessageProcessor interface
+func (p *reimbursementProcessor) ProcessMessage(
 	ctx context.Context,
-	taskID string,
 	message protocol.Message,
-	handle taskmanager.TaskHandle,
-) error {
-	// Extract text from the incoming message
-	query := extractText(message)
-	if query == "" {
+	options taskmanager.ProcessOptions,
+	handle taskmanager.TaskHandler,
+) (*taskmanager.MessageProcessingResult, error) {
+	// Extract text from the incoming message.
+	text := extractText(message)
+	if text == "" {
 		errMsg := "input message must contain text."
-		log.Error("Task %s failed: %s", taskID, errMsg)
+		log.Error("Message processing failed: %s", errMsg)
 
-		// Update status to Failed via handle
-		failedMessage := protocol.NewMessage(
+		// Return error message directly
+		errorMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
 			[]protocol.Part{protocol.NewTextPart(errMsg)},
 		)
-		_ = handle.UpdateStatus(protocol.TaskStateFailed, &failedMessage)
-		return fmt.Errorf(errMsg)
+		return &taskmanager.MessageProcessingResult{
+			Result: &errorMessage,
+		}, nil
 	}
 
-	log.Info("Processing reimbursement task %s with query: %s", taskID, query)
+	log.Info("Processing reimbursement request: %s", text)
 
-	// Check if this is a form submission
-	if strings.Contains(query, "request_id") && strings.Contains(query, "date") &&
-		strings.Contains(query, "amount") && strings.Contains(query, "purpose") {
-		return p.handleFormSubmission(ctx, taskID, query, handle)
+	// Try to extract reimbursement details from natural language
+	date, amount, purpose := extractReimbursementDetails(text)
+
+	// Also try to extract structured form data if available
+	formData := extractFormData(text)
+
+	// Build a complete reimbursement record
+	reimbursement := make(map[string]interface{})
+
+	// Use extracted natural language data
+	if date != "" {
+		reimbursement["date"] = date
+	}
+	if amount != "" {
+		reimbursement["amount"] = amount
+	}
+	if purpose != "" {
+		reimbursement["purpose"] = purpose
 	}
 
-	// Otherwise, this is a new request - create a form
-	return p.handleNewRequest(ctx, taskID, query, handle)
-}
-
-// handleNewRequest processes a new reimbursement request by creating a form
-func (p *reimbursementProcessor) handleNewRequest(
-	ctx context.Context,
-	taskID string,
-	query string,
-	handle taskmanager.TaskHandle,
-) error {
-	// Try to extract date, amount, and purpose from the query
-	date, amount, purpose := extractReimbursementDetails(query)
-
-	// Generate a random request ID
-	requestID := fmt.Sprintf("request_id_%d", rand.Intn(9000000)+1000000)
-	requestIDs[requestID] = true
-
-	// Create a form request
-	formRequest := map[string]interface{}{
-		"request_id": requestID,
-		"date":       date,
-		"amount":     amount,
-		"purpose":    purpose,
+	// Override with structured form data if available
+	for key, value := range formData {
+		reimbursement[key] = value
 	}
 
-	// Create form response
-	formDict := map[string]interface{}{
-		"type": "form",
-		"form": map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"date": map[string]interface{}{
-					"type":        "string",
-					"format":      "date",
-					"description": "Date of expense",
-					"title":       "Date",
-				},
-				"amount": map[string]interface{}{
-					"type":        "string",
-					"format":      "number",
-					"description": "Amount of expense",
-					"title":       "Amount",
-				},
-				"purpose": map[string]interface{}{
-					"type":        "string",
-					"description": "Purpose of expense",
-					"title":       "Purpose",
-				},
-				"request_id": map[string]interface{}{
-					"type":        "string",
-					"description": "Request id",
-					"title":       "Request ID",
-				},
-			},
-			"required": []string{"request_id", "date", "amount", "purpose"},
-		},
-		"form_data":    formRequest,
-		"instructions": "Please fill out this reimbursement request form with all required information.",
+	// Generate request ID if not provided
+	if _, exists := reimbursement["request_id"]; !exists {
+		reimbursement["request_id"] = "REIMB-" + generateReferenceID()
 	}
 
-	// Convert to JSON
-	formJSON, err := json.MarshalIndent(formDict, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to create form JSON: %w", err)
+	// Validate the reimbursement request
+	missing := validateForm(reimbursement)
+
+	var result string
+	if len(missing) > 0 {
+		// Request is incomplete - ask for missing information
+		result = fmt.Sprintf("Your reimbursement request is missing the following required information: %s.\n\n"+
+			"Please provide:\n", strings.Join(missing, ", "))
+
+		for _, field := range missing {
+			switch field {
+			case "request_id":
+				result += "- Request ID (will be auto-generated if not provided)\n"
+			case "date":
+				result += "- Date of expense (YYYY-MM-DD format)\n"
+			case "amount":
+				result += "- Amount ($XX.XX format)\n"
+			case "purpose":
+				result += "- Purpose/reason for the expense\n"
+			}
+		}
+
+		result += "\nYou can provide information in natural language or structured format like:\n"
+		result += "Date: 2023-10-15\nAmount: $50.00\nPurpose: Business lunch with client"
+	} else {
+		// Request is complete - process it
+		requestID := reimbursement["request_id"].(string)
+		requestIDs[requestID] = true
+
+		result = fmt.Sprintf("✅ Reimbursement request processed successfully!\n\n"+
+			"Request Details:\n"+
+			"- Request ID: %s\n"+
+			"- Date: %s\n"+
+			"- Amount: %s\n"+
+			"- Purpose: %s\n\n"+
+			"Status: Approved\n"+
+			"Processing Time: 2-3 business days\n"+
+			"You will receive an email confirmation shortly.",
+			requestID,
+			reimbursement["date"],
+			reimbursement["amount"],
+			reimbursement["purpose"])
 	}
 
 	// Create response message
 	responseMessage := protocol.NewMessage(
 		protocol.MessageRoleAgent,
-		[]protocol.Part{protocol.NewTextPart(string(formJSON))},
+		[]protocol.Part{protocol.NewTextPart(result)},
 	)
 
-	// Update task status to in-progress with the form
-	if err := handle.UpdateStatus(protocol.TaskStateWorking, &responseMessage); err != nil {
-		return fmt.Errorf("failed to update task status: %w", err)
+	// Create result with potential artifact for completed requests
+	processingResult := &taskmanager.MessageProcessingResult{
+		Result: &responseMessage,
 	}
 
-	return nil
+	// Add artifact for completed reimbursement requests
+	if len(missing) == 0 {
+		// Build task to get artifact support
+		task, err := handle.BuildTask(nil, nil)
+		if err == nil {
+			// Create reimbursement details artifact
+			reimbursementJSON, _ := json.Marshal(reimbursement)
+			artifact := protocol.Artifact{
+				ArtifactID:  fmt.Sprintf("reimb-%s", reimbursement["request_id"]),
+				Name:        stringPtr("Reimbursement Details"),
+				Description: stringPtr(fmt.Sprintf("Processed reimbursement request %s", reimbursement["request_id"])),
+				Parts:       []protocol.Part{protocol.NewTextPart(string(reimbursementJSON))},
+			}
+
+			_ = handle.AddArtifact(&task.Task.ID, artifact, true, false)
+		}
+	}
+
+	return processingResult, nil
 }
 
-// handleFormSubmission processes a submitted reimbursement form
-func (p *reimbursementProcessor) handleFormSubmission(
-	ctx context.Context,
-	taskID string,
-	formData string,
-	handle taskmanager.TaskHandle,
-) error {
-	// Try to parse the form data
-	var parsedForm map[string]interface{}
-	if err := json.Unmarshal([]byte(formData), &parsedForm); err != nil {
-		// If can't parse as JSON, try to extract form data from the text
-		parsedForm = extractFormData(formData)
-	}
-
-	// Validate the form
-	missingFields := validateForm(parsedForm)
-	if len(missingFields) > 0 {
-		// Form is incomplete - ask for the missing fields
-		errorMsg := fmt.Sprintf(
-			"Your reimbursement request is missing required information: %s. Please provide all required information.",
-			strings.Join(missingFields, ", "),
-		)
-		errorMessage := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(errorMsg)},
-		)
-		return handle.UpdateStatus(protocol.TaskStateWorking, &errorMessage)
-	}
-
-	// Check if request ID is valid
-	requestID, _ := parsedForm["request_id"].(string)
-	if !requestIDs[requestID] {
-		errorMsg := fmt.Sprintf("Error: Invalid request_id: %s", requestID)
-		errorMessage := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(errorMsg)},
-		)
-		return handle.UpdateStatus(protocol.TaskStateFailed, &errorMessage)
-	}
-
-	// Process the reimbursement
-	amount, _ := parsedForm["amount"].(string)
-	purpose, _ := parsedForm["purpose"].(string)
-	date, _ := parsedForm["date"].(string)
-
-	// Generate response
-	response := fmt.Sprintf(
-		"Your reimbursement request has been approved!\n\n"+
-			"Request ID: %s\n"+
-			"Date: %s\n"+
-			"Amount: %s\n"+
-			"Purpose: %s\n\n"+
-			"Status: approved",
-		requestID, date, amount, purpose,
-	)
-
-	// Mark the task as completed
-	responseMessage := protocol.NewMessage(
-		protocol.MessageRoleAgent,
-		[]protocol.Part{protocol.NewTextPart(response)},
-	)
-
-	if err := handle.UpdateStatus(protocol.TaskStateCompleted, &responseMessage); err != nil {
-		return fmt.Errorf("failed to update task status: %w", err)
-	}
-
-	// Add the reimbursement data as an artifact
-	artifact := protocol.Artifact{
-		Name:        stringPtr("Reimbursement Request"),
-		Description: stringPtr(fmt.Sprintf("Reimbursement request for %s", amount)),
-		Index:       0,
-		Parts:       []protocol.Part{protocol.NewTextPart(response)},
-		LastChunk:   boolPtr(true),
-	}
-
-	if err := handle.AddArtifact(artifact); err != nil {
-		log.Error("Error adding artifact for task %s: %v", taskID, err)
-	}
-
-	return nil
+// newReimbursementProcessor creates a new reimbursement processor
+func newReimbursementProcessor() (*reimbursementProcessor, error) {
+	return &reimbursementProcessor{}, nil
 }
 
 // extractReimbursementDetails attempts to extract date, amount, and purpose from the text
@@ -342,11 +260,16 @@ func validateForm(form map[string]interface{}) []string {
 // extractText extracts the text content from a message
 func extractText(message protocol.Message) string {
 	for _, part := range message.Parts {
-		if textPart, ok := part.(protocol.TextPart); ok {
+		if textPart, ok := part.(*protocol.TextPart); ok {
 			return textPart.Text
 		}
 	}
 	return ""
+}
+
+// generateReferenceID generates a simple reference ID for demonstration
+func generateReferenceID() string {
+	return fmt.Sprintf("%d", len(requestIDs)+1)
 }
 
 // Helper functions
@@ -362,26 +285,29 @@ func boolPtr(b bool) *bool {
 func getAgentCard() server.AgentCard {
 	return server.AgentCard{
 		Name:        "Reimbursement Agent",
-		Description: stringPtr("An agent that processes employee reimbursement requests."),
+		Description: "An agent that processes employee reimbursement requests.",
 		URL:         "http://localhost:8083",
 		Version:     "1.0.0",
 		Capabilities: server.AgentCapabilities{
-			Streaming:              false,
-			PushNotifications:      false,
-			StateTransitionHistory: true,
+			Streaming:              boolPtr(false),
+			PushNotifications:      boolPtr(false),
+			StateTransitionHistory: boolPtr(true),
 		},
-		DefaultInputModes:  []string{string(protocol.PartTypeText)},
-		DefaultOutputModes: []string{string(protocol.PartTypeText)},
+		DefaultInputModes:  []string{"text"},
+		DefaultOutputModes: []string{"text"},
 		Skills: []server.AgentSkill{
 			{
 				ID:          "reimbursement",
 				Name:        "Process Reimbursements",
 				Description: stringPtr("Creates and processes expense reimbursement requests."),
+				Tags:        []string{"expense", "reimbursement", "finance"},
 				Examples: []string{
 					"I need to get reimbursed for my business lunch.",
 					"Process my reimbursement for $50 for office supplies.",
 					"Submit a reimbursement request for my travel expenses on 2023-10-15.",
 				},
+				InputModes:  []string{"text"},
+				OutputModes: []string{"text"},
 			},
 		},
 	}

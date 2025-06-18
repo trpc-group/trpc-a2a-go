@@ -33,13 +33,14 @@ import (
 func defaultAgentCard() AgentCard {
 	// Corrected based on types.go definition
 	desc := "Agent used for server testing."
+	streaming := true
 	return AgentCard{
 		Name:        "Test Agent",
-		Description: &desc,
+		Description: desc,
 		URL:         "http://localhost/test-agent", // Example URL
 		Version:     "test-agent-v0.1.0",
 		Capabilities: AgentCapabilities{
-			Streaming: true,
+			Streaming: &streaming,
 		},
 		DefaultInputModes:  []string{"text"},
 		DefaultOutputModes: []string{"text", "artifact"},
@@ -263,22 +264,28 @@ func TestA2ASrv_HandleTasksSendSub_SSE(t *testing.T) {
 
 	// Configure mock events
 	event1 := protocol.TaskStatusUpdateEvent{
-		ID:     taskID,
+		TaskID: taskID,
 		Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
 	}
 	event2 := protocol.TaskArtifactUpdateEvent{
-		ID: taskID,
+		TaskID: taskID,
 		Artifact: protocol.Artifact{
-			Index: 0,
-			Parts: []protocol.Part{protocol.NewTextPart("Intermediate result")},
+			ArtifactID: "test-artifact-1",
+			Parts:      []protocol.Part{protocol.NewTextPart("Intermediate result")},
 		},
 	}
+	final := true
 	event3 := protocol.TaskStatusUpdateEvent{
-		ID:     taskID,
+		TaskID: taskID,
 		Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
-		Final:  true,
+		Final:  &final,
 	}
-	mockTM.SubscribeEvents = []protocol.TaskEvent{event1, event2, event3}
+	// Wrap events in StreamingMessageEvent
+	mockTM.SubscribeEvents = []protocol.StreamingMessageEvent{
+		{Result: &event1},
+		{Result: &event2},
+		{Result: &event3},
+	}
 	mockTM.SubscribeError = nil
 
 	// Prepare SSE request
@@ -309,7 +316,7 @@ func TestA2ASrv_HandleTasksSendSub_SSE(t *testing.T) {
 
 	// Read and verify SSE events
 	reader := sse.NewEventReader(resp.Body) // Use the client's SSE reader
-	receivedEvents := []protocol.TaskEvent{}
+	receivedEvents := []protocol.StreamingMessageEvent{}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -340,30 +347,30 @@ func TestA2ASrv_HandleTasksSendSub_SSE(t *testing.T) {
 		}
 		eventBytes := jsonRPCResponse.Result
 
-		var event protocol.TaskEvent
+		var event *protocol.StreamingMessageEvent
 		switch eventType {
 		case "task_status_update":
 			var statusEvent protocol.TaskStatusUpdateEvent
 			if err := json.Unmarshal(eventBytes, &statusEvent); err != nil {
 				t.Fatalf("Failed to unmarshal task_status_update: %v. Data: %s", err, string(eventBytes))
 			}
-			event = statusEvent
+			event = &protocol.StreamingMessageEvent{Result: &statusEvent}
 		case "task_artifact_update":
 			var artifactEvent protocol.TaskArtifactUpdateEvent
 			if err := json.Unmarshal(eventBytes, &artifactEvent); err != nil {
 				t.Fatalf("Failed to unmarshal task_artifact_update: %v. Data: %s", err, string(eventBytes))
 			}
-			event = artifactEvent
+			event = &protocol.StreamingMessageEvent{Result: &artifactEvent}
 		case "close": // Handle potential close event
 			t.Logf("Received close event: %s", string(data))
-			break
+			return
 		default:
 			t.Logf("Skipping unknown event type: %s", eventType)
 			continue
 		}
 
 		if event != nil {
-			receivedEvents = append(receivedEvents, event)
+			receivedEvents = append(receivedEvents, *event)
 		}
 
 		// Check context cancellation (e.g., test timeout)
@@ -374,12 +381,12 @@ func TestA2ASrv_HandleTasksSendSub_SSE(t *testing.T) {
 	require.Greater(t, len(receivedEvents), 0, "Should have received at least one event")
 	var lastStatusEvent protocol.TaskStatusUpdateEvent
 	for i := len(receivedEvents) - 1; i >= 0; i-- {
-		if statusEvent, ok := receivedEvents[i].(protocol.TaskStatusUpdateEvent); ok {
-			lastStatusEvent = statusEvent
+		if statusEvent, ok := receivedEvents[i].Result.(*protocol.TaskStatusUpdateEvent); ok {
+			lastStatusEvent = *statusEvent
 			break
 		}
 	}
-	require.NotEmpty(t, lastStatusEvent.ID, "Should have received at least one status update event")
+	require.NotEmpty(t, lastStatusEvent.TaskID, "Should have received at least one status update event")
 	assert.Equal(t, protocol.TaskStateCompleted, lastStatusEvent.Status.State, "State of last status event should be 'completed'")
 }
 
@@ -387,6 +394,8 @@ func TestA2ASrv_HandleTasksSendSub_SSE(t *testing.T) {
 func getCurrentTimestamp() string {
 	return time.Now().UTC().Format(time.RFC3339)
 }
+
+var _ taskmanager.TaskManager = (*mockTaskManager)(nil)
 
 // mockTaskManager implements the taskmanager.TaskManager interface for testing.
 type mockTaskManager struct {
@@ -401,10 +410,10 @@ type mockTaskManager struct {
 	GetError        error
 	CancelResponse  *protocol.Task
 	CancelError     error
-	SubscribeEvents []protocol.TaskEvent // Events to send for subscription
+	SubscribeEvents []protocol.StreamingMessageEvent // Updated to use StreamingMessageEvent
 	SubscribeError  error
 
-	// Additional fields for tests
+	// Additional fields for tests (deprecated)
 	SendTaskSubscribeStream chan protocol.TaskEvent
 	SendTaskSubscribeError  error
 
@@ -413,6 +422,12 @@ type mockTaskManager struct {
 	pushNotificationSetError    error
 	pushNotificationGetResponse *protocol.TaskPushNotificationConfig
 	pushNotificationGetError    error
+
+	// New message handling fields
+	sendMessageResponse     *protocol.MessageResult
+	sendMessageError        error
+	sendMessageStreamEvents []protocol.StreamingMessageEvent
+	sendMessageStreamError  error
 }
 
 // newMockTaskManager creates a new MockTaskManager for testing.
@@ -422,7 +437,76 @@ func newMockTaskManager() *mockTaskManager {
 	}
 }
 
-// OnSendTask implements the TaskManager interface.
+// OnSendMessage implements the TaskManager interface.
+func (m *mockTaskManager) OnSendMessage(
+	ctx context.Context,
+	request protocol.SendMessageParams,
+) (*protocol.MessageResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.sendMessageError != nil {
+		return nil, m.sendMessageError
+	}
+
+	if m.sendMessageResponse != nil {
+		return m.sendMessageResponse, nil
+	}
+
+	// Default behavior: create a simple message response
+	return &protocol.MessageResult{
+		Result: &request.Message,
+	}, nil
+}
+
+// OnSendMessageStream implements the TaskManager interface.
+func (m *mockTaskManager) OnSendMessageStream(
+	ctx context.Context,
+	request protocol.SendMessageParams,
+) (<-chan protocol.StreamingMessageEvent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.sendMessageStreamError != nil {
+		return nil, m.sendMessageStreamError
+	}
+
+	// Create a channel and send events
+	eventCh := make(chan protocol.StreamingMessageEvent, len(m.sendMessageStreamEvents)+1)
+
+	// Send configured events in background
+	if len(m.sendMessageStreamEvents) > 0 {
+		go func() {
+			defer close(eventCh)
+			for _, event := range m.sendMessageStreamEvents {
+				select {
+				case <-ctx.Done():
+					return
+				case eventCh <- event:
+					// Continue sending events
+				}
+			}
+		}()
+	} else {
+		// Default behavior: send the message back as a streaming event
+		go func() {
+			defer close(eventCh)
+			event := protocol.StreamingMessageEvent{
+				Result: &request.Message,
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case eventCh <- event:
+				// Event sent
+			}
+		}()
+	}
+
+	return eventCh, nil
+}
+
+// OnSendTask implements the TaskManager interface (deprecated).
 func (m *mockTaskManager) OnSendTask(
 	ctx context.Context,
 	params protocol.SendTaskParams,
@@ -430,33 +514,23 @@ func (m *mockTaskManager) OnSendTask(
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Return configured error if set
 	if m.SendError != nil {
 		return nil, m.SendError
 	}
 
-	// Validate required fields
-	if params.ID == "" {
-		return nil, jsonrpc.ErrInvalidParams("task ID is required")
-	}
-
-	if len(params.Message.Parts) == 0 {
-		return nil, jsonrpc.ErrInvalidParams("message must have at least one part")
-	}
-
-	// Return configured response if set
 	if m.SendResponse != nil {
-		// Store for later retrieval
-		m.tasks[m.SendResponse.ID] = m.SendResponse
 		return m.SendResponse, nil
 	}
 
-	// Default behavior: create a simple task
-	task := protocol.NewTask(params.ID, params.SessionID)
-	now := getCurrentTimestamp()
+	// Create a new task
+	var contextID string
+	if params.Message.ContextID != nil {
+		contextID = *params.Message.ContextID
+	}
+	task := protocol.NewTask(params.ID, contextID)
 	task.Status = protocol.TaskStatus{
 		State:     protocol.TaskStateSubmitted,
-		Timestamp: now,
+		Timestamp: getCurrentTimestamp(),
 	}
 
 	// Store for later retrieval
@@ -514,7 +588,7 @@ func (m *mockTaskManager) OnCancelTask(
 	return task, nil
 }
 
-// OnSendTaskSubscribe implements the TaskManager interface.
+// OnSendTaskSubscribe implements the TaskManager interface (deprecated).
 func (m *mockTaskManager) OnSendTaskSubscribe(
 	ctx context.Context, params protocol.SendTaskParams,
 ) (<-chan protocol.TaskEvent, error) {
@@ -536,7 +610,11 @@ func (m *mockTaskManager) OnSendTaskSubscribe(
 	}
 
 	// Create a task like OnSendTask would
-	task := protocol.NewTask(params.ID, params.SessionID)
+	var contextID string
+	if params.Message.ContextID != nil {
+		contextID = *params.Message.ContextID
+	}
+	task := protocol.NewTask(params.ID, contextID)
 	task.Status = protocol.TaskStatus{
 		State:     protocol.TaskStateSubmitted,
 		Timestamp: getCurrentTimestamp(),
@@ -551,59 +629,75 @@ func (m *mockTaskManager) OnSendTaskSubscribe(
 	// Send configured events in background
 	if len(m.SubscribeEvents) > 0 {
 		go func() {
-			for _, event := range m.SubscribeEvents {
+			defer close(eventCh)
+			for _, streamEvent := range m.SubscribeEvents {
+				// Convert StreamingMessageEvent to TaskEvent for backward compatibility
+				var taskEvent protocol.TaskEvent
+				switch e := streamEvent.Result.(type) {
+				case *protocol.TaskStatusUpdateEvent:
+					taskEvent = e
+				case *protocol.TaskArtifactUpdateEvent:
+					taskEvent = e
+				default:
+					// Skip unsupported event types
+					continue
+				}
+
 				select {
 				case <-ctx.Done():
-					close(eventCh)
 					return
-				case eventCh <- event:
+				case eventCh <- taskEvent:
 					// If this is the final event, close the channel
-					if event.IsFinal() {
-						close(eventCh)
+					if taskEvent.IsFinal() {
 						return
 					}
 				}
 			}
-			// If we didn't have a final event, close the channel anyway
-			close(eventCh)
 		}()
 	} else {
 		// No events configured, send a default working and completed status
 		go func() {
+			defer close(eventCh)
+
 			// Working status
+			var eventContextID string
+			if params.Message.ContextID != nil {
+				eventContextID = *params.Message.ContextID
+			}
 			workingEvent := protocol.TaskStatusUpdateEvent{
-				ID: params.ID,
+				TaskID:    params.ID,
+				ContextID: eventContextID,
+				Kind:      protocol.KindTaskStatusUpdate,
 				Status: protocol.TaskStatus{
 					State:     protocol.TaskStateWorking,
 					Timestamp: getCurrentTimestamp(),
 				},
-				Final: false,
 			}
 
 			// Completed status
+			final := true
 			completedEvent := protocol.TaskStatusUpdateEvent{
-				ID: params.ID,
+				TaskID:    params.ID,
+				ContextID: eventContextID,
+				Kind:      protocol.KindTaskStatusUpdate,
+				Final:     &final,
 				Status: protocol.TaskStatus{
 					State:     protocol.TaskStateCompleted,
 					Timestamp: getCurrentTimestamp(),
 				},
-				Final: true,
 			}
 
 			select {
 			case <-ctx.Done():
-				close(eventCh)
 				return
-			case eventCh <- workingEvent:
+			case eventCh <- &workingEvent:
 				// Continue
 			}
 
 			select {
 			case <-ctx.Done():
-				close(eventCh)
 				return
-			case eventCh <- completedEvent:
-				close(eventCh)
+			case eventCh <- &completedEvent:
 				return
 			}
 		}()
@@ -629,8 +723,9 @@ func (m *mockTaskManager) OnPushNotificationSet(
 
 	// Default implementation if response not configured
 	return &protocol.TaskPushNotificationConfig{
-		ID:                     params.ID,
+		RPCID:                  params.RPCID,
 		PushNotificationConfig: params.PushNotificationConfig,
+		TaskID:                 params.TaskID,
 	}, nil
 }
 
@@ -656,7 +751,7 @@ func (m *mockTaskManager) OnPushNotificationGet(
 // OnResubscribe implements the TaskManager interface for resubscribing to task events.
 func (m *mockTaskManager) OnResubscribe(
 	ctx context.Context, params protocol.TaskIDParams,
-) (<-chan protocol.TaskEvent, error) {
+) (<-chan protocol.StreamingMessageEvent, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -671,45 +766,42 @@ func (m *mockTaskManager) OnResubscribe(
 	}
 
 	// Create a channel and send events
-	eventCh := make(chan protocol.TaskEvent, len(m.SubscribeEvents)+1)
+	eventCh := make(chan protocol.StreamingMessageEvent, len(m.SubscribeEvents)+1)
 
 	// Send configured events in background
 	if len(m.SubscribeEvents) > 0 {
 		go func() {
-			for _, event := range m.SubscribeEvents {
+			defer close(eventCh)
+			for _, streamEvent := range m.SubscribeEvents {
 				select {
 				case <-ctx.Done():
-					close(eventCh)
 					return
-				case eventCh <- event:
-					// If this is the final event, close the channel
-					if event.IsFinal() {
-						close(eventCh)
-						return
-					}
+				case eventCh <- streamEvent:
+					// Continue sending events
 				}
 			}
-			// If we didn't have a final event, close the channel anyway
-			close(eventCh)
 		}()
 	} else {
 		// No events configured, send a default completed status
 		go func() {
-			completedEvent := protocol.TaskStatusUpdateEvent{
-				ID: params.ID,
+			defer close(eventCh)
+			completedEvent := &protocol.TaskStatusUpdateEvent{
+				TaskID: params.ID,
 				Status: protocol.TaskStatus{
 					State:     protocol.TaskStateCompleted,
 					Timestamp: getCurrentTimestamp(),
 				},
-				Final: true,
+				Kind: protocol.KindTaskStatusUpdate,
+			}
+
+			streamEvent := protocol.StreamingMessageEvent{
+				Result: completedEvent,
 			}
 
 			select {
 			case <-ctx.Done():
-				close(eventCh)
 				return
-			case eventCh <- completedEvent:
-				close(eventCh)
+			case eventCh <- streamEvent:
 				return
 			}
 		}()
@@ -744,16 +836,19 @@ func (m *mockTaskManager) ProcessTask(
 	return task, nil
 }
 
-// mockProcessor is a mock implementation of taskmanager.Processor
+// mockProcessor is a mock implementation of taskmanager.MessageProcessor
 type mockProcessor struct{}
 
-func (m *mockProcessor) Process(
+func (m *mockProcessor) ProcessMessage(
 	ctx context.Context,
-	taskID string,
 	message protocol.Message,
-	handle taskmanager.TaskHandle,
-) error {
-	return nil
+	options taskmanager.ProcessOptions,
+	handle taskmanager.TaskHandler,
+) (*taskmanager.MessageProcessingResult, error) {
+	// Simple echo processor for testing
+	return &taskmanager.MessageProcessingResult{
+		Result: &message,
+	}, nil
 }
 
 // Test for push notification authenticator integration

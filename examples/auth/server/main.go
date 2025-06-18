@@ -61,7 +61,7 @@ func main() {
 	}
 
 	// Create a simple echo processor for demonstration purposes
-	processor := &echoProcessor{}
+	processor := &echoMessageProcessor{}
 
 	// Create a real task manager with our processor
 	taskManager, err := taskmanager.NewMemoryTaskManager(processor)
@@ -113,22 +113,48 @@ func main() {
 
 	agentCard := server.AgentCard{
 		Name:        "A2A Server with Authentication",
-		Description: addressableStr("A demonstration server with JWT and API key authentication"),
+		Description: "A demonstration server with JWT and API key authentication",
 		URL:         fmt.Sprintf("http://localhost:%d", config.Port),
 		Provider: &server.AgentProvider{
 			Organization: "Example Provider",
 		},
 		Version: "1.0.0",
 		Capabilities: server.AgentCapabilities{
-			Streaming:         true,
-			PushNotifications: true,
+			Streaming:              boolPtr(true),
+			PushNotifications:      boolPtr(true),
+			StateTransitionHistory: boolPtr(true),
 		},
-		Authentication: &protocol.AuthenticationInfo{
-			Schemes:     []string{authType},
-			Credentials: &config.APIKeyHeader,
+		SecuritySchemes: map[string]server.SecurityScheme{
+			"apiKey": {
+				Type:        "apiKey",
+				Description: stringPtr("API key authentication"),
+				Name:        stringPtr(config.APIKeyHeader),
+				In:          securitySchemeInPtr(server.SecuritySchemeInHeader),
+			},
+			"jwt": {
+				Type:         "http",
+				Description:  stringPtr("JWT Bearer token authentication"),
+				Scheme:       stringPtr("bearer"),
+				BearerFormat: stringPtr("JWT"),
+			},
+		},
+		Security: []map[string][]string{
+			{"apiKey": {}},
+			{"jwt": {}},
 		},
 		DefaultInputModes:  []string{"text"},
 		DefaultOutputModes: []string{"text"},
+		Skills: []server.AgentSkill{
+			{
+				ID:          "echo",
+				Name:        "Echo Service",
+				Description: stringPtr("Echoes back the input text with authentication"),
+				Tags:        []string{"text", "echo", "auth"},
+				Examples:    []string{"Hello, world!"},
+				InputModes:  []string{"text"},
+				OutputModes: []string{"text"},
+			},
+		},
 	}
 
 	// Create the server with authentication
@@ -265,16 +291,16 @@ func printExampleCommands(port int, token string, enableOAuth bool, tokenEndpoin
 	log.Printf("Using JWT authentication:")
 	log.Printf("curl -X POST http://localhost:%d -H 'Content-Type: application/json' "+
 		"-H 'Authorization: Bearer %s' "+
-		"-d '{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":1,"+
-		"\"params\":{\"id\":\"task1\",\"message\":{\"role\":\"user\","+
+		"-d '{\"jsonrpc\":\"2.0\",\"method\":\"message/send\",\"id\":1,"+
+		"\"params\":{\"message\":{\"role\":\"user\","+
 		"\"parts\":[{\"type\":\"text\",\"text\":\"Hello, world!\"}]}}}'", port, token)
 
 	// API key example
 	log.Printf("\nUsing API key authentication:")
 	log.Printf("curl -X POST http://localhost:%d -H 'Content-Type: application/json' "+
 		"-H 'X-API-Key: test-api-key' "+
-		"-d '{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":1,"+
-		"\"params\":{\"id\":\"task1\",\"message\":{\"role\":\"user\","+
+		"-d '{\"jsonrpc\":\"2.0\",\"method\":\"message/send\",\"id\":1,"+
+		"\"params\":{\"message\":{\"role\":\"user\","+
 		"\"parts\":[{\"type\":\"text\",\"text\":\"Hello, world!\"}]}}}'", port)
 
 	// OAuth2 example if enabled
@@ -286,8 +312,8 @@ func printExampleCommands(port int, token string, enableOAuth bool, tokenEndpoin
 		log.Printf("\nStep 2: Use the token with the A2A API:")
 		log.Printf("curl -X POST http://localhost:%d -H 'Content-Type: application/json' "+
 			"-H 'Authorization: Bearer <access_token_from_step_1>' "+
-			"-d '{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"id\":1,"+
-			"\"params\":{\"id\":\"task1\",\"message\":{\"role\":\"user\","+
+			"-d '{\"jsonrpc\":\"2.0\",\"method\":\"message/send\",\"id\":1,"+
+			"\"params\":{\"message\":{\"role\":\"user\","+
 			"\"parts\":[{\"type\":\"text\",\"text\":\"Hello, world!\"}]}}}'", port)
 	}
 
@@ -296,37 +322,35 @@ func printExampleCommands(port int, token string, enableOAuth bool, tokenEndpoin
 	log.Printf("curl http://localhost:%d/.well-known/agent.json", port)
 }
 
-// echoProcessor is a simple processor that echoes user messages
-type echoProcessor struct{}
+// echoMessageProcessor is a simple processor that echoes user messages
+type echoMessageProcessor struct{}
 
-func (p *echoProcessor) Process(
+func (p *echoMessageProcessor) ProcessMessage(
 	ctx context.Context,
-	taskID string,
-	msg protocol.Message,
-	handle taskmanager.TaskHandle,
-) error {
+	message protocol.Message,
+	options taskmanager.ProcessOptions,
+	handle taskmanager.TaskHandler,
+) (*taskmanager.MessageProcessingResult, error) {
 	// Create a concatenated string of all text parts
 	var responseText string
-	for _, part := range msg.Parts {
-		if textPart, ok := part.(protocol.TextPart); ok {
+	for _, part := range message.Parts {
+		if textPart, ok := part.(*protocol.TextPart); ok {
 			responseText += textPart.Text + " "
 		}
 	}
 
 	// Create response message
-	responseMsg := &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
+	responseMsg := protocol.NewMessage(
+		protocol.MessageRoleAgent,
+		[]protocol.Part{
 			protocol.NewTextPart(fmt.Sprintf("Echo: %s", responseText)),
 		},
-	}
+	)
 
-	// Update the task status to completed with our response
-	if err := handle.UpdateStatus(protocol.TaskStateCompleted, responseMsg); err != nil {
-		return fmt.Errorf("failed to update task status: %w", err)
-	}
-
-	return nil
+	// Return the response message directly
+	return &taskmanager.MessageProcessingResult{
+		Result: &responseMsg,
+	}, nil
 }
 
 func addressableStr(s string) *string {
@@ -439,4 +463,16 @@ func generateToken(clientID string, scopes []string) TokenResponse {
 		Scope:       strings.Join(scopes, " "),
 		ClientID:    clientID,
 	}
+}
+
+func boolPtr(b bool) *bool {
+	return &b
+}
+
+func stringPtr(s string) *string {
+	return &s
+}
+
+func securitySchemeInPtr(in server.SecuritySchemeIn) *server.SecuritySchemeIn {
+	return &in
 }

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"trpc.group/trpc-go/trpc-a2a-go/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/log"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
@@ -33,76 +34,131 @@ const (
 	defaultNotifyHost = "localhost"
 )
 
-// pushNotificationTaskProcessor is a task processor that sends push notifications.
-// It implements both the taskmanager.TaskProcessor interface for task processing
-// and the PushNotificationProcessor interface for receiving the authenticator.
-type pushNotificationTaskProcessor struct {
+// pushNotificationMessageProcessor is a message processor that sends push notifications.
+// It implements the taskmanager.MessageProcessor interface for message processing
+// and handles push notification functionality.
+type pushNotificationMessageProcessor struct {
 	notifyHost string
 	manager    *pushNotificationTaskManager
 }
 
-// Process implements the TaskProcessor interface.
-// This method should return quickly, only setting the task to "submitted" state
-// and then processing the task asynchronously.
-func (p *pushNotificationTaskProcessor) Process(
+// ProcessMessage implements the MessageProcessor interface.
+// This method processes messages and can handle both streaming and non-streaming modes.
+func (p *pushNotificationMessageProcessor) ProcessMessage(
 	ctx context.Context,
-	taskID string,
 	message protocol.Message,
-	handle taskmanager.TaskHandle,
-) error {
-	log.Infof("Task received: %s", taskID)
+	options taskmanager.ProcessOptions,
+	handle taskmanager.TaskHandler,
+) (*taskmanager.MessageProcessingResult, error) {
+	log.Infof("Message processing started")
 
 	// Extract task payload from the message parts
 	var payload map[string]interface{}
+	var textContent string
+
 	if len(message.Parts) > 0 {
-		if textPart, ok := message.Parts[0].(protocol.TextPart); ok {
+		if textPart, ok := message.Parts[0].(*protocol.TextPart); ok {
+			textContent = textPart.Text
+			// Try to parse as JSON, but if it fails, treat as plain text
 			if err := json.Unmarshal([]byte(textPart.Text), &payload); err != nil {
-				log.Errorf("Failed to unmarshal payload text: %v", err)
-				// Continue with empty payload
-				payload = make(map[string]interface{})
+				log.Infof("Message content is plain text, not JSON: %s", textContent)
+				// Create a simple payload with the text content
+				payload = map[string]interface{}{
+					"content": textContent,
+					"type":    "text",
+				}
+			} else {
+				log.Infof("Message content parsed as JSON successfully")
 			}
 		}
 	}
 
-	// Update status to working
-	if err := handle.UpdateStatus(protocol.TaskStateWorking, &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
-			protocol.NewTextPart("Task queued for processing..."),
-		},
-	}); err != nil {
-		return fmt.Errorf("failed to update task status: %v", err)
+	if payload == nil {
+		payload = map[string]interface{}{
+			"content": "empty message",
+			"type":    "text",
+		}
+	}
+
+	// For non-streaming processing, return direct result
+	if !options.Streaming {
+		return p.processDirectly(ctx, payload)
+	}
+
+	// For streaming processing, create a task and process asynchronously
+	task, err := handle.BuildTask(nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build task: %w", err)
+	}
+
+	// Subscribe to the task for streaming events
+	subscriber, err := handle.SubScribeTask(&task.Task.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to subscribe to task: %w", err)
 	}
 
 	// Start asynchronous processing
-	go p.processTaskAsync(ctx, taskID, payload, handle)
+	go p.processTaskAsync(ctx, task.Task.ID, payload, subscriber)
 
-	return nil
+	return &taskmanager.MessageProcessingResult{
+		StreamingEvents: subscriber,
+	}, nil
 }
 
-// OnTaskStatusUpdate implements the TaskProcessor interface.
-func (p *pushNotificationTaskProcessor) OnTaskStatusUpdate(
+// processDirectly handles immediate processing for non-streaming requests
+func (p *pushNotificationMessageProcessor) processDirectly(
 	ctx context.Context,
-	taskID string,
-	state protocol.TaskState,
-	message *protocol.Message,
-) error {
-	log.Infof("Updating task status for task: %s with status: %s", taskID, state)
-	if state == protocol.TaskStateCompleted ||
-		state == protocol.TaskStateFailed || state == protocol.TaskStateCanceled {
-		p.manager.sendPushNotification(ctx, taskID, string(state))
+	payload map[string]interface{},
+) (*taskmanager.MessageProcessingResult, error) {
+	// Process the task immediately
+	completeMsg := "Task completed"
+	if content, ok := payload["content"].(string); ok {
+		completeMsg = fmt.Sprintf("Task completed: %s", content)
 	}
-	return nil
+
+	responseMessage := protocol.NewMessage(
+		protocol.MessageRoleAgent,
+		[]protocol.Part{protocol.NewTextPart(completeMsg)},
+	)
+
+	return &taskmanager.MessageProcessingResult{
+		Result: &responseMessage,
+	}, nil
 }
 
 // processTaskAsync handles the actual task processing in a separate goroutine.
-func (p *pushNotificationTaskProcessor) processTaskAsync(
+func (p *pushNotificationMessageProcessor) processTaskAsync(
 	ctx context.Context,
 	taskID string,
 	payload map[string]interface{},
-	handle taskmanager.TaskHandle,
+	subscriber *taskmanager.TaskSubscriber,
 ) {
+	defer func() {
+		if subscriber.EventQueue != nil {
+			close(subscriber.EventQueue)
+		}
+	}()
+
 	log.Infof("Starting async processing of task: %s", taskID)
+
+	// Send working status
+	workingEvent := protocol.StreamingMessageEvent{
+		Result: &protocol.TaskStatusUpdateEvent{
+			TaskID:    taskID,
+			ContextID: "", // We'll need to get this from the task
+			Kind:      "status-update",
+			Status: protocol.TaskStatus{
+				State: protocol.TaskStateWorking,
+				Message: &protocol.Message{
+					MessageID: uuid.New().String(),
+					Kind:      "message",
+					Role:      protocol.MessageRoleAgent,
+					Parts:     []protocol.Part{protocol.NewTextPart("Task queued for processing...")},
+				},
+			},
+		},
+	}
+	subscriber.EventQueue <- workingEvent
 
 	// Process the task (simulating work)
 	time.Sleep(5 * time.Second) // Longer processing time to demonstrate async behavior
@@ -113,20 +169,28 @@ func (p *pushNotificationTaskProcessor) processTaskAsync(
 		completeMsg = fmt.Sprintf("Task completed: %s", content)
 	}
 
-	// Complete the task
-	// When we call UpdateStatus with a terminal state (like completed),
-	// the task manager automatically:
-	// 1. Updates the task status in memory
-	// 2. Sends a push notification to the registered webhook URL (if enabled)
-	if err := handle.UpdateStatus(protocol.TaskStateCompleted, &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
-			protocol.NewTextPart(completeMsg),
+	// Send completion status
+	completedEvent := protocol.StreamingMessageEvent{
+		Result: &protocol.TaskStatusUpdateEvent{
+			TaskID:    taskID,
+			ContextID: "", // We'll need to get this from the task
+			Kind:      "status-update",
+			Status: protocol.TaskStatus{
+				State: protocol.TaskStateCompleted,
+				Message: &protocol.Message{
+					MessageID: uuid.New().String(),
+					Kind:      "message",
+					Role:      protocol.MessageRoleAgent,
+					Parts:     []protocol.Part{protocol.NewTextPart(completeMsg)},
+				},
+			},
+			Final: boolPtr(true),
 		},
-	}); err != nil {
-		log.Errorf("Failed to update task status: %v", err)
-		return
 	}
+	subscriber.EventQueue <- completedEvent
+
+	// Send push notification
+	p.manager.sendPushNotification(ctx, taskID, string(protocol.TaskStateCompleted))
 
 	log.Infof("Task completed asynchronously: %s", taskID)
 }
@@ -136,14 +200,7 @@ type pushNotificationTaskManager struct {
 	authenticator *auth.PushNotificationAuthenticator
 }
 
-func (m *pushNotificationTaskManager) OnSendTask(ctx context.Context, request protocol.SendTaskParams) (*protocol.Task, error) {
-	task, err := m.TaskManager.OnSendTask(ctx, request)
-	if err != nil {
-		return nil, err
-	}
-	return task, nil
-}
-
+// sendPushNotification sends a push notification for a completed task
 func (m *pushNotificationTaskManager) sendPushNotification(ctx context.Context, taskID, status string) {
 	log.Infof("Sending push notification for task: %s with status: %s", taskID, status)
 	// Get push config from task manager
@@ -159,7 +216,7 @@ func (m *pushNotificationTaskManager) sendPushNotification(ctx context.Context, 
 	}
 
 	// Send push notification
-	if err := m.authenticator.SendPushNotification(ctx, pushConfig.URL, map[string]interface{}{
+	if err := m.authenticator.SendPushNotification(ctx, pushConfig.PushNotificationConfig.URL, map[string]interface{}{
 		"task_id":   taskID,
 		"status":    status,
 		"timestamp": time.Now().Format(time.RFC3339),
@@ -181,16 +238,27 @@ func main() {
 	// Create agent card
 	agentCard := server.AgentCard{
 		Name:        "Push Notification Example",
-		Description: strPtr("A2A server example with push notification support"),
+		Description: "A2A server example with push notification support",
 		URL:         fmt.Sprintf("http://localhost:%d/", *port),
 		Version:     "1.0.0",
 		Capabilities: server.AgentCapabilities{
-			Streaming:              true,
-			PushNotifications:      true,
-			StateTransitionHistory: true,
+			Streaming:              boolPtr(true),
+			PushNotifications:      boolPtr(true),
+			StateTransitionHistory: boolPtr(true),
 		},
 		DefaultInputModes:  []string{"text"},
 		DefaultOutputModes: []string{"text"},
+		Skills: []server.AgentSkill{
+			{
+				ID:          "push_notification_task",
+				Name:        "Push Notification Task",
+				Description: strPtr("Processes tasks with push notification support"),
+				Tags:        []string{"push", "notification", "async"},
+				Examples:    []string{`{"content": "Hello, world!"}`},
+				InputModes:  []string{"text"},
+				OutputModes: []string{"text"},
+			},
+		},
 	}
 
 	authenticator := auth.NewPushNotificationAuthenticator()
@@ -199,7 +267,7 @@ func main() {
 	}
 
 	// Create task processor
-	processor := &pushNotificationTaskProcessor{
+	processor := &pushNotificationMessageProcessor{
 		notifyHost: *notifyHost,
 	}
 	// Create task manager
@@ -240,4 +308,9 @@ func main() {
 // Helper function to create string pointer
 func strPtr(s string) *string {
 	return &s
+}
+
+// Helper function to create bool pointer
+func boolPtr(b bool) *bool {
+	return &b
 }

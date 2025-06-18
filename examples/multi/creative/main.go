@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/llms/googleai"
 	"trpc.group/trpc-go/trpc-a2a-go/log"
@@ -48,7 +49,7 @@ func (c *conversationCache) GetHistory(sessionID string) []string {
 	return []string{}
 }
 
-// creativeWritingProcessor implements the taskmanager.TaskProcessor interface
+// creativeWritingProcessor implements the taskmanager.MessageProcessor interface
 type creativeWritingProcessor struct {
 	llm   llms.Model
 	cache *conversationCache
@@ -80,40 +81,35 @@ func getAPIKey() string {
 	return apiKey
 }
 
-// Process implements the taskmanager.TaskProcessor interface
-func (p *creativeWritingProcessor) Process(
+// ProcessMessage implements the taskmanager.MessageProcessor interface
+func (p *creativeWritingProcessor) ProcessMessage(
 	ctx context.Context,
-	taskID string,
 	message protocol.Message,
-	handle taskmanager.TaskHandle,
-) error {
+	options taskmanager.ProcessOptions,
+	handle taskmanager.TaskHandler,
+) (*taskmanager.MessageProcessingResult, error) {
 	// Extract text from the incoming message
 	prompt := extractText(message)
 	if prompt == "" {
 		errMsg := "input message must contain text."
-		log.Error("Task %s failed: %s", taskID, errMsg)
+		log.Error("Message processing failed: %s", errMsg)
 
-		// Update status to Failed via handle
-		failedMessage := protocol.NewMessage(
+		// Return error message directly
+		errorMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
 			[]protocol.Part{protocol.NewTextPart(errMsg)},
 		)
-		_ = handle.UpdateStatus(protocol.TaskStateFailed, &failedMessage)
-		return fmt.Errorf(errMsg)
+		return &taskmanager.MessageProcessingResult{
+			Result: &errorMessage,
+		}, nil
 	}
 
-	log.Info("Processing creative writing task %s with prompt: %s", taskID, prompt)
+	log.Info("Processing creative writing message with prompt: %s", prompt)
 
-	// Get session ID from task metadata or use taskID as fallback
-	sessionID := taskID
-
-	// Update to in-progress status
-	progressMessage := protocol.NewMessage(
-		protocol.MessageRoleAgent,
-		[]protocol.Part{protocol.NewTextPart("Crafting your creative response...")},
-	)
-	if err := handle.UpdateStatus(protocol.TaskStateWorking, &progressMessage); err != nil {
-		log.Error("Failed to update task status: %v", err)
+	// Get session ID from message context or generate one
+	sessionID := handle.GetContextID()
+	if sessionID == "" {
+		sessionID = uuid.New().String()
 	}
 
 	// Build the context from conversation history
@@ -139,13 +135,15 @@ func (p *creativeWritingProcessor) Process(
 	response, err := llms.GenerateFromSinglePrompt(ctx, p.llm, finalPrompt)
 	if err != nil {
 		errorMsg := fmt.Sprintf("Failed to generate response: %v", err)
-		log.Error("Task %s failed: %s", taskID, errorMsg)
+		log.Error("Message processing failed: %s", errorMsg)
 
 		errorMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
 			[]protocol.Part{protocol.NewTextPart(errorMsg)},
 		)
-		return handle.UpdateStatus(protocol.TaskStateFailed, &errorMessage)
+		return &taskmanager.MessageProcessingResult{
+			Result: &errorMessage,
+		}, nil
 	}
 
 	// Save prompt and response to conversation history
@@ -158,31 +156,15 @@ func (p *creativeWritingProcessor) Process(
 		[]protocol.Part{protocol.NewTextPart(response)},
 	)
 
-	// Update task status to completed
-	if err := handle.UpdateStatus(protocol.TaskStateCompleted, &responseMessage); err != nil {
-		return fmt.Errorf("failed to update task status: %w", err)
-	}
-
-	// Add response as an artifact
-	artifact := protocol.Artifact{
-		Name:        stringPtr("Creative Writing Response"),
-		Description: stringPtr(prompt),
-		Index:       0,
-		Parts:       []protocol.Part{protocol.NewTextPart(response)},
-		LastChunk:   boolPtr(true),
-	}
-
-	if err := handle.AddArtifact(artifact); err != nil {
-		log.Error("Error adding artifact for task %s: %v", taskID, err)
-	}
-
-	return nil
+	return &taskmanager.MessageProcessingResult{
+		Result: &responseMessage,
+	}, nil
 }
 
 // extractText extracts the text content from a message
 func extractText(message protocol.Message) string {
 	for _, part := range message.Parts {
-		if textPart, ok := part.(protocol.TextPart); ok {
+		if textPart, ok := part.(*protocol.TextPart); ok {
 			return textPart.Text
 		}
 	}
@@ -202,27 +184,30 @@ func boolPtr(b bool) *bool {
 func getAgentCard() server.AgentCard {
 	return server.AgentCard{
 		Name:        "Creative Writing Agent",
-		Description: stringPtr("An agent that generates creative writing based on prompts using Google Gemini."),
+		Description: "An agent that generates creative writing based on prompts using Google Gemini.",
 		URL:         "http://localhost:8082",
 		Version:     "1.0.0",
 		Capabilities: server.AgentCapabilities{
-			Streaming:              false,
-			PushNotifications:      false,
-			StateTransitionHistory: true,
+			Streaming:              boolPtr(false),
+			PushNotifications:      boolPtr(false),
+			StateTransitionHistory: boolPtr(true),
 		},
-		DefaultInputModes:  []string{string(protocol.PartTypeText)},
-		DefaultOutputModes: []string{string(protocol.PartTypeText)},
+		DefaultInputModes:  []string{"text"},
+		DefaultOutputModes: []string{"text"},
 		Skills: []server.AgentSkill{
 			{
 				ID:          "creative_writing",
 				Name:        "Creative Writing",
 				Description: stringPtr("Creates engaging creative text based on user prompts."),
+				Tags:        []string{"creative", "writing", "llm"},
 				Examples: []string{
 					"Write a short story about a space explorer",
 					"Compose a poem about autumn leaves",
 					"Create a funny dialogue between a cat and a dog",
 					"Write a brief fantasy adventure about a magical forest",
 				},
+				InputModes:  []string{"text"},
+				OutputModes: []string{"text"},
 			},
 		},
 	}

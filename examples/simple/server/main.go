@@ -16,72 +16,141 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/google/uuid"
+
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/server"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
-// simpleTaskProcessor implements the taskmanager.TaskProcessor interface.
-type simpleTaskProcessor struct{}
+// simpleMessageProcessor implements the taskmanager.MessageProcessor interface.
+type simpleMessageProcessor struct{}
 
-// Process implements the taskmanager.TaskProcessor interface.
-func (p *simpleTaskProcessor) Process(
+// ProcessMessage implements the taskmanager.MessageProcessor interface.
+func (p *simpleMessageProcessor) ProcessMessage(
 	ctx context.Context,
-	taskID string,
 	message protocol.Message,
-	handle taskmanager.TaskHandle,
-) error {
+	options taskmanager.ProcessOptions,
+	handle taskmanager.TaskHandler,
+) (*taskmanager.MessageProcessingResult, error) {
 	// Extract text from the incoming message.
 	text := extractText(message)
 	if text == "" {
 		errMsg := "input message must contain text."
-		log.Printf("Task %s failed: %s", taskID, errMsg)
+		log.Printf("Message processing failed: %s", errMsg)
 
-		// Update status to Failed via handle.
-		failedMessage := protocol.NewMessage(
+		// Return error message directly
+		errorMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
 			[]protocol.Part{protocol.NewTextPart(errMsg)},
 		)
-		_ = handle.UpdateStatus(protocol.TaskStateFailed, &failedMessage)
-		return fmt.Errorf(errMsg)
+
+		return &taskmanager.MessageProcessingResult{
+			Result: &errorMessage,
+		}, nil
 	}
 
-	log.Printf("Processing task %s with input: %s", taskID, text)
+	log.Printf("Processing message with input: %s", text)
 
 	// Process the input text (in this simple example, we'll just reverse it).
 	result := reverseString(text)
 
-	// Create response message.
-	responseMessage := protocol.NewMessage(
-		protocol.MessageRoleAgent,
-		[]protocol.Part{protocol.NewTextPart(fmt.Sprintf("Processed result: %s", result))},
-	)
+	// For non-streaming processing, we can return either a Message or Task
+	if !options.Streaming {
+		// Return a direct message response
+		responseMessage := protocol.NewMessage(
+			protocol.MessageRoleAgent,
+			[]protocol.Part{protocol.NewTextPart(fmt.Sprintf("Processed result: %s", result))},
+		)
 
-	// Update task status to completed.
-	if err := handle.UpdateStatus(protocol.TaskStateCompleted, &responseMessage); err != nil {
-		return fmt.Errorf("failed to update task status: %w", err)
+		return &taskmanager.MessageProcessingResult{
+			Result: &responseMessage,
+		}, nil
 	}
 
-	// Add the processed text as an artifact.
-	artifact := protocol.Artifact{
-		Name:        stringPtr("Reversed Text"),
-		Description: stringPtr("The input text reversed"),
-		Index:       0,
-		Parts:       []protocol.Part{protocol.NewTextPart(result)},
-		LastChunk:   boolPtr(true),
+	// For streaming processing, create a task and subscribe to it
+	task, err := handle.BuildTask(nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build task: %w", err)
 	}
 
-	if err := handle.AddArtifact(artifact); err != nil {
-		log.Printf("Error adding artifact for task %s: %v", taskID, err)
+	// Subscribe to the task for streaming events
+	subscriber, err := handle.SubScribeTask(&task.Task.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to subscribe to task: %w", err)
 	}
 
-	return nil
+	// Start processing in a goroutine
+	go func() {
+		defer func() {
+			if subscriber.EventQueue != nil {
+				close(subscriber.EventQueue)
+			}
+		}()
+
+		// Send task status update - working
+		workingEvent := protocol.StreamingMessageEvent{
+			Result: &protocol.TaskStatusUpdateEvent{
+				TaskID:    task.Task.ID,
+				ContextID: task.Task.ContextID,
+				Kind:      "status-update",
+				Status: protocol.TaskStatus{
+					State: protocol.TaskStateWorking,
+				},
+			},
+		}
+		subscriber.EventQueue <- workingEvent
+
+		// Create response message
+		responseMessage := protocol.NewMessage(
+			protocol.MessageRoleAgent,
+			[]protocol.Part{protocol.NewTextPart(fmt.Sprintf("Processed result: %s", result))},
+		)
+
+		// Send task completion
+		completedEvent := protocol.StreamingMessageEvent{
+			Result: &protocol.TaskStatusUpdateEvent{
+				TaskID:    task.Task.ID,
+				ContextID: task.Task.ContextID,
+				Kind:      "status-update",
+				Status: protocol.TaskStatus{
+					State:   protocol.TaskStateCompleted,
+					Message: &responseMessage,
+				},
+				Final: boolPtr(true),
+			},
+		}
+		subscriber.EventQueue <- completedEvent
+
+		// Add artifact
+		artifact := protocol.Artifact{
+			ArtifactID:  uuid.New().String(),
+			Name:        stringPtr("Reversed Text"),
+			Description: stringPtr("The input text reversed"),
+			Parts:       []protocol.Part{protocol.NewTextPart(result)},
+		}
+
+		artifactEvent := protocol.StreamingMessageEvent{
+			Result: &protocol.TaskArtifactUpdateEvent{
+				TaskID:    task.Task.ID,
+				ContextID: task.Task.ContextID,
+				Kind:      "artifact-update",
+				Artifact:  artifact,
+				LastChunk: boolPtr(true),
+			},
+		}
+		subscriber.EventQueue <- artifactEvent
+	}()
+
+	return &taskmanager.MessageProcessingResult{
+		StreamingEvents: subscriber,
+	}, nil
 }
 
 // extractText extracts the text content from a message.
 func extractText(message protocol.Message) string {
 	for _, part := range message.Parts {
-		if textPart, ok := part.(protocol.TextPart); ok {
+		if textPart, ok := part.(*protocol.TextPart); ok {
 			return textPart.Text
 		}
 	}
@@ -116,18 +185,19 @@ func main() {
 	// Create the agent card.
 	agentCard := server.AgentCard{
 		Name:        "Simple A2A Example Server",
-		Description: stringPtr("A simple example A2A server that reverses text"),
+		Description: "A simple example A2A server that reverses text",
 		URL:         fmt.Sprintf("http://%s:%d/", *host, *port),
 		Version:     "1.0.0",
 		Provider: &server.AgentProvider{
 			Organization: "tRPC-A2A-Go Examples",
 		},
 		Capabilities: server.AgentCapabilities{
-			Streaming:              false,
-			StateTransitionHistory: true,
+			Streaming:              boolPtr(true),
+			PushNotifications:      boolPtr(false),
+			StateTransitionHistory: boolPtr(true),
 		},
-		DefaultInputModes:  []string{string(protocol.PartTypeText)},
-		DefaultOutputModes: []string{string(protocol.PartTypeText)},
+		DefaultInputModes:  []string{"text"},
+		DefaultOutputModes: []string{"text"},
 		Skills: []server.AgentSkill{
 			{
 				ID:          "text_reversal",
@@ -135,14 +205,14 @@ func main() {
 				Description: stringPtr("Reverses the input text"),
 				Tags:        []string{"text", "processing"},
 				Examples:    []string{"Hello, world!"},
-				InputModes:  []string{string(protocol.PartTypeText)},
-				OutputModes: []string{string(protocol.PartTypeText)},
+				InputModes:  []string{"text"},
+				OutputModes: []string{"text"},
 			},
 		},
 	}
 
-	// Create the task processor.
-	processor := &simpleTaskProcessor{}
+	// Create the message processor.
+	processor := &simpleMessageProcessor{}
 
 	// Create task manager and inject processor.
 	taskManager, err := taskmanager.NewMemoryTaskManager(processor)

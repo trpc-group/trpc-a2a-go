@@ -10,7 +10,6 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log"
 	"time"
 
@@ -36,95 +35,134 @@ func main() {
 	// Display connection information.
 	log.Printf("Connecting to agent: %s (Timeout: %v)", *agentURL, *timeout)
 
-	// Create a new unique task ID.
-	taskID := uuid.New().String()
+	// Create a new unique message ID and context ID.
+	contextID := uuid.New().String()
+	log.Printf("Context ID: %s", contextID)
 
-	// Create a new session ID.
-	sessionID := uuid.New().String()
-	log.Printf("Session ID: %s", sessionID)
-
-	// Create the message to send.
-	userMessage := protocol.NewMessage(
+	// Create the message to send using the new constructor.
+	userMessage := protocol.NewMessageWithContext(
 		protocol.MessageRoleUser,
 		[]protocol.Part{protocol.NewTextPart(*message)},
+		nil, // taskID
+		&contextID,
 	)
 
-	// Create task parameters.
-	params := protocol.SendTaskParams{
-		ID:        taskID,
-		SessionID: &sessionID,
-		Message:   userMessage,
+	// Create message parameters using the new SendMessageParams structure.
+	params := protocol.SendMessageParams{
+		Message: userMessage,
+		Configuration: &protocol.SendMessageConfiguration{
+			Blocking: boolPtr(true), // Wait for completion
+		},
 	}
 
-	log.Printf("Sending task %s with message: %s", taskID, *message)
+	log.Printf("Sending message with content: %s", *message)
 
-	// Send task to the agent.
+	// Send message to the agent using the new message API.
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	task, err := a2aClient.SendTasks(ctx, params)
+	messageResult, err := a2aClient.SendMessage(ctx, params)
 	if err != nil {
-		log.Fatalf("Failed to send task: %v", err)
+		log.Fatalf("Failed to send message: %v", err)
 	}
 
-	// Display the initial task response.
-	log.Printf("Task %s initial state: %s", taskID, task.Status.State)
+	// Display the result.
+	log.Printf("Message sent successfully")
 
-	// Wait for the task to complete if it's not already done.
-	if task.Status.State != protocol.TaskStateCompleted && 
-	   task.Status.State != protocol.TaskStateFailed && 
-	   task.Status.State != protocol.TaskStateCanceled {
-		
-		log.Printf("Task %s is %s, fetching final state...", taskID, task.Status.State)
-		
-		// Get the task's final state.
-		queryParams := protocol.TaskQueryParams{
-			ID: taskID,
+	// Handle the result based on its type
+	switch result := messageResult.Result.(type) {
+	case *protocol.Message:
+		log.Printf("Received message response:")
+		printMessage(*result)
+	case *protocol.Task:
+		log.Printf("Received task response - ID: %s, State: %s", result.ID, result.Status.State)
+
+		// If task is not completed, wait and check again
+		if result.Status.State != protocol.TaskStateCompleted &&
+			result.Status.State != protocol.TaskStateFailed &&
+			result.Status.State != protocol.TaskStateCanceled {
+
+			log.Printf("Task %s is %s, fetching final state...", result.ID, result.Status.State)
+
+			// Get the task's final state.
+			queryParams := protocol.TaskQueryParams{
+				ID: result.ID,
+			}
+
+			// Give the server some time to process.
+			time.Sleep(500 * time.Millisecond)
+
+			task, err := a2aClient.GetTasks(ctx, queryParams)
+			if err != nil {
+				log.Fatalf("Failed to get task status: %v", err)
+			}
+
+			log.Printf("Task %s final state: %s", task.ID, task.Status.State)
+			printTaskResult(task)
+		} else {
+			printTaskResult(result)
 		}
-		
-		// Give the server some time to process.
-		time.Sleep(500 * time.Millisecond)
-		
-		task, err = a2aClient.GetTasks(ctx, queryParams)
-		if err != nil {
-			log.Fatalf("Failed to get task status: %v", err)
+	default:
+		log.Printf("Received unknown result type: %T", result)
+	}
+}
+
+// printMessage prints the contents of a message.
+func printMessage(message protocol.Message) {
+	log.Printf("Message ID: %s", message.MessageID)
+	if message.ContextID != nil {
+		log.Printf("Context ID: %s", *message.ContextID)
+	}
+	log.Printf("Role: %s", message.Role)
+
+	log.Printf("Message parts:")
+	for i, part := range message.Parts {
+		switch p := part.(type) {
+		case *protocol.TextPart:
+			log.Printf("  Part %d (text): %s", i+1, p.Text)
+		case *protocol.FilePart:
+			log.Printf("  Part %d (file): [file content]", i+1)
+		case *protocol.DataPart:
+			log.Printf("  Part %d (data): %+v", i+1, p.Data)
+		default:
+			log.Printf("  Part %d (unknown): %+v", i+1, part)
 		}
 	}
+}
 
-	// Display the final task state.
-	log.Printf("Task %s final state: %s", taskID, task.Status.State)
-
-	// Display the response message if available.
+// printTaskResult prints the contents of a task result.
+func printTaskResult(task *protocol.Task) {
 	if task.Status.Message != nil {
-		fmt.Println("\nAgent response:")
-		for _, part := range task.Status.Message.Parts {
-			if textPart, ok := part.(protocol.TextPart); ok {
-				fmt.Println(textPart.Text)
-			}
-		}
+		log.Printf("Task result message:")
+		printMessage(*task.Status.Message)
 	}
 
-	// Display any artifacts.
+	// Print artifacts if any
 	if len(task.Artifacts) > 0 {
-		fmt.Println("\nArtifacts:")
+		log.Printf("Task artifacts:")
 		for i, artifact := range task.Artifacts {
-			// Display artifact name and description if available.
+			name := "Unnamed"
 			if artifact.Name != nil {
-				fmt.Printf("%d. %s", i+1, *artifact.Name)
-				if artifact.Description != nil {
-					fmt.Printf(" - %s", *artifact.Description)
-				}
-				fmt.Println()
-			} else {
-				fmt.Printf("%d. Artifact #%d\n", i+1, i+1)
+				name = *artifact.Name
 			}
-
-			// Display artifact content.
-			for _, part := range artifact.Parts {
-				if textPart, ok := part.(protocol.TextPart); ok {
-					fmt.Printf("   %s\n", textPart.Text)
+			log.Printf("  Artifact %d: %s", i+1, name)
+			for j, part := range artifact.Parts {
+				switch p := part.(type) {
+				case *protocol.TextPart:
+					log.Printf("    Part %d (text): %s", j+1, p.Text)
+				case *protocol.FilePart:
+					log.Printf("    Part %d (file): [file content]", j+1)
+				case *protocol.DataPart:
+					log.Printf("    Part %d (data): %+v", j+1, p.Data)
+				default:
+					log.Printf("    Part %d (unknown): %+v", j+1, part)
 				}
 			}
 		}
 	}
-} 
+}
+
+// boolPtr returns a pointer to a boolean value.
+func boolPtr(b bool) *bool {
+	return &b
+}

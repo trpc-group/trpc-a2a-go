@@ -141,7 +141,7 @@ func TestFormatEvent(t *testing.T) {
 		{
 			name:      "struct data",
 			eventType: "close",
-			data:      CloseEventData{TaskID: "123", Reason: "completed"},
+			data:      CloseEventData{ID: "123", Reason: "completed"},
 			expected:  "event: close\ndata: {\"taskId\":\"123\",\"reason\":\"completed\"}\n\n",
 		},
 		{
@@ -215,7 +215,7 @@ func TestReadEventSequence(t *testing.T) {
 
 func TestCloseEventDataMarshaling(t *testing.T) {
 	closeData := CloseEventData{
-		TaskID: "task123",
+		ID:     "task123",
 		Reason: "test completed",
 	}
 
@@ -229,8 +229,8 @@ func TestCloseEventDataMarshaling(t *testing.T) {
 		t.Fatalf("Failed to unmarshal CloseEventData: %v.", err)
 	}
 
-	if unmarshaled.TaskID != closeData.TaskID {
-		t.Errorf("Expected TaskID %q, got %q.", closeData.TaskID, unmarshaled.TaskID)
+	if unmarshaled.ID != closeData.ID {
+		t.Errorf("Expected TaskID %q, got %q.", closeData.ID, unmarshaled.ID)
 	}
 
 	if unmarshaled.Reason != closeData.Reason {

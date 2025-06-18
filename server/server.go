@@ -25,6 +25,8 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
+var errUnknownEvent = errors.New("unknown event type")
+
 // A2AServer implements the HTTP server for the A2A protocol.
 // It handles agent card requests and routes JSON-RPC calls to the TaskManager.
 type A2AServer struct {
@@ -142,7 +144,7 @@ func (s *A2AServer) Handler() http.Handler {
 // Corresponds to GET /.well-known/agent.json in A2A Spec.
 func (s *A2AServer) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 	if s.corsEnabled {
-		s.setCORSHeaders(w)
+		setCORSHeaders(w)
 	}
 	if r.Method != http.MethodGet {
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
@@ -161,7 +163,7 @@ func (s *A2AServer) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 func (s *A2AServer) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	// --- CORS Handling ---
 	if s.corsEnabled {
-		s.setCORSHeaders(w)
+		setCORSHeaders(w)
 		// Handle browser preflight requests.
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
@@ -246,20 +248,31 @@ func (s *A2AServer) routeJSONRPCMethod(ctx context.Context, w http.ResponseWrite
 	log.Infof("Received JSON-RPC request (ID: %v, Method: %s)", request.ID, request.Method)
 
 	switch request.Method {
-	case protocol.MethodTasksSend: // A2A Spec: tasks/send
-		s.handleTasksSend(ctx, w, request)
-	case protocol.MethodTasksSendSubscribe: // A2A Spec: tasks/sendSubscribe
-		s.handleTasksSendSubscribe(ctx, w, request)
+
+	case protocol.MethodMessageSend: // A2A Spec: message/send
+		s.handleMessageSend(ctx, w, request)
+	case protocol.MethodMessageStream: // A2A Spec: message/stream
+		s.handleMessageStream(ctx, w, request)
+	case protocol.MethodTasksPushNotificationConfigGet: // A2A Spec: tasks/pushNotification/config/get
+		s.handleTasksPushNotificationGet(ctx, w, request)
+	case protocol.MethodTasksPushNotificationConfigSet: // A2A Spec: tasks/pushNotification/config/set
+		s.handleTasksPushNotificationSet(ctx, w, request)
 	case protocol.MethodTasksGet: // A2A Spec: tasks/get
 		s.handleTasksGet(ctx, w, request)
 	case protocol.MethodTasksCancel: // A2A Spec: tasks/cancel
 		s.handleTasksCancel(ctx, w, request)
-	case protocol.MethodTasksPushNotificationSet: // A2A Spec: tasks/pushNotification/set
-		s.handleTasksPushNotificationSet(ctx, w, request)
-	case protocol.MethodTasksPushNotificationGet: // A2A Spec: tasks/pushNotification/get
-		s.handleTasksPushNotificationGet(ctx, w, request)
 	case protocol.MethodTasksResubscribe: // A2A Spec: tasks/resubscribe
 		s.handleTasksResubscribe(ctx, w, request)
+
+	// deprecated methods:
+	case protocol.MethodTasksSend: // A2A Spec: message/send
+		s.handleTasksSend(ctx, w, request)
+	case protocol.MethodTasksSendSubscribe: // A2A Spec: message/sendSubscribe
+		s.handleTasksSendSubscribe(ctx, w, request)
+	case protocol.MethodTasksPushNotificationGet: // A2A Spec: tasks/pushNotification/get
+		s.handleTasksPushNotificationGet(ctx, w, request)
+	case protocol.MethodTasksPushNotificationSet: // A2A Spec: tasks/pushNotification/config/set
+		s.handleTasksPushNotificationSet(ctx, w, request)
 	default:
 		log.Warnf("Method not found: %s (Request ID: %v)", request.Method, request.ID)
 		s.writeJSONRPCError(w, request.ID,
@@ -283,6 +296,17 @@ func (s *A2AServer) handleTasksSend(ctx context.Context, w http.ResponseWriter, 
 		s.writeJSONRPCError(w, request.ID, err)
 		return
 	}
+
+	// Validate required fields
+	if params.ID == "" {
+		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
+		return
+	}
+	if params.Message.Role == "" || len(params.Message.Parts) == 0 {
+		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("message with at least one part is required"))
+		return
+	}
+
 	// Delegate to the task manager.
 	task, err := s.taskManager.OnSendTask(ctx, params)
 	if err != nil {
@@ -346,89 +370,6 @@ func (s *A2AServer) handleTasksCancel(ctx context.Context, w http.ResponseWriter
 	s.writeJSONRPCResponse(w, request.ID, task)
 }
 
-// handleSSEStream handles an SSE stream for a task, including setup and event forwarding.
-// It sets the appropriate headers, logs connection status, and forwards events to the client.
-func (s *A2AServer) handleSSEStream(
-	ctx context.Context,
-	w http.ResponseWriter,
-	flusher http.Flusher,
-	eventsChan <-chan protocol.TaskEvent,
-	taskID string,
-	requestID interface{},
-	isResubscribe bool,
-) {
-	// Set headers for SSE.
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	if s.corsEnabled {
-		s.setCORSHeaders(w)
-	}
-
-	// Indicate successful subscription setup.
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush() // Send headers immediately.
-
-	// Log appropriate message based on whether this is a new subscription or resubscribe
-	if isResubscribe {
-		log.Infof("SSE stream reopened for task %s (Request ID: %v)", taskID, requestID)
-	} else {
-		log.Infof("SSE stream opened for task %s (Request ID: %v)", taskID, requestID)
-	}
-
-	// Use request context to detect client disconnection.
-	clientClosed := ctx.Done()
-
-	// --- Event Forwarding Loop ---
-	for {
-		select {
-		case event, ok := <-eventsChan:
-			if !ok {
-				// Channel closed by task manager (task finished or error).
-				log.Infof("SSE stream closing for task %s (event channel closed by manager)", taskID)
-				// Send a final SSE event indicating closure.
-				closeData := sse.CloseEventData{
-					TaskID: taskID,
-					Reason: "task ended",
-				}
-				// Use JSON-RPC format for the close event
-				if err := sse.FormatJSONRPCEvent(w, protocol.EventClose, requestID, closeData); err != nil {
-					log.Errorf("Error writing SSE JSON-RPC close event for task %s: %v", taskID, err)
-				} else {
-					flusher.Flush()
-				}
-				return // End the handler.
-			}
-
-			// Determine event type string for SSE.
-			var eventType string
-			switch event.(type) {
-			case protocol.TaskStatusUpdateEvent:
-				eventType = protocol.EventTaskStatusUpdate
-			case protocol.TaskArtifactUpdateEvent:
-				eventType = protocol.EventTaskArtifactUpdate
-			default:
-				log.Warnf("Unknown event type received for task %s: %T. Skipping.", taskID, event)
-				continue // Skip unknown event types
-			}
-
-			// Write the event to the SSE stream using JSON-RPC format.
-			if err := sse.FormatJSONRPCEvent(w, eventType, requestID, event); err != nil {
-				// Error writing, likely client disconnected.
-				log.Errorf("Error writing SSE JSON-RPC event for task %s (client likely disconnected): %v. "+
-					"Closing stream.", taskID, err)
-				return // Exit the handler.
-			}
-			// Flush the buffer to ensure the event is sent immediately.
-			flusher.Flush()
-		case <-clientClosed:
-			// Client disconnected (request context canceled).
-			log.Infof("SSE client disconnected for task %s (Request ID: %v). Closing stream.", taskID, requestID)
-			return // Exit the handler.
-		}
-	}
-}
-
 // handleTasksSendSubscribe handles the tasks_sendSubscribe method using Server-Sent Events (SSE).
 func (s *A2AServer) handleTasksSendSubscribe(ctx context.Context, w http.ResponseWriter, request jsonrpc.Request) {
 	var params protocol.SendTaskParams
@@ -470,7 +411,7 @@ func (s *A2AServer) handleTasksSendSubscribe(ctx context.Context, w http.Respons
 	}
 
 	// Use the helper function to handle the SSE stream
-	s.handleSSEStream(ctx, w, flusher, eventsChan, params.ID, request.ID, false)
+	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, request.ID.(string), false)
 }
 
 // writeJSONRPCResponse encodes and writes a successful JSON-RPC response.
@@ -516,7 +457,7 @@ func (s *A2AServer) writeJSONRPCError(w http.ResponseWriter, id interface{}, err
 
 // setCORSHeaders adds permissive CORS headers for development/testing.
 // WARNING: This is insecure for production. Configure origins explicitly.
-func (s *A2AServer) setCORSHeaders(w http.ResponseWriter) {
+func setCORSHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*") // INSECURE
 	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -534,7 +475,7 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 		return
 	}
 	// Validate required fields.
-	if params.ID == "" {
+	if params.TaskID == "" {
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
 		return
 	}
@@ -579,7 +520,7 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 	// Delegate to the task manager.
 	result, err := s.taskManager.OnPushNotificationSet(ctx, params)
 	if err != nil {
-		log.Errorf("Error calling OnPushNotificationSet for task %s: %v", params.ID, err)
+		log.Errorf("Error calling OnPushNotificationSet for task %s: %v", params.TaskID, err)
 		// Check if the error is already a JSONRPCError.
 		if rpcErr, ok := err.(*jsonrpc.Error); ok {
 			s.writeJSONRPCError(w, request.ID, rpcErr)
@@ -684,5 +625,169 @@ func (s *A2AServer) handleTasksResubscribe(ctx context.Context, w http.ResponseW
 	}
 
 	// Use the helper function to handle the SSE stream
-	s.handleSSEStream(ctx, w, flusher, eventsChan, params.ID, request.ID, true)
+	handleSSEStream[protocol.StreamingMessageEvent](ctx, s.corsEnabled, w, flusher, eventsChan, request.ID.(string), true)
+}
+
+// handleMessageSend handles the message_send method.
+func (s *A2AServer) handleMessageSend(ctx context.Context, w http.ResponseWriter, request jsonrpc.Request) {
+	var params protocol.SendMessageParams
+	if err := s.unmarshalParams(request.Params, &params); err != nil {
+		s.writeJSONRPCError(w, request.ID, err)
+		return
+	}
+	// Delegate to the task manager.
+	message, err := s.taskManager.OnSendMessage(ctx, params)
+	if err != nil {
+		log.Errorf("Error calling OnSendMessage for message %s: %v", params.RPCID, err)
+		// Check if it's already a JSON-RPC error
+		if rpcErr, ok := err.(*jsonrpc.Error); ok {
+			s.writeJSONRPCError(w, request.ID, rpcErr)
+		} else {
+			// Otherwise, wrap as internal error
+			s.writeJSONRPCError(w, request.ID,
+				jsonrpc.ErrInternalError(fmt.Sprintf("message processing failed: %v", err)))
+		}
+		return
+	}
+	s.writeJSONRPCResponse(w, request.ID, message)
+}
+
+// handleMessageStream handles the message_stream method using Server-Sent Events (SSE).
+func (s *A2AServer) handleMessageStream(ctx context.Context, w http.ResponseWriter, request jsonrpc.Request) {
+	var params protocol.SendMessageParams
+	if err := s.unmarshalParams(request.Params, &params); err != nil {
+		s.writeJSONRPCError(w, request.ID, err)
+		return
+	}
+
+	if params.Message.Role == "" || len(params.Message.Parts) == 0 {
+		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("message with at least one part is required"))
+		return
+	}
+
+	// Check if client supports SSE.
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		log.Error("Streaming is not supported by the underlying http responseWriter")
+		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInternalError("server does not support streaming"))
+		return
+	}
+
+	// Get the event channel from the task manager.
+	eventsChan, err := s.taskManager.OnSendMessageStream(ctx, params)
+	if err != nil {
+		log.Errorf("Error calling OnSendMessageStream for message %s: %v", params.RPCID, err)
+		s.writeJSONRPCError(w, request.ID,
+			jsonrpc.ErrInternalError(fmt.Sprintf("failed to subscribe to message events: %v", err)))
+		return
+	}
+
+	// Use the helper function to handle the SSE stream
+	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, request.ID.(string), false)
+}
+
+// handleSSEStream handles an SSE stream for a task, including setup and event forwarding.
+// It sets the appropriate headers, logs connection status, and forwards events to the client.
+func handleSSEStream[T interface{}](
+	ctx context.Context,
+	corsEnabled bool,
+	w http.ResponseWriter,
+	flusher http.Flusher,
+	eventsChan <-chan T,
+	rpcID string,
+	isResubscribe bool,
+) {
+	// Set headers for SSE.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	if corsEnabled {
+		setCORSHeaders(w)
+	}
+
+	// Indicate successful subscription setup.
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush() // Send headers immediately.
+
+	// Log appropriate message based on whether this is a new subscription or resubscribe
+	if isResubscribe {
+		log.Infof("SSE stream reopened for request ID: %v)", rpcID)
+	} else {
+		log.Infof("SSE stream opened for request ID: %v)", rpcID)
+	}
+
+	// Use request context to detect client disconnection.
+	clientClosed := ctx.Done()
+
+	// --- Event Forwarding Loop ---
+	for {
+		select {
+		case event, ok := <-eventsChan:
+			if !ok {
+				// Channel closed by task manager (task finished or error).
+				log.Infof("SSE stream closing request ID: %s", rpcID)
+				// Send a final SSE event indicating closure.
+				closeData := sse.CloseEventData{
+					ID:     rpcID,
+					Reason: "task ended",
+				}
+				// Use JSON-RPC format for the close event
+				if err := sse.FormatJSONRPCEvent(w, protocol.EventClose, rpcID, closeData); err != nil {
+					log.Errorf("Error writing SSE JSON-RPC close event for request ID: %s: %v", rpcID, err)
+				} else {
+					flusher.Flush()
+				}
+				return // End the handler.
+			}
+			if err := sendSSEEvent(w, rpcID, flusher, event); err != nil {
+				if err == errUnknownEvent {
+					log.Warnf("Unknown event type received for request ID: %s: %T. Skipping.", rpcID, event)
+					continue
+				}
+				log.Errorf("Error writing SSE JSON-RPC event for request ID: %s (client likely disconnected): %v", rpcID, err)
+				return
+			}
+			// Flush the buffer to ensure the event is sent immediately.
+			flusher.Flush()
+		case <-clientClosed:
+			// Client disconnected (request context canceled).
+			log.Infof("SSE client disconnected for request ID: %s. Closing stream.", rpcID)
+			return // Exit the handler.
+		}
+	}
+}
+
+func sendSSEEvent(w http.ResponseWriter, rpcID string, flusher http.Flusher, event interface{}) error {
+	// Determine event type string for SSE.
+	var eventType string
+	var actualEvent protocol.Event
+
+	// Handle StreamingMessageEvent by extracting the inner Result
+	if streamEvent, ok := event.(protocol.StreamingMessageEvent); ok {
+		actualEvent = streamEvent.Result
+	} else if directEvent, ok := event.(protocol.Event); ok {
+		actualEvent = directEvent
+	} else {
+		return errUnknownEvent
+	}
+
+	switch actualEvent.(type) {
+	case *protocol.TaskStatusUpdateEvent:
+		eventType = protocol.EventStatusUpdate
+	case *protocol.TaskArtifactUpdateEvent:
+		eventType = protocol.EventArtifactUpdate
+	case *protocol.Message:
+		eventType = protocol.EventMessage
+	case *protocol.Task:
+		eventType = protocol.EventTask
+	default:
+		return errUnknownEvent
+	}
+
+	// For StreamMessage API, we need to send the event wrapped in StreamingMessageEvent
+	// Write the event to the SSE stream using JSON-RPC format.
+	if err := sse.FormatJSONRPCEvent(w, eventType, rpcID, event); err != nil {
+		return err
+	}
+	return nil
 }

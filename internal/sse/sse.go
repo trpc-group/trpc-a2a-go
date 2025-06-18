@@ -21,7 +21,7 @@ import (
 // CloseEventData represents the data payload for a close event.
 // Used when formatting SSE messages indicating stream closure.
 type CloseEventData struct {
-	TaskID string `json:"taskId"`
+	ID     string `json:"taskId"`
 	Reason string `json:"reason"`
 }
 

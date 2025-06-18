@@ -8,6 +8,8 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,21 +22,26 @@ func boolPtr(b bool) *bool {
 	return &b
 }
 
+// Helper function to create string pointers
+func stringPtr(s string) *string {
+	return &s
+}
+
 // Test marshalling of concrete types
 func TestPartConcreteType_MarshalJSON(t *testing.T) {
 	t.Run("TextPart", func(t *testing.T) {
 		part := NewTextPart("Hello")
 		jsonData, err := json.Marshal(part)
 		require.NoError(t, err)
-		assert.JSONEq(t, `{"type":"text","text":"Hello"}`, string(jsonData))
+		assert.JSONEq(t, `{"kind":"text","text":"Hello"}`, string(jsonData))
 	})
 
 	t.Run("DataPart", func(t *testing.T) {
 		payload := map[string]int{"a": 1}
-		part := DataPart{Type: PartTypeData, Data: payload}
+		part := DataPart{Kind: KindData, Data: payload}
 		jsonData, err := json.Marshal(part)
 		require.NoError(t, err)
-		assert.JSONEq(t, `{"type":"data","data":{"a":1}}`, string(jsonData))
+		assert.JSONEq(t, `{"kind":"data","data":{"a":1}}`, string(jsonData))
 	})
 
 	// FilePart marshalling test can be added if needed
@@ -46,9 +53,9 @@ func TestPartIfaceUnmarshalJSONCont(t *testing.T) {
 	jsonData := `{
 		"role": "user",
 		"parts": [
-			{"type":"text", "text":"part1"},
-			{"type":"data", "data":{"val": true}},
-			{"type":"text", "text":"part3"}
+			{"kind": "text", "text": "part1"},
+			{"kind": "data", "data": {"val": true}},
+			{"kind": "text", "text": "part3"}
 		]
 	}`
 
@@ -57,14 +64,14 @@ func TestPartIfaceUnmarshalJSONCont(t *testing.T) {
 	require.NoError(t, err, "Unmarshal into Message should succeed via custom UnmarshalJSON")
 
 	require.Len(t, msg.Parts, 3)
-	require.IsType(t, TextPart{}, msg.Parts[0])
-	assert.Equal(t, "part1", msg.Parts[0].(TextPart).Text)
+	require.IsType(t, &TextPart{}, msg.Parts[0])
+	assert.Equal(t, "part1", msg.Parts[0].(*TextPart).Text)
 
-	require.IsType(t, DataPart{}, msg.Parts[1])
-	assert.Equal(t, map[string]interface{}{"val": true}, msg.Parts[1].(DataPart).Data)
+	require.IsType(t, &DataPart{}, msg.Parts[1])
+	assert.Equal(t, map[string]interface{}{"val": true}, msg.Parts[1].(*DataPart).Data)
 
-	require.IsType(t, TextPart{}, msg.Parts[2])
-	assert.Equal(t, "part3", msg.Parts[2].(TextPart).Text)
+	require.IsType(t, &TextPart{}, msg.Parts[2])
+	assert.Equal(t, "part3", msg.Parts[2].(*TextPart).Text)
 }
 
 // Removed TestArtifactPart_MarshalUnmarshalJSON as ArtifactPart type doesn't exist
@@ -73,7 +80,7 @@ func TestPartIfaceUnmarshalJSONCont(t *testing.T) {
 // Removed TestMessage_MarshalUnmarshalJSON as it's covered by TestPartIface_UnmarshalJSON_Container
 
 func TestTaskEvent_IsFinal(t *testing.T) {
-	// Use boolPtr helper for LastChunk
+	// Use boolPtr helper for pointer boolean values
 	tests := []struct {
 		name     string
 		event    TaskEvent
@@ -81,37 +88,47 @@ func TestTaskEvent_IsFinal(t *testing.T) {
 	}{
 		{
 			name:     "StatusUpdate Submitted",
-			event:    TaskStatusUpdateEvent{Final: false, Status: TaskStatus{State: TaskStateSubmitted}},
+			event:    &TaskStatusUpdateEvent{Final: boolPtr(false), Status: TaskStatus{State: TaskStateSubmitted}},
 			expected: false,
 		},
 		{
 			name:     "StatusUpdate Working",
-			event:    TaskStatusUpdateEvent{Final: false, Status: TaskStatus{State: TaskStateWorking}},
+			event:    &TaskStatusUpdateEvent{Final: boolPtr(false), Status: TaskStatus{State: TaskStateWorking}},
 			expected: false,
 		},
 		{
 			name:     "StatusUpdate Completed",
-			event:    TaskStatusUpdateEvent{Final: true, Status: TaskStatus{State: TaskStateCompleted}},
+			event:    &TaskStatusUpdateEvent{Final: boolPtr(true), Status: TaskStatus{State: TaskStateCompleted}},
 			expected: true,
 		},
 		{
 			name:     "StatusUpdate Failed",
-			event:    TaskStatusUpdateEvent{Final: true, Status: TaskStatus{State: TaskStateFailed}},
+			event:    &TaskStatusUpdateEvent{Final: boolPtr(true), Status: TaskStatus{State: TaskStateFailed}},
 			expected: true,
 		},
 		{
 			name:     "StatusUpdate Canceled",
-			event:    TaskStatusUpdateEvent{Final: true, Status: TaskStatus{State: TaskStateCanceled}},
+			event:    &TaskStatusUpdateEvent{Final: boolPtr(true), Status: TaskStatus{State: TaskStateCanceled}},
 			expected: true,
 		},
 		{
-			name:     "ArtifactUpdate Not Last Chunk",
-			event:    TaskArtifactUpdateEvent{Final: false, Artifact: Artifact{LastChunk: boolPtr(false)}},
+			name:     "StatusUpdate Rejected",
+			event:    &TaskStatusUpdateEvent{Final: boolPtr(true), Status: TaskStatus{State: TaskStateRejected}},
+			expected: true,
+		},
+		{
+			name:     "StatusUpdate AuthRequired",
+			event:    &TaskStatusUpdateEvent{Final: boolPtr(false), Status: TaskStatus{State: TaskStateAuthRequired}},
 			expected: false,
 		},
 		{
-			name:     "ArtifactUpdate Last Chunk",
-			event:    TaskArtifactUpdateEvent{Final: true, Artifact: Artifact{LastChunk: boolPtr(true)}},
+			name:     "ArtifactUpdate Not Final",
+			event:    TaskArtifactUpdateEvent{},
+			expected: false,
+		},
+		{
+			name:     "ArtifactUpdate Final",
+			event:    TaskArtifactUpdateEvent{LastChunk: boolPtr(true)},
 			expected: true,
 		},
 	}
@@ -134,6 +151,8 @@ func TestTaskState(t *testing.T) {
 		{TaskStateCompleted, "completed"},
 		{TaskStateCanceled, "canceled"},
 		{TaskStateFailed, "failed"},
+		{TaskStateRejected, "rejected"},
+		{TaskStateAuthRequired, "auth-required"},
 		{TaskStateUnknown, "unknown"},
 		{TaskStateInputRequired, "input-required"},
 	}
@@ -149,22 +168,19 @@ func TestTaskState(t *testing.T) {
 func TestMessageJSON(t *testing.T) {
 	// Create text part
 	textPart := TextPart{
-		Type: PartTypeText,
+		Kind: "text",
 		Text: "Hello, world!",
 	}
 
 	// Create file part
-	filePart := FilePart{
-		Type: PartTypeFile,
-		File: FileContent{
-			Name:     stringPtr("example.txt"),
-			MimeType: stringPtr("text/plain"),
-			Bytes:    stringPtr("RmlsZSBjb250ZW50"), // Base64 encoded "File content"
-		},
-	}
+	filePart := NewFilePartWithBytes(
+		"example.txt",
+		"text/plain",
+		"File content",
+	)
 
 	// Create a message with these parts
-	original := NewMessage(MessageRoleUser, []Part{textPart, filePart})
+	original := NewMessage(MessageRoleUser, []Part{&textPart, &filePart})
 
 	// Marshal the message
 	data, err := json.Marshal(original)
@@ -182,72 +198,58 @@ func TestMessageJSON(t *testing.T) {
 	require.Len(t, decoded.Parts, 2)
 
 	// Check the text part
-	textPartDecoded, ok := decoded.Parts[0].(TextPart)
+	textPartDecoded, ok := decoded.Parts[0].(*TextPart)
 	require.True(t, ok, "First part should be a TextPart")
-	assert.Equal(t, PartTypeText, textPartDecoded.Type)
+	assert.Equal(t, "text", textPartDecoded.Kind)
 	assert.Equal(t, "Hello, world!", textPartDecoded.Text)
 
 	// Check the file part
-	filePartDecoded, ok := decoded.Parts[1].(FilePart)
+	filePartDecoded, ok := decoded.Parts[1].(*FilePart)
 	require.True(t, ok, "Second part should be a FilePart")
-	assert.Equal(t, PartTypeFile, filePartDecoded.Type)
-	assert.Equal(t, "example.txt", *filePartDecoded.File.Name)
-	assert.Equal(t, "text/plain", *filePartDecoded.File.MimeType)
-	assert.Equal(t, "RmlsZSBjb250ZW50", *filePartDecoded.File.Bytes)
+	assert.Equal(t, KindFile, filePartDecoded.Kind)
+	fileWithBytes, ok := filePartDecoded.File.(*FileWithBytes)
+	assert.True(t, ok, "File part should be a FileWithBytes")
+	assert.Equal(t, "example.txt", *fileWithBytes.Name)
+	assert.Equal(t, "text/plain", *fileWithBytes.MimeType)
+	assert.Equal(t, "File content", fileWithBytes.Bytes)
 }
 
 // TestPartValidation tests validation of different part types
 func TestPartValidation(t *testing.T) {
 	// Test TextPart
 	t.Run("TextPart", func(t *testing.T) {
-		textPart := TextPart{
-			Type: PartTypeText,
-			Text: "Valid text content",
-		}
-		assert.True(t, isValidPart(textPart))
+		textPart := NewTextPart("Valid text content")
+		assert.True(t, isValidPart(&textPart))
 
 		// Invalid part type
-		invalidPart := TextPart{
-			Type: "invalid",
-			Text: "Text with invalid part type",
-		}
-		assert.False(t, isValidPart(invalidPart))
+		invalidPart := NewTextPart("")
+		assert.False(t, isValidPart(&invalidPart))
 	})
 
 	// Test FilePart
 	t.Run("FilePart", func(t *testing.T) {
-		validFilePart := FilePart{
-			Type: PartTypeFile,
-			File: FileContent{
-				Name:     stringPtr("file.txt"),
-				MimeType: stringPtr("text/plain"),
-				Bytes:    stringPtr("SGVsbG8="), // Base64 "Hello"
-			},
-		}
-		assert.True(t, isValidPart(validFilePart))
+		validFilePart := NewFilePartWithBytes("file.txt", "text/plain", "SGVsbG8=")
+		assert.True(t, isValidPart(&validFilePart))
 
 		// Invalid part: missing required file info
-		invalidFilePart := FilePart{
-			Type: PartTypeFile,
-			File: FileContent{}, // Empty file content
-		}
-		assert.False(t, isValidPart(invalidFilePart))
+		invalidFilePart := NewFilePartWithBytes("file.txt", "text/plain", "")
+		assert.False(t, isValidPart(&invalidFilePart))
 	})
 
 	// Test DataPart
 	t.Run("DataPart", func(t *testing.T) {
 		validDataPart := DataPart{
-			Type: PartTypeData,
+			Kind: KindData,
 			Data: map[string]interface{}{"key": "value"},
 		}
-		assert.True(t, isValidPart(validDataPart))
+		assert.True(t, isValidPart(&validDataPart))
 
 		// Invalid part: nil data
 		invalidDataPart := DataPart{
-			Type: PartTypeData,
+			Kind: KindData,
 			Data: nil,
 		}
-		assert.False(t, isValidPart(invalidDataPart))
+		assert.False(t, isValidPart(&invalidDataPart))
 	})
 }
 
@@ -255,12 +257,18 @@ func TestPartValidation(t *testing.T) {
 // This is a simplified validation just for testing
 func isValidPart(part Part) bool {
 	switch p := part.(type) {
-	case TextPart:
-		return p.Type == PartTypeText && p.Text != ""
-	case FilePart:
-		return p.Type == PartTypeFile && (p.File.Name != nil || p.File.URI != nil || p.File.Bytes != nil)
-	case DataPart:
-		return p.Type == PartTypeData && p.Data != nil
+	case *TextPart:
+		return p.Text != ""
+	case *FilePart:
+		if fileWithBytes, ok := p.File.(*FileWithBytes); ok {
+			return fileWithBytes.Bytes != ""
+		}
+		if fileWithURI, ok := p.File.(*FileWithURI); ok {
+			return fileWithURI.URI != ""
+		}
+		return false
+	case *DataPart:
+		return p.Data != nil
 	default:
 		return false
 	}
@@ -270,18 +278,16 @@ func isValidPart(part Part) bool {
 func TestArtifact(t *testing.T) {
 	// Create a simple text part
 	textPart := TextPart{
-		Type: PartTypeText,
+		Kind: KindText,
 		Text: "Artifact content",
 	}
 
-	// Create an artifact
-	artifact := Artifact{
-		Name:        stringPtr("Test Artifact"),
-		Description: stringPtr("This is a test artifact"),
-		Parts:       []Part{textPart},
-		Index:       1,
-		LastChunk:   boolPtr(true),
-	}
+	// Create an artifact with generated ID
+	artifact := NewArtifactWithID(
+		stringPtr("Test Artifact"),
+		stringPtr("This is a test artifact"),
+		[]Part{&textPart},
+	)
 
 	// Validate the artifact
 	assert.NotNil(t, artifact.Name)
@@ -289,9 +295,7 @@ func TestArtifact(t *testing.T) {
 	assert.NotNil(t, artifact.Description)
 	assert.Equal(t, "This is a test artifact", *artifact.Description)
 	assert.Len(t, artifact.Parts, 1)
-	assert.Equal(t, 1, artifact.Index)
-	assert.NotNil(t, artifact.LastChunk)
-	assert.True(t, *artifact.LastChunk)
+	assert.NotEmpty(t, artifact.ArtifactID)
 
 	// Test JSON marshaling
 	data, err := json.Marshal(artifact)
@@ -305,14 +309,13 @@ func TestArtifact(t *testing.T) {
 	// Verify the decoded artifact
 	assert.Equal(t, *artifact.Name, *decoded.Name)
 	assert.Equal(t, *artifact.Description, *decoded.Description)
-	assert.Equal(t, artifact.Index, decoded.Index)
-	assert.Equal(t, *artifact.LastChunk, *decoded.LastChunk)
+	assert.Equal(t, artifact.ArtifactID, decoded.ArtifactID)
 
 	// Check the part
 	require.Len(t, decoded.Parts, 1)
-	decodedPart, ok := decoded.Parts[0].(TextPart)
+	decodedPart, ok := decoded.Parts[0].(*TextPart)
 	require.True(t, ok, "Should decode as a TextPart")
-	assert.Equal(t, PartTypeText, decodedPart.Type)
+	assert.Equal(t, "text", decodedPart.Kind)
 	assert.Equal(t, "Artifact content", decodedPart.Text)
 }
 
@@ -331,29 +334,23 @@ func TestTaskStatus(t *testing.T) {
 	assert.Equal(t, now, status.Timestamp)
 
 	// Test adding a message to the status
-	message := NewMessage(MessageRoleAgent, []Part{
-		TextPart{
-			Type: PartTypeText,
-			Text: "Task completed successfully",
-		},
-	})
+	textPart := TextPart{
+		Kind: "text",
+		Text: "Task completed successfully",
+	}
+	message := NewMessage(MessageRoleAgent, []Part{&textPart})
 
 	status.Message = &message
 	assert.NotNil(t, status.Message)
 	assert.Equal(t, MessageRoleAgent, status.Message.Role)
 }
 
-// Helper functions for testing
-func stringPtr(s string) *string {
-	return &s
-}
-
 // TestMarkerFunctions tests the marker functions for parts and events
 func TestMarkerFunctions(t *testing.T) {
 	// Test part marker functions
-	textPart := TextPart{Type: PartTypeText, Text: "Test"}
-	filePart := FilePart{Type: PartTypeFile}
-	dataPart := DataPart{Type: PartTypeData, Data: map[string]string{"key": "value"}}
+	textPart := TextPart{Kind: "text", Text: "Test"}
+	filePart := FilePart{Kind: KindFile}
+	dataPart := DataPart{Kind: KindData, Data: map[string]string{"key": "value"}}
 
 	// This test simply ensures the marker functions exist and don't panic
 	// They're just marker methods with no behavior
@@ -362,8 +359,8 @@ func TestMarkerFunctions(t *testing.T) {
 	dataPart.partMarker()
 
 	// Test event marker functions
-	statusEvent := TaskStatusUpdateEvent{ID: "test", Status: TaskStatus{State: TaskStateCompleted}}
-	artifactEvent := TaskArtifactUpdateEvent{ID: "test"}
+	statusEvent := TaskStatusUpdateEvent{TaskID: "test", Status: TaskStatus{State: TaskStateCompleted}}
+	artifactEvent := TaskArtifactUpdateEvent{TaskID: "test"}
 
 	// This test simply ensures the marker functions exist and don't panic
 	statusEvent.eventMarker()
@@ -375,23 +372,198 @@ func TestMarkerFunctions(t *testing.T) {
 
 // TestNewTask tests the NewTask factory function
 func TestNewTask(t *testing.T) {
-	// Test with just ID
+	// Test with contextID
 	taskID := "test-task"
-	task := NewTask(taskID, nil)
+	contextID := "test-context-123"
+	task := NewTask(taskID, contextID)
 
 	assert.Equal(t, taskID, task.ID)
-	assert.Nil(t, task.SessionID)
+	assert.Equal(t, contextID, task.ContextID)
 	assert.Equal(t, TaskStateSubmitted, task.Status.State)
 	assert.NotEmpty(t, task.Status.Timestamp)
 	assert.NotNil(t, task.Metadata)
 	assert.Empty(t, task.Metadata)
 	assert.Nil(t, task.Artifacts)
+}
 
-	// Test with session ID
-	sessionID := "test-session"
-	task = NewTask(taskID, &sessionID)
+// TestGenerateContextID tests the context ID generation function
+func TestGenerateContextID(t *testing.T) {
+	contextID1 := GenerateContextID()
+	assert.NotEmpty(t, contextID1)
+	assert.Len(t, contextID1, 36) // UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 
-	assert.Equal(t, taskID, task.ID)
-	assert.Equal(t, &sessionID, task.SessionID)
-	assert.Equal(t, *task.SessionID, sessionID)
+	contextID2 := GenerateContextID()
+	assert.NotEmpty(t, contextID2)
+	assert.NotEqual(t, contextID1, contextID2) // Should be unique
+}
+
+// TestGenerateMessageID tests the message ID generation function
+func TestGenerateMessageID(t *testing.T) {
+	messageID1 := GenerateMessageID()
+	assert.NotEmpty(t, messageID1)
+	assert.True(t, strings.HasPrefix(messageID1, "msg-"))
+	assert.Len(t, messageID1, 40) // "msg-" + UUID (36 chars)
+
+	messageID2 := GenerateMessageID()
+	assert.NotEmpty(t, messageID2)
+	assert.NotEqual(t, messageID1, messageID2) // Should be unique
+}
+
+// TestNewMessage tests the NewMessage factory functions
+func TestNewMessage(t *testing.T) {
+	// Test basic NewMessage
+	textPart := NewTextPart("Hello")
+	parts := []Part{&textPart}
+	message := NewMessage(MessageRoleUser, parts)
+
+	assert.Equal(t, MessageRoleUser, message.Role)
+	assert.Equal(t, parts, message.Parts)
+	assert.NotEmpty(t, message.MessageID)
+	assert.True(t, strings.HasPrefix(message.MessageID, "msg-"))
+	assert.Equal(t, "message", message.Kind)
+	assert.Nil(t, message.TaskID)
+	assert.Nil(t, message.ContextID)
+
+	// Test NewMessageWithContext
+	taskID := "task-123"
+	contextID := "ctx-456"
+	messageWithContext := NewMessageWithContext(MessageRoleAgent, parts, &taskID, &contextID)
+
+	assert.Equal(t, MessageRoleAgent, messageWithContext.Role)
+	assert.Equal(t, parts, messageWithContext.Parts)
+	assert.NotEmpty(t, messageWithContext.MessageID)
+	assert.Equal(t, "message", messageWithContext.Kind)
+	require.NotNil(t, messageWithContext.TaskID)
+	assert.Equal(t, taskID, *messageWithContext.TaskID)
+	require.NotNil(t, messageWithContext.ContextID)
+	assert.Equal(t, contextID, *messageWithContext.ContextID)
+}
+
+func TestPartDeserialization(t *testing.T) {
+	// Test for TextPart
+	t.Run("TextPart", func(t *testing.T) {
+		jsonData := `{"kind":"text","text":"Hello","metadata":{"foo":"bar"}}`
+		parts, err := unmarshalPartsFromJSON([]byte(fmt.Sprintf("[%s]", jsonData)))
+		assert.NoError(t, err)
+		assert.Len(t, parts, 1)
+		textPartDecoded, ok := parts[0].(*TextPart)
+		assert.True(t, ok)
+		assert.Equal(t, "text", textPartDecoded.Kind)
+		assert.Equal(t, "Hello", textPartDecoded.Text)
+		assert.Equal(t, map[string]interface{}{"foo": "bar"}, textPartDecoded.Metadata)
+	})
+
+	// Test for FilePart
+	t.Run("FilePart", func(t *testing.T) {
+		jsonData := `{"kind":"file","file":{"name":"example.txt","mimeType":"text/plain","bytes":"SGVsbG8gV29ybGQ="}}`
+		parts, err := unmarshalPartsFromJSON([]byte(fmt.Sprintf("[%s]", jsonData)))
+		assert.NoError(t, err)
+		assert.Len(t, parts, 1)
+
+		filePartDecoded, ok := parts[0].(*FilePart)
+		assert.True(t, ok)
+		assert.Equal(t, KindFile, filePartDecoded.Kind)
+
+		// Access FileUnion properly by type assertion
+		fileWithBytes, ok := filePartDecoded.File.(*FileWithBytes)
+		assert.True(t, ok)
+		assert.Equal(t, "example.txt", *fileWithBytes.Name)
+		assert.Equal(t, "text/plain", *fileWithBytes.MimeType)
+		assert.Equal(t, "SGVsbG8gV29ybGQ=", fileWithBytes.Bytes)
+	})
+
+	// Test for DataPart
+	t.Run("DataPart", func(t *testing.T) {
+		jsonData := `{"kind":"data","data":{"key":"value","number":42}}`
+		parts, err := unmarshalPartsFromJSON([]byte(fmt.Sprintf("[%s]", jsonData)))
+		assert.NoError(t, err)
+		assert.Len(t, parts, 1)
+
+		dataPartDecoded, ok := parts[0].(*DataPart)
+		assert.True(t, ok)
+		assert.Equal(t, KindData, dataPartDecoded.Kind)
+
+		// Access the data as a map
+		dataMap, ok := dataPartDecoded.Data.(map[string]interface{})
+		assert.True(t, ok)
+		assert.Equal(t, "value", dataMap["key"])
+		assert.Equal(t, float64(42), dataMap["number"]) // JSON numbers are float64
+	})
+}
+
+func TestMessage_MarshalJSON(t *testing.T) {
+	textPart := TextPart{
+		Kind: "text",
+		Text: "Hello",
+	}
+
+	message := Message{
+		Role:  MessageRoleUser,
+		Parts: []Part{&textPart},
+	}
+
+	jsonData, err := json.Marshal(message)
+	require.NoError(t, err)
+
+	var decodedMessage Message
+	err = json.Unmarshal(jsonData, &decodedMessage)
+	require.NoError(t, err)
+
+	// Verify that the unmarshaled Part is a concrete TextPart
+	require.Len(t, decodedMessage.Parts, 1)
+	textPartFromDecoded, ok := decodedMessage.Parts[0].(*TextPart)
+	require.True(t, ok)
+	assert.Equal(t, "text", textPartFromDecoded.Kind)
+	assert.Equal(t, "Hello", textPartFromDecoded.Text)
+}
+
+func TestMessage_UnmarshalJSON(t *testing.T) {
+	jsonData := `{
+	"role": "user",
+	"parts": [
+		{"kind": "text", "text": "Hello"},
+		{"kind": "file", "file": {"name": "test.txt", "mimeType": "text/plain", "bytes": "SGVsbG8="}}
+	]
+}`
+
+	var message Message
+	err := json.Unmarshal([]byte(jsonData), &message)
+	require.NoError(t, err)
+
+	assert.Equal(t, MessageRoleUser, message.Role)
+	require.Len(t, message.Parts, 2)
+
+	// Check first part (TextPart)
+	textPart, ok := message.Parts[0].(*TextPart)
+	assert.True(t, ok)
+	assert.Equal(t, "text", textPart.Kind)
+	assert.Equal(t, "Hello", textPart.Text)
+
+	// Check second part (FilePart)
+	filePart, ok := message.Parts[1].(*FilePart)
+	assert.True(t, ok)
+	assert.Equal(t, KindFile, filePart.Kind)
+
+	// Access FileUnion properly by type assertion
+	fileWithBytes, ok := filePart.File.(*FileWithBytes)
+	assert.True(t, ok)
+	assert.Equal(t, "test.txt", *fileWithBytes.Name)
+}
+
+// Helper function to unmarshal JSON array of parts
+func unmarshalPartsFromJSON(data []byte) ([]Part, error) {
+	var rawParts []json.RawMessage
+	if err := json.Unmarshal(data, &rawParts); err != nil {
+		return nil, err
+	}
+
+	parts := make([]Part, len(rawParts))
+	for i, rawPart := range rawParts {
+		part, err := unmarshalPart(rawPart)
+		if err != nil {
+			return nil, err
+		}
+		parts[i] = part
+	}
+	return parts, nil
 }

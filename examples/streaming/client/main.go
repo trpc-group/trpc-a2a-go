@@ -144,7 +144,11 @@ func checkStreamingSupport(serverURL string) (bool, error) {
 		return false, fmt.Errorf("error parsing agent card: %w", err)
 	}
 
-	return agentCard.Capabilities.Streaming, nil
+	// Handle the new *bool type for Streaming capability
+	if agentCard.Capabilities.Streaming != nil {
+		return *agentCard.Capabilities.Streaming, nil
+	}
+	return false, nil
 }
 
 // processStreamEvents handles events received from a streaming task
@@ -169,15 +173,15 @@ func processStreamEvents(ctx context.Context, streamChan <-chan protocol.TaskEve
 
 			// Process the received event
 			switch e := event.(type) {
-			case protocol.TaskStatusUpdateEvent:
-				log.Infof("Received Status Update - TaskID: %s, State: %s, Final: %t", e.ID, e.Status.State, e.Final)
+			case *protocol.TaskStatusUpdateEvent:
+				log.Infof("Received Status Update - TaskID: %s, State: %s, Final: %v", e.TaskID, e.Status.State, e.Final)
 				if e.Status.Message != nil {
 					log.Infof("  Status Message: Role=%s, Parts=%+v", e.Status.Message.Role, e.Status.Message.Parts)
 				}
 
 				// Exit when we receive a final status update (indicating a terminal state)
 				// Per A2A spec, this should be the definitive way to know the task is complete
-				if e.IsFinal() {
+				if e.Final != nil && *e.Final {
 					if e.Status.State == protocol.TaskStateCompleted {
 						log.Info("Task completed successfully.")
 					} else if e.Status.State == protocol.TaskStateFailed {
@@ -188,14 +192,13 @@ func processStreamEvents(ctx context.Context, streamChan <-chan protocol.TaskEve
 					log.Info("Received final status update, exiting.")
 					return
 				}
-			case protocol.TaskArtifactUpdateEvent:
-				log.Infof("Received Artifact Update - TaskID: %s, Index: %d, Append: %v, LastChunk: %v",
-					e.ID, e.Artifact.Index, e.Artifact.Append, e.Artifact.LastChunk)
+			case *protocol.TaskArtifactUpdateEvent:
+				log.Infof("Received Artifact Update - TaskID: %s, ArtifactID: %s", e.TaskID, e.Artifact.ArtifactID)
 				log.Infof("  Artifact Parts: %+v", e.Artifact.Parts)
 
 				// For artifact updates, we note it's the final artifact,
 				// but we don't exit yet - per A2A spec, we should wait for the final status update
-				if e.IsFinal() {
+				if e.LastChunk != nil && *e.LastChunk {
 					log.Info("Received final artifact update, waiting for final status.")
 				}
 			default:
@@ -210,5 +213,5 @@ func getArtifactName(artifact protocol.Artifact) string {
 	if artifact.Name != nil {
 		return *artifact.Name
 	}
-	return fmt.Sprintf("Unnamed artifact (index: %d)", artifact.Index)
+	return fmt.Sprintf("Unnamed artifact (ArtifactID: %s)", artifact.ArtifactID)
 }
