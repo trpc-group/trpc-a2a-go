@@ -25,9 +25,7 @@ For detailed specification changes, refer to the official A2A specification comp
 
 #### Interface Evolution
 
-**Core Processor Interface Transformation**
-
-**TaskProcessor → MessageProcessor**:
+TaskProcessor → MessageProcessor:
 ```go
 // Old interface
 type TaskProcessor interface {
@@ -40,23 +38,23 @@ type MessageProcessor interface {
 }
 ```
 
-**Key Changes**:
+Key Changes:
 - **Processing Model**: Task-driven → Message-driven processing
 - **Parameters**: Removed `taskID`, added `ProcessOptions` for configuration
 - **Return Type**: Simple `error` → Structured `*MessageProcessingResult` 
 - **Handler Interface**: `TaskHandle` → `TaskHandler` (enhanced capabilities)
 
-**TaskHandler Interface Enhancement**:
+TaskHandler Interface Enhancement:
 - **Method Evolution**: `GetSessionID()` → `GetContextID()` (A2A spec compliance)
 - **New Capabilities**: Added `BuildTask()`, `GetTask()`, `SubScribeTask()`, `GetMessageHistory()`
 - **Enhanced Parameters**: `AddArtifact()` now supports `taskID`, `isFinal`, `needMoreData`
 
-**TaskManager Interface Updates**:
+TaskManager Interface Updates:
 - **New Methods**: Added `OnSendMessage()`, `OnSendMessageStream()` (A2A 0.2.0 methods)
 - **Updated Returns**: `OnResubscribe()` now returns `<-chan protocol.StreamingMessageEvent`
 - **Backward Compatibility**: Legacy methods (`OnSendTask`, `OnSendTaskSubscribe`) deprecated but retained
 
-**Constructor Changes**:
+Constructor Changes:
 - `NewMemoryTaskManager(TaskProcessor)` → `NewMemoryTaskManager(MessageProcessor, ...MemoryTaskManagerOption)`
 
 #### Implementation Updates
