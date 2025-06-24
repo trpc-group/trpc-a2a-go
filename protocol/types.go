@@ -118,9 +118,9 @@ const (
 	// KindTask is the kind of the task.
 	KindTask = "task"
 	// KindTaskStatusUpdate is the kind of the task status update event.
-	KindTaskStatusUpdate = "status_update"
+	KindTaskStatusUpdate = "status-update"
 	// KindTaskArtifactUpdate is the kind of the task artifact update event.
-	KindTaskArtifactUpdate = "artifact_update"
+	KindTaskArtifactUpdate = "artifact-update"
 	// KindData is the kind of the data.
 	KindData = "data"
 	// KindFile is the kind of the file.
