@@ -875,12 +875,6 @@ func (r StreamingMessageEvent) MarshalJSON() ([]byte, error) {
 		return json.Marshal(r.Result)
 	case KindTaskArtifactUpdate:
 		return json.Marshal(r.Result)
-	case KindData:
-		return json.Marshal(r.Result)
-	case KindFile:
-		return json.Marshal(r.Result)
-	case KindText:
-		return json.Marshal(r.Result)
 	default:
 		return nil, fmt.Errorf("unsupported result kind: %s", r.Result.GetKind())
 	}
