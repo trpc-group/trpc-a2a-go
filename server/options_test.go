@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"trpc.group/trpc-go/trpc-a2a-go/auth"
+	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 )
 
 func TestWithCORSEnabled(t *testing.T) {
@@ -101,6 +102,98 @@ func TestWithPushNotificationAuthenticator(t *testing.T) {
 	opt(serverOptions)
 
 	assert.Equal(t, authenticator, serverOptions.pushAuth)
+}
+
+func TestWithBasePath(t *testing.T) {
+	tests := []struct {
+		name              string
+		basePath          string
+		expectedJSONRPC   string
+		expectedAgentCard string
+		expectedJWKS      string
+	}{
+		{
+			name:              "Basic sub-path",
+			basePath:          "/agent",
+			expectedJSONRPC:   "/agent/",
+			expectedAgentCard: "/agent/.well-known/agent.json",
+			expectedJWKS:      "/agent/.well-known/jwks.json",
+		},
+		{
+			name:              "Multi-level path",
+			basePath:          "/api/v2/agents/myagent",
+			expectedJSONRPC:   "/api/v2/agents/myagent/",
+			expectedAgentCard: "/api/v2/agents/myagent/.well-known/agent.json",
+			expectedJWKS:      "/api/v2/agents/myagent/.well-known/jwks.json",
+		},
+		{
+			name:              "Path with trailing slash - should be normalized",
+			basePath:          "/agent/api/v2/",
+			expectedJSONRPC:   "/agent/api/v2/",
+			expectedAgentCard: "/agent/api/v2/.well-known/agent.json",
+			expectedJWKS:      "/agent/api/v2/.well-known/jwks.json",
+		},
+		{
+			name:              "Path without leading slash - should be normalized",
+			basePath:          "agent/api",
+			expectedJSONRPC:   "/agent/api/",
+			expectedAgentCard: "/agent/api/.well-known/agent.json",
+			expectedJWKS:      "/agent/api/.well-known/jwks.json",
+		},
+		{
+			name:              "Path without leading slash and with trailing slash",
+			basePath:          "agent/api/",
+			expectedJSONRPC:   "/agent/api/",
+			expectedAgentCard: "/agent/api/.well-known/agent.json",
+			expectedJWKS:      "/agent/api/.well-known/jwks.json",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create server instance with default paths
+			s := &A2AServer{
+				jsonRPCEndpoint: protocol.DefaultJSONRPCPath,
+				agentCardPath:   protocol.AgentCardPath,
+				jwksEndpoint:    protocol.JWKSPath,
+			}
+
+			// Apply WithBasePath option
+			opt := WithBasePath(tt.basePath)
+			opt(s)
+
+			// Verify all paths are correctly configured
+			assert.Equal(t, tt.expectedJSONRPC, s.jsonRPCEndpoint, "JSON-RPC endpoint mismatch")
+			assert.Equal(t, tt.expectedAgentCard, s.agentCardPath, "Agent card path mismatch")
+			assert.Equal(t, tt.expectedJWKS, s.jwksEndpoint, "JWKS endpoint mismatch")
+		})
+	}
+}
+
+func TestWithBasePathEmptyAndRoot(t *testing.T) {
+	// Test with empty string - should not change paths
+	s := &A2AServer{
+		jsonRPCEndpoint: protocol.DefaultJSONRPCPath,
+		agentCardPath:   protocol.AgentCardPath,
+		jwksEndpoint:    protocol.JWKSPath,
+	}
+
+	opt := WithBasePath("")
+	opt(s)
+
+	// Paths should remain unchanged
+	assert.Equal(t, protocol.DefaultJSONRPCPath, s.jsonRPCEndpoint)
+	assert.Equal(t, protocol.AgentCardPath, s.agentCardPath)
+	assert.Equal(t, protocol.JWKSPath, s.jwksEndpoint)
+
+	// Test with root path "/" - should not change paths
+	opt = WithBasePath("/")
+	opt(s)
+
+	// Paths should remain unchanged
+	assert.Equal(t, protocol.DefaultJSONRPCPath, s.jsonRPCEndpoint)
+	assert.Equal(t, protocol.AgentCardPath, s.agentCardPath)
+	assert.Equal(t, protocol.JWKSPath, s.jwksEndpoint)
 }
 
 // mockAuthProvider is a simple mock implementing auth.Provider interface
