@@ -26,9 +26,9 @@ type Request struct {
 // NewRequest creates a new JSON-RPC request with the given method and ID.
 // If id is nil, a new ID will be automatically generated since A2A protocol
 // requires responses for all requests.
-func NewRequest(method string, id interface{}) *Request {
-	if id == nil {
-		// A2A protocol doesn't use notifications - all requests need responses
+// Note: Currently all callers pass non-nil IDs, so auto-generation is not used in practice.
+func NewRequest(method string, id string) *Request {
+	if id == "" {
 		id = protocol.GenerateRPCID()
 	}
 	return &Request{

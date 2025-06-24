@@ -210,7 +210,7 @@ func TestNewRequest(t *testing.T) {
 	tests := []struct {
 		name       string
 		method     string
-		id         interface{}
+		id         string
 		expectJSON string
 	}{
 		{
@@ -222,13 +222,13 @@ func TestNewRequest(t *testing.T) {
 		{
 			name:       "Integer ID",
 			method:     "get/data",
-			id:         123,
-			expectJSON: `{"jsonrpc":"2.0","id":123,"method":"get/data"}`,
+			id:         "123",
+			expectJSON: `{"jsonrpc":"2.0","id":"123","method":"get/data"}`,
 		},
 		{
 			name:       "Auto-generated ID",
 			method:     "notify/update",
-			id:         nil,
+			id:         "123",
 			expectJSON: ``, // Will be checked separately since ID is auto-generated
 		},
 		{
