@@ -4,190 +4,84 @@
 //
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
-// Package main demonstrates how to serve an A2A agent behind a sub-path.
-// This example uses the new WithBasePath option for simple integration.
+// Package main demonstrates A2A agent with subpath configuration.
 package main
 
 import (
 	"context"
-	"flag"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
-	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/server"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
-// simpleTextProcessor implements a basic message processor.
-type simpleTextProcessor struct{}
+// simpleProcessor implements the MessageProcessor interface.
+type simpleProcessor struct{}
 
-func (p *simpleTextProcessor) ProcessMessage(
+func (p *simpleProcessor) ProcessMessage(
 	ctx context.Context,
 	message protocol.Message,
 	options taskmanager.ProcessOptions,
-	handle taskmanager.TaskHandler,
+	taskHandler taskmanager.TaskHandler,
 ) (*taskmanager.MessageProcessingResult, error) {
-	// Extract text from the message.
-	text := extractTextFromMessage(message)
-	if text == "" {
-		return nil, fmt.Errorf("no text found in message")
-	}
-
-	// Simple processing: reverse the text.
-	result := reverseString(text)
-
-	// Create response message.
-	responseMessage := protocol.NewMessage(
-		protocol.MessageRoleAgent,
-		[]protocol.Part{protocol.NewTextPart(fmt.Sprintf("Reversed: %s", result))},
-	)
-
-	return &taskmanager.MessageProcessingResult{
-		Result: &responseMessage,
-	}, nil
-}
-
-func extractTextFromMessage(message protocol.Message) string {
-	for _, part := range message.Parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			return textPart.Text
-		}
-	}
-	return ""
-}
-
-func reverseString(s string) string {
-	runes := []rune(s)
-	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
-		runes[i], runes[j] = runes[j], runes[i]
-	}
-	return string(runes)
-}
-
-// Helper functions for pointer conversion.
-func stringPtr(s string) *string {
-	return &s
-}
-
-func boolPtr(b bool) *bool {
-	return &b
-}
-
-// createAgentCard creates an agent card with the correct base URL.
-func createAgentCard(baseURL string) server.AgentCard {
-	return server.AgentCard{
-		Name:        "SubPath Text Processor Agent",
-		Description: "A simple agent that reverses text, served under a sub-path",
-		URL:         baseURL,
-		Version:     "1.0.0",
-		Capabilities: server.AgentCapabilities{
-			Streaming: boolPtr(false),
-		},
-		DefaultInputModes:  []string{"text"},
-		DefaultOutputModes: []string{"text"},
-		Skills: []server.AgentSkill{
-			{
-				ID:          "text_processing",
-				Name:        "Text Processing",
-				Description: stringPtr("Can reverse text strings"),
-				InputModes:  []string{"text"},
-				OutputModes: []string{"text"},
+	// Simply return a text response
+	response := &protocol.Message{
+		Role:      protocol.MessageRoleAgent,
+		Kind:      protocol.KindMessage,
+		MessageID: protocol.GenerateMessageID(),
+		Parts: []protocol.Part{
+			&protocol.TextPart{
+				Kind: protocol.KindText,
+				Text: "Hello from subpath agent!",
 			},
 		},
 	}
+
+	return &taskmanager.MessageProcessingResult{
+		Result: response,
+	}, nil
 }
 
 func main() {
-	var (
-		port    = flag.String("port", "8080", "Port to listen on")
-		subPath = flag.String("subPath", "/agent/api/v2/myagent", "Sub-path prefix for the agent")
-		baseURL = flag.String("baseURL", "", "Base URL for the agent (auto-detected if empty)")
-	)
-	flag.Parse()
-
-	// Auto-detect base URL if not provided.
-	if *baseURL == "" {
-		*baseURL = fmt.Sprintf("http://localhost:%s%s", *port, *subPath)
+	// Create agent card with subpath URL
+	agentCard := server.AgentCard{
+		Name:        "Subpath Agent",
+		Description: "Demo agent with subpath",
+		URL:         "http://localhost:8080/api/v1/agent", // Path will be extracted
+		Version:     "1.0.0",
 	}
 
-	// Create the agent card with the correct base URL.
-	agentCard := createAgentCard(*baseURL)
-
-	// Create the message processor.
-	processor := &simpleTextProcessor{}
-
-	// Create the task manager.
-	taskMgr, err := taskmanager.NewMemoryTaskManager(processor)
+	// Create task manager with simple processor
+	taskManager, err := taskmanager.NewMemoryTaskManager(&simpleProcessor{})
 	if err != nil {
 		log.Fatalf("Failed to create task manager: %v", err)
 	}
 
-	// Create the A2A server with base path option.
-	// This automatically configures all endpoints under the sub-path.
-	a2aServer, err := server.NewA2AServer(agentCard, taskMgr,
-		server.WithBasePath(*subPath))
+	a2aServer, err := server.NewA2AServer(agentCard, taskManager)
 	if err != nil {
-		log.Fatalf("Failed to create A2A server: %v", err)
+		log.Fatalf("Failed to create server: %v", err)
 	}
 
-	// Create HTTP server with direct mounting.
-	srv := &http.Server{
-		Addr:    ":" + *port,
-		Handler: a2aServer.Handler(),
-	}
+	// Setup graceful shutdown
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 
-	// Print example URLs.
-	printExampleURLs(*port, *subPath)
-
-	// Setup graceful shutdown.
 	go func() {
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-		<-sigChan
-
-		log.Println("Shutting down server...")
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		if err := srv.Shutdown(ctx); err != nil {
-			log.Printf("Server shutdown error: %v", err)
+		log.Printf("Server starting on :8080")
+		log.Printf("Endpoints available at:")
+		log.Printf("  Agent Card: http://localhost:8080/api/v1/agent/.well-known/agent.json")
+		log.Printf("  JSON-RPC: http://localhost:8080/api/v1/agent/")
+		if err := a2aServer.Start(":8080"); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server failed: %v", err)
 		}
 	}()
 
-	// Start the server.
-	log.Printf("Starting A2A agent server on :%s", *port)
-	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-		log.Fatalf("Server failed: %v", err)
-	}
-
-	log.Println("Server stopped")
-}
-
-func printExampleURLs(port, subPath string) {
-	log.Println("\n" + strings.Repeat("=", 60))
-	log.Printf("A2A Agent Server with Sub-Path")
-	log.Println(strings.Repeat("=", 60))
-
-	baseURL := fmt.Sprintf("http://localhost:%s", port)
-
-	log.Println("\nA2A Agent endpoints:")
-	log.Printf("  Agent card: %s%s/.well-known/agent.json", baseURL, subPath)
-	log.Printf("  JSON-RPC:   %s%s/", baseURL, subPath)
-
-	log.Println("\nExample usage:")
-	fmt.Printf("  # Get agent metadata\n")
-	fmt.Printf(`  curl "%s%s/.well-known/agent.json"`, baseURL, subPath)
-	fmt.Printf("\n  # Send a message\n")
-	fmt.Printf(`  curl -X POST "%s%s/" `, baseURL, subPath)
-	fmt.Printf(" -H \"Content-Type: application/json\" ")
-	fmt.Println(` -d '{"jsonrpc":"2.0","method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"hello"}]}},"id":"1"}'`)
-
-	log.Println("\n" + strings.Repeat("=", 60) + "\n")
+	<-ctx.Done()
+	log.Printf("Shutting down...")
+	a2aServer.Stop(context.Background())
 }

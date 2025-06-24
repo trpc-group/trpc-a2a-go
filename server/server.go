@@ -15,6 +15,8 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/auth"
@@ -67,9 +69,32 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 		jwksEnabled:     false,
 		jwksEndpoint:    protocol.JWKSPath,
 	}
+
+	// Store the original paths before applying options.
+	originalJSONRPCEndpoint := server.jsonRPCEndpoint
+	originalAgentCardPath := server.agentCardPath
+	originalJWKSEndpoint := server.jwksEndpoint
+
+	// Apply options first (WithBasePath has higher priority).
 	for _, opt := range opts {
 		opt(server)
 	}
+
+	// If paths haven't been changed by options (e.g., WithBasePath),
+	// then extract base path from agent card URL as fallback.
+	if server.jsonRPCEndpoint == originalJSONRPCEndpoint &&
+		server.agentCardPath == originalAgentCardPath &&
+		server.jwksEndpoint == originalJWKSEndpoint {
+
+		basePath := extractBasePathFromURL(agentCard.URL)
+		if basePath != "" {
+			// Configure endpoints with the extracted base path.
+			server.jsonRPCEndpoint = basePath + "/"
+			server.agentCardPath = basePath + protocol.AgentCardPath
+			server.jwksEndpoint = basePath + protocol.JWKSPath
+		}
+	}
+
 	// Initialize authentication components if auth provider is set.
 	if server.authProvider != nil {
 		server.authMiddleware = auth.NewMiddleware(server.authProvider)
@@ -538,24 +563,22 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 
 // composeJWKSURL returns the fully qualified URL to the JWKS endpoint.
 func (s *A2AServer) composeJWKSURL() string {
-	// Extract the base URL from the agent card.
-	baseURL := s.agentCard.URL
-	// If the URL already has a scheme, use it directly.
-	if baseURL == "" {
+	if s.agentCard.URL == "" {
 		// This is a fallback, but ideally the agent card should have a proper URL.
 		log.Warn("Agent card URL is empty, using relative JWKS endpoint")
 		return s.jwksEndpoint
 	}
-	// Make sure the URL doesn't have a trailing slash.
-	if len(baseURL) > 0 && baseURL[len(baseURL)-1] == '/' {
-		baseURL = baseURL[:len(baseURL)-1]
+
+	// Parse the agent card URL to extract the base (scheme + host + port).
+	parsedURL, err := url.Parse(s.agentCard.URL)
+	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+		log.Warnf("Failed to parse agent card URL '%s': %v", s.agentCard.URL, err)
+		return s.jwksEndpoint
 	}
-	// Make sure the JWKS endpoint starts with a slash.
-	jwksPath := s.jwksEndpoint
-	if len(jwksPath) > 0 && jwksPath[0] != '/' {
-		jwksPath = "/" + jwksPath
-	}
-	return baseURL + jwksPath
+
+	// Reconstruct base URL (scheme + host + port) and append the JWKS endpoint path.
+	baseURL := fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
+	return baseURL + s.jwksEndpoint
 }
 
 func (s *A2AServer) handleTasksPushNotificationGet(
@@ -792,4 +815,40 @@ func sendSSEEvent(w http.ResponseWriter, rpcID string, flusher http.Flusher, eve
 		return err
 	}
 	return nil
+}
+
+// extractBasePathFromURL extracts the base path from an agent card URL.
+// For example, "http://localhost:8080/agent/api/v2/myagent" returns "/agent/api/v2/myagent".
+func extractBasePathFromURL(agentURL string) string {
+	if agentURL == "" {
+		return ""
+	}
+
+	// Parse the URL.
+	parsedURL, err := url.Parse(agentURL)
+	if err != nil {
+		log.Warnf("Failed to parse agent card URL '%s': %v", agentURL, err)
+		return ""
+	}
+
+	// Validate that it's a proper absolute URL (has scheme and host)
+	if parsedURL.Scheme == "" || parsedURL.Host == "" {
+		log.Warnf("Invalid agent card URL '%s': missing scheme or host", agentURL)
+		return ""
+	}
+
+	// Extract the path and clean it.
+	basePath := parsedURL.Path
+
+	// Remove trailing slash unless it's the root path.
+	if len(basePath) > 1 && strings.HasSuffix(basePath, "/") {
+		basePath = strings.TrimSuffix(basePath, "/")
+	}
+
+	// If the path is empty or just "/", return empty string (no base path).
+	if basePath == "" || basePath == "/" {
+		return ""
+	}
+
+	return basePath
 }

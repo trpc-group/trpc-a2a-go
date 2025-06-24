@@ -7,6 +7,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"testing"
 	"time"
@@ -104,6 +105,249 @@ func TestWithPushNotificationAuthenticator(t *testing.T) {
 	assert.Equal(t, authenticator, serverOptions.pushAuth)
 }
 
+func TestExtractBasePathFromURL(t *testing.T) {
+	tests := []struct {
+		name         string
+		agentURL     string
+		expectedPath string
+	}{
+		{
+			name:         "Basic sub-path",
+			agentURL:     "http://localhost:8080/agent",
+			expectedPath: "/agent",
+		},
+		{
+			name:         "Multi-level path",
+			agentURL:     "http://localhost:8080/api/v2/agents/myagent",
+			expectedPath: "/api/v2/agents/myagent",
+		},
+		{
+			name:         "Path with trailing slash - should be normalized",
+			agentURL:     "http://localhost:8080/agent/api/v2/",
+			expectedPath: "/agent/api/v2",
+		},
+		{
+			name:         "Root path - should return empty",
+			agentURL:     "http://localhost:8080/",
+			expectedPath: "",
+		},
+		{
+			name:         "Root path without slash - should return empty",
+			agentURL:     "http://localhost:8080",
+			expectedPath: "",
+		},
+		{
+			name:         "Empty URL - should return empty",
+			agentURL:     "",
+			expectedPath: "",
+		},
+		{
+			name:         "HTTPS URL with port",
+			agentURL:     "https://example.com:9090/my/agent/path",
+			expectedPath: "/my/agent/path",
+		},
+		{
+			name:         "URL with query parameters - query ignored",
+			agentURL:     "http://localhost:8080/agent?param=value",
+			expectedPath: "/agent",
+		},
+		{
+			name:         "URL with fragment - fragment ignored",
+			agentURL:     "http://localhost:8080/agent#section",
+			expectedPath: "/agent",
+		},
+		{
+			name:         "Invalid URL - should return empty",
+			agentURL:     "not-a-valid-url",
+			expectedPath: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractBasePathFromURL(tt.agentURL)
+			assert.Equal(t, tt.expectedPath, result, "Base path extraction mismatch")
+		})
+	}
+}
+
+func TestNewA2AServerWithAgentCardURL(t *testing.T) {
+	tests := []struct {
+		name              string
+		agentCardURL      string
+		expectedJSONRPC   string
+		expectedAgentCard string
+		expectedJWKS      string
+	}{
+		{
+			name:              "Agent card with sub-path",
+			agentCardURL:      "http://localhost:8080/agent",
+			expectedJSONRPC:   "/agent/",
+			expectedAgentCard: "/agent/.well-known/agent.json",
+			expectedJWKS:      "/agent/.well-known/jwks.json",
+		},
+		{
+			name:              "Agent card with multi-level path",
+			agentCardURL:      "http://localhost:8080/api/v2/agents/myagent",
+			expectedJSONRPC:   "/api/v2/agents/myagent/",
+			expectedAgentCard: "/api/v2/agents/myagent/.well-known/agent.json",
+			expectedJWKS:      "/api/v2/agents/myagent/.well-known/jwks.json",
+		},
+		{
+			name:              "Agent card with root URL",
+			agentCardURL:      "http://localhost:8080/",
+			expectedJSONRPC:   "/",
+			expectedAgentCard: "/.well-known/agent.json",
+			expectedJWKS:      "/.well-known/jwks.json",
+		},
+		{
+			name:              "Agent card with empty URL",
+			agentCardURL:      "",
+			expectedJSONRPC:   "/",
+			expectedAgentCard: "/.well-known/agent.json",
+			expectedJWKS:      "/.well-known/jwks.json",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a mock task manager
+			taskMgr := &optionsTestTaskManager{}
+
+			// Create agent card with the test URL
+			agentCard := AgentCard{
+				Name: "Test Agent",
+				URL:  tt.agentCardURL,
+			}
+
+			// Create the server
+			server, err := NewA2AServer(agentCard, taskMgr)
+			require.NoError(t, err)
+
+			// Verify all paths are correctly configured
+			assert.Equal(t, tt.expectedJSONRPC, server.jsonRPCEndpoint, "JSON-RPC endpoint mismatch")
+			assert.Equal(t, tt.expectedAgentCard, server.agentCardPath, "Agent card path mismatch")
+			assert.Equal(t, tt.expectedJWKS, server.jwksEndpoint, "JWKS endpoint mismatch")
+		})
+	}
+}
+
+func TestComposeJWKSURL(t *testing.T) {
+	tests := []struct {
+		name         string
+		agentCardURL string
+		jwksEndpoint string
+		expectedURL  string
+	}{
+		{
+			name:         "Agent card with sub-path",
+			agentCardURL: "http://localhost:8080/agent",
+			jwksEndpoint: "/agent/.well-known/jwks.json",
+			expectedURL:  "http://localhost:8080/agent/.well-known/jwks.json",
+		},
+		{
+			name:         "Agent card with multi-level path",
+			agentCardURL: "https://example.com:9090/api/v2/agents/myagent",
+			jwksEndpoint: "/api/v2/agents/myagent/.well-known/jwks.json",
+			expectedURL:  "https://example.com:9090/api/v2/agents/myagent/.well-known/jwks.json",
+		},
+		{
+			name:         "Agent card with root path",
+			agentCardURL: "http://localhost:8080/",
+			jwksEndpoint: "/.well-known/jwks.json",
+			expectedURL:  "http://localhost:8080/.well-known/jwks.json",
+		},
+		{
+			name:         "Empty agent card URL",
+			agentCardURL: "",
+			jwksEndpoint: "/.well-known/jwks.json",
+			expectedURL:  "/.well-known/jwks.json",
+		},
+		{
+			name:         "Invalid agent card URL",
+			agentCardURL: "not-a-valid-url",
+			jwksEndpoint: "/.well-known/jwks.json",
+			expectedURL:  "/.well-known/jwks.json",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create server instance
+			server := &A2AServer{
+				agentCard: AgentCard{
+					URL: tt.agentCardURL,
+				},
+				jwksEndpoint: tt.jwksEndpoint,
+			}
+
+			// Call the function
+			result := server.composeJWKSURL()
+
+			// Verify the result
+			assert.Equal(t, tt.expectedURL, result, "JWKS URL composition mismatch")
+		})
+	}
+}
+
+// optionsTestTaskManager is a simple mock implementing taskmanager.TaskManager interface
+type optionsTestTaskManager struct{}
+
+func (m *optionsTestTaskManager) OnSendMessage(ctx context.Context, params protocol.SendMessageParams) (*protocol.MessageResult, error) {
+	return &protocol.MessageResult{
+		Result: &protocol.Message{
+			Kind:      "message",
+			MessageID: "test-message-id",
+			Role:      protocol.MessageRoleAgent,
+			Parts:     []protocol.Part{protocol.NewTextPart("test response")},
+		},
+	}, nil
+}
+
+func (m *optionsTestTaskManager) OnSendMessageStream(ctx context.Context, params protocol.SendMessageParams) (<-chan protocol.StreamingMessageEvent, error) {
+	return nil, nil
+}
+
+func (m *optionsTestTaskManager) OnSendTask(ctx context.Context, params protocol.SendTaskParams) (*protocol.Task, error) {
+	return nil, nil
+}
+
+func (m *optionsTestTaskManager) OnSendTaskSubscribe(ctx context.Context, params protocol.SendTaskParams) (<-chan protocol.TaskEvent, error) {
+	return nil, nil
+}
+
+func (m *optionsTestTaskManager) OnGetTask(ctx context.Context, params protocol.TaskQueryParams) (*protocol.Task, error) {
+	return nil, nil
+}
+
+func (m *optionsTestTaskManager) OnCancelTask(ctx context.Context, params protocol.TaskIDParams) (*protocol.Task, error) {
+	return nil, nil
+}
+
+func (m *optionsTestTaskManager) OnResubscribe(ctx context.Context, params protocol.TaskIDParams) (<-chan protocol.StreamingMessageEvent, error) {
+	return nil, nil
+}
+
+func (m *optionsTestTaskManager) OnPushNotificationSet(ctx context.Context, params protocol.TaskPushNotificationConfig) (*protocol.TaskPushNotificationConfig, error) {
+	return &params, nil
+}
+
+func (m *optionsTestTaskManager) OnPushNotificationGet(ctx context.Context, params protocol.TaskIDParams) (*protocol.TaskPushNotificationConfig, error) {
+	return &protocol.TaskPushNotificationConfig{
+		TaskID: params.ID,
+		PushNotificationConfig: protocol.PushNotificationConfig{
+			URL: "http://test.example.com/webhook",
+		},
+	}, nil
+}
+
+// mockAuthProvider is a simple mock implementing auth.Provider interface
+type mockAuthProvider struct{}
+
+func (p *mockAuthProvider) Authenticate(r *http.Request) (*auth.User, error) {
+	return &auth.User{ID: "test-user"}, nil
+}
+
 func TestWithBasePath(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -196,9 +440,64 @@ func TestWithBasePathEmptyAndRoot(t *testing.T) {
 	assert.Equal(t, protocol.JWKSPath, s.jwksEndpoint)
 }
 
-// mockAuthProvider is a simple mock implementing auth.Provider interface
-type mockAuthProvider struct{}
+func TestWithBasePathPriority(t *testing.T) {
+	tests := []struct {
+		name              string
+		agentCardURL      string
+		basePath          string
+		expectedJSONRPC   string
+		expectedAgentCard string
+		expectedJWKS      string
+	}{
+		{
+			name:              "WithBasePath overrides agentCard.URL",
+			agentCardURL:      "http://localhost:8080/from/url",
+			basePath:          "/from/option",
+			expectedJSONRPC:   "/from/option/",
+			expectedAgentCard: "/from/option/.well-known/agent.json",
+			expectedJWKS:      "/from/option/.well-known/jwks.json",
+		},
+		{
+			name:              "agentCard.URL used when WithBasePath is empty",
+			agentCardURL:      "http://localhost:8080/from/url",
+			basePath:          "",
+			expectedJSONRPC:   "/from/url/",
+			expectedAgentCard: "/from/url/.well-known/agent.json",
+			expectedJWKS:      "/from/url/.well-known/jwks.json",
+		},
+		{
+			name:              "agentCard.URL used when WithBasePath is root path",
+			agentCardURL:      "http://localhost:8080/from/url",
+			basePath:          "/",
+			expectedJSONRPC:   "/from/url/",
+			expectedAgentCard: "/from/url/.well-known/agent.json",
+			expectedJWKS:      "/from/url/.well-known/jwks.json",
+		},
+	}
 
-func (p *mockAuthProvider) Authenticate(r *http.Request) (*auth.User, error) {
-	return &auth.User{ID: "test-user"}, nil
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a mock task manager
+			taskMgr := &optionsTestTaskManager{}
+
+			// Create agent card with the test URL
+			agentCard := AgentCard{
+				Name: "Test Agent",
+				URL:  tt.agentCardURL,
+			}
+
+			// Create the server with WithBasePath option
+			var opts []Option
+			if tt.basePath != "" {
+				opts = append(opts, WithBasePath(tt.basePath))
+			}
+			server, err := NewA2AServer(agentCard, taskMgr, opts...)
+			require.NoError(t, err)
+
+			// Verify all paths are correctly configured
+			assert.Equal(t, tt.expectedJSONRPC, server.jsonRPCEndpoint, "JSON-RPC endpoint mismatch")
+			assert.Equal(t, tt.expectedAgentCard, server.agentCardPath, "Agent card path mismatch")
+			assert.Equal(t, tt.expectedJWKS, server.jwksEndpoint, "JWKS endpoint mismatch")
+		})
+	}
 }

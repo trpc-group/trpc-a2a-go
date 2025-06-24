@@ -89,16 +89,23 @@ func WithPushNotificationAuthenticator(authenticator *auth.PushNotificationAuthe
 }
 
 // WithBasePath sets a base path for all A2A endpoints.
-// This is useful when serving the agent under a sub-path like "/agent/api/v2/myagent".
+// This option has higher priority than agentCard.URL path extraction.
+// When provided, it overrides any path extracted from agentCard.URL.
+//
+// This is useful when:
+// - The agentCard.URL is for external/frontend use
+// - Internal routing/forwarding maps to different backend paths
+// - You need explicit control over the serving endpoints
+//
 // The base path will be automatically prepended to all standard A2A endpoints:
 // - Agent card: basePath + "/.well-known/agent.json"
 // - JSON-RPC: basePath + "/"
 // - JWKS: basePath + "/.well-known/jwks.json"
 //
-// Example: WithBasePath("/agent/api/v2/myagent") creates endpoints:
-// - /agent/api/v2/myagent/.well-known/agent.json
-// - /agent/api/v2/myagent/
-// - /agent/api/v2/myagent/.well-known/jwks.json
+// Example: WithBasePath("/api/v1/agent") creates endpoints:
+// - /api/v1/agent/.well-known/agent.json
+// - /api/v1/agent/
+// - /api/v1/agent/.well-known/jwks.json
 //
 // The base path should start with "/" and not end with "/".
 func WithBasePath(basePath string) Option {

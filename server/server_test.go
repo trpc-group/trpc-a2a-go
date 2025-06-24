@@ -37,7 +37,7 @@ func defaultAgentCard() AgentCard {
 	return AgentCard{
 		Name:        "Test Agent",
 		Description: desc,
-		URL:         "http://localhost/test-agent", // Example URL
+		URL:         "http://localhost:8080/", // Root URL to avoid path extraction
 		Version:     "test-agent-v0.1.0",
 		Capabilities: AgentCapabilities{
 			Streaming: &streaming,
