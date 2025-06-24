@@ -661,11 +661,12 @@ func NewTaskStatusUpdateEvent(taskID, contextID string, status TaskStatus, final
 		ContextID: contextID,
 		Kind:      KindTaskStatusUpdate,
 		Status:    status,
+		Final:     &final,
 	}
 }
 
 // NewTaskArtifactUpdateEvent creates a new TaskArtifactUpdateEvent.
-func NewTaskArtifactUpdateEvent(taskID, contextID string, artifact Artifact, final bool) TaskArtifactUpdateEvent {
+func NewTaskArtifactUpdateEvent(taskID, contextID string, artifact Artifact) TaskArtifactUpdateEvent {
 	return TaskArtifactUpdateEvent{
 		TaskID:    taskID,
 		ContextID: contextID,
