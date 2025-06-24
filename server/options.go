@@ -7,9 +7,11 @@
 package server
 
 import (
+	"strings"
 	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/auth"
+	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 )
 
 const (
@@ -83,5 +85,41 @@ func WithJWKSEndpoint(enabled bool, path string) Option {
 func WithPushNotificationAuthenticator(authenticator *auth.PushNotificationAuthenticator) Option {
 	return func(s *A2AServer) {
 		s.pushAuth = authenticator
+	}
+}
+
+// WithBasePath sets a base path for all A2A endpoints.
+// This is useful when serving the agent under a sub-path like "/agent/api/v2/myagent".
+// The base path will be automatically prepended to all standard A2A endpoints:
+// - Agent card: basePath + "/.well-known/agent.json"
+// - JSON-RPC: basePath + "/"
+// - JWKS: basePath + "/.well-known/jwks.json"
+//
+// Example: WithBasePath("/agent/api/v2/myagent") creates endpoints:
+// - /agent/api/v2/myagent/.well-known/agent.json
+// - /agent/api/v2/myagent/
+// - /agent/api/v2/myagent/.well-known/jwks.json
+//
+// The base path should start with "/" and not end with "/".
+func WithBasePath(basePath string) Option {
+	return func(s *A2AServer) {
+		// Normalize the base path.
+		if basePath == "" || basePath == "/" {
+			// Empty or root path - use default paths.
+			return
+		}
+
+		// Ensure the base path starts with "/".
+		if !strings.HasPrefix(basePath, "/") {
+			basePath = "/" + basePath
+		}
+
+		// Remove trailing slash.
+		basePath = strings.TrimSuffix(basePath, "/")
+
+		// Set all endpoint paths with the base path prefix.
+		s.jsonRPCEndpoint = basePath + "/"
+		s.agentCardPath = basePath + protocol.AgentCardPath
+		s.jwksEndpoint = basePath + protocol.JWKSPath
 	}
 }

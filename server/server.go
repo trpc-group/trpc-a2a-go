@@ -35,6 +35,7 @@ type A2AServer struct {
 	httpServer      *http.Server            // Underlying HTTP server.
 	corsEnabled     bool                    // Flag to enable/disable CORS headers.
 	jsonRPCEndpoint string                  // Path for the JSON-RPC endpoint.
+	agentCardPath   string                  // Path for the agent card endpoint.
 	readTimeout     time.Duration           // HTTP server read timeout.
 	writeTimeout    time.Duration           // HTTP server write timeout.
 	idleTimeout     time.Duration           // HTTP server idle timeout.
@@ -59,6 +60,7 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 		taskManager:     taskManager,
 		corsEnabled:     true, // Enable CORS by default for easier development.
 		jsonRPCEndpoint: protocol.DefaultJSONRPCPath,
+		agentCardPath:   protocol.AgentCardPath,
 		readTimeout:     defaultReadTimeout,
 		writeTimeout:    defaultWriteTimeout,
 		idleTimeout:     defaultIdleTimeout,
@@ -124,7 +126,7 @@ func (s *A2AServer) Stop(ctx context.Context) error {
 func (s *A2AServer) Handler() http.Handler {
 	router := http.NewServeMux()
 	// Endpoint for agent metadata (.well-known convention).
-	router.HandleFunc(protocol.AgentCardPath, s.handleAgentCard)
+	router.HandleFunc(s.agentCardPath, s.handleAgentCard)
 	// JWKS endpoint for JWT authentication if enabled.
 	if s.jwksEnabled && s.pushAuth != nil {
 		router.HandleFunc(s.jwksEndpoint, s.pushAuth.HandleJWKS)
