@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0 (2025-06-24)
+
+- Add MCP information to the README for improved documentation (#38)
+- Add support for subpaths in the a2a-go server, enabling more flexible routing (#37)
+- The status enum for status_update should be status-update (#36)
+
 ## 0.2.0-beta (2025-06-24)
 
 ### A2A Specification Upgrade ([a2a spec v0.1.0](https://github.com/google-a2a/A2A/releases/tag/v0.1.0) -> [a2a spec v0.2.0](https://github.com/google-a2a/A2A/releases/tag/v0.2.0))
