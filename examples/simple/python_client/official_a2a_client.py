@@ -90,13 +90,11 @@ class SimpleA2AClient:
             
         print(f"📤 Sending streaming message: '{text}'")
         
-        # Use official SDK's streaming request type
         try:
             # Create A2A message for streaming
             message = create_text_message_object(role=Role.user, content=text)
             params = MessageSendParams(message=message)
             
-            # Use the correct SendStreamingMessageRequest
             request = SendStreamingMessageRequest(
                 id=str(uuid.uuid4()),
                 jsonrpc="2.0",
@@ -105,64 +103,46 @@ class SimpleA2AClient:
             )
             
             chunk_count = 0
-            final_message = ""
+            final_result = ""
             
-            # Use SDK's streaming method
+            # Use SDK's streaming method - we know the server sends 3 events:
+            # 1. working status, 2. completed status + message, 3. artifact
             async for chunk in self.client.send_message_streaming(request):
                 chunk_count += 1
-                
-                # Extract text from streaming chunk
                 chunk_data = chunk.model_dump() if hasattr(chunk, 'model_dump') else chunk
                 
-                # Handle different chunk types
-                if isinstance(chunk_data, dict):
-                    if 'result' in chunk_data:
-                        result = chunk_data['result']
-                        # Extract meaningful information from streaming events
-                        if isinstance(result, dict):
-                            if "Result" in result:
-                                # Handle StreamingMessageEvent format
-                                inner_result = result["Result"]
-                                if inner_result.get("kind") == "status-update":
-                                    status = inner_result.get("status", {})
-                                    state = status.get("state", "unknown")
-                                    print(f"📥 Status: {state}")
+                if isinstance(chunk_data, dict) and 'result' in chunk_data:
+                    result = chunk_data['result']
+                    if isinstance(result, dict) and "Result" in result:
+                        event = result["Result"]
+                        kind = event.get("kind", "")
+                        
+                        if kind == "status-update":
+                            status = event.get("status", {})
+                            state = status.get("state", "")
+                            print(f"📥 Status: {state}")
+                            
+                            # Extract final message from completed status
+                            if state == "completed" and "message" in status:
+                                parts = status["message"].get("parts", [])
+                                if parts and "text" in parts[0]:
+                                    final_result = parts[0]["text"]
+                                    print(f"   💬 Result: {final_result}")
                                     
-                                    # Extract message if present
-                                    if "message" in status and status["message"]:
-                                        msg = status["message"]
-                                        if "parts" in msg and msg["parts"]:
-                                            text_content = msg["parts"][0].get("text", "")
-                                            if text_content:
-                                                final_message = text_content
-                                                print(f"   💬 Message: {text_content}")
-                                                
-                                elif inner_result.get("kind") == "artifact-update":
-                                    artifact = inner_result.get("artifact", {})
-                                    name = artifact.get("name", "Unknown")
-                                    parts = artifact.get("parts", [])
-                                    if parts and "text" in parts[0]:
-                                        text_content = parts[0]["text"]
-                                        print(f"📥 Artifact '{name}': {text_content}")
-                                    else:
-                                        print(f"📥 Event: {inner_result.get('kind', 'unknown')}")
-                                else:
-                                    print(f"📥 Event: {inner_result.get('kind', 'unknown')}")
-                            elif "reason" in result:
-                                # Handle stream end event
-                                print(f"📥 Stream ended: {result['reason']}")
-                            else:
-                                print(f"📥 Stream data: {result}")
+                        elif kind == "artifact-update":
+                            artifact = event.get("artifact", {})
+                            name = artifact.get("name", "Artifact")
+                            parts = artifact.get("parts", [])
+                            if parts and "text" in parts[0]:
+                                text_content = parts[0]["text"]
+                                print(f"📥 {name}: {text_content}")
+                        
                         else:
-                            print(f"📥 Stream chunk: {result}")
-                    else:
-                        print(f"📥 Stream event: {chunk_data}")
-                else:
-                    print(f"📥 Stream chunk: {chunk}")
+                            print(f"📥 Event: {kind}")
             
             print(f"✅ Received {chunk_count} streaming chunks")
-            if final_message:
-                print(f"📝 Final result: '{final_message}'")
+            if final_result:
+                print(f"📝 Final result: '{final_result}'")
                 
         except Exception as e:
             print(f"⚠️  Streaming failed, falling back to regular message: {e}")
