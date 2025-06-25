@@ -105,40 +105,36 @@ class SimpleA2AClient:
             chunk_count = 0
             final_result = ""
             
-            # Use SDK's streaming method - we know the server sends 3 events:
-            # 1. working status, 2. completed status + message, 3. artifact
+            # Process streaming events: working status -> completed status + message -> artifact
             async for chunk in self.client.send_message_streaming(request):
                 chunk_count += 1
                 chunk_data = chunk.model_dump() if hasattr(chunk, 'model_dump') else chunk
                 
                 if isinstance(chunk_data, dict) and 'result' in chunk_data:
                     result = chunk_data['result']
-                    if isinstance(result, dict) and "Result" in result:
-                        event = result["Result"]
-                        kind = event.get("kind", "")
+                    if isinstance(result, dict):
+                        kind = result.get("kind", "")
                         
                         if kind == "status-update":
-                            status = event.get("status", {})
-                            state = status.get("state", "")
+                            status = result.get("status", {})
+                            state = str(status.get("state", "")).replace("TaskState.", "")
                             print(f"📥 Status: {state}")
                             
                             # Extract final message from completed status
-                            if state == "completed" and "message" in status:
-                                parts = status["message"].get("parts", [])
+                            if "completed" in state and "message" in status and status["message"]:
+                                message = status["message"]
+                                parts = message.get("parts", [])
                                 if parts and "text" in parts[0]:
                                     final_result = parts[0]["text"]
                                     print(f"   💬 Result: {final_result}")
                                     
                         elif kind == "artifact-update":
-                            artifact = event.get("artifact", {})
+                            artifact = result.get("artifact", {})
                             name = artifact.get("name", "Artifact")
                             parts = artifact.get("parts", [])
                             if parts and "text" in parts[0]:
                                 text_content = parts[0]["text"]
                                 print(f"📥 {name}: {text_content}")
-                        
-                        else:
-                            print(f"📥 Event: {kind}")
             
             print(f"✅ Received {chunk_count} streaming chunks")
             if final_result:
@@ -267,12 +263,18 @@ async def main():
             return 1
         
         # Run based on mode
-        if args.message:
-            await run_single_message(client, args.message)
-        elif args.mode == "streaming":
-            await run_streaming_test(client)
+        if args.mode == "streaming":
+            if args.message:
+                # Single streaming message
+                await client.send_streaming_message(args.message)
+            else:
+                # Streaming test suite
+                await run_streaming_test(client)
         elif args.mode == "info":
             await show_agent_info(client)
+        elif args.message:
+            # Single regular message
+            await run_single_message(client, args.message)
         else:  # test mode
             await run_test_suite(client)
             

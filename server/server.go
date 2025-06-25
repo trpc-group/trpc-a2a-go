@@ -749,20 +749,7 @@ func handleSSEStream[T interface{}](
 		select {
 		case event, ok := <-eventsChan:
 			if !ok {
-				// todo: remove this event, it's not official event
-				// Channel closed by task manager (task finished or error).
-				log.Infof("SSE stream closing request ID: %s", rpcID)
-				// Send a final SSE event indicating closure.
-				closeData := sse.CloseEventData{
-					ID:     rpcID,
-					Reason: "task ended",
-				}
-				// Use JSON-RPC format for the close event
-				if err := sse.FormatJSONRPCEvent(w, protocol.EventClose, rpcID, &closeData); err != nil {
-					log.Errorf("Error writing SSE JSON-RPC close event for request ID: %s: %v", rpcID, err)
-				} else {
-					flusher.Flush()
-				}
+				flusher.Flush()
 				return // End the handler.
 			}
 			if err := sendSSEEvent(w, rpcID, &event); err != nil {
