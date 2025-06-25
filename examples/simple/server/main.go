@@ -120,7 +120,7 @@ func (p *simpleMessageProcessor) ProcessMessage(
 					State:   protocol.TaskStateCompleted,
 					Message: &responseMessage,
 				},
-				Final: boolPtr(true),
+				Final: true,
 			},
 		}
 		err = subscriber.Send(completedEvent)

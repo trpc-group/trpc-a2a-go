@@ -637,7 +637,7 @@ func (m *mockTaskManager) OnResubscribe(
 		event := protocol.TaskStatusUpdateEvent{
 			TaskID: task.ID,
 			Status: task.Status,
-			Final:  &final,
+			Final:  final,
 		}
 
 		// Try to send the event, but don't block forever
@@ -696,7 +696,7 @@ func (m *mockTaskManager) OnSendTaskSubscribe(
 		event := &protocol.TaskStatusUpdateEvent{
 			TaskID: task.ID,
 			Status: task.Status,
-			Final:  &final,
+			Final:  final,
 		}
 
 		// Try to send the event, but don't block forever

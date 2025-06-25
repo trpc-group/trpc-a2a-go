@@ -111,6 +111,17 @@ func (TextPart) partMarker() {}
 func (FilePart) partMarker() {}
 func (DataPart) partMarker() {}
 
+// StreamingMessageResult is an interface representing a result of SendMessageStream.
+type StreamingMessageResult interface {
+	streamingMessageResultMarker()
+	GetKind() string
+}
+
+func (Message) streamingMessageResultMarker()                 {}
+func (Task) streamingMessageResultMarker()                    {}
+func (TaskStatusUpdateEvent) streamingMessageResultMarker()   {}
+func (TaskArtifactUpdateEvent) streamingMessageResultMarker() {}
+
 // Kind constants define the possible kinds of the struct.
 const (
 	// KindMessage is the kind of the message.
@@ -507,6 +518,7 @@ type Task struct {
 // See A2A Spec section on Streaming and Events.
 // Exported interface.
 type TaskEvent interface {
+	Event
 	eventMarker() // Internal marker method.
 	// IsFinal returns true if this is the final event for the task.
 	IsFinal() bool
@@ -518,7 +530,7 @@ type TaskStatusUpdateEvent struct {
 	// ContextID is the context ID of the task.
 	ContextID string `json:"contextId"`
 	// Final is a flag indicating if this is the final event for the task.
-	Final *bool `json:"final"`
+	Final bool `json:"final"`
 	// Kind is the event type discriminator.
 	Kind string `json:"kind"`
 	// Metadata is the optional metadata.
@@ -534,7 +546,7 @@ func (TaskStatusUpdateEvent) eventMarker() {}
 
 // IsFinal returns true if this is a final event.
 func (r *TaskStatusUpdateEvent) IsFinal() bool {
-	return r.Final != nil && *r.Final
+	return r.Final
 }
 
 // TaskArtifactUpdateEvent indicates a new or updated artifact chunk.
@@ -661,17 +673,18 @@ func NewTaskStatusUpdateEvent(taskID, contextID string, status TaskStatus, final
 		ContextID: contextID,
 		Kind:      KindTaskStatusUpdate,
 		Status:    status,
-		Final:     &final,
+		Final:     final,
 	}
 }
 
 // NewTaskArtifactUpdateEvent creates a new TaskArtifactUpdateEvent.
-func NewTaskArtifactUpdateEvent(taskID, contextID string, artifact Artifact) TaskArtifactUpdateEvent {
+func NewTaskArtifactUpdateEvent(taskID, contextID string, artifact Artifact, lastChunk bool) TaskArtifactUpdateEvent {
 	return TaskArtifactUpdateEvent{
 		TaskID:    taskID,
 		ContextID: contextID,
 		Kind:      KindTaskArtifactUpdate,
 		Artifact:  artifact,
+		LastChunk: &lastChunk,
 	}
 }
 
@@ -803,7 +816,7 @@ type SendStreamingMessageParams struct {
 // StreamingMessageEvent is the union type of Message/Task/TaskStatusUpdate/TaskArtifactUpdate.
 type StreamingMessageEvent struct {
 	// Result is the final result of the streaming operation.
-	Result Event
+	Result StreamingMessageResult
 }
 
 // UnmarshalJSON implements custom unmarshalling logic for StreamingMessageEvent

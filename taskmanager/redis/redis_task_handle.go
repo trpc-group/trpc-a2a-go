@@ -122,7 +122,7 @@ func (h *taskHandler) UpdateTaskState(
 		ContextID: task.ContextID,
 		Status:    task.Status,
 		Kind:      protocol.KindTaskStatusUpdate,
-		Final:     &finalState,
+		Final:     finalState,
 	}
 	streamEvent := protocol.StreamingMessageEvent{Result: event}
 	h.manager.notifySubscribers(*taskID, streamEvent)

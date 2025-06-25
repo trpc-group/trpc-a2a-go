@@ -407,7 +407,7 @@ func TestA2AServer_Resubscribe(t *testing.T) {
 			ContextID: "test-context",
 			Kind:      protocol.KindTaskStatusUpdate,
 			Status:    protocol.TaskStatus{State: protocol.TaskStateCompleted},
-			Final:     &finalPtr,
+			Final:     finalPtr,
 		}
 		mockTM.SubscribeEvents = []protocol.StreamingMessageEvent{
 			{Result: &workingEvent},
@@ -553,7 +553,7 @@ func TestA2AServer_HandleTasksSendSubscribe(t *testing.T) {
 			ContextID: "test-context",
 			Kind:      protocol.KindTaskStatusUpdate,
 			Status:    protocol.TaskStatus{State: protocol.TaskStateCompleted},
-			Final:     &finalPtr,
+			Final:     finalPtr,
 		}
 
 		params := protocol.SendTaskParams{

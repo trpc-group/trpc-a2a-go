@@ -128,7 +128,7 @@ func (p *streamingMessageProcessor) ProcessMessage(
 						Status: protocol.TaskStatus{
 							State: protocol.TaskStateCanceled,
 						},
-						Final: boolPtr(true),
+						Final: true,
 					},
 				}
 				err = subscriber.Send(cancelEvent)
@@ -204,7 +204,7 @@ func (p *streamingMessageProcessor) ProcessMessage(
 						Status: protocol.TaskStatus{
 							State: protocol.TaskStateCanceled,
 						},
-						Final: boolPtr(true),
+						Final: true,
 					},
 				}
 				err = subscriber.Send(cancelEvent)
@@ -232,7 +232,7 @@ func (p *streamingMessageProcessor) ProcessMessage(
 						Parts:     []protocol.Part{protocol.NewTextPart(fmt.Sprintf("Completed processing all %d chunks successfully!", totalChunks))},
 					},
 				},
-				Final: boolPtr(true),
+				Final: true,
 			},
 		}
 		err = subscriber.Send(completeEvent)

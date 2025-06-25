@@ -129,7 +129,7 @@ func TestA2AClient_StreamTask(t *testing.T) {
 		sseEvent1Data, _ := json.Marshal(protocol.TaskStatusUpdateEvent{
 			TaskID: taskID,
 			Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
-			Final:  &[]bool{false}[0],
+			Final:  false,
 		})
 		sseEvent2Data, _ := json.Marshal(protocol.TaskArtifactUpdateEvent{
 			TaskID:   taskID,
@@ -138,7 +138,7 @@ func TestA2AClient_StreamTask(t *testing.T) {
 		sseEvent3Data, _ := json.Marshal(protocol.TaskStatusUpdateEvent{
 			TaskID: taskID,
 			Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
-			Final:  &[]bool{true}[0],
+			Final:  true,
 		})
 
 		// Format the mock SSE stream string.

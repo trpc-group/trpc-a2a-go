@@ -115,7 +115,7 @@ func (m *TaskManager) OnSendMessage(
 	m.processRequestMessage(&request.Message)
 
 	// Process configuration.
-	options := m.processConfiguration(request.Configuration, request.Metadata)
+	options := m.processConfiguration(request.Configuration)
 	options.Streaming = false // non-streaming processing
 
 	// Create MessageHandle.
@@ -172,7 +172,7 @@ func (m *TaskManager) OnSendMessageStream(
 	m.processRequestMessage(&request.Message)
 
 	// Process configuration.
-	options := m.processConfiguration(request.Configuration, request.Metadata)
+	options := m.processConfiguration(request.Configuration)
 	options.Streaming = true // streaming mode
 
 	// Create streaming MessageHandle.
@@ -339,12 +339,18 @@ func (m *TaskManager) OnResubscribe(
 }
 
 // OnSendTask deprecated method empty implementation.
-func (m *TaskManager) OnSendTask(ctx context.Context, request protocol.SendTaskParams) (*protocol.Task, error) {
+func (m *TaskManager) OnSendTask(
+	ctx context.Context,
+	request protocol.SendTaskParams,
+) (*protocol.Task, error) {
 	return nil, fmt.Errorf("OnSendTask is deprecated, use OnSendMessage instead")
 }
 
 // OnSendTaskSubscribe deprecated method empty implementation.
-func (m *TaskManager) OnSendTaskSubscribe(ctx context.Context, request protocol.SendTaskParams) (<-chan protocol.TaskEvent, error) {
+func (m *TaskManager) OnSendTaskSubscribe(
+	ctx context.Context,
+	request protocol.SendTaskParams,
+) (<-chan protocol.TaskEvent, error) {
 	return nil, fmt.Errorf("OnSendTaskSubscribe is deprecated, use OnSendMessageStream instead")
 }
 
@@ -353,7 +359,9 @@ func (m *TaskManager) OnSendTaskSubscribe(ctx context.Context, request protocol.
 // =============================================================================
 
 // processConfiguration processes and normalizes configuration.
-func (m *TaskManager) processConfiguration(config *protocol.SendMessageConfiguration, metadata map[string]interface{}) taskmanager.ProcessOptions {
+func (m *TaskManager) processConfiguration(
+	config *protocol.SendMessageConfiguration,
+) taskmanager.ProcessOptions {
 	result := taskmanager.ProcessOptions{
 		Blocking:      false,
 		HistoryLength: 0,

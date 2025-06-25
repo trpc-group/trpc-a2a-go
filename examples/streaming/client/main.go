@@ -181,12 +181,13 @@ func processStreamEvents(ctx context.Context, streamChan <-chan protocol.TaskEve
 
 				// Exit when we receive a final status update (indicating a terminal state)
 				// Per A2A spec, this should be the definitive way to know the task is complete
-				if e.Final != nil && *e.Final {
-					if e.Status.State == protocol.TaskStateCompleted {
+				if e.Final {
+					switch e.Status.State {
+					case protocol.TaskStateCompleted:
 						log.Info("Task completed successfully.")
-					} else if e.Status.State == protocol.TaskStateFailed {
+					case protocol.TaskStateFailed:
 						log.Info("Task failed.")
-					} else if e.Status.State == protocol.TaskStateCanceled {
+					case protocol.TaskStateCanceled:
 						log.Info("Task was canceled.")
 					}
 					log.Info("Received final status update, exiting.")

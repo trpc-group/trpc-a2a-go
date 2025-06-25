@@ -88,47 +88,47 @@ func TestTaskEvent_IsFinal(t *testing.T) {
 	}{
 		{
 			name:     "StatusUpdate Submitted",
-			event:    &TaskStatusUpdateEvent{Final: boolPtr(false), Status: TaskStatus{State: TaskStateSubmitted}},
+			event:    &TaskStatusUpdateEvent{Final: false, Status: TaskStatus{State: TaskStateSubmitted}},
 			expected: false,
 		},
 		{
 			name:     "StatusUpdate Working",
-			event:    &TaskStatusUpdateEvent{Final: boolPtr(false), Status: TaskStatus{State: TaskStateWorking}},
+			event:    &TaskStatusUpdateEvent{Final: false, Status: TaskStatus{State: TaskStateWorking}},
 			expected: false,
 		},
 		{
 			name:     "StatusUpdate Completed",
-			event:    &TaskStatusUpdateEvent{Final: boolPtr(true), Status: TaskStatus{State: TaskStateCompleted}},
+			event:    &TaskStatusUpdateEvent{Final: true, Status: TaskStatus{State: TaskStateCompleted}},
 			expected: true,
 		},
 		{
 			name:     "StatusUpdate Failed",
-			event:    &TaskStatusUpdateEvent{Final: boolPtr(true), Status: TaskStatus{State: TaskStateFailed}},
+			event:    &TaskStatusUpdateEvent{Final: true, Status: TaskStatus{State: TaskStateFailed}},
 			expected: true,
 		},
 		{
 			name:     "StatusUpdate Canceled",
-			event:    &TaskStatusUpdateEvent{Final: boolPtr(true), Status: TaskStatus{State: TaskStateCanceled}},
+			event:    &TaskStatusUpdateEvent{Final: true, Status: TaskStatus{State: TaskStateCanceled}},
 			expected: true,
 		},
 		{
 			name:     "StatusUpdate Rejected",
-			event:    &TaskStatusUpdateEvent{Final: boolPtr(true), Status: TaskStatus{State: TaskStateRejected}},
+			event:    &TaskStatusUpdateEvent{Final: true, Status: TaskStatus{State: TaskStateRejected}},
 			expected: true,
 		},
 		{
 			name:     "StatusUpdate AuthRequired",
-			event:    &TaskStatusUpdateEvent{Final: boolPtr(false), Status: TaskStatus{State: TaskStateAuthRequired}},
+			event:    &TaskStatusUpdateEvent{Final: false, Status: TaskStatus{State: TaskStateAuthRequired}},
 			expected: false,
 		},
 		{
 			name:     "ArtifactUpdate Not Final",
-			event:    TaskArtifactUpdateEvent{},
+			event:    &TaskArtifactUpdateEvent{},
 			expected: false,
 		},
 		{
 			name:     "ArtifactUpdate Final",
-			event:    TaskArtifactUpdateEvent{LastChunk: boolPtr(true)},
+			event:    &TaskArtifactUpdateEvent{LastChunk: boolPtr(true)},
 			expected: true,
 		},
 	}

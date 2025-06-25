@@ -278,7 +278,7 @@ func TestA2ASrv_HandleTasksSendSub_SSE(t *testing.T) {
 	event3 := protocol.TaskStatusUpdateEvent{
 		TaskID: taskID,
 		Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
-		Final:  &final,
+		Final:  final,
 	}
 	// Wrap events in StreamingMessageEvent
 	mockTM.SubscribeEvents = []protocol.StreamingMessageEvent{
@@ -680,7 +680,7 @@ func (m *mockTaskManager) OnSendTaskSubscribe(
 				TaskID:    params.ID,
 				ContextID: eventContextID,
 				Kind:      protocol.KindTaskStatusUpdate,
-				Final:     &final,
+				Final:     final,
 				Status: protocol.TaskStatus{
 					State:     protocol.TaskStateCompleted,
 					Timestamp: getCurrentTimestamp(),

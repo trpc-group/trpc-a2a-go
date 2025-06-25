@@ -187,7 +187,7 @@ func (p *pushNotificationMessageProcessor) processTaskAsync(
 					Parts:     []protocol.Part{protocol.NewTextPart(completeMsg)},
 				},
 			},
-			Final: boolPtr(true),
+			Final: true,
 		},
 	}
 	err = subscriber.Send(completedEvent)

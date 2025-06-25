@@ -63,7 +63,7 @@ func (h *memoryTaskHandler) UpdateTaskState(
 		ContextID: originalTask.ContextID,
 		Status:    originalTask.Status,
 		Kind:      protocol.KindTaskStatusUpdate,
-		Final:     &finalState,
+		Final:     finalState,
 	}
 	streamEvent := protocol.StreamingMessageEvent{Result: event}
 	h.manager.notifySubscribers(*taskID, streamEvent)

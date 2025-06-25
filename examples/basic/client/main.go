@@ -734,7 +734,7 @@ func processStreamResponse(
 				if e.Status.State == protocol.TaskStateInputRequired {
 					fmt.Println("  [Additional input required]")
 					return taskID
-				} else if e.Final != nil && *e.Final {
+				} else if e.Final {
 					log.Printf("Final status received: %s", e.Status.State)
 
 					// Print a message indicating task completion state
