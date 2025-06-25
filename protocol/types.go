@@ -807,7 +807,7 @@ type StreamingMessageEvent struct {
 }
 
 // UnmarshalJSON implements custom unmarshalling logic for StreamingMessageEvent
-func (r StreamingMessageEvent) UnmarshalJSON(data []byte) error {
+func (r *StreamingMessageEvent) UnmarshalJSON(data []byte) error {
 	// First, try to detect if this is wrapped in a Result field
 	type StreamingMessageEventRaw struct {
 		Result json.RawMessage `json:"Result"`
@@ -865,7 +865,7 @@ func (r StreamingMessageEvent) UnmarshalJSON(data []byte) error {
 }
 
 // MarshalJSON implements custom marshalling logic for StreamingMessageResult
-func (r StreamingMessageEvent) MarshalJSON() ([]byte, error) {
+func (r *StreamingMessageEvent) MarshalJSON() ([]byte, error) {
 	switch r.Result.GetKind() {
 	case KindMessage:
 		return json.Marshal(r.Result)
