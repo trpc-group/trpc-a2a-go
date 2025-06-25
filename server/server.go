@@ -732,7 +732,7 @@ func handleSSEStream[T interface{}](
 					Reason: "task ended",
 				}
 				// Use JSON-RPC format for the close event
-				if err := sse.FormatJSONRPCEvent(w, protocol.EventClose, rpcID, closeData); err != nil {
+				if err := sse.FormatJSONRPCEvent(w, protocol.EventClose, rpcID, &closeData); err != nil {
 					log.Errorf("Error writing SSE JSON-RPC close event for request ID: %s: %v", rpcID, err)
 				} else {
 					flusher.Flush()
