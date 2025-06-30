@@ -410,7 +410,7 @@ func (m *TaskManager) processReplyMessage(ctxID *string, message *protocol.Messa
 	if message.MessageID == "" {
 		message.MessageID = m.generateMessageID()
 	}
-	if message.ContextID == nil {
+	if message.ContextID == nil || *message.ContextID == "" {
 		contextID := protocol.GenerateContextID()
 		message.ContextID = &contextID
 	}

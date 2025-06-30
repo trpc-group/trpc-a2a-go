@@ -597,7 +597,7 @@ func (m *MemoryTaskManager) processReplyMessage(ctxID *string, message *protocol
 		message.MessageID = protocol.GenerateMessageID()
 	}
 
-	if message.ContextID == nil {
+	if message.ContextID == nil || *message.ContextID == "" {
 		contextID := protocol.GenerateContextID()
 		message.ContextID = &contextID
 	}

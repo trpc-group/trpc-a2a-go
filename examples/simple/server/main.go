@@ -88,6 +88,7 @@ func (p *simpleMessageProcessor) ProcessMessage(
 			if subscriber != nil {
 				subscriber.Close()
 			}
+			handler.CleanTask(&taskID)
 		}()
 
 		startMessage := protocol.NewMessage(

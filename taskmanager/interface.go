@@ -45,6 +45,7 @@ type CancellableTask interface {
 // with the task manager during processing. It encapsulates the necessary callbacks.
 type TaskHandler interface {
 	// BuildTask creates a new task and returns the task ID.
+	// If ContextID is not set, it will assign a contextID from request or generate a new one
 	BuildTask(specificTaskID *string, contextID *string) (string, error)
 
 	// UpdateTaskState updates the task's state and returns the updated task ID.
@@ -60,6 +61,7 @@ type TaskHandler interface {
 	GetTask(taskID *string) (CancellableTask, error)
 
 	// CleanTask cleans up the task from storage.
+	// CleanTask should be called when the task is no longer needed.
 	CleanTask(taskID *string) error
 
 	// GetMessageHistory returns the conversation history for the current context.

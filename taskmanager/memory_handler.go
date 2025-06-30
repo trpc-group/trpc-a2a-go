@@ -273,9 +273,6 @@ func (h *memoryTaskHandler) sendStreamingEventHook(ctxID string) func(event prot
 			}
 		case *protocol.Message:
 			event := event.Result.(*protocol.Message)
-			if event.ContextID == nil || *event.ContextID == "" {
-				event.ContextID = &ctxID
-			}
 			// store message
 			h.manager.processReplyMessage(&ctxID, event)
 		case *protocol.Task:
