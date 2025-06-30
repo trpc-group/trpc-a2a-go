@@ -85,6 +85,7 @@ type MessageProcessingResult struct {
 // TaskSubscriber is a subscriber for a task
 type TaskSubscriber interface {
 	// Send sends an event to the task subscriber, could be blocked if the channel is full
+	// If the contextID is not set, it will be assigned to the contextID of the request automatically
 	Send(event protocol.StreamingMessageEvent) error
 
 	// Channel returns the channel of the task subscriber

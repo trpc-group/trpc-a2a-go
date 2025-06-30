@@ -182,6 +182,7 @@ func (h *taskHandler) AddArtifact(taskID *string, artifact protocol.Artifact, is
 
 // SubScribeTask subscribes to the task and returns a TaskSubscriber.
 func (h *taskHandler) SubScribeTask(taskID *string) (taskmanager.TaskSubscriber, error) {
+	log.Infof("SubScribeTask: %v", taskID)
 	if taskID == nil || *taskID == "" {
 		return nil, fmt.Errorf("taskID cannot be nil or empty")
 	}
@@ -192,7 +193,8 @@ func (h *taskHandler) SubScribeTask(taskID *string) (taskmanager.TaskSubscriber,
 		return nil, fmt.Errorf("task not found: %s", *taskID)
 	}
 
-	subscriber := NewTaskSubscriber(*taskID, defaultTaskSubscriberBufferSize)
+	sendHook := h.sendStreamingEventHook(h.GetContextID())
+	subscriber := NewTaskSubscriber(*taskID, defaultTaskSubscriberBufferSize, WithTaskSubscriberSendHook(sendHook))
 	h.manager.addSubscriber(*taskID, subscriber)
 	return subscriber, nil
 }
@@ -281,4 +283,33 @@ func (h *taskHandler) GetMessageHistory() []protocol.Message {
 	}
 
 	return history
+}
+
+func (h *taskHandler) sendStreamingEventHook(ctxID string) func(event protocol.StreamingMessageEvent) error {
+	return func(event protocol.StreamingMessageEvent) error {
+		switch event.Result.(type) {
+		case *protocol.TaskStatusUpdateEvent:
+			event := event.Result.(*protocol.TaskStatusUpdateEvent)
+			if event.ContextID == "" {
+				event.ContextID = ctxID
+			}
+		case *protocol.TaskArtifactUpdateEvent:
+			event := event.Result.(*protocol.TaskArtifactUpdateEvent)
+			if event.ContextID == "" {
+				event.ContextID = ctxID
+			}
+		case *protocol.Message:
+			event := event.Result.(*protocol.Message)
+			if event.ContextID == nil {
+				event.ContextID = &ctxID
+			}
+			h.manager.processReplyMessage(&ctxID, event)
+		case *protocol.Task:
+			event := event.Result.(*protocol.Task)
+			if event.ContextID == "" {
+				event.ContextID = ctxID
+			}
+		}
+		return nil
+	}
 }

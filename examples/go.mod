@@ -9,7 +9,8 @@ require (
 	github.com/lestrrat-go/jwx/v2 v2.1.4
 	github.com/redis/go-redis/v9 v9.10.0
 	golang.org/x/oauth2 v0.29.0
-	trpc.group/trpc-go/trpc-a2a-go v0.0.0
+	trpc.group/trpc-go/trpc-a2a-go v0.0.3
+	trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis v0.0.0-20250625115112-3bb198d0dc98
 )
 
 require (
@@ -31,3 +32,5 @@ require (
 )
 
 replace trpc.group/trpc-go/trpc-a2a-go => ../
+
+replace trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis => ../taskmanager/redis

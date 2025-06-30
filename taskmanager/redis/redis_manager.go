@@ -156,7 +156,7 @@ func (m *TaskManager) OnSendMessage(
 		if request.Message.ContextID != nil {
 			contextID = *request.Message.ContextID
 		}
-		m.processReplyMessage(contextID, message)
+		m.processReplyMessage(&contextID, message)
 	}
 
 	return &protocol.MessageResult{Result: result.Result}, nil
@@ -394,23 +394,28 @@ func (m *TaskManager) processRequestMessage(message *protocol.Message) {
 	if message.MessageID == "" {
 		message.MessageID = protocol.GenerateMessageID()
 	}
-	if message.ContextID != nil {
-		m.storeMessage(context.Background(), *message)
+
+	if message.ContextID == nil {
+		contextID := protocol.GenerateContextID()
+		message.ContextID = &contextID
 	}
+
+	m.storeMessage(context.Background(), *message)
 }
 
 // processReplyMessage processes and stores the reply message.
-func (m *TaskManager) processReplyMessage(ctxID string, message *protocol.Message) {
-	message.ContextID = &ctxID
+func (m *TaskManager) processReplyMessage(ctxID *string, message *protocol.Message) {
+	message.ContextID = ctxID
 	message.Role = protocol.MessageRoleAgent
 	if message.MessageID == "" {
 		message.MessageID = m.generateMessageID()
 	}
-
-	// If contextID is not nil, store the conversation history.
-	if message.ContextID != nil {
-		m.storeMessage(context.Background(), *message)
+	if message.ContextID == nil {
+		contextID := protocol.GenerateContextID()
+		message.ContextID = &contextID
 	}
+
+	m.storeMessage(context.Background(), *message)
 }
 
 // generateMessageID generates a message ID.

@@ -47,6 +47,21 @@ func (t *CancellableTask) Cancel() {
 	}
 }
 
+// TaskSubscriberOpts is the options for the TaskSubscriber
+type TaskSubscriberOpts struct {
+	sendHook func(event protocol.StreamingMessageEvent) error
+}
+
+// TaskSubscriberOption is the option for the TaskSubscriber
+type TaskSubscriberOption func(s *TaskSubscriberOpts)
+
+// WithTaskSubscriberSendHook sets the send hook for the task subscriber
+func WithTaskSubscriberSendHook(hook func(event protocol.StreamingMessageEvent) error) TaskSubscriberOption {
+	return func(s *TaskSubscriberOpts) {
+		s.sendHook = hook
+	}
+}
+
 // TaskSubscriber implements the TaskSubscriber interface for Redis storage.
 type TaskSubscriber struct {
 	taskID     string
@@ -54,10 +69,18 @@ type TaskSubscriber struct {
 	closed     atomic.Bool
 	mu         sync.RWMutex
 	lastAccess time.Time
+	opts       TaskSubscriberOpts
 }
 
 // NewTaskSubscriber creates a new Redis-based task subscriber.
-func NewTaskSubscriber(taskID string, bufferSize int) *TaskSubscriber {
+func NewTaskSubscriber(taskID string, bufferSize int, opts ...TaskSubscriberOption) *TaskSubscriber {
+	subscriberOpts := TaskSubscriberOpts{
+		sendHook: nil,
+	}
+	for _, opt := range opts {
+		opt(&subscriberOpts)
+	}
+
 	if bufferSize <= 0 {
 		bufferSize = defaultTaskSubscriberBufferSize
 	}
@@ -66,6 +89,7 @@ func NewTaskSubscriber(taskID string, bufferSize int) *TaskSubscriber {
 		taskID:     taskID,
 		eventQueue: make(chan protocol.StreamingMessageEvent, bufferSize),
 		lastAccess: time.Now(),
+		opts:       subscriberOpts,
 	}
 }
 
@@ -83,6 +107,13 @@ func (s *TaskSubscriber) Send(event protocol.StreamingMessageEvent) error {
 	}
 
 	s.lastAccess = time.Now()
+
+	if s.opts.sendHook != nil {
+		err := s.opts.sendHook(event)
+		if err != nil {
+			return err
+		}
+	}
 
 	// Use select with default to avoid blocking
 	select {

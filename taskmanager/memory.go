@@ -59,6 +59,21 @@ func (t *MemoryCancellableTask) Task() *protocol.Task {
 	return &t.task
 }
 
+// MemoryTaskSubscriberOpts is the options for the MemoryTaskSubscriber
+type MemoryTaskSubscriberOpts struct {
+	sendHook func(event protocol.StreamingMessageEvent) error
+}
+
+// MemoryTaskSubscriberOption is the option for the MemoryTaskSubscriber
+type MemoryTaskSubscriberOption func(s *MemoryTaskSubscriberOpts)
+
+// WithMemoryTaskSubscriberSendHook sets the send hook for the task subscriber
+func WithMemoryTaskSubscriberSendHook(hook func(event protocol.StreamingMessageEvent) error) MemoryTaskSubscriberOption {
+	return func(s *MemoryTaskSubscriberOpts) {
+		s.sendHook = hook
+	}
+}
+
 // MemoryTaskSubscriber is a subscriber for a task
 type MemoryTaskSubscriber struct {
 	taskID         string
@@ -66,21 +81,32 @@ type MemoryTaskSubscriber struct {
 	lastAccessTime time.Time
 	closed         atomic.Bool
 	mu             sync.RWMutex
+	opts           MemoryTaskSubscriberOpts
 }
 
 // NewMemoryTaskSubscriber creates a new task subscriber with specified buffer length
-func NewMemoryTaskSubscriber(taskID string, length int) *MemoryTaskSubscriber {
-	if length <= 0 {
-		length = defaultTaskSubscriberBufferSize // default buffer size
+func NewMemoryTaskSubscriber(
+	taskID string,
+	bufSize int,
+	opts ...MemoryTaskSubscriberOption,
+) *MemoryTaskSubscriber {
+	subscriberOpts := MemoryTaskSubscriberOpts{
+		sendHook: nil,
+	}
+	for _, opt := range opts {
+		opt(&subscriberOpts)
 	}
 
-	eventQueue := make(chan protocol.StreamingMessageEvent, length)
-
+	if bufSize <= 0 {
+		bufSize = defaultTaskSubscriberBufferSize // default buffer size
+	}
+	eventQueue := make(chan protocol.StreamingMessageEvent, bufSize)
 	return &MemoryTaskSubscriber{
 		taskID:         taskID,
 		eventQueue:     eventQueue,
 		lastAccessTime: time.Now(),
 		closed:         atomic.Bool{},
+		opts:           subscriberOpts,
 	}
 }
 
@@ -117,6 +143,12 @@ func (s *MemoryTaskSubscriber) Send(event protocol.StreamingMessageEvent) error 
 	}
 
 	s.lastAccessTime = time.Now()
+	if s.opts.sendHook != nil {
+		err := s.opts.sendHook(event)
+		if err != nil {
+			return err
+		}
+	}
 
 	// Use select with default to avoid blocking
 	select {
@@ -259,16 +291,9 @@ func (m *MemoryTaskManager) OnSendMessage(
 	switch result.Result.(type) {
 	case *protocol.Task:
 	case *protocol.Message:
+		m.processReplyMessage(request.Message.ContextID, result.Result.(*protocol.Message))
 	default:
 		return nil, fmt.Errorf("processor returned unsupported result type %T for SendMessage request", result.Result)
-	}
-
-	if message, ok := result.Result.(*protocol.Message); ok {
-		var contextID string
-		if request.Message.ContextID != nil {
-			contextID = *request.Message.ContextID
-		}
-		m.processReplyMessage(contextID, message)
 	}
 
 	return &protocol.MessageResult{Result: result.Result}, nil
@@ -549,26 +574,35 @@ func (m *MemoryTaskManager) processConfiguration(config *protocol.SendMessageCon
 	return result
 }
 
+// processRequestMessage processes the request message, add messageID and contextID if not set
 func (m *MemoryTaskManager) processRequestMessage(message *protocol.Message) {
 	if message.MessageID == "" {
 		message.MessageID = protocol.GenerateMessageID()
 	}
-	if message.ContextID != nil {
-		m.storeMessage(*message)
+
+	if message.ContextID == nil || *message.ContextID == "" {
+		contextID := protocol.GenerateContextID()
+		message.ContextID = &contextID
 	}
+
+	m.storeMessage(*message)
 }
 
-func (m *MemoryTaskManager) processReplyMessage(ctxID string, message *protocol.Message) {
-	message.ContextID = &ctxID
+// processReplyMessage processes the reply message, add messageID and contextID if not set
+func (m *MemoryTaskManager) processReplyMessage(ctxID *string, message *protocol.Message) {
+	message.ContextID = ctxID
 	message.Role = protocol.MessageRoleAgent
+
 	if message.MessageID == "" {
 		message.MessageID = protocol.GenerateMessageID()
 	}
 
-	// if contextID is not nil, store the conversation history
-	if message.ContextID != nil {
-		m.storeMessage(*message)
+	if message.ContextID == nil {
+		contextID := protocol.GenerateContextID()
+		message.ContextID = &contextID
 	}
+
+	m.storeMessage(*message)
 }
 
 func (m *MemoryTaskManager) checkTaskExists(taskID string) bool {

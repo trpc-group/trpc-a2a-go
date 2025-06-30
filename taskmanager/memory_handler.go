@@ -78,7 +78,13 @@ func (h *memoryTaskHandler) SubScribeTask(taskID *string) (TaskSubscriber, error
 	if !h.manager.checkTaskExists(*taskID) {
 		return nil, fmt.Errorf("task not found: %s", *taskID)
 	}
-	subscriber := NewMemoryTaskSubscriber(*taskID, defaultTaskSubscriberBufferSize)
+	ctxID := h.GetContextID()
+	sendHook := h.sendStreamingEventHook(ctxID)
+	subscriber := NewMemoryTaskSubscriber(
+		*taskID,
+		defaultTaskSubscriberBufferSize,
+		WithMemoryTaskSubscriberSendHook(sendHook),
+	)
 	h.manager.addSubscriber(*taskID, subscriber)
 	return subscriber, nil
 }
@@ -250,4 +256,34 @@ func (h *memoryTaskHandler) CleanTask(taskID *string) error {
 	h.manager.taskMu.Unlock()
 
 	return nil
+}
+
+func (h *memoryTaskHandler) sendStreamingEventHook(ctxID string) func(event protocol.StreamingMessageEvent) error {
+	return func(event protocol.StreamingMessageEvent) error {
+		switch event.Result.(type) {
+		case *protocol.TaskStatusUpdateEvent:
+			event := event.Result.(*protocol.TaskStatusUpdateEvent)
+			if event.ContextID == "" {
+				event.ContextID = ctxID
+			}
+		case *protocol.TaskArtifactUpdateEvent:
+			event := event.Result.(*protocol.TaskArtifactUpdateEvent)
+			if event.ContextID == "" {
+				event.ContextID = ctxID
+			}
+		case *protocol.Message:
+			event := event.Result.(*protocol.Message)
+			if event.ContextID == nil || *event.ContextID == "" {
+				event.ContextID = &ctxID
+			}
+			// store message
+			h.manager.processReplyMessage(&ctxID, event)
+		case *protocol.Task:
+			event := event.Result.(*protocol.Task)
+			if event.ContextID == "" {
+				event.ContextID = ctxID
+			}
+		}
+		return nil
+	}
 }

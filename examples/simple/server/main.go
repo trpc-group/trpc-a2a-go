@@ -17,10 +17,12 @@ import (
 
 	"github.com/google/uuid"
 
+	goredis "github.com/redis/go-redis/v9"
 	"trpc.group/trpc-go/trpc-a2a-go/log"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/server"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis"
 )
 
 // simpleMessageProcessor implements the taskmanager.MessageProcessor interface.
@@ -31,7 +33,7 @@ func (p *simpleMessageProcessor) ProcessMessage(
 	ctx context.Context,
 	message protocol.Message,
 	options taskmanager.ProcessOptions,
-	handle taskmanager.TaskHandler,
+	handler taskmanager.TaskHandler,
 ) (*taskmanager.MessageProcessingResult, error) {
 	// Extract text from the incoming message.
 	text := extractText(message)
@@ -69,13 +71,13 @@ func (p *simpleMessageProcessor) ProcessMessage(
 	}
 
 	// For streaming processing, create a task and subscribe to it
-	taskID, err := handle.BuildTask(nil, nil)
+	taskID, err := handler.BuildTask(nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build task: %w", err)
 	}
 
 	// Subscribe to the task for streaming events
-	subscriber, err := handle.SubScribeTask(&taskID)
+	subscriber, err := handler.SubScribeTask(&taskID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to subscribe to task: %w", err)
 	}
@@ -88,12 +90,22 @@ func (p *simpleMessageProcessor) ProcessMessage(
 			}
 		}()
 
+		startMessage := protocol.NewMessage(
+			protocol.MessageRoleAgent,
+			[]protocol.Part{protocol.NewTextPart("Task started, processing...")},
+		)
+		err = subscriber.Send(protocol.StreamingMessageEvent{
+			Result: &startMessage,
+		})
+		if err != nil {
+			log.Errorf("Failed to send start message: %v", err)
+		}
+
 		// Send task status update - working
 		workingEvent := protocol.StreamingMessageEvent{
 			Result: &protocol.TaskStatusUpdateEvent{
-				TaskID:    taskID,
-				ContextID: "",
-				Kind:      "status-update",
+				TaskID: taskID,
+				Kind:   protocol.KindTaskStatusUpdate,
 				Status: protocol.TaskStatus{
 					State: protocol.TaskStateWorking,
 				},
@@ -113,9 +125,8 @@ func (p *simpleMessageProcessor) ProcessMessage(
 		// Send task completion
 		completedEvent := protocol.StreamingMessageEvent{
 			Result: &protocol.TaskStatusUpdateEvent{
-				TaskID:    taskID,
-				ContextID: "",
-				Kind:      "status-update",
+				TaskID: taskID,
+				Kind:   protocol.KindTaskStatusUpdate,
 				Status: protocol.TaskStatus{
 					State:   protocol.TaskStateCompleted,
 					Message: &responseMessage,
@@ -139,8 +150,7 @@ func (p *simpleMessageProcessor) ProcessMessage(
 		artifactEvent := protocol.StreamingMessageEvent{
 			Result: &protocol.TaskArtifactUpdateEvent{
 				TaskID:    taskID,
-				ContextID: "",
-				Kind:      "artifact-update",
+				Kind:      protocol.KindTaskArtifactUpdate,
 				Artifact:  artifact,
 				LastChunk: boolPtr(true),
 			},
@@ -189,6 +199,7 @@ func main() {
 	// Parse command-line flags.
 	host := flag.String("host", "localhost", "Host to listen on")
 	port := flag.Int("port", 8080, "Port to listen on")
+	manager := flag.String("manager", "memory", "Task manager to use: memory or redis")
 	flag.Parse()
 
 	// Create the agent card.
@@ -224,7 +235,22 @@ func main() {
 	processor := &simpleMessageProcessor{}
 
 	// Create task manager and inject processor.
-	taskManager, err := taskmanager.NewMemoryTaskManager(processor)
+	var taskManager taskmanager.TaskManager
+	var err error
+	switch *manager {
+	case "memory":
+		log.Infof("Using memory task manager")
+		taskManager, err = taskmanager.NewMemoryTaskManager(processor)
+	case "redis":
+		log.Infof("Using redis task manager")
+		cli := goredis.NewClient(&goredis.Options{
+			Addr: "localhost:6379",
+		})
+		taskManager, err = redis.NewTaskManager(cli, processor)
+	default:
+		log.Fatalf("Invalid task manager: %s", *manager)
+	}
+
 	if err != nil {
 		log.Fatalf("Failed to create task manager: %v", err)
 	}
