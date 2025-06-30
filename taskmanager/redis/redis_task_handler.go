@@ -182,7 +182,6 @@ func (h *taskHandler) AddArtifact(taskID *string, artifact protocol.Artifact, is
 
 // SubScribeTask subscribes to the task and returns a TaskSubscriber.
 func (h *taskHandler) SubScribeTask(taskID *string) (taskmanager.TaskSubscriber, error) {
-	log.Infof("SubScribeTask: %v", taskID)
 	if taskID == nil || *taskID == "" {
 		return nil, fmt.Errorf("taskID cannot be nil or empty")
 	}
