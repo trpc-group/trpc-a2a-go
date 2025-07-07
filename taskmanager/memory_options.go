@@ -24,15 +24,23 @@ type MemoryTaskManagerOptions struct {
 
 	// EnableCleanup enables automatic cleanup of expired conversations.
 	EnableCleanup bool
+
+	// TaskSubscriberBufSize is the buffer size for task subscribers.
+	TaskSubscriberBufSize int
+
+	// TaskSubscriberBlockingSend enables blocking send for task subscribers.
+	TaskSubscriberBlockingSend bool
 }
 
 // DefaultMemoryTaskManagerOptions returns the default configuration options.
 func DefaultMemoryTaskManagerOptions() *MemoryTaskManagerOptions {
 	return &MemoryTaskManagerOptions{
-		MaxHistoryLength: defaultMaxHistoryLength,
-		ConversationTTL:  defaultConversationTTL,
-		CleanupInterval:  defaultCleanupInterval,
-		EnableCleanup:    true,
+		MaxHistoryLength:           defaultMaxHistoryLength,
+		ConversationTTL:            defaultConversationTTL,
+		CleanupInterval:            defaultCleanupInterval,
+		EnableCleanup:              true,
+		TaskSubscriberBufSize:      defaultSubscriberBufferSize,
+		TaskSubscriberBlockingSend: false,
 	}
 }
 
@@ -58,5 +66,21 @@ func WithConversationTTL(ttl, cleanupInterval time.Duration) MemoryTaskManagerOp
 			opts.CleanupInterval = cleanupInterval
 			opts.EnableCleanup = true
 		}
+	}
+}
+
+// WithTaskSubscriberBufferSize sets the buffer size for task subscriber channels.
+func WithTaskSubscriberBufferSize(size int) MemoryTaskManagerOption {
+	return func(opts *MemoryTaskManagerOptions) {
+		if size > 0 {
+			opts.TaskSubscriberBufSize = size
+		}
+	}
+}
+
+// WithTaskSubscriberBlockingSend sets the blocking send flag for the task subscriber
+func WithTaskSubscriberBlockingSend(blockingSend bool) MemoryTaskManagerOption {
+	return func(opts *MemoryTaskManagerOptions) {
+		opts.TaskSubscriberBlockingSend = blockingSend
 	}
 }

@@ -49,16 +49,24 @@ func (t *CancellableTask) Cancel() {
 
 // TaskSubscriberOpts is the options for the TaskSubscriber
 type TaskSubscriberOpts struct {
-	sendHook func(event protocol.StreamingMessageEvent) error
+	sendHook     func(event protocol.StreamingMessageEvent) error
+	blockingSend bool
 }
 
 // TaskSubscriberOption is the option for the TaskSubscriber
 type TaskSubscriberOption func(s *TaskSubscriberOpts)
 
-// WithTaskSubscriberSendHook sets the send hook for the task subscriber
-func WithTaskSubscriberSendHook(hook func(event protocol.StreamingMessageEvent) error) TaskSubscriberOption {
+// WithSubscriberSendHook sets the send hook for the task subscriber
+func WithSubscriberSendHook(hook func(event protocol.StreamingMessageEvent) error) TaskSubscriberOption {
 	return func(s *TaskSubscriberOpts) {
 		s.sendHook = hook
+	}
+}
+
+// WithSubscriberBlockingSend sets the blocking send flag for the task subscriber
+func WithSubscriberBlockingSend(blockingSend bool) TaskSubscriberOption {
+	return func(s *TaskSubscriberOpts) {
+		s.blockingSend = blockingSend
 	}
 }
 
@@ -75,7 +83,8 @@ type TaskSubscriber struct {
 // NewTaskSubscriber creates a new Redis-based task subscriber.
 func NewTaskSubscriber(taskID string, bufferSize int, opts ...TaskSubscriberOption) *TaskSubscriber {
 	subscriberOpts := TaskSubscriberOpts{
-		sendHook: nil,
+		sendHook:     nil,
+		blockingSend: false,
 	}
 	for _, opt := range opts {
 		opt(&subscriberOpts)
@@ -115,7 +124,11 @@ func (s *TaskSubscriber) Send(event protocol.StreamingMessageEvent) error {
 		}
 	}
 
-	// Use select with default to avoid blocking
+	if s.opts.blockingSend {
+		s.eventQueue <- event
+		return nil
+	}
+
 	select {
 	case s.eventQueue <- event:
 		return nil

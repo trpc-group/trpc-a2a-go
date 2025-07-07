@@ -21,9 +21,11 @@ import (
 
 // memoryTaskHandler implements TaskHandler interface
 type memoryTaskHandler struct {
-	manager   *MemoryTaskManager
-	messageID string
-	ctx       context.Context
+	manager                *MemoryTaskManager
+	messageID              string
+	ctx                    context.Context
+	subscriberBufSize      int
+	subscriberBlockingSend bool
 }
 
 var _ TaskHandler = (*memoryTaskHandler)(nil)
@@ -79,11 +81,16 @@ func (h *memoryTaskHandler) SubScribeTask(taskID *string) (TaskSubscriber, error
 		return nil, fmt.Errorf("task not found: %s", *taskID)
 	}
 	ctxID := h.GetContextID()
-	sendHook := h.sendStreamingEventHook(ctxID)
+	sendHook := h.manager.sendStreamingEventHook(ctxID)
+	bufSize := h.subscriberBufSize
+	if bufSize <= 0 {
+		bufSize = defaultSubscriberBufferSize
+	}
 	subscriber := NewMemoryTaskSubscriber(
 		*taskID,
-		defaultTaskSubscriberBufferSize,
-		WithMemoryTaskSubscriberSendHook(sendHook),
+		bufSize,
+		WithSubscriberSendHook(sendHook),
+		WithSubscriberBlockingSend(h.subscriberBlockingSend),
 	)
 	h.manager.addSubscriber(*taskID, subscriber)
 	return subscriber, nil
@@ -256,31 +263,4 @@ func (h *memoryTaskHandler) CleanTask(taskID *string) error {
 	h.manager.taskMu.Unlock()
 
 	return nil
-}
-
-func (h *memoryTaskHandler) sendStreamingEventHook(ctxID string) func(event protocol.StreamingMessageEvent) error {
-	return func(event protocol.StreamingMessageEvent) error {
-		switch event.Result.(type) {
-		case *protocol.TaskStatusUpdateEvent:
-			event := event.Result.(*protocol.TaskStatusUpdateEvent)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
-			}
-		case *protocol.TaskArtifactUpdateEvent:
-			event := event.Result.(*protocol.TaskArtifactUpdateEvent)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
-			}
-		case *protocol.Message:
-			event := event.Result.(*protocol.Message)
-			// store message
-			h.manager.processReplyMessage(&ctxID, event)
-		case *protocol.Task:
-			event := event.Result.(*protocol.Task)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
-			}
-		}
-		return nil
-	}
 }

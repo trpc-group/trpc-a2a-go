@@ -19,16 +19,20 @@ type TaskManagerOptions struct {
 	// MaxHistoryLength is the maximum number of messages to keep in conversation history.
 	MaxHistoryLength int
 
-	// TaskSubscriberBufferSize is the buffer size for task subscriber channels.
-	TaskSubscriberBufferSize int
+	// TaskSubscriberBufSize is the buffer size for task subscriber channels.
+	TaskSubscriberBufSize int
+
+	// TaskSubscriberBlockingSend enables blocking send for task subscribers.
+	TaskSubscriberBlockingSend bool
 }
 
 // DefaultRedisTaskManagerOptions returns the default configuration options.
 func DefaultRedisTaskManagerOptions() *TaskManagerOptions {
 	return &TaskManagerOptions{
-		ExpireTime:               defaultExpiration,
-		MaxHistoryLength:         defaultMaxHistoryLength,
-		TaskSubscriberBufferSize: defaultTaskSubscriberBufferSize,
+		ExpireTime:                 defaultExpiration,
+		MaxHistoryLength:           defaultMaxHistoryLength,
+		TaskSubscriberBufSize:      defaultTaskSubscriberBufferSize,
+		TaskSubscriberBlockingSend: false,
 	}
 }
 
@@ -57,7 +61,14 @@ func WithMaxHistoryLength(length int) TaskManagerOption {
 func WithTaskSubscriberBufferSize(size int) TaskManagerOption {
 	return func(opts *TaskManagerOptions) {
 		if size > 0 {
-			opts.TaskSubscriberBufferSize = size
+			opts.TaskSubscriberBufSize = size
 		}
+	}
+}
+
+// WithTaskSubscriberBlockingSend sets the blocking send flag for the task subscriber
+func WithTaskSubscriberBlockingSend(blockingSend bool) TaskManagerOption {
+	return func(opts *TaskManagerOptions) {
+		opts.TaskSubscriberBlockingSend = blockingSend
 	}
 }

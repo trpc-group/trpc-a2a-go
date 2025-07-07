@@ -22,7 +22,7 @@ import (
 const defaultMaxHistoryLength = 100
 const defaultCleanupInterval = 30 * time.Second
 const defaultConversationTTL = 1 * time.Hour
-const defaultTaskSubscriberBufferSize = 10
+const defaultSubscriberBufferSize = 10
 
 // ConversationHistory stores conversation history information
 type ConversationHistory struct {
@@ -61,16 +61,24 @@ func (t *MemoryCancellableTask) Task() *protocol.Task {
 
 // MemoryTaskSubscriberOpts is the options for the MemoryTaskSubscriber
 type MemoryTaskSubscriberOpts struct {
-	sendHook func(event protocol.StreamingMessageEvent) error
+	sendHook     func(event protocol.StreamingMessageEvent) error
+	blockingSend bool
 }
 
 // MemoryTaskSubscriberOption is the option for the MemoryTaskSubscriber
 type MemoryTaskSubscriberOption func(s *MemoryTaskSubscriberOpts)
 
-// WithMemoryTaskSubscriberSendHook sets the send hook for the task subscriber
-func WithMemoryTaskSubscriberSendHook(hook func(event protocol.StreamingMessageEvent) error) MemoryTaskSubscriberOption {
+// WithSubscriberSendHook sets the send hook for the task subscriber
+func WithSubscriberSendHook(hook func(event protocol.StreamingMessageEvent) error) MemoryTaskSubscriberOption {
 	return func(s *MemoryTaskSubscriberOpts) {
 		s.sendHook = hook
+	}
+}
+
+// WithSubscriberBlockingSend sets the blocking send flag for the task subscriber
+func WithSubscriberBlockingSend(blockingSend bool) MemoryTaskSubscriberOption {
+	return func(s *MemoryTaskSubscriberOpts) {
+		s.blockingSend = blockingSend
 	}
 }
 
@@ -98,7 +106,7 @@ func NewMemoryTaskSubscriber(
 	}
 
 	if bufSize <= 0 {
-		bufSize = defaultTaskSubscriberBufferSize // default buffer size
+		bufSize = defaultSubscriberBufferSize // default buffer size
 	}
 	eventQueue := make(chan protocol.StreamingMessageEvent, bufSize)
 	return &MemoryTaskSubscriber{
@@ -150,7 +158,11 @@ func (s *MemoryTaskSubscriber) Send(event protocol.StreamingMessageEvent) error 
 		}
 	}
 
-	// Use select with default to avoid blocking
+	if s.opts.blockingSend {
+		s.eventQueue <- event
+		return nil
+	}
+
 	select {
 	case s.eventQueue <- event:
 		return nil
@@ -201,8 +213,8 @@ type MemoryTaskManager struct {
 	// key: taskID, value: push notification configuration
 	PushNotifications map[string]protocol.TaskPushNotificationConfig
 
-	// configuration options
-	maxHistoryLength int // max history message count
+	// options
+	options *MemoryTaskManagerOptions
 }
 
 // NewMemoryTaskManager creates a new MemoryTaskManager instance
@@ -226,7 +238,7 @@ func NewMemoryTaskManager(processor MessageProcessor, opts ...MemoryTaskManagerO
 		Tasks:             make(map[string]*MemoryCancellableTask),
 		Subscribers:       make(map[string][]*MemoryTaskSubscriber),
 		PushNotifications: make(map[string]protocol.TaskPushNotificationConfig),
-		maxHistoryLength:  options.MaxHistoryLength,
+		options:           options,
 	}
 
 	// Start cleanup goroutine if enabled
@@ -259,14 +271,16 @@ func (m *MemoryTaskManager) OnSendMessage(
 	m.processRequestMessage(&request.Message)
 
 	// process Configuration
-	options := m.processConfiguration(request.Configuration, request.Metadata)
+	options := m.processConfiguration(request.Configuration)
 	options.Streaming = false // non-streaming processing
 
 	// create MessageHandle
 	handle := &memoryTaskHandler{
-		manager:   m,
-		messageID: request.Message.MessageID,
-		ctx:       ctx,
+		manager:                m,
+		messageID:              request.Message.MessageID,
+		ctx:                    ctx,
+		subscriberBufSize:      m.options.TaskSubscriberBufSize,
+		subscriberBlockingSend: m.options.TaskSubscriberBlockingSend,
 	}
 
 	// call the user's message processor
@@ -309,14 +323,16 @@ func (m *MemoryTaskManager) OnSendMessageStream(
 	m.processRequestMessage(&request.Message)
 
 	// Process Configuration
-	options := m.processConfiguration(request.Configuration, request.Metadata)
+	options := m.processConfiguration(request.Configuration)
 	options.Streaming = true // streaming mode
 
 	// Create streaming MessageHandle
 	handle := &memoryTaskHandler{
-		manager:   m,
-		messageID: request.Message.MessageID,
-		ctx:       ctx,
+		manager:                m,
+		messageID:              request.Message.MessageID,
+		ctx:                    ctx,
+		subscriberBufSize:      m.options.TaskSubscriberBufSize,
+		subscriberBlockingSend: m.options.TaskSubscriberBlockingSend,
 	}
 
 	// Call user's message processor
@@ -369,8 +385,10 @@ func (m *MemoryTaskManager) OnCancelTask(ctx context.Context, params protocol.Ta
 	m.taskMu.Unlock()
 
 	handle := &memoryTaskHandler{
-		manager: m,
-		ctx:     ctx,
+		manager:                m,
+		ctx:                    ctx,
+		subscriberBufSize:      m.options.TaskSubscriberBufSize,
+		subscriberBlockingSend: m.options.TaskSubscriberBlockingSend,
 	}
 	handle.CleanTask(&params.ID)
 	taskCopy.Status.State = protocol.TaskStateCanceled
@@ -423,7 +441,17 @@ func (m *MemoryTaskManager) OnResubscribe(
 		return nil, fmt.Errorf("task not found: %s", params.ID)
 	}
 
-	subscriber := NewMemoryTaskSubscriber(params.ID, defaultTaskSubscriberBufferSize)
+	bufSize := m.options.TaskSubscriberBufSize
+	if bufSize <= 0 {
+		bufSize = defaultSubscriberBufferSize
+	}
+
+	subscriber := NewMemoryTaskSubscriber(
+		params.ID,
+		bufSize,
+		WithSubscriberBlockingSend(m.options.TaskSubscriberBlockingSend),
+		WithSubscriberSendHook(m.sendStreamingEventHook(params.ID)),
+	)
 
 	// Add to subscribers list
 	if _, exists := m.Subscribers[params.ID]; !exists {
@@ -472,7 +500,7 @@ func (m *MemoryTaskManager) storeMessage(message protocol.Message) {
 		m.Conversations[contextID].LastAccessTime = time.Now()
 
 		// Limit history length
-		if len(m.Conversations[contextID].MessageIDs) > m.maxHistoryLength {
+		if len(m.Conversations[contextID].MessageIDs) > m.options.MaxHistoryLength {
 			// Remove the oldest message
 			removedMsgID := m.Conversations[contextID].MessageIDs[0]
 			m.Conversations[contextID].MessageIDs = m.Conversations[contextID].MessageIDs[1:]
@@ -546,7 +574,7 @@ func isFinalState(state protocol.TaskState) bool {
 // =============================================================================
 
 // processConfiguration processes and normalizes Configuration
-func (m *MemoryTaskManager) processConfiguration(config *protocol.SendMessageConfiguration, metadata map[string]interface{}) ProcessOptions {
+func (m *MemoryTaskManager) processConfiguration(config *protocol.SendMessageConfiguration) ProcessOptions {
 	result := ProcessOptions{
 		Blocking:      false,
 		HistoryLength: 0,
@@ -586,6 +614,34 @@ func (m *MemoryTaskManager) processRequestMessage(message *protocol.Message) {
 	}
 
 	m.storeMessage(*message)
+}
+
+// sendStreamingEventHook is a hook for sending streaming events
+func (m *MemoryTaskManager) sendStreamingEventHook(ctxID string) func(event protocol.StreamingMessageEvent) error {
+	return func(event protocol.StreamingMessageEvent) error {
+		switch event.Result.(type) {
+		case *protocol.TaskStatusUpdateEvent:
+			event := event.Result.(*protocol.TaskStatusUpdateEvent)
+			if event.ContextID == "" {
+				event.ContextID = ctxID
+			}
+		case *protocol.TaskArtifactUpdateEvent:
+			event := event.Result.(*protocol.TaskArtifactUpdateEvent)
+			if event.ContextID == "" {
+				event.ContextID = ctxID
+			}
+		case *protocol.Message:
+			event := event.Result.(*protocol.Message)
+			// store message
+			m.processReplyMessage(&ctxID, event)
+		case *protocol.Task:
+			event := event.Result.(*protocol.Task)
+			if event.ContextID == "" {
+				event.ContextID = ctxID
+			}
+		}
+		return nil
+	}
 }
 
 // processReplyMessage processes the reply message, add messageID and contextID if not set

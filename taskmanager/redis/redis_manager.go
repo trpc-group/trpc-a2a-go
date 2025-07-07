@@ -59,8 +59,8 @@ type TaskManager struct {
 	// cancels is a map of task IDs to cancellation functions.
 	cancels map[string]context.CancelFunc
 
-	// Configuration options.
-	maxHistoryLength int // max history message count
+	// options
+	options *TaskManagerOptions
 }
 
 // NewTaskManager creates a new Redis-based TaskManager with the provided options.
@@ -93,12 +93,12 @@ func NewTaskManager(
 	expiration := options.ExpireTime
 
 	manager := &TaskManager{
-		processor:        processor,
-		client:           client,
-		expiration:       expiration,
-		subscribers:      make(map[string][]*TaskSubscriber),
-		cancels:          make(map[string]context.CancelFunc),
-		maxHistoryLength: options.MaxHistoryLength,
+		processor:   processor,
+		client:      client,
+		expiration:  expiration,
+		subscribers: make(map[string][]*TaskSubscriber),
+		cancels:     make(map[string]context.CancelFunc),
+		options:     options,
 	}
 
 	return manager, nil
@@ -120,9 +120,11 @@ func (m *TaskManager) OnSendMessage(
 
 	// Create MessageHandle.
 	handle := &taskHandler{
-		manager:   m,
-		messageID: request.Message.MessageID,
-		ctx:       ctx,
+		manager:                m,
+		messageID:              request.Message.MessageID,
+		ctx:                    ctx,
+		subscriberBufSize:      m.options.TaskSubscriberBufSize,
+		subscriberBlockingSend: m.options.TaskSubscriberBlockingSend,
 	}
 
 	// Call the user's message processor.
@@ -177,9 +179,11 @@ func (m *TaskManager) OnSendMessageStream(
 
 	// Create streaming MessageHandle.
 	handle := &taskHandler{
-		manager:   m,
-		messageID: request.Message.MessageID,
-		ctx:       ctx,
+		manager:                m,
+		messageID:              request.Message.MessageID,
+		ctx:                    ctx,
+		subscriberBufSize:      m.options.TaskSubscriberBufSize,
+		subscriberBlockingSend: m.options.TaskSubscriberBlockingSend,
 	}
 
 	// Call user's message processor.
@@ -330,7 +334,17 @@ func (m *TaskManager) OnResubscribe(
 		return nil, err
 	}
 
-	subscriber := NewTaskSubscriber(params.ID, defaultTaskSubscriberBufferSize)
+	bufSize := m.options.TaskSubscriberBufSize
+	if bufSize <= 0 {
+		bufSize = defaultTaskSubscriberBufferSize
+	}
+
+	subscriber := NewTaskSubscriber(
+		params.ID,
+		bufSize,
+		WithSubscriberBlockingSend(m.options.TaskSubscriberBlockingSend),
+		WithSubscriberSendHook(m.sendStreamingEventHook(params.ID)),
+	)
 
 	// Add to subscribers list.
 	m.addSubscriber(params.ID, subscriber)
@@ -408,7 +422,7 @@ func (m *TaskManager) processReplyMessage(ctxID *string, message *protocol.Messa
 	message.ContextID = ctxID
 	message.Role = protocol.MessageRoleAgent
 	if message.MessageID == "" {
-		message.MessageID = m.generateMessageID()
+		message.MessageID = protocol.GenerateMessageID()
 	}
 	if message.ContextID == nil || *message.ContextID == "" {
 		contextID := protocol.GenerateContextID()
@@ -418,9 +432,33 @@ func (m *TaskManager) processReplyMessage(ctxID *string, message *protocol.Messa
 	m.storeMessage(context.Background(), *message)
 }
 
-// generateMessageID generates a message ID.
-func (m *TaskManager) generateMessageID() string {
-	return protocol.GenerateMessageID()
+// sendStreamingEventHook is a hook for sending streaming events
+// used to set contextID for task status update, task artifact update, message and task events
+func (m *TaskManager) sendStreamingEventHook(ctxID string) func(event protocol.StreamingMessageEvent) error {
+	return func(event protocol.StreamingMessageEvent) error {
+		switch event.Result.(type) {
+		case *protocol.TaskStatusUpdateEvent:
+			event := event.Result.(*protocol.TaskStatusUpdateEvent)
+			if event.ContextID == "" {
+				event.ContextID = ctxID
+			}
+		case *protocol.TaskArtifactUpdateEvent:
+			event := event.Result.(*protocol.TaskArtifactUpdateEvent)
+			if event.ContextID == "" {
+				event.ContextID = ctxID
+			}
+		case *protocol.Message:
+			event := event.Result.(*protocol.Message)
+			// store message
+			m.processReplyMessage(&ctxID, event)
+		case *protocol.Task:
+			event := event.Result.(*protocol.Task)
+			if event.ContextID == "" {
+				event.ContextID = ctxID
+			}
+		}
+		return nil
+	}
 }
 
 // storeMessage stores a message in Redis and updates conversation history.
@@ -453,7 +491,7 @@ func (m *TaskManager) storeMessage(ctx context.Context, message protocol.Message
 		m.client.Expire(ctx, convKey, m.expiration).Err()
 
 		// Limit history length by trimming the list.
-		if err := m.client.LTrim(ctx, convKey, -int64(m.maxHistoryLength), -1).Err(); err != nil {
+		if err := m.client.LTrim(ctx, convKey, -int64(m.options.MaxHistoryLength), -1).Err(); err != nil {
 			log.Errorf("Failed to trim conversation %s: %v", contextID, err)
 		}
 	}

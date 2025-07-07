@@ -91,8 +91,8 @@ func TestNewMemoryTaskManager(t *testing.T) {
 				t.Error("Processor not set correctly")
 			}
 
-			if len(tt.options) > 0 && manager.maxHistoryLength != 50 {
-				t.Errorf("Expected MaxHistoryLength=50, got %d", manager.maxHistoryLength)
+			if len(tt.options) > 0 && manager.options.MaxHistoryLength != 50 {
+				t.Errorf("Expected MaxHistoryLength=50, got %d", manager.options.MaxHistoryLength)
 			}
 		})
 	}

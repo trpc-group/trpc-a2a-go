@@ -20,9 +20,11 @@ import (
 
 // taskHandler implements TaskHandler interface for Redis.
 type taskHandler struct {
-	manager   *TaskManager
-	messageID string
-	ctx       context.Context
+	manager                *TaskManager
+	messageID              string
+	ctx                    context.Context
+	subscriberBufSize      int
+	subscriberBlockingSend bool
 }
 
 var _ taskmanager.TaskHandler = (*taskHandler)(nil)
@@ -192,8 +194,16 @@ func (h *taskHandler) SubScribeTask(taskID *string) (taskmanager.TaskSubscriber,
 		return nil, fmt.Errorf("task not found: %s", *taskID)
 	}
 
-	sendHook := h.sendStreamingEventHook(h.GetContextID())
-	subscriber := NewTaskSubscriber(*taskID, defaultTaskSubscriberBufferSize, WithTaskSubscriberSendHook(sendHook))
+	sendHook := h.manager.sendStreamingEventHook(h.GetContextID())
+	bufSize := h.subscriberBufSize
+	if bufSize <= 0 {
+		bufSize = defaultTaskSubscriberBufferSize
+	}
+	subscriber := NewTaskSubscriber(
+		*taskID,
+		bufSize,
+		WithSubscriberSendHook(sendHook),
+		WithSubscriberBlockingSend(h.subscriberBlockingSend))
 	h.manager.addSubscriber(*taskID, subscriber)
 	return subscriber, nil
 }
@@ -275,38 +285,11 @@ func (h *taskHandler) GetMessageHistory() []protocol.Message {
 		return []protocol.Message{}
 	}
 
-	history, err := h.manager.getConversationHistory(h.ctx, contextID, h.manager.maxHistoryLength)
+	history, err := h.manager.getConversationHistory(h.ctx, contextID, h.manager.options.MaxHistoryLength)
 	if err != nil {
 		log.Errorf("Failed to get message history for context %s: %v", contextID, err)
 		return []protocol.Message{}
 	}
 
 	return history
-}
-
-func (h *taskHandler) sendStreamingEventHook(ctxID string) func(event protocol.StreamingMessageEvent) error {
-	return func(event protocol.StreamingMessageEvent) error {
-		switch event.Result.(type) {
-		case *protocol.TaskStatusUpdateEvent:
-			event := event.Result.(*protocol.TaskStatusUpdateEvent)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
-			}
-		case *protocol.TaskArtifactUpdateEvent:
-			event := event.Result.(*protocol.TaskArtifactUpdateEvent)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
-			}
-		case *protocol.Message:
-			event := event.Result.(*protocol.Message)
-			// store message
-			h.manager.processReplyMessage(&ctxID, event)
-		case *protocol.Task:
-			event := event.Result.(*protocol.Task)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
-			}
-		}
-		return nil
-	}
 }
