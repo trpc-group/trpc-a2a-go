@@ -54,8 +54,8 @@ type TaskHandler interface {
 	// AddArtifact adds an artifact to the specified task.
 	AddArtifact(taskID *string, artifact protocol.Artifact, isFinal bool, needMoreData bool) error
 
-	// SubScribeTask subscribes to the task and returns the task subscriber.
-	SubScribeTask(taskID *string) (TaskSubscriber, error)
+	// SubscribeTask subscribes to the task and returns the task subscriber.
+	SubscribeTask(taskID *string) (TaskSubscriber, error)
 
 	// GetTask returns the task by taskID. Returns an error if the task cannot be found.
 	GetTask(taskID *string) (CancellableTask, error)

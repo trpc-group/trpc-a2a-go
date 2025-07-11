@@ -194,7 +194,7 @@ func TestMemoryTaskManager_OnSendMessageStream(t *testing.T) {
 				return nil, err
 			}
 
-			subscriber, err := handle.SubScribeTask(&taskID)
+			subscriber, err := handle.SubscribeTask(&taskID)
 			if err != nil {
 				return nil, err
 			}

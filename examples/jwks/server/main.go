@@ -92,7 +92,7 @@ func (p *pushNotificationMessageProcessor) ProcessMessage(
 	}
 
 	// Subscribe to the task for streaming events
-	subscriber, err := handle.SubScribeTask(&taskID)
+	subscriber, err := handle.SubscribeTask(&taskID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to subscribe to task: %w", err)
 	}

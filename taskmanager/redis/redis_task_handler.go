@@ -182,8 +182,8 @@ func (h *taskHandler) AddArtifact(taskID *string, artifact protocol.Artifact, is
 	return nil
 }
 
-// SubScribeTask subscribes to the task and returns a TaskSubscriber.
-func (h *taskHandler) SubScribeTask(taskID *string) (taskmanager.TaskSubscriber, error) {
+// SubscribeTask subscribes to the task and returns a TaskSubscriber.
+func (h *taskHandler) SubscribeTask(taskID *string) (taskmanager.TaskSubscriber, error) {
 	if taskID == nil || *taskID == "" {
 		return nil, fmt.Errorf("taskID cannot be nil or empty")
 	}
