@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.1 (2025-07-14)
+
+- Fix jsonrpc ID generation（#41）
+- Add official python sdk client example in examples/simple (#42)
+- Fix issue on context id generation (#45)
+- Fix task subscriber buf size option (#50)
+- Add bloing option for task subscriber (#50)
+
+Breaking Changes:
+- Change the filed `Final` of  TaskStatusUpdateEvent from *bool to bool(#42)
+- Task Subscriber Constructor like `NewMemoryTaskSubscriber` and `NewTaskSubscriber` add a option param (#45)
+
 ## 0.2.0 (2025-06-24)
 
 - Add MCP information to the README for improved documentation (#38)
