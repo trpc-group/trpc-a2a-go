@@ -128,7 +128,7 @@ func TestMemoryTaskHandler_AddArtifact(t *testing.T) {
 	}
 }
 
-func TestMemoryTaskHandler_SubScribeTask(t *testing.T) {
+func TestMemoryTaskHandler_SubscribeTask(t *testing.T) {
 	handler, _ := setupTestHandler(t)
 
 	// First create a task
@@ -138,7 +138,7 @@ func TestMemoryTaskHandler_SubScribeTask(t *testing.T) {
 	}
 
 	// Subscribe to task
-	subscriber, err := handler.SubScribeTask(&taskID)
+	subscriber, err := handler.SubscribeTask(&taskID)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -304,9 +304,9 @@ func TestTaskHandlerErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("SubScribeTask_NonExistentTask", func(t *testing.T) {
+	t.Run("SubscribeTask_NonExistentTask", func(t *testing.T) {
 		nonExistentTaskID := "non-existent-task"
-		_, err := handler.SubScribeTask(&nonExistentTaskID)
+		_, err := handler.SubscribeTask(&nonExistentTaskID)
 		if err == nil {
 			t.Error("Expected error for non-existent task")
 		}
@@ -339,7 +339,7 @@ func TestTaskHandlerErrors(t *testing.T) {
 			t.Error("Expected error for nil task ID")
 		}
 
-		_, err = handler.SubScribeTask(nil)
+		_, err = handler.SubscribeTask(nil)
 		if err == nil {
 			t.Error("Expected error for nil task ID")
 		}

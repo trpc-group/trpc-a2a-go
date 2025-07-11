@@ -71,7 +71,7 @@ func (p *testProcessor) ProcessMessage(
 
 	if options.Streaming {
 		// For streaming requests, process in background and return StreamingEvents
-		subscriber, err := handle.SubScribeTask(stringPtr(taskID))
+		subscriber, err := handle.SubscribeTask(stringPtr(taskID))
 		if err != nil {
 			return nil, fmt.Errorf("failed to subscribe to task: %w", err)
 		}

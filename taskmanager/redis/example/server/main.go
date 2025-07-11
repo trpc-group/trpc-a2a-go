@@ -118,7 +118,7 @@ func (p *ToLowerProcessor) processStreamingMode(
 	}
 
 	// Subscribe to the task
-	subscriber, err := handle.SubScribeTask(&taskID)
+	subscriber, err := handle.SubscribeTask(&taskID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to subscribe to task: %w", err)
 	}

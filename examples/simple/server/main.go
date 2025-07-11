@@ -77,7 +77,7 @@ func (p *simpleMessageProcessor) ProcessMessage(
 	}
 
 	// Subscribe to the task for streaming events
-	subscriber, err := handler.SubScribeTask(&taskID)
+	subscriber, err := handler.SubscribeTask(&taskID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to subscribe to task: %w", err)
 	}

@@ -72,8 +72,8 @@ func (h *memoryTaskHandler) UpdateTaskState(
 	return nil
 }
 
-// SubScribeTask subscribes to the task
-func (h *memoryTaskHandler) SubScribeTask(taskID *string) (TaskSubscriber, error) {
+// SubscribeTask subscribes to the task
+func (h *memoryTaskHandler) SubscribeTask(taskID *string) (TaskSubscriber, error) {
 	if taskID == nil || *taskID == "" {
 		return nil, fmt.Errorf("taskID cannot be nil or empty")
 	}
