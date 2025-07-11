@@ -27,6 +27,7 @@ If you're interested in **streamable MCP development**, check out [**trpc-mcp-go
 - [Future Enhancements](#future-enhancements)
 - [Contributing](#contributing)
 - [Acknowledgements](#acknowledgements)
+- [Copyright](#copyright)
 
 ## Quick Start
 
@@ -462,3 +463,7 @@ Contributions and improvement suggestions are welcome! Please ensure your code f
 ## Acknowledgements
 
 This project's protocol design is based on Google's open-source A2A protocol ([original repository](https://github.com/google/A2A)), following the Apache 2.0 license. This is an unofficial implementation.
+
+## Copyright
+
+The copyright notice pertaining to the Tencent code in this repo was previously in the name of “THL A29 Limited.”  That entity has now been de-registered.  You should treat all previously distributed copies of the code as if the copyright notice was in the name of “Tencent.”
