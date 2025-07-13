@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"trpc.group/trpc-go/trpc-a2a-go/log"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	v1 "trpc.group/trpc-go/trpc-a2a-go/protocol/a2apb"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
@@ -109,7 +111,7 @@ func (m *TaskManager) OnSendMessage(
 	ctx context.Context,
 	request protocol.SendMessageParams,
 ) (*protocol.MessageResult, error) {
-	log.Debugf("RedisTaskManager: OnSendMessage for message %s", request.Message.MessageID)
+	log.Debugf("RedisTaskManager: OnSendMessage for message %s", request.Message.MessageId)
 
 	// Process the request message.
 	m.processRequestMessage(&request.Message)
@@ -121,7 +123,7 @@ func (m *TaskManager) OnSendMessage(
 	// Create MessageHandle.
 	handle := &taskHandler{
 		manager:                m,
-		messageID:              request.Message.MessageID,
+		messageID:              request.Message.MessageId,
 		ctx:                    ctx,
 		subscriberBufSize:      m.options.TaskSubscriberBufSize,
 		subscriberBlockingSend: m.options.TaskSubscriberBlockingSend,
@@ -155,8 +157,8 @@ func (m *TaskManager) OnSendMessage(
 
 	if message, ok := result.Result.(*protocol.Message); ok {
 		var contextID string
-		if request.Message.ContextID != nil {
-			contextID = *request.Message.ContextID
+		if request.Message.ContextId != "" {
+			contextID = request.Message.ContextId
 		}
 		m.processReplyMessage(&contextID, message)
 	}
@@ -169,7 +171,7 @@ func (m *TaskManager) OnSendMessageStream(
 	ctx context.Context,
 	request protocol.SendMessageParams,
 ) (<-chan protocol.StreamingMessageEvent, error) {
-	log.Debugf("RedisTaskManager: OnSendMessageStream for message %s", request.Message.MessageID)
+	log.Debugf("RedisTaskManager: OnSendMessageStream for message %s", request.Message.MessageId)
 
 	m.processRequestMessage(&request.Message)
 
@@ -180,7 +182,7 @@ func (m *TaskManager) OnSendMessageStream(
 	// Create streaming MessageHandle.
 	handle := &taskHandler{
 		manager:                m,
-		messageID:              request.Message.MessageID,
+		messageID:              request.Message.MessageId,
 		ctx:                    ctx,
 		subscriberBufSize:      m.options.TaskSubscriberBufSize,
 		subscriberBlockingSend: m.options.TaskSubscriberBlockingSend,
@@ -211,8 +213,8 @@ func (m *TaskManager) OnGetTask(
 
 	// If the request contains history length, fill the message history.
 	if params.HistoryLength != nil && *params.HistoryLength > 0 {
-		if task.ContextID != "" {
-			history, err := m.getConversationHistory(ctx, task.ContextID, *params.HistoryLength)
+		if task.ContextId != "" {
+			history, err := m.getConversationHistory(ctx, task.ContextId, *params.HistoryLength)
 			if err != nil {
 				log.Warnf("Failed to retrieve message history for task %s: %v", params.ID, err)
 				// Continue without history rather than failing the whole request.
@@ -257,7 +259,7 @@ func (m *TaskManager) OnCancelTask(
 
 	// Update task state to Cancelled.
 	task.Status.State = protocol.TaskStateCanceled
-	task.Status.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	task.Status.Timestamp = timestamppb.New(time.Now().UTC())
 
 	// Store updated task.
 	if err := m.storeTask(ctx, task); err != nil {
@@ -274,7 +276,7 @@ func (m *TaskManager) OnCancelTask(
 // OnPushNotificationSet handles tasks/pushNotificationConfig/set requests.
 func (m *TaskManager) OnPushNotificationSet(
 	ctx context.Context,
-	params protocol.TaskPushNotificationConfig,
+	params *protocol.TaskPushNotificationConfig,
 ) (*protocol.TaskPushNotificationConfig, error) {
 	// Check if task exists.
 	_, err := m.getTaskInternal(ctx, params.TaskID)
@@ -294,7 +296,7 @@ func (m *TaskManager) OnPushNotificationSet(
 	}
 
 	log.Debugf("RedisTaskManager: Push notification config set for task %s", params.TaskID)
-	return &params, nil
+	return params, nil
 }
 
 // OnPushNotificationGet handles tasks/pushNotificationConfig/get requests.
@@ -370,18 +372,16 @@ func (m *TaskManager) processConfiguration(
 	}
 
 	// Process Blocking configuration.
-	if config.Blocking != nil {
-		result.Blocking = *config.Blocking
-	}
+	result.Blocking = config.Blocking
 
 	// Process HistoryLength configuration.
-	if config.HistoryLength != nil && *config.HistoryLength > 0 {
-		result.HistoryLength = *config.HistoryLength
+	if config.HistoryLength > 0 {
+		result.HistoryLength = int(config.HistoryLength)
 	}
 
 	// Process PushNotificationConfig.
-	if config.PushNotificationConfig != nil {
-		result.PushNotificationConfig = config.PushNotificationConfig
+	if config.PushNotification != nil {
+		result.PushNotificationConfig = config.PushNotification
 	}
 
 	// Process AcceptedOutputModes configuration.
@@ -394,13 +394,13 @@ func (m *TaskManager) processConfiguration(
 
 // processRequestMessage processes and stores the request message.
 func (m *TaskManager) processRequestMessage(message *protocol.Message) {
-	if message.MessageID == "" {
-		message.MessageID = protocol.GenerateMessageID()
+	if message.MessageId == "" {
+		message.MessageId = protocol.GenerateMessageID()
 	}
 
-	if message.ContextID == nil {
+	if message.ContextId == "" {
 		contextID := protocol.GenerateContextID()
-		message.ContextID = &contextID
+		message.ContextId = contextID
 	}
 
 	m.storeMessage(context.Background(), *message)
@@ -408,14 +408,16 @@ func (m *TaskManager) processRequestMessage(message *protocol.Message) {
 
 // processReplyMessage processes and stores the reply message.
 func (m *TaskManager) processReplyMessage(ctxID *string, message *protocol.Message) {
-	message.ContextID = ctxID
-	message.Role = protocol.MessageRoleAgent
-	if message.MessageID == "" {
-		message.MessageID = protocol.GenerateMessageID()
+	if ctxID != nil {
+		message.ContextId = *ctxID
 	}
-	if message.ContextID == nil || *message.ContextID == "" {
+	message.Role = protocol.MessageRoleAgent
+	if message.MessageId == "" {
+		message.MessageId = protocol.GenerateMessageID()
+	}
+	if message.ContextId == "" {
 		contextID := protocol.GenerateContextID()
-		message.ContextID = &contextID
+		message.ContextId = contextID
 	}
 
 	m.storeMessage(context.Background(), *message)
@@ -428,13 +430,13 @@ func (m *TaskManager) sendStreamingEventHook(ctxID string) func(event protocol.S
 		switch event.Result.(type) {
 		case *protocol.TaskStatusUpdateEvent:
 			event := event.Result.(*protocol.TaskStatusUpdateEvent)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
+			if event.ContextId == "" {
+				event.ContextId = ctxID
 			}
 		case *protocol.TaskArtifactUpdateEvent:
 			event := event.Result.(*protocol.TaskArtifactUpdateEvent)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
+			if event.ContextId == "" {
+				event.ContextId = ctxID
 			}
 		case *protocol.Message:
 			event := event.Result.(*protocol.Message)
@@ -442,8 +444,8 @@ func (m *TaskManager) sendStreamingEventHook(ctxID string) func(event protocol.S
 			m.processReplyMessage(&ctxID, event)
 		case *protocol.Task:
 			event := event.Result.(*protocol.Task)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
+			if event.ContextId == "" {
+				event.ContextId = ctxID
 			}
 		}
 		return nil
@@ -453,26 +455,26 @@ func (m *TaskManager) sendStreamingEventHook(ctxID string) func(event protocol.S
 // storeMessage stores a message in Redis and updates conversation history.
 func (m *TaskManager) storeMessage(ctx context.Context, message protocol.Message) {
 	// Store the message.
-	msgKey := messagePrefix + message.MessageID
+	msgKey := messagePrefix + message.MessageId
 	msgBytes, err := json.Marshal(message)
 	if err != nil {
-		log.Errorf("Failed to serialize message %s: %v", message.MessageID, err)
+		log.Errorf("Failed to serialize message %s: %v", message.MessageId, err)
 		return
 	}
 
 	if err := m.client.Set(ctx, msgKey, msgBytes, m.expiration).Err(); err != nil {
-		log.Errorf("Failed to store message %s in Redis: %v", message.MessageID, err)
+		log.Errorf("Failed to store message %s in Redis: %v", message.MessageId, err)
 		return
 	}
 
 	// If the message has a contextID, add it to conversation history.
-	if message.ContextID != nil {
-		contextID := *message.ContextID
+	if message.ContextId != "" {
+		contextID := message.ContextId
 		convKey := conversationPrefix + contextID
 
 		// Add message ID to conversation history using Redis list.
-		if err := m.client.RPush(ctx, convKey, message.MessageID).Err(); err != nil {
-			log.Errorf("Failed to add message %s to conversation %s: %v", message.MessageID, contextID, err)
+		if err := m.client.RPush(ctx, convKey, message.MessageId).Err(); err != nil {
+			log.Errorf("Failed to add message %s to conversation %s: %v", message.MessageId, contextID, err)
 			return
 		}
 
@@ -491,7 +493,7 @@ func (m *TaskManager) getConversationHistory(
 	ctx context.Context,
 	contextID string,
 	length int,
-) ([]protocol.Message, error) {
+) ([]*v1.Message, error) {
 	if contextID == "" {
 		return nil, nil
 	}
@@ -517,7 +519,7 @@ func (m *TaskManager) getConversationHistory(
 	}
 
 	// Retrieve messages.
-	messages := make([]protocol.Message, 0, len(messageIDs))
+	messages := make([]*v1.Message, 0, len(messageIDs))
 	for _, msgID := range messageIDs {
 		msgKey := messagePrefix + msgID
 		msgBytes, err := m.client.Get(ctx, msgKey).Bytes()
@@ -526,13 +528,13 @@ func (m *TaskManager) getConversationHistory(
 			continue // Skip missing messages.
 		}
 
-		var msg protocol.Message
+		var msg v1.Message
 		if err := json.Unmarshal(msgBytes, &msg); err != nil {
 			log.Errorf("Failed to deserialize message %s: %v", msgID, err)
 			continue // Skip invalid messages.
 		}
 
-		messages = append(messages, msg)
+		messages = append(messages, &msg)
 	}
 
 	return messages, nil
@@ -556,7 +558,7 @@ func (m *TaskManager) getTaskInternal(ctx context.Context, taskID string) (*prot
 
 // storeTask stores a task in Redis.
 func (m *TaskManager) storeTask(ctx context.Context, task *protocol.Task) error {
-	taskKey := taskPrefix + task.ID
+	taskKey := taskPrefix + task.Id
 	taskBytes, err := json.Marshal(task)
 	if err != nil {
 		return fmt.Errorf("failed to serialize task: %w", err)

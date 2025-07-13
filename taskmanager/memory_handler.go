@@ -10,10 +10,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"trpc.group/trpc-go/trpc-a2a-go/log"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	v1 "trpc.group/trpc-go/trpc-a2a-go/protocol/a2apb"
 )
 
 // =============================================================================
@@ -51,10 +52,14 @@ func (h *memoryTaskHandler) UpdateTaskState(
 	}
 
 	originalTask := task.Task()
-	originalTask.Status = protocol.TaskStatus{
+	var updateMessage *v1.Message
+	if message != nil {
+		updateMessage = message.Message
+	}
+	originalTask.Status = &v1.TaskStatus{
 		State:     state,
-		Message:   message,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Update:    updateMessage,
+		Timestamp: timestamppb.Now(),
 	}
 	h.manager.taskMu.Unlock()
 
@@ -62,14 +67,8 @@ func (h *memoryTaskHandler) UpdateTaskState(
 
 	// notify subscribers
 	finalState := isFinalState(state)
-	event := &protocol.TaskStatusUpdateEvent{
-		TaskID:    *taskID,
-		ContextID: originalTask.ContextID,
-		Status:    originalTask.Status,
-		Kind:      protocol.KindTaskStatusUpdate,
-		Final:     finalState,
-	}
-	streamEvent := protocol.StreamingMessageEvent{Result: event}
+	event := protocol.NewTaskStatusUpdateEvent(*taskID, originalTask.ContextId, originalTask.Status, finalState)
+	streamEvent := protocol.StreamingMessageEvent{Result: &event}
 	h.manager.notifySubscribers(*taskID, streamEvent)
 	return nil
 }
@@ -115,21 +114,14 @@ func (h *memoryTaskHandler) AddArtifact(
 		h.manager.taskMu.Unlock()
 		return fmt.Errorf("task not found: %s", *taskID)
 	}
-	task.Task().Artifacts = append(task.Task().Artifacts, artifact)
+	task.Task().Artifacts = append(task.Task().Artifacts, artifact.Artifact)
 	h.manager.taskMu.Unlock()
 
-	log.Debugf("Added artifact %s to task %s", artifact.ArtifactID, *taskID)
+	log.Debugf("Added artifact %s to task %s", artifact.ArtifactId, *taskID)
 
 	// notify subscribers
-	event := &protocol.TaskArtifactUpdateEvent{
-		TaskID:    *taskID,
-		ContextID: task.Task().ContextID,
-		Artifact:  artifact,
-		Kind:      protocol.KindTaskArtifactUpdate,
-		LastChunk: &isFinal,
-		Append:    &needMoreData,
-	}
-	streamEvent := protocol.StreamingMessageEvent{Result: event}
+	event := protocol.NewTaskArtifactUpdateEvent(*taskID, task.Task().ContextId, artifact, isFinal)
+	streamEvent := protocol.StreamingMessageEvent{Result: &event}
 	h.manager.notifySubscribers(*taskID, streamEvent)
 
 	return nil
@@ -152,11 +144,11 @@ func (h *memoryTaskHandler) GetTask(taskID *string) (CancellableTask, error) {
 	// return task copy to avoid external modification
 	taskCopy := *task.Task()
 	if taskCopy.Artifacts != nil {
-		taskCopy.Artifacts = make([]protocol.Artifact, len(task.Task().Artifacts))
+		taskCopy.Artifacts = make([]*v1.Artifact, len(task.Task().Artifacts))
 		copy(taskCopy.Artifacts, task.Task().Artifacts)
 	}
 	if taskCopy.History != nil {
-		taskCopy.History = make([]protocol.Message, len(task.Task().History))
+		taskCopy.History = make([]*v1.Message, len(task.Task().History))
 		copy(taskCopy.History, task.Task().History)
 	}
 
@@ -172,8 +164,8 @@ func (h *memoryTaskHandler) GetContextID() string {
 	h.manager.conversationMu.RLock()
 	defer h.manager.conversationMu.RUnlock()
 
-	if msg, exists := h.manager.Messages[h.messageID]; exists && msg.ContextID != nil {
-		return *msg.ContextID
+	if msg, exists := h.manager.Messages[h.messageID]; exists && msg.ContextId != "" {
+		return msg.ContextId
 	}
 	return ""
 }
@@ -192,8 +184,13 @@ func (h *memoryTaskHandler) GetMessageHistory() []protocol.Message {
 	h.manager.conversationMu.RLock()
 	defer h.manager.conversationMu.RUnlock()
 
-	if msg, exists := h.manager.Messages[h.messageID]; exists && msg.ContextID != nil {
-		return h.manager.getMessageHistory(*msg.ContextID)
+	if msg, exists := h.manager.Messages[h.messageID]; exists && msg.ContextId != "" {
+		v1Messages := h.manager.getMessageHistory(msg.ContextId)
+		result := make([]protocol.Message, len(v1Messages))
+		for i, v1Msg := range v1Messages {
+			result[i] = protocol.Message{Message: v1Msg}
+		}
+		return result
 	}
 	return []protocol.Message{}
 }
@@ -226,16 +223,16 @@ func (h *memoryTaskHandler) BuildTask(specificTaskID *string, contextID *string)
 
 	// create new task
 	task := protocol.Task{
-		ID:        actualTaskID,
-		ContextID: actualContextID,
-		Kind:      protocol.KindTask,
-		Status: protocol.TaskStatus{
-			State:     protocol.TaskStateSubmitted,
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Task: &v1.Task{
+			Id:        actualTaskID,
+			ContextId: actualContextID,
+			Status: &v1.TaskStatus{
+				State:     protocol.TaskStateSubmitted,
+				Timestamp: timestamppb.Now(),
+			},
+			Artifacts: make([]*v1.Artifact, 0),
+			History:   make([]*v1.Message, 0),
 		},
-		Artifacts: make([]protocol.Artifact, 0),
-		History:   make([]protocol.Message, 0),
-		Metadata:  make(map[string]interface{}),
 	}
 
 	cancellableTask := NewCancellableTask(task)

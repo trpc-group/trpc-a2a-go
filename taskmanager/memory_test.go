@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	v1 "trpc.group/trpc-go/trpc-a2a-go/protocol/a2apb"
 )
 
 // MockMessageProcessor implements MessageProcessor for testing
@@ -26,9 +27,13 @@ func (m *MockMessageProcessor) ProcessMessage(ctx context.Context, message proto
 
 	// Default implementation: echo the message
 	response := &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
-			protocol.NewTextPart("Echo: " + getTextFromMessage(message)),
+		Message: &v1.Message{
+			Role: v1.Role_ROLE_AGENT,
+			Content: []*v1.Part{
+				{
+					Part: &v1.Part_Text{Text: "Echo: " + getTextFromMessage(message)},
+				},
+			},
 		},
 	}
 
@@ -39,9 +44,11 @@ func (m *MockMessageProcessor) ProcessMessage(ctx context.Context, message proto
 
 // Helper function to extract text from message
 func getTextFromMessage(message protocol.Message) string {
-	for _, part := range message.Parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			return textPart.Text
+	if message.Message != nil && message.Message.Content != nil {
+		for _, part := range message.Message.Content {
+			if textPart := part.GetText(); textPart != "" {
+				return textPart
+			}
 		}
 	}
 	return ""
@@ -116,9 +123,13 @@ func TestMemoryTaskManager_OnSendMessage(t *testing.T) {
 			name: "valid message",
 			request: protocol.SendMessageParams{
 				Message: protocol.Message{
-					Role: protocol.MessageRoleUser,
-					Parts: []protocol.Part{
-						protocol.NewTextPart("Hello"),
+					Message: &v1.Message{
+						Role: v1.Role_ROLE_USER,
+						Content: []*v1.Part{
+							{
+								Part: &v1.Part_Text{Text: "Hello"},
+							},
+						},
 					},
 				},
 			},
@@ -128,10 +139,14 @@ func TestMemoryTaskManager_OnSendMessage(t *testing.T) {
 			name: "message with context",
 			request: protocol.SendMessageParams{
 				Message: protocol.Message{
-					Role:      protocol.MessageRoleUser,
-					ContextID: stringPtr("test-context"),
-					Parts: []protocol.Part{
-						protocol.NewTextPart("Hello with context"),
+					Message: &v1.Message{
+						Role:      v1.Role_ROLE_USER,
+						ContextId: "test-context",
+						Content: []*v1.Part{
+							{
+								Part: &v1.Part_Text{Text: "Hello with context"},
+							},
+						},
 					},
 				},
 			},
@@ -168,13 +183,13 @@ func TestMemoryTaskManager_OnSendMessage(t *testing.T) {
 
 			// Check if result is a message
 			if message, ok := result.Result.(*protocol.Message); ok {
-				if message.MessageID == "" {
+				if message.MessageId == "" {
 					t.Error("Expected message ID to be set")
 				}
 
 				// Check that message is in storage
 				manager.mu.RLock()
-				_, exists := manager.Messages[message.MessageID]
+				_, exists := manager.Messages[message.MessageId]
 				manager.mu.RUnlock()
 
 				if !exists {
@@ -189,7 +204,11 @@ func TestMemoryTaskManager_OnSendMessageStream(t *testing.T) {
 	processor := &MockMessageProcessor{
 		ProcessMessageFunc: func(ctx context.Context, message protocol.Message, options ProcessOptions, handle TaskHandler) (*MessageProcessingResult, error) {
 			// Create a task for streaming
-			taskID, err := handle.BuildTask(nil, message.ContextID)
+			var contextID *string
+			if message.Message != nil && message.Message.ContextId != "" {
+				contextID = &message.Message.ContextId
+			}
+			taskID, err := handle.BuildTask(nil, contextID)
 			if err != nil {
 				return nil, err
 			}
@@ -208,9 +227,13 @@ func TestMemoryTaskManager_OnSendMessageStream(t *testing.T) {
 
 				// Complete task
 				finalMessage := &protocol.Message{
-					Role: protocol.MessageRoleAgent,
-					Parts: []protocol.Part{
-						protocol.NewTextPart("Streaming completed"),
+					Message: &v1.Message{
+						Role: v1.Role_ROLE_AGENT,
+						Content: []*v1.Part{
+							{
+								Part: &v1.Part_Text{Text: "Streaming completed"},
+							},
+						},
 					},
 				}
 				handle.UpdateTaskState(&taskID, protocol.TaskStateCompleted, finalMessage)
@@ -230,9 +253,13 @@ func TestMemoryTaskManager_OnSendMessageStream(t *testing.T) {
 	ctx := context.Background()
 	request := protocol.SendMessageParams{
 		Message: protocol.Message{
-			Role: protocol.MessageRoleUser,
-			Parts: []protocol.Part{
-				protocol.NewTextPart("Stream test"),
+			Message: &v1.Message{
+				Role: v1.Role_ROLE_USER,
+				Content: []*v1.Part{
+					{
+						Part: &v1.Part_Text{Text: "Stream test"},
+					},
+				},
 			},
 		},
 	}
@@ -298,7 +325,11 @@ func TestMemoryTaskManager_OnGetTask(t *testing.T) {
 	processor := &MockMessageProcessor{
 		ProcessMessageFunc: func(ctx context.Context, message protocol.Message, options ProcessOptions, handle TaskHandler) (*MessageProcessingResult, error) {
 			// Create a task for testing
-			taskID, err := handle.BuildTask(nil, message.ContextID)
+			var contextID *string
+			if message.Message != nil && message.Message.ContextId != "" {
+				contextID = &message.Message.ContextId
+			}
+			taskID, err := handle.BuildTask(nil, contextID)
 			if err != nil {
 				return nil, err
 			}
@@ -324,9 +355,13 @@ func TestMemoryTaskManager_OnGetTask(t *testing.T) {
 	// First create a task by sending a message
 	request := protocol.SendMessageParams{
 		Message: protocol.Message{
-			Role: protocol.MessageRoleUser,
-			Parts: []protocol.Part{
-				protocol.NewTextPart("Test"),
+			Message: &v1.Message{
+				Role: v1.Role_ROLE_USER,
+				Content: []*v1.Part{
+					{
+						Part: &v1.Part_Text{Text: "Test"},
+					},
+				},
 			},
 		},
 	}
@@ -338,7 +373,7 @@ func TestMemoryTaskManager_OnGetTask(t *testing.T) {
 
 	var existingTaskID string
 	if task, ok := result.Result.(*protocol.Task); ok {
-		existingTaskID = task.ID
+		existingTaskID = task.Id
 	} else {
 		t.Fatalf("Expected task result but got %T", result.Result)
 	}
@@ -362,8 +397,8 @@ func TestMemoryTaskManager_OnGetTask(t *testing.T) {
 				if task == nil {
 					t.Error("Expected task but got nil")
 				}
-				if task != nil && task.ID != existingTaskID {
-					t.Errorf("Expected task ID %s, got %s", existingTaskID, task.ID)
+				if task != nil && task.Id != existingTaskID {
+					t.Errorf("Expected task ID %s, got %s", existingTaskID, task.Id)
 				}
 			},
 		},
@@ -408,7 +443,11 @@ func TestMemoryTaskManager_OnCancelTask(t *testing.T) {
 	processor := &MockMessageProcessor{
 		ProcessMessageFunc: func(ctx context.Context, message protocol.Message, options ProcessOptions, handle TaskHandler) (*MessageProcessingResult, error) {
 			// Create a task for testing cancellation
-			taskID, err := handle.BuildTask(nil, message.ContextID)
+			var contextID *string
+			if message.Message != nil && message.Message.ContextId != "" {
+				contextID = &message.Message.ContextId
+			}
+			taskID, err := handle.BuildTask(nil, contextID)
 			if err != nil {
 				return nil, err
 			}
@@ -434,9 +473,13 @@ func TestMemoryTaskManager_OnCancelTask(t *testing.T) {
 	// Create a task first
 	request := protocol.SendMessageParams{
 		Message: protocol.Message{
-			Role: protocol.MessageRoleUser,
-			Parts: []protocol.Part{
-				protocol.NewTextPart("Test"),
+			Message: &v1.Message{
+				Role: v1.Role_ROLE_USER,
+				Content: []*v1.Part{
+					{
+						Part: &v1.Part_Text{Text: "Test"},
+					},
+				},
 			},
 		},
 	}
@@ -449,7 +492,7 @@ func TestMemoryTaskManager_OnCancelTask(t *testing.T) {
 	// Extract task from result
 	var taskID string
 	if task, ok := result.Result.(*protocol.Task); ok {
-		taskID = task.ID
+		taskID = task.Id
 	} else {
 		t.Fatal("Expected task result but got different type")
 	}
@@ -466,6 +509,12 @@ func TestMemoryTaskManager_OnCancelTask(t *testing.T) {
 
 	if canceledTask == nil {
 		t.Error("Expected canceled task but got nil")
+		return
+	}
+
+	if canceledTask.Status == nil {
+		t.Error("Expected task status but got nil")
+		return
 	}
 
 	if canceledTask.Status.State != protocol.TaskStateCanceled {
@@ -497,9 +546,11 @@ func TestMemoryTaskManager_PushNotifications(t *testing.T) {
 			taskID: "test-task-id",
 			config: &protocol.TaskPushNotificationConfig{
 				TaskID: "test-task-id",
-				PushNotificationConfig: protocol.PushNotificationConfig{
-					URL:   "https://example.com/webhook",
-					Token: "Bearer token",
+				TaskPushNotificationConfig: &v1.TaskPushNotificationConfig{
+					PushNotificationConfig: &v1.PushNotificationConfig{
+						Url:   "https://example.com/webhook",
+						Token: "Bearer token",
+					},
 				},
 			},
 			wantErr: false,
@@ -531,8 +582,8 @@ func TestMemoryTaskManager_PushNotifications(t *testing.T) {
 
 				if getResult, ok := result.(*protocol.TaskPushNotificationConfig); ok {
 					expectedURL := "https://example.com/webhook"
-					if getResult.PushNotificationConfig.URL != expectedURL {
-						t.Errorf("Expected URL %s, got %s", expectedURL, getResult.PushNotificationConfig.URL)
+					if getResult.PushNotificationConfig.Url != expectedURL {
+						t.Errorf("Expected URL %s, got %s", expectedURL, getResult.PushNotificationConfig.Url)
 					}
 				} else {
 					t.Errorf("Expected TaskPushNotificationConfig, got %T", result)
@@ -556,11 +607,13 @@ func TestMemoryTaskManager_PushNotifications(t *testing.T) {
 	}
 
 	// First set up a push notification for the get test
-	setupConfig := protocol.TaskPushNotificationConfig{
+	setupConfig := &protocol.TaskPushNotificationConfig{
 		TaskID: "test-task-id",
-		PushNotificationConfig: protocol.PushNotificationConfig{
-			URL:   "https://example.com/webhook",
-			Token: "Bearer token",
+		TaskPushNotificationConfig: &v1.TaskPushNotificationConfig{
+			PushNotificationConfig: &v1.PushNotificationConfig{
+				Url:   "https://example.com/webhook",
+				Token: "Bearer token",
+			},
 		},
 	}
 	_, err = manager.OnPushNotificationSet(ctx, setupConfig)
@@ -576,7 +629,7 @@ func TestMemoryTaskManager_PushNotifications(t *testing.T) {
 			switch tt.action {
 			case "set":
 				if tt.config != nil {
-					result, err = manager.OnPushNotificationSet(ctx, *tt.config)
+					result, err = manager.OnPushNotificationSet(ctx, tt.config)
 				}
 			case "get":
 				if tt.getParams != nil {
@@ -620,9 +673,13 @@ func TestTaskSubscriber(t *testing.T) {
 			setup: func(s *MemoryTaskSubscriber) {
 				event := protocol.StreamingMessageEvent{
 					Result: &protocol.Message{
-						Role: protocol.MessageRoleAgent,
-						Parts: []protocol.Part{
-							protocol.NewTextPart("Test event"),
+						Message: &v1.Message{
+							Role: v1.Role_ROLE_AGENT,
+							Content: []*v1.Part{
+								{
+									Part: &v1.Part_Text{Text: "Test event"},
+								},
+							},
 						},
 					},
 				}
@@ -656,7 +713,11 @@ func TestTaskSubscriber(t *testing.T) {
 
 				// Test sending to closed subscriber
 				event := protocol.StreamingMessageEvent{
-					Result: &protocol.Message{Role: protocol.MessageRoleAgent},
+					Result: &protocol.Message{
+						Message: &v1.Message{
+							Role: v1.Role_ROLE_AGENT,
+						},
+					},
 				}
 				err := s.Send(event)
 				if err == nil {
@@ -681,8 +742,12 @@ func TestCancellableTask(t *testing.T) {
 
 	task := &MemoryCancellableTask{
 		task: protocol.Task{
-			ID:     "test-task",
-			Status: protocol.TaskStatus{State: protocol.TaskStateSubmitted},
+			Task: &v1.Task{
+				Id: "test-task",
+				Status: &v1.TaskStatus{
+					State: protocol.TaskStateSubmitted,
+				},
+			},
 		},
 		cancelFunc: cancel,
 		ctx:        ctx,
