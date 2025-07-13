@@ -24,6 +24,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	v1 "trpc.group/trpc-go/trpc-a2a-go/protocol/a2apb"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
@@ -87,8 +88,8 @@ func decodeJSONRPCResponse(t *testing.T, resp *http.Response) jsonrpc.Response {
 // testJSONRPCErrorResponse is a helper that creates and sends a test JSON-RPC request
 // and verifies the error response with the expected error code and message pattern.
 func testJSONRPCErrorResponse(t *testing.T, server *httptest.Server, method string, reqBody io.Reader,
-	contentType string, expectedCode int, expectedMsgPattern string) {
-
+	contentType string, expectedCode int, expectedMsgPattern string,
+) {
 	t.Helper()
 
 	// Create and send request
@@ -141,8 +142,11 @@ func verifyPushNotificationConfig(t *testing.T, resp *jsonrpc.Response, expected
 	err = json.Unmarshal(resultBytes, &config)
 	require.NoError(t, err)
 
+	err = config.Parse()
+	require.NoError(t, err)
+
 	assert.Equal(t, expectedTaskID, config.TaskID)
-	assert.Equal(t, expectedURL, config.PushNotificationConfig.URL)
+	assert.Equal(t, expectedURL, config.PushNotificationConfig.Url)
 }
 
 // TestA2AServer_HandlerErrors tests various error conditions in the JSON-RPC handler
@@ -219,8 +223,10 @@ func TestA2AServer_AuthMiddleware(t *testing.T) {
 	t.Run("Auth Success", func(t *testing.T) {
 		// Configure mock task manager to succeed
 		mockTM.GetResponse = &protocol.Task{
-			ID:     "test-task-auth",
-			Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
+			Task: &v1.Task{
+				Id:     "test-task-auth",
+				Status: &v1.TaskStatus{State: protocol.TaskStateCompleted},
+			},
 		}
 		mockTM.GetError = nil
 
@@ -303,8 +309,11 @@ func TestA2AServer_PushNotifications(t *testing.T) {
 		// Configure mock task manager
 		mockTM.pushNotificationSetResponse = &protocol.TaskPushNotificationConfig{
 			TaskID: "test-push-task",
-			PushNotificationConfig: protocol.PushNotificationConfig{
-				URL: "https://example.com/webhook",
+			TaskPushNotificationConfig: &v1.TaskPushNotificationConfig{
+				Name: "tasks/test-push-task/pushNotificationConfigs/test-config",
+				PushNotificationConfig: &v1.PushNotificationConfig{
+					Url: "https://example.com/webhook",
+				},
 			},
 		}
 		mockTM.pushNotificationSetError = nil
@@ -312,8 +321,11 @@ func TestA2AServer_PushNotifications(t *testing.T) {
 		// Create request
 		params := protocol.TaskPushNotificationConfig{
 			TaskID: "test-push-task",
-			PushNotificationConfig: protocol.PushNotificationConfig{
-				URL: "https://example.com/webhook",
+			TaskPushNotificationConfig: &v1.TaskPushNotificationConfig{
+				Name: "tasks/test-push-task/pushNotificationConfigs/test-config",
+				PushNotificationConfig: &v1.PushNotificationConfig{
+					Url: "https://example.com/webhook",
+				},
 			},
 		}
 
@@ -334,8 +346,11 @@ func TestA2AServer_PushNotifications(t *testing.T) {
 		// Configure mock task manager
 		mockTM.pushNotificationGetResponse = &protocol.TaskPushNotificationConfig{
 			TaskID: "test-push-task",
-			PushNotificationConfig: protocol.PushNotificationConfig{
-				URL: "https://example.com/webhook",
+			TaskPushNotificationConfig: &v1.TaskPushNotificationConfig{
+				Name: "tasks/test-push-task/pushNotificationConfigs/test-config",
+				PushNotificationConfig: &v1.PushNotificationConfig{
+					Url: "https://example.com/webhook",
+				},
 			},
 		}
 		mockTM.pushNotificationGetError = nil
@@ -394,18 +409,20 @@ func TestA2AServer_Resubscribe(t *testing.T) {
 	t.Run("Resubscribe_Success", func(t *testing.T) {
 		// Configure mock events
 		workingEvent := protocol.TaskStatusUpdateEvent{
-			TaskID:    "resubscribe-task",
-			ContextID: "test-context",
-			Kind:      protocol.KindTaskStatusUpdate,
-			Status:    protocol.TaskStatus{State: protocol.TaskStateWorking},
+			TaskStatusUpdateEvent: &v1.TaskStatusUpdateEvent{
+				TaskId:    "resubscribe-task",
+				ContextId: "test-context",
+				Status:    &v1.TaskStatus{State: protocol.TaskStateWorking},
+			},
 		}
 		finalPtr := true
 		completedEvent := protocol.TaskStatusUpdateEvent{
-			TaskID:    "resubscribe-task",
-			ContextID: "test-context",
-			Kind:      protocol.KindTaskStatusUpdate,
-			Status:    protocol.TaskStatus{State: protocol.TaskStateCompleted},
-			Final:     finalPtr,
+			TaskStatusUpdateEvent: &v1.TaskStatusUpdateEvent{
+				TaskId:    "resubscribe-task",
+				ContextId: "test-context",
+				Status:    &v1.TaskStatus{State: protocol.TaskStateCompleted},
+				Final:     finalPtr,
+			},
 		}
 		mockTM.SubscribeEvents = []protocol.StreamingMessageEvent{
 			{Result: &workingEvent},
@@ -415,10 +432,12 @@ func TestA2AServer_Resubscribe(t *testing.T) {
 
 		// Add task to mock task manager to ensure it exists
 		mockTM.tasks["resubscribe-task"] = &protocol.Task{
-			ID: "resubscribe-task",
-			Status: protocol.TaskStatus{
-				State:     protocol.TaskStateWorking,
-				Timestamp: getCurrentTimestamp(),
+			Task: &v1.Task{
+				Id: "resubscribe-task",
+				Status: &protocol.TaskStatus{
+					State:     protocol.TaskStateWorking,
+					Timestamp: getCurrentTimestamp(),
+				},
 			},
 		}
 

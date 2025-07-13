@@ -19,6 +19,7 @@ import (
 
 	"trpc.group/trpc-go/trpc-a2a-go/client"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	v1 "trpc.group/trpc-go/trpc-a2a-go/protocol/a2apb"
 )
 
 const (
@@ -53,20 +54,18 @@ const (
 	prefixTimeout    = "[TIMEOUT]"
 )
 
-var (
-	// Progress indicator characters
-	progressChars = []string{".", "..", "...", "...."}
-)
+// Progress indicator characters
+var progressChars = []string{".", "..", "...", "...."}
 
 func main() {
 	// Parse command line arguments
-	var serverURL = flag.String("addr", defaultServerURL, "Server URL")
-	var inputText = flag.String("text", defaultInputText, "Input text to process")
-	var streamingOnly = flag.Bool("streaming", false, "Only test streaming mode")
-	var nonStreamingOnly = flag.Bool("non-streaming", false, "Only test non-streaming mode")
-	var verbose = flag.Bool("verbose", false, "Enable verbose output")
-	var help = flag.Bool("help", false, "Show help message")
-	var version = flag.Bool("version", false, "Show version information")
+	serverURL := flag.String("addr", defaultServerURL, "Server URL")
+	inputText := flag.String("text", defaultInputText, "Input text to process")
+	streamingOnly := flag.Bool("streaming", false, "Only test streaming mode")
+	nonStreamingOnly := flag.Bool("non-streaming", false, "Only test non-streaming mode")
+	verbose := flag.Bool("verbose", false, "Enable verbose output")
+	help := flag.Bool("help", false, "Show help message")
+	version := flag.Bool("version", false, "Show version information")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "%s - Redis TaskManager Example\n\n", clientName)
@@ -138,16 +137,20 @@ func main() {
 
 func runNonStreamingDemo(ctx context.Context, client *client.A2AClient, inputText string, verbose bool) {
 	message := protocol.Message{
-		Role: protocol.MessageRoleUser,
-		Parts: []protocol.Part{
-			protocol.NewTextPart(inputText),
+		Message: &v1.Message{
+			Role: v1.Role_ROLE_USER,
+			Content: []*v1.Part{
+				{
+					Part: &v1.Part_Text{Text: inputText},
+				},
+			},
 		},
 	}
 
 	params := protocol.SendMessageParams{
 		Message: message,
 		Configuration: &protocol.SendMessageConfiguration{
-			Blocking: boolPtr(true), // Non-streaming
+			Blocking: true, // Non-streaming
 		},
 	}
 
@@ -167,9 +170,9 @@ func runNonStreamingDemo(ctx context.Context, client *client.A2AClient, inputTex
 	fmt.Printf("%s Processing time: %v\n", prefixSuccess, duration)
 
 	if response, ok := result.Result.(*protocol.Message); ok {
-		for i, part := range response.Parts {
-			if textPart, ok := part.(*protocol.TextPart); ok {
-				fmt.Printf("%s %d: '%s'\n", prefixResult, i+1, textPart.Text)
+		for i, part := range response.Message.Content {
+			if text := part.GetText(); text != "" {
+				fmt.Printf("%s %d: '%s'\n", prefixResult, i+1, text)
 			}
 		}
 	} else {
@@ -198,16 +201,22 @@ func runStreamingDemo(ctx context.Context, client *client.A2AClient, inputText s
 // startStreamingRequest initiates a streaming request and returns the event channel
 func startStreamingRequest(ctx context.Context, client *client.A2AClient, inputText string, verbose bool) (<-chan protocol.StreamingMessageEvent, error) {
 	message := protocol.Message{
-		Role: protocol.MessageRoleUser,
-		Parts: []protocol.Part{
-			protocol.NewTextPart(inputText),
+		Message: &v1.Message{
+			Role: v1.Role_ROLE_USER,
+			Content: []*v1.Part{
+				{
+					Part: &v1.Part_Text{
+						Text: inputText,
+					},
+				},
+			},
 		},
 	}
 
 	params := protocol.SendMessageParams{
 		Message: message,
 		Configuration: &protocol.SendMessageConfiguration{
-			Blocking: boolPtr(false), // Streaming
+			Blocking: false, // Streaming
 		},
 	}
 
@@ -291,9 +300,9 @@ func (p *streamEventProcessor) handleStreamEvent(event protocol.StreamingMessage
 // handleTaskStatusEvent processes task status update events
 func (p *streamEventProcessor) handleTaskStatusEvent(event *protocol.TaskStatusUpdateEvent) {
 	if p.taskID == "" {
-		p.taskID = event.TaskID
+		p.taskID = event.TaskId
 		if p.verbose {
-			fmt.Printf("%s ID: %s\n", prefixTask, event.TaskID)
+			fmt.Printf("%s ID: %s\n", prefixTask, event.TaskId)
 		}
 	}
 
@@ -305,7 +314,9 @@ func (p *streamEventProcessor) handleTaskStatusEvent(event *protocol.TaskStatusU
 	}
 	fmt.Println()
 
-	p.displayTaskMessage(event.Status.Message)
+	if updateMsg := event.Status.GetUpdate(); updateMsg != nil {
+		p.displayTaskMessage(&protocol.Message{Message: updateMsg})
+	}
 
 	if event.IsFinal() {
 		duration := time.Since(p.startTime)
@@ -315,39 +326,39 @@ func (p *streamEventProcessor) handleTaskStatusEvent(event *protocol.TaskStatusU
 
 // handleTaskArtifactEvent processes task artifact update events
 func (p *streamEventProcessor) handleTaskArtifactEvent(event *protocol.TaskArtifactUpdateEvent) {
-	fmt.Printf("%s ID: %s\n", prefixArtifact, event.Artifact.ArtifactID)
+	fmt.Printf("%s ID: %s\n", prefixArtifact, event.Artifact.ArtifactId)
 
-	if event.Artifact.Name != nil {
-		fmt.Printf("   %s %s\n", prefixName, *event.Artifact.Name)
+	if event.Artifact.Name != "" {
+		fmt.Printf("   %s %s\n", prefixName, event.Artifact.Name)
 	}
 
-	if event.Artifact.Description != nil {
-		fmt.Printf("   %s %s\n", prefixDesc, *event.Artifact.Description)
+	if event.Artifact.Description != "" {
+		fmt.Printf("   %s %s\n", prefixDesc, event.Artifact.Description)
 	}
 
 	p.displayArtifactContent(event.Artifact.Parts)
 
-	if p.verbose {
-		p.displayArtifactMetadata(event.Artifact.Metadata)
+	if p.verbose && event.Artifact.Metadata != nil {
+		p.displayArtifactMetadata(event.Artifact.Metadata.AsMap())
 	}
 }
 
 // displayTaskMessage displays task status message if present
 func (p *streamEventProcessor) displayTaskMessage(message *protocol.Message) {
-	if message != nil {
-		for _, part := range message.Parts {
-			if textPart, ok := part.(*protocol.TextPart); ok {
-				fmt.Printf("   %s %s\n", prefixMessage, textPart.Text)
+	if message != nil && message.Message != nil {
+		for _, part := range message.Message.Content {
+			if text := part.GetText(); text != "" {
+				fmt.Printf("   %s %s\n", prefixMessage, text)
 			}
 		}
 	}
 }
 
 // displayArtifactContent displays artifact content parts
-func (p *streamEventProcessor) displayArtifactContent(parts []protocol.Part) {
+func (p *streamEventProcessor) displayArtifactContent(parts []*v1.Part) {
 	for _, part := range parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			fmt.Printf("   %s '%s'\n", prefixContent, textPart.Text)
+		if text := part.GetText(); text != "" {
+			fmt.Printf("   %s '%s'\n", prefixContent, text)
 		}
 	}
 }
@@ -376,8 +387,4 @@ func getStatusPrefix(state protocol.TaskState) string {
 	default:
 		return "STATUS"
 	}
-}
-
-func boolPtr(b bool) *bool {
-	return &b
 }

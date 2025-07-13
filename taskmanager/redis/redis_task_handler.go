@@ -12,11 +12,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
+	"google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"trpc.group/trpc-go/trpc-a2a-go/log"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
+
+	v1 "trpc.group/trpc-go/trpc-a2a-go/protocol/a2apb"
 )
 
 // taskHandler implements TaskHandler interface for Redis.
@@ -59,18 +62,21 @@ func (h *taskHandler) BuildTask(specificTaskID *string, contextID *string) (stri
 	// Create new context for cancellation.
 	_, cancel := context.WithCancel(context.Background())
 
+	// an empty metadata struct with no error
+	metadata, _ := structpb.NewStruct(map[string]any{})
 	// Create new task.
 	task := &protocol.Task{
-		ID:        actualTaskID,
-		ContextID: actualContextID,
-		Kind:      protocol.KindTask,
-		Status: protocol.TaskStatus{
-			State:     protocol.TaskStateSubmitted,
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Task: &v1.Task{
+			Id:        actualTaskID,
+			ContextId: actualContextID,
+			Status: &v1.TaskStatus{
+				State:     protocol.TaskStateSubmitted,
+				Timestamp: timestamppb.Now(),
+			},
+			Artifacts: make([]*v1.Artifact, 0),
+			History:   make([]*v1.Message, 0),
+			Metadata:  metadata,
 		},
-		Artifacts: make([]protocol.Artifact, 0),
-		History:   make([]protocol.Message, 0),
-		Metadata:  make(map[string]interface{}),
 	}
 
 	// Store task in Redis.
@@ -106,10 +112,10 @@ func (h *taskHandler) UpdateTaskState(
 	}
 
 	// Update task status.
-	task.Status = protocol.TaskStatus{
+	task.Status = &v1.TaskStatus{
 		State:     state,
-		Message:   message,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Update:    message.Message,
+		Timestamp: timestamppb.Now(),
 	}
 
 	// Store updated task.
@@ -122,11 +128,12 @@ func (h *taskHandler) UpdateTaskState(
 	// Notify subscribers.
 	finalState := isFinalState(state)
 	event := &protocol.TaskStatusUpdateEvent{
-		TaskID:    *taskID,
-		ContextID: task.ContextID,
-		Status:    task.Status,
-		Kind:      protocol.KindTaskStatusUpdate,
-		Final:     finalState,
+		TaskStatusUpdateEvent: &v1.TaskStatusUpdateEvent{
+			TaskId:    *taskID,
+			ContextId: task.ContextId,
+			Status:    task.Status,
+			Final:     finalState,
+		},
 	}
 	streamEvent := protocol.StreamingMessageEvent{Result: event}
 	h.manager.notifySubscribers(*taskID, streamEvent)
@@ -158,25 +165,26 @@ func (h *taskHandler) AddArtifact(taskID *string, artifact protocol.Artifact, is
 
 	// Append the artifact.
 	if task.Artifacts == nil {
-		task.Artifacts = make([]protocol.Artifact, 0, 1)
+		task.Artifacts = make([]*v1.Artifact, 0, 1)
 	}
-	task.Artifacts = append(task.Artifacts, artifact)
+	task.Artifacts = append(task.Artifacts, artifact.Artifact)
 
 	// Store updated task.
 	if err := h.manager.storeTask(h.ctx, task); err != nil {
 		return fmt.Errorf("failed to update task artifacts: %w", err)
 	}
 
-	log.Debugf("Added artifact %s to task %s", artifact.ArtifactID, *taskID)
+	log.Debugf("Added artifact %s to task %s", artifact.ArtifactId, *taskID)
 
 	// Notify subscribers.
 	event := &protocol.TaskArtifactUpdateEvent{
-		TaskID:    *taskID,
-		ContextID: task.ContextID,
-		Artifact:  artifact,
-		Kind:      protocol.KindTaskArtifactUpdate,
-		LastChunk: &isFinal,
-		Append:    &needMoreData,
+		TaskArtifactUpdateEvent: &v1.TaskArtifactUpdateEvent{
+			TaskId:    *taskID,
+			ContextId: task.ContextId,
+			Artifact:  artifact.Artifact,
+			LastChunk: isFinal,
+			Append:    needMoreData,
+		},
 	}
 	streamEvent := protocol.StreamingMessageEvent{Result: event}
 	h.manager.notifySubscribers(*taskID, streamEvent)
@@ -274,8 +282,8 @@ func (h *taskHandler) GetContextID() string {
 		return ""
 	}
 
-	if msg.ContextID != nil {
-		return *msg.ContextID
+	if msg.ContextId != "" {
+		return msg.ContextId
 	}
 	return ""
 }
@@ -302,5 +310,12 @@ func (h *taskHandler) GetMessageHistory() []protocol.Message {
 		return []protocol.Message{}
 	}
 
-	return history
+	msgs := make([]protocol.Message, len(history))
+	for i, msg := range history {
+		msgs[i] = protocol.Message{
+			Message: msg,
+		}
+	}
+
+	return msgs
 }

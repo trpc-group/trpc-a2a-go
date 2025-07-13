@@ -15,14 +15,18 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"trpc.group/trpc-go/trpc-a2a-go/log"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	v1 "trpc.group/trpc-go/trpc-a2a-go/protocol/a2apb"
 )
 
-const defaultMaxHistoryLength = 100
-const defaultCleanupInterval = 30 * time.Second
-const defaultConversationTTL = 1 * time.Hour
-const defaultSubscriberBufferSize = 1024
+const (
+	defaultMaxHistoryLength     = 100
+	defaultCleanupInterval      = 30 * time.Second
+	defaultConversationTTL      = 1 * time.Hour
+	defaultSubscriberBufferSize = 1024
+)
 
 // ConversationHistory stores conversation history information
 type ConversationHistory struct {
@@ -188,7 +192,7 @@ type MemoryTaskManager struct {
 
 	// Messages stores all Messages, indexed by messageID
 	// key: messageID, value: Message
-	Messages map[string]protocol.Message
+	Messages map[string]*v1.Message
 
 	// Conversations stores the message history of each conversation, indexed by contextID
 	// key: contextID, value: ConversationHistory
@@ -211,7 +215,7 @@ type MemoryTaskManager struct {
 
 	// PushNotifications stores the push notification configurations
 	// key: taskID, value: push notification configuration
-	PushNotifications map[string]protocol.TaskPushNotificationConfig
+	PushNotifications map[string]*protocol.TaskPushNotificationConfig
 
 	// options
 	options *MemoryTaskManagerOptions
@@ -233,11 +237,11 @@ func NewMemoryTaskManager(processor MessageProcessor, opts ...MemoryTaskManagerO
 
 	manager := &MemoryTaskManager{
 		Processor:         processor,
-		Messages:          make(map[string]protocol.Message),
+		Messages:          make(map[string]*v1.Message),
 		Conversations:     make(map[string]*ConversationHistory),
 		Tasks:             make(map[string]*MemoryCancellableTask),
 		Subscribers:       make(map[string][]*MemoryTaskSubscriber),
-		PushNotifications: make(map[string]protocol.TaskPushNotificationConfig),
+		PushNotifications: make(map[string]*protocol.TaskPushNotificationConfig),
 		options:           options,
 	}
 
@@ -265,10 +269,10 @@ func (m *MemoryTaskManager) OnSendMessage(
 	ctx context.Context,
 	request protocol.SendMessageParams,
 ) (*protocol.MessageResult, error) {
-	log.Debugf("MemoryTaskManager: OnSendMessage for message %s", request.Message.MessageID)
+	log.Debugf("MemoryTaskManager: OnSendMessage for message %s", request.Message.MessageId)
 
 	// process the request message
-	m.processRequestMessage(&request.Message)
+	m.processRequestMessage(request.Message.Message)
 
 	// process Configuration
 	options := m.processConfiguration(request.Configuration)
@@ -277,7 +281,7 @@ func (m *MemoryTaskManager) OnSendMessage(
 	// create MessageHandle
 	handle := &memoryTaskHandler{
 		manager:                m,
-		messageID:              request.Message.MessageID,
+		messageID:              request.Message.MessageId,
 		ctx:                    ctx,
 		subscriberBufSize:      m.options.TaskSubscriberBufSize,
 		subscriberBlockingSend: m.options.TaskSubscriberBlockingSend,
@@ -305,7 +309,7 @@ func (m *MemoryTaskManager) OnSendMessage(
 	switch result.Result.(type) {
 	case *protocol.Task:
 	case *protocol.Message:
-		m.processReplyMessage(request.Message.ContextID, result.Result.(*protocol.Message))
+		m.processReplyMessage(request.Message.ContextId, result.Result.(*protocol.Message).Message)
 	default:
 		return nil, fmt.Errorf("processor returned unsupported result type %T for SendMessage request", result.Result)
 	}
@@ -318,9 +322,9 @@ func (m *MemoryTaskManager) OnSendMessageStream(
 	ctx context.Context,
 	request protocol.SendMessageParams,
 ) (<-chan protocol.StreamingMessageEvent, error) {
-	log.Debugf("MemoryTaskManager: OnSendMessageStream for message %s", request.Message.MessageID)
+	log.Debugf("MemoryTaskManager: OnSendMessageStream for message %s", request.Message.MessageId)
 
-	m.processRequestMessage(&request.Message)
+	m.processRequestMessage(request.Message.Message)
 
 	// Process Configuration
 	options := m.processConfiguration(request.Configuration)
@@ -329,7 +333,7 @@ func (m *MemoryTaskManager) OnSendMessageStream(
 	// Create streaming MessageHandle
 	handle := &memoryTaskHandler{
 		manager:                m,
-		messageID:              request.Message.MessageID,
+		messageID:              request.Message.MessageId,
 		ctx:                    ctx,
 		subscriberBufSize:      m.options.TaskSubscriberBufSize,
 		subscriberBlockingSend: m.options.TaskSubscriberBlockingSend,
@@ -363,8 +367,8 @@ func (m *MemoryTaskManager) OnGetTask(ctx context.Context, params protocol.TaskQ
 
 	// if the request contains history length, fill the message history
 	if params.HistoryLength != nil && *params.HistoryLength > 0 {
-		if taskCopy.ContextID != "" {
-			history := m.getConversationHistory(taskCopy.ContextID, *params.HistoryLength)
+		if taskCopy.ContextId != "" {
+			history := m.getConversationHistory(taskCopy.ContextId, *params.HistoryLength)
 			taskCopy.History = history
 		}
 	}
@@ -392,7 +396,7 @@ func (m *MemoryTaskManager) OnCancelTask(ctx context.Context, params protocol.Ta
 	}
 	handle.CleanTask(&params.ID)
 	taskCopy.Status.State = protocol.TaskStateCanceled
-	taskCopy.Status.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	taskCopy.Status.Timestamp = timestamppb.New(time.Now())
 
 	return &taskCopy, nil
 }
@@ -400,7 +404,7 @@ func (m *MemoryTaskManager) OnCancelTask(ctx context.Context, params protocol.Ta
 // OnPushNotificationSet handles tasks/pushNotificationConfig/set requests
 func (m *MemoryTaskManager) OnPushNotificationSet(
 	ctx context.Context,
-	params protocol.TaskPushNotificationConfig,
+	params *protocol.TaskPushNotificationConfig,
 ) (*protocol.TaskPushNotificationConfig, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -408,7 +412,7 @@ func (m *MemoryTaskManager) OnPushNotificationSet(
 	// Store push notification configuration
 	m.PushNotifications[params.TaskID] = params
 	log.Debugf("MemoryTaskManager: Push notification config set for task %s", params.TaskID)
-	return &params, nil
+	return params, nil
 }
 
 // OnPushNotificationGet handles tasks/pushNotificationConfig/get requests
@@ -424,7 +428,7 @@ func (m *MemoryTaskManager) OnPushNotificationGet(
 		return nil, fmt.Errorf("push notification config not found for task: %s", params.ID)
 	}
 
-	return &config, nil
+	return config, nil
 }
 
 // OnResubscribe handles tasks/resubscribe requests
@@ -467,16 +471,16 @@ func (m *MemoryTaskManager) OnResubscribe(
 // =============================================================================
 
 // storeMessage stores messages
-func (m *MemoryTaskManager) storeMessage(message protocol.Message) {
+func (m *MemoryTaskManager) storeMessage(message *v1.Message) {
 	m.conversationMu.Lock()
 	defer m.conversationMu.Unlock()
 
 	// Store the message
-	m.Messages[message.MessageID] = message
+	m.Messages[message.MessageId] = message
 
 	// If the message has a contextID, add it to conversation history
-	if message.ContextID != nil {
-		contextID := *message.ContextID
+	if message.ContextId != "" {
+		contextID := message.ContextId
 		if _, exists := m.Conversations[contextID]; !exists {
 			m.Conversations[contextID] = &ConversationHistory{
 				MessageIDs:     make([]string, 0),
@@ -485,7 +489,7 @@ func (m *MemoryTaskManager) storeMessage(message protocol.Message) {
 		}
 
 		// Add message ID to conversation history
-		m.Conversations[contextID].MessageIDs = append(m.Conversations[contextID].MessageIDs, message.MessageID)
+		m.Conversations[contextID].MessageIDs = append(m.Conversations[contextID].MessageIDs, message.MessageId)
 		// Update last access time
 		m.Conversations[contextID].LastAccessTime = time.Now()
 
@@ -501,8 +505,8 @@ func (m *MemoryTaskManager) storeMessage(message protocol.Message) {
 }
 
 // getMessageHistory gets message history
-func (m *MemoryTaskManager) getMessageHistory(contextID string) []protocol.Message {
-	var history []protocol.Message
+func (m *MemoryTaskManager) getMessageHistory(contextID string) []*v1.Message {
+	var history []*v1.Message
 	if contextID == "" {
 		return history
 	}
@@ -515,7 +519,7 @@ func (m *MemoryTaskManager) getMessageHistory(contextID string) []protocol.Messa
 		// Update last access time
 		conversation.LastAccessTime = time.Now()
 
-		history = make([]protocol.Message, 0, len(conversation.MessageIDs))
+		history = make([]*v1.Message, 0, len(conversation.MessageIDs))
 		for _, msgID := range conversation.MessageIDs {
 			if msg, exists := m.Messages[msgID]; exists {
 				history = append(history, msg)
@@ -526,11 +530,11 @@ func (m *MemoryTaskManager) getMessageHistory(contextID string) []protocol.Messa
 }
 
 // getConversationHistory gets conversation history of specified length
-func (m *MemoryTaskManager) getConversationHistory(contextID string, length int) []protocol.Message {
+func (m *MemoryTaskManager) getConversationHistory(contextID string, length int) []*v1.Message {
 	m.conversationMu.RLock()
 	defer m.conversationMu.RUnlock()
 
-	var history []protocol.Message
+	var history []*v1.Message
 
 	if conversation, exists := m.Conversations[contextID]; exists {
 		// Update last access time
@@ -575,18 +579,16 @@ func (m *MemoryTaskManager) processConfiguration(config *protocol.SendMessageCon
 	}
 
 	// Process Blocking configuration
-	if config.Blocking != nil {
-		result.Blocking = *config.Blocking
-	}
+	result.Blocking = config.Blocking
 
 	// Process HistoryLength configuration
-	if config.HistoryLength != nil && *config.HistoryLength > 0 {
-		result.HistoryLength = *config.HistoryLength
+	if config.HistoryLength > 0 {
+		result.HistoryLength = int(config.HistoryLength)
 	}
 
 	// Process PushNotificationConfig
-	if config.PushNotificationConfig != nil {
-		result.PushNotificationConfig = config.PushNotificationConfig
+	if config.PushNotification != nil {
+		result.PushNotificationConfig = config.PushNotification
 	}
 
 	// Process AcceptedOutputModes configuration
@@ -598,17 +600,17 @@ func (m *MemoryTaskManager) processConfiguration(config *protocol.SendMessageCon
 }
 
 // processRequestMessage processes the request message, add messageID and contextID if not set
-func (m *MemoryTaskManager) processRequestMessage(message *protocol.Message) {
-	if message.MessageID == "" {
-		message.MessageID = protocol.GenerateMessageID()
+func (m *MemoryTaskManager) processRequestMessage(message *v1.Message) {
+	if message.MessageId == "" {
+		message.MessageId = protocol.GenerateMessageID()
 	}
 
-	if message.ContextID == nil || *message.ContextID == "" {
+	if message.ContextId == "" {
 		contextID := protocol.GenerateContextID()
-		message.ContextID = &contextID
+		message.ContextId = contextID
 	}
 
-	m.storeMessage(*message)
+	m.storeMessage(message)
 }
 
 // sendStreamingEventHook is a hook for sending streaming events
@@ -617,22 +619,22 @@ func (m *MemoryTaskManager) sendStreamingEventHook(ctxID string) func(event prot
 		switch event.Result.(type) {
 		case *protocol.TaskStatusUpdateEvent:
 			event := event.Result.(*protocol.TaskStatusUpdateEvent)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
+			if event.ContextId == "" {
+				event.ContextId = ctxID
 			}
 		case *protocol.TaskArtifactUpdateEvent:
 			event := event.Result.(*protocol.TaskArtifactUpdateEvent)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
+			if event.ContextId == "" {
+				event.ContextId = ctxID
 			}
 		case *protocol.Message:
 			event := event.Result.(*protocol.Message)
 			// store message
-			m.processReplyMessage(&ctxID, event)
+			m.processReplyMessage(ctxID, event.Message)
 		case *protocol.Task:
 			event := event.Result.(*protocol.Task)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
+			if event.ContextId == "" {
+				event.ContextId = ctxID
 			}
 		}
 		return nil
@@ -640,20 +642,20 @@ func (m *MemoryTaskManager) sendStreamingEventHook(ctxID string) func(event prot
 }
 
 // processReplyMessage processes the reply message, add messageID and contextID if not set
-func (m *MemoryTaskManager) processReplyMessage(ctxID *string, message *protocol.Message) {
-	message.ContextID = ctxID
+func (m *MemoryTaskManager) processReplyMessage(ctxID string, message *v1.Message) {
+	message.ContextId = ctxID
 	message.Role = protocol.MessageRoleAgent
 
-	if message.MessageID == "" {
-		message.MessageID = protocol.GenerateMessageID()
+	if message.MessageId == "" {
+		message.MessageId = protocol.GenerateMessageID()
 	}
 
-	if message.ContextID == nil || *message.ContextID == "" {
+	if message.ContextId == "" {
 		contextID := protocol.GenerateContextID()
-		message.ContextID = &contextID
+		message.ContextId = contextID
 	}
 
-	m.storeMessage(*message)
+	m.storeMessage(message)
 }
 
 func (m *MemoryTaskManager) checkTaskExists(taskID string) bool {

@@ -148,7 +148,6 @@ type MessageProcessor interface {
 // This interface corresponds to the Task Service defined in the A2A Specification.
 // Exported interface.
 type TaskManager interface {
-
 	// OnSendMessage handles a request corresponding to the 'message/send' RPC method.
 	// It creates and potentially starts processing a new message via the MessageProcessor.
 	// It returns the initial state of the message, possibly reflecting immediate processing results.
@@ -186,7 +185,7 @@ type TaskManager interface {
 	// It configures push notifications for a specific task.
 	OnPushNotificationSet(
 		ctx context.Context,
-		params protocol.TaskPushNotificationConfig,
+		params *protocol.TaskPushNotificationConfig,
 	) (*protocol.TaskPushNotificationConfig, error)
 
 	// OnPushNotificationGet handles a request corresponding to the 'tasks/pushNotification/get' RPC method.

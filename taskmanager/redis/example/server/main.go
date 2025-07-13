@@ -19,6 +19,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	v1 "trpc.group/trpc-go/trpc-a2a-go/protocol/a2apb"
 	"trpc.group/trpc-go/trpc-a2a-go/server"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 	redisTaskManager "trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis"
@@ -72,23 +73,30 @@ func (p *ToLowerProcessor) ProcessMessage(
 	options taskmanager.ProcessOptions,
 	handle taskmanager.TaskHandler,
 ) (*taskmanager.MessageProcessingResult, error) {
-	log.Printf("Processing message: %s", message.MessageID)
+	log.Printf("Processing message: %s", message.MessageId)
 
 	// Extract text from message parts
 	inputText := extractTextFromMessage(message)
 	if inputText == "" {
 		return &taskmanager.MessageProcessingResult{
 			Result: &protocol.Message{
-				Role: protocol.MessageRoleAgent,
-				Parts: []protocol.Part{
-					protocol.NewTextPart("Error: No text found in message"),
+				Message: &v1.Message{
+					Role: v1.Role_ROLE_AGENT,
+					Content: []*v1.Part{
+						{
+							Part: &v1.Part_Text{
+								Text: "Error: No text found in message",
+							},
+						},
+					},
 				},
 			},
 		}, nil
 	}
 
 	if options.Streaming {
-		return p.processStreamingMode(inputText, message.ContextID, handle)
+		contextId := message.ContextId
+		return p.processStreamingMode(inputText, &contextId, handle)
 	}
 
 	return p.processNonStreamingMode(inputText), nil
@@ -97,9 +105,11 @@ func (p *ToLowerProcessor) ProcessMessage(
 // extractTextFromMessage extracts text content from message parts
 func extractTextFromMessage(message protocol.Message) string {
 	var inputText string
-	for _, part := range message.Parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			inputText += textPart.Text
+	if message.Message != nil {
+		for _, part := range message.Message.Content {
+			if text := part.GetText(); text != "" {
+				inputText += text
+			}
 		}
 	}
 	return inputText
@@ -136,9 +146,15 @@ func (p *ToLowerProcessor) processNonStreamingMode(inputText string) *taskmanage
 	result := strings.ToLower(inputText)
 
 	response := &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
-			protocol.NewTextPart(result),
+		Message: &v1.Message{
+			Role: v1.Role_ROLE_AGENT,
+			Content: []*v1.Part{
+				{
+					Part: &v1.Part_Text{
+						Text: result,
+					},
+				},
+			},
 		},
 	}
 
@@ -161,9 +177,15 @@ func (p *ToLowerProcessor) processTextAsync(
 
 	// Step 1: Starting processing
 	err := handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
-			protocol.NewTextPart(msgStarting),
+		Message: &v1.Message{
+			Role: v1.Role_ROLE_AGENT,
+			Content: []*v1.Part{
+				{
+					Part: &v1.Part_Text{
+						Text: msgStarting,
+					},
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -176,9 +198,15 @@ func (p *ToLowerProcessor) processTextAsync(
 
 	// Step 2: Analysis phase
 	err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
-			protocol.NewTextPart(fmt.Sprintf(msgAnalyzing, len(inputText))),
+		Message: &v1.Message{
+			Role: v1.Role_ROLE_AGENT,
+			Content: []*v1.Part{
+				{
+					Part: &v1.Part_Text{
+						Text: fmt.Sprintf(msgAnalyzing, len(inputText)),
+					},
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -191,9 +219,15 @@ func (p *ToLowerProcessor) processTextAsync(
 
 	// Step 3: Processing phase
 	err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
-			protocol.NewTextPart(msgProcessing),
+		Message: &v1.Message{
+			Role: v1.Role_ROLE_AGENT,
+			Content: []*v1.Part{
+				{
+					Part: &v1.Part_Text{
+						Text: msgProcessing,
+					},
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -209,9 +243,15 @@ func (p *ToLowerProcessor) processTextAsync(
 
 	// Step 4: Creating artifact
 	err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
-			protocol.NewTextPart(msgArtifact),
+		Message: &v1.Message{
+			Role: v1.Role_ROLE_AGENT,
+			Content: []*v1.Part{
+				{
+					Part: &v1.Part_Text{
+						Text: msgArtifact,
+					},
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -221,19 +261,17 @@ func (p *ToLowerProcessor) processTextAsync(
 
 	// Create an artifact with the processed text
 	artifact := protocol.Artifact{
-		ArtifactID:  protocol.GenerateArtifactID(),
-		Name:        stringPtr(skillName),
-		Description: stringPtr(skillDescription),
-		Parts: []protocol.Part{
-			protocol.NewTextPart(result),
-		},
-		Metadata: map[string]interface{}{
-			"operation":      skillID,
-			"originalText":   inputText,
-			"originalLength": len(inputText),
-			"resultLength":   len(result),
-			"processedAt":    time.Now().UTC().Format(time.RFC3339),
-			"processingTime": "1.7s",
+		Artifact: &v1.Artifact{
+			ArtifactId:  protocol.GenerateArtifactID(),
+			Name:        skillName,
+			Description: skillDescription,
+			Parts: []*v1.Part{
+				{
+					Part: &v1.Part_Text{
+						Text: result,
+					},
+				},
+			},
 		},
 	}
 
@@ -247,9 +285,15 @@ func (p *ToLowerProcessor) processTextAsync(
 
 	// Send final status with result message
 	finalMessage := &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
-			protocol.NewTextPart(fmt.Sprintf(msgCompleted, inputText, result)),
+		Message: &v1.Message{
+			Role: v1.Role_ROLE_AGENT,
+			Content: []*v1.Part{
+				{
+					Part: &v1.Part_Text{
+						Text: fmt.Sprintf(msgCompleted, inputText, result),
+					},
+				},
+			},
 		},
 	}
 
@@ -270,10 +314,10 @@ func boolPtr(b bool) *bool {
 
 func main() {
 	// Parse command line flags
-	var redisAddr = flag.String("redis_addr", defaultRedisAddress, "Redis server address")
-	var serverAddr = flag.String("addr", defaultServerAddress, "Server listen address (e.g., :8080 or localhost:8080)")
-	var help = flag.Bool("help", false, "Show help message")
-	var version = flag.Bool("version", false, "Show version information")
+	redisAddr := flag.String("redis_addr", defaultRedisAddress, "Redis server address")
+	serverAddr := flag.String("addr", defaultServerAddress, "Server listen address (e.g., :8080 or localhost:8080)")
+	help := flag.Bool("help", false, "Show help message")
+	version := flag.Bool("version", false, "Show version information")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Text Case Converter Server - Redis TaskManager Example\n\n")
