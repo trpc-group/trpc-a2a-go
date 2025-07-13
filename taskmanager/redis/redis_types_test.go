@@ -11,17 +11,21 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	v1 "trpc.group/trpc-go/trpc-a2a-go/protocol/a2apb"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
 func TestRedisCancellableTask(t *testing.T) {
 	// Create a test task
 	task := &protocol.Task{
-		ID: "test-task-1",
-		Status: protocol.TaskStatus{
-			State:     protocol.TaskStateSubmitted,
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Task: &v1.Task{
+			Id: "test-task-1",
+			Status: &v1.TaskStatus{
+				State:     protocol.TaskStateSubmitted,
+				Timestamp: timestamppb.New(time.Now().UTC()),
+			},
 		},
 	}
 
@@ -36,8 +40,8 @@ func TestRedisCancellableTask(t *testing.T) {
 
 	// Test Task() method
 	retrievedTask := cancellableTask.Task()
-	if retrievedTask.ID != "test-task-1" {
-		t.Errorf("Expected task ID 'test-task-1', got '%s'", retrievedTask.ID)
+	if retrievedTask.Id != "test-task-1" {
+		t.Errorf("Expected task ID 'test-task-1', got '%s'", retrievedTask.Id)
 	}
 
 	// Test Cancel() method
@@ -72,14 +76,17 @@ func TestRedisTaskSubscriber(t *testing.T) {
 	}
 
 	// Test sending events
-	event := protocol.StreamingMessageEvent{
-		Result: &protocol.TaskStatusUpdateEvent{
-			TaskID: taskID,
-			Status: protocol.TaskStatus{
-				State:     protocol.TaskStateSubmitted,
-				Timestamp: time.Now().UTC().Format(time.RFC3339),
-			},
+	statusUpdateEvent := protocol.NewTaskStatusUpdateEvent(
+		taskID,
+		"",
+		&v1.TaskStatus{
+			State:     protocol.TaskStateSubmitted,
+			Timestamp: timestamppb.New(time.Now().UTC()),
 		},
+		false,
+	)
+	event := protocol.StreamingMessageEvent{
+		Result: &statusUpdateEvent,
 	}
 
 	err := subscriber.Send(event)
@@ -117,10 +124,9 @@ func TestRedisTaskSubscriberBufferFull(t *testing.T) {
 	subscriber := NewTaskSubscriber(taskID, bufferSize)
 	defer subscriber.Close()
 
+	statusUpdateEvent := protocol.NewTaskStatusUpdateEvent(taskID, "", &v1.TaskStatus{State: protocol.TaskStateSubmitted}, false)
 	event := protocol.StreamingMessageEvent{
-		Result: &protocol.TaskStatusUpdateEvent{
-			TaskID: taskID,
-		},
+		Result: &statusUpdateEvent,
 	}
 
 	// Fill the buffer
