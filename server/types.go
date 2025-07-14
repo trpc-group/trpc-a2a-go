@@ -7,6 +7,11 @@
 // Package server contains the A2A server implementation and related types.
 package server
 
+const (
+	// ProtocolVersion is the protocol version.
+	ProtocolVersion = "0.2.5"
+)
+
 // SecurityScheme represents an authentication scheme supported by the agent.
 // Based on A2A 0.2.2 specification.
 type SecurityScheme struct {
@@ -75,7 +80,7 @@ type OAuthFlow struct {
 	// RefreshURL is the refresh URL.
 	RefreshURL *string `json:"refreshUrl,omitempty"`
 	// Scopes are the available scopes.
-	Scopes map[string]string `json:"scopes,omitempty"`
+	Scopes map[string]string `json:"scopes"`
 }
 
 // AgentExtension represents an agent extension.
@@ -111,7 +116,7 @@ type AgentSkill struct {
 	// Description is an optional detailed description of the skill.
 	Description *string `json:"description,omitempty"`
 	// Tags are optional tags for categorization.
-	Tags []string `json:"tags,omitempty"`
+	Tags []string `json:"tags"`
 	// Examples are optional usage examples.
 	Examples []string `json:"examples,omitempty"`
 	// InputModes are the supported input data modes/types.
@@ -136,6 +141,15 @@ type AgentAuthentication struct {
 	Required bool `json:"required"`
 	// Config is an optional configuration details for the auth type.
 	Config interface{} `json:"config,omitempty"`
+}
+
+// AgentInterface provides a declaration of a combination of the
+// target url and the supported transport to interact with the agent.
+type AgentInterface struct {
+	// URL is the target URL of the agent.
+	URL string `json:"url"`
+	// Transport is the supported transport.
+	Transport string `json:"transport"`
 }
 
 // AgentCard is the metadata structure describing an A2A agent.
@@ -169,4 +183,10 @@ type AgentCard struct {
 	Skills []AgentSkill `json:"skills"`
 	// SupportsAuthenticatedExtendedCard indicates if the agent supports authenticated extended card.
 	SupportsAuthenticatedExtendedCard *bool `json:"supportsAuthenticatedExtendedCard,omitempty"`
+	// PreferredTransport is the preferred transport.
+	PreferredTransport *string `json:"preferredTransport,omitempty"`
+	// ProtocolVersion is the protocol version.
+	ProtocolVersion *string `json:"protocolVersion,omitempty"`
+	// Interfaces are the list of interfaces supported by the agent.
+	AdditionalInterfaces []AgentInterface `json:"additionalInterfaces,omitempty"`
 }

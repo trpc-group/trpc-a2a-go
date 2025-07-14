@@ -20,7 +20,7 @@ import uuid
 
 try:
     from a2a.client import A2AClient, create_text_message_object
-    from a2a.types import SendMessageRequest, SendStreamingMessageRequest, MessageSendParams, Role
+    from a2a.types import SendMessageRequest, SendStreamingMessageRequest, MessageSendParams, Role, MessageSendConfiguration
     import httpx
     print("✅ Successfully imported official A2A SDK")
 except ImportError as e:
@@ -93,7 +93,7 @@ class SimpleA2AClient:
         try:
             # Create A2A message for streaming
             message = create_text_message_object(role=Role.user, content=text)
-            params = MessageSendParams(message=message)
+            params = MessageSendParams(message=message, configuration=MessageSendConfiguration(acceptedOutputModes=["text"]))
             
             request = SendStreamingMessageRequest(
                 id=str(uuid.uuid4()),

@@ -490,7 +490,7 @@ type TaskStatus struct {
 	// Message is the optional message associated with the status (e.g., final response).
 	Message *Message `json:"message,omitempty"`
 	// Timestamp is the ISO 8601 timestamp of the status change.
-	Timestamp string `json:"timestamp"`
+	Timestamp string `json:"timestamp,omitempty"`
 }
 
 // Task represents a unit of work being processed by the agent.
@@ -746,6 +746,8 @@ type SendMessageParams struct {
 
 // SendMessageConfiguration defines optional configuration for message sending.
 type SendMessageConfiguration struct {
+	// AcceptedOutputModes is the list of accepted output modes.
+	AcceptedOutputModes []string `json:"acceptedOutputModes"`
 	// PushNotificationConfig contains optional push notification settings.
 	PushNotificationConfig *PushNotificationConfig `json:"pushNotificationConfig,omitempty"`
 	// HistoryLength is the requested history length in response.

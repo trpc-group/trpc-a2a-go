@@ -46,7 +46,8 @@ func main() {
 	params := protocol.SendMessageParams{
 		Message: userMessage,
 		Configuration: &protocol.SendMessageConfiguration{
-			Blocking: boolPtr(false), // Non-blocking for streaming, blocking for standard
+			Blocking:            boolPtr(false), // Non-blocking for streaming, blocking for standard
+			AcceptedOutputModes: []string{"text"},
 		},
 	}
 
