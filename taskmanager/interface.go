@@ -26,6 +26,9 @@ type ProcessOptions struct {
 	// PushNotificationConfig contains push notification configuration
 	PushNotificationConfig *protocol.PushNotificationConfig
 
+	// AcceptedOutputModes is the list of accepted output modes.
+	AcceptedOutputModes []string
+
 	// Streaming indicates whether this is a streaming request
 	// If true, the user should return event streams through the StreamingEvents channel
 	// If false, the user should return a single result through Result

@@ -599,6 +599,11 @@ func (m *MemoryTaskManager) processConfiguration(config *protocol.SendMessageCon
 		result.PushNotificationConfig = config.PushNotificationConfig
 	}
 
+	// Process AcceptedOutputModes configuration
+	if config.AcceptedOutputModes != nil {
+		result.AcceptedOutputModes = config.AcceptedOutputModes
+	}
+
 	return result
 }
 
