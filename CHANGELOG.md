@@ -7,10 +7,13 @@
 - Fix issue on context id generation (#45)
 - Fix task subscriber buf size option (#50)
 - Add bloing option for task subscriber (#50)
+- Fix typo of SubscribeTask (#54)
+- Synchronize with latest a2a spec (#57)
 
 Breaking Changes:
 - Change the filed `Final` of  TaskStatusUpdateEvent from *bool to bool(#42)
 - Task Subscriber Constructor like `NewMemoryTaskSubscriber` and `NewTaskSubscriber` add a option param (#45)
+- Fix typo of  taskmanager.TaskHandler.Subscriber,  taskmanager.TaskHandler.SubScribeTask -> taskmanager.TaskHandler.SubscribeTask ($54)
 
 ## 0.2.0 (2025-06-24)
 
