@@ -43,11 +43,11 @@ type A2AServer struct {
 	idleTimeout     time.Duration           // HTTP server idle timeout.
 
 	// Authentication related fields
-	authProvider   auth.Provider                       // Authentication provider.
-	authMiddleware *auth.Middleware                    // Authentication middleware.
-	pushAuth       *auth.PushNotificationAuthenticator // Push notification authenticator.
-	jwksEnabled    bool                                // Flag to enable/disable JWKS endpoint.
-	jwksEndpoint   string                              // Path for the JWKS endpoint.
+	middleWare       []Middleware                        // Authentication middlewares.
+	pushAuth         *auth.PushNotificationAuthenticator // Push notification authenticator.
+	jwksEnabled      bool                                // Flag to enable/disable JWKS endpoint.
+	jwksEndpoint     string                              // Path for the JWKS endpoint.
+	agentCardHandler http.HandlerFunc                    // Handler for agent card endpoint.
 }
 
 // NewA2AServer creates a new A2AServer instance with the given agent card
@@ -95,10 +95,7 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 		}
 	}
 
-	// Initialize authentication components if auth provider is set.
-	if server.authProvider != nil {
-		server.authMiddleware = auth.NewMiddleware(server.authProvider)
-	}
+	// Note: Authentication middleware is now initialized in WithAuthProvider option
 	// Initialize push notification authenticator.
 	if server.jwksEnabled {
 		if server.pushAuth == nil {
@@ -151,15 +148,22 @@ func (s *A2AServer) Stop(ctx context.Context) error {
 func (s *A2AServer) Handler() http.Handler {
 	router := http.NewServeMux()
 	// Endpoint for agent metadata (.well-known convention).
-	router.HandleFunc(s.agentCardPath, s.handleAgentCard)
+	if s.agentCardHandler != nil {
+		router.HandleFunc(s.agentCardPath, s.agentCardHandler)
+	} else {
+		router.HandleFunc(s.agentCardPath, s.handleAgentCard)
+	}
+
 	// JWKS endpoint for JWT authentication if enabled.
 	if s.jwksEnabled && s.pushAuth != nil {
 		router.HandleFunc(s.jwksEndpoint, s.pushAuth.HandleJWKS)
 	}
+
 	// Main JSON-RPC endpoint (configurable path) with optional authentication.
-	if s.authMiddleware != nil {
-		// Apply authentication middleware to JSON-RPC endpoint.
-		router.Handle(s.jsonRPCEndpoint, s.authMiddleware.Wrap(http.HandlerFunc(s.handleJSONRPC)))
+	if len(s.middleWare) > 0 {
+		// Apply authentication middleware chain to JSON-RPC endpoint.
+		chain := MiddlewareChain(s.middleWare)
+		router.Handle(s.jsonRPCEndpoint, chain.Wrap(http.HandlerFunc(s.handleJSONRPC)))
 	} else {
 		// No authentication required.
 		router.HandleFunc(s.jsonRPCEndpoint, s.handleJSONRPC)
