@@ -1,3 +1,4 @@
+// Package main implements a simple A2A client example.
 package main
 
 import (

@@ -160,7 +160,7 @@ func WithBasePath(basePath string) Option {
 // WithMiddleWare sets the authentication middleware for the server.
 // Multiple middlewares can be provided and will be chained together.
 // The first middleware in the slice will be the outermost wrapper.
-// middlewares only take effect on JSON-RPC endpoint.
+// Middlewares only take effect on JSON-RPC endpoint.
 func WithMiddleWare(middlewares ...Middleware) Option {
 	return func(s *A2AServer) {
 		s.middleWare = append(s.middleWare, middlewares...)

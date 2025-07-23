@@ -96,7 +96,6 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 		}
 	}
 
-	// Note: Authentication middleware is now initialized in WithAuthProvider option
 	// Initialize push notification authenticator.
 	if server.jwksEnabled {
 		if server.pushAuth == nil {
@@ -147,7 +146,8 @@ func (s *A2AServer) Stop(ctx context.Context) error {
 // Handler returns an http.Handler for the server.
 // This can be used to integrate the A2A server into existing HTTP servers.
 func (s *A2AServer) Handler() http.Handler {
-	// Default router using standard library ServeMux.
+	// If custom router is provided, use it; otherwise, use default router.
+	// Mainly used for provide multi endpoints support.
 	var router HTTPRouter
 	if s.customRouter != nil {
 		router = s.customRouter
