@@ -32,22 +32,23 @@ var errUnknownEvent = errors.New("unknown event type")
 // A2AServer implements the HTTP server for the A2A protocol.
 // It handles agent card requests and routes JSON-RPC calls to the TaskManager.
 type A2AServer struct {
-	agentCard       AgentCard               // Metadata for this agent.
-	taskManager     taskmanager.TaskManager // Handles task logic.
-	httpServer      *http.Server            // Underlying HTTP server.
-	corsEnabled     bool                    // Flag to enable/disable CORS headers.
-	jsonRPCEndpoint string                  // Path for the JSON-RPC endpoint.
-	agentCardPath   string                  // Path for the agent card endpoint.
-	readTimeout     time.Duration           // HTTP server read timeout.
-	writeTimeout    time.Duration           // HTTP server write timeout.
-	idleTimeout     time.Duration           // HTTP server idle timeout.
+	agentCard        AgentCard               // Metadata for this agent.
+	taskManager      taskmanager.TaskManager // Handles task logic.
+	httpServer       *http.Server            // Underlying HTTP server.
+	corsEnabled      bool                    // Flag to enable/disable CORS headers.
+	jsonRPCEndpoint  string                  // Path for the JSON-RPC endpoint.
+	agentCardPath    string                  // Path for the agent card endpoint.
+	readTimeout      time.Duration           // HTTP server read timeout.
+	writeTimeout     time.Duration           // HTTP server write timeout.
+	idleTimeout      time.Duration           // HTTP server idle timeout.
+	agentCardHandler http.Handler            // Handler for agent card endpoint.
+	customRouter     HTTPRouter              // Custom router for advanced routing (e.g., Gorilla Mux).
 
 	// Authentication related fields
-	middleWare       []Middleware                        // Authentication middlewares.
-	pushAuth         *auth.PushNotificationAuthenticator // Push notification authenticator.
-	jwksEnabled      bool                                // Flag to enable/disable JWKS endpoint.
-	jwksEndpoint     string                              // Path for the JWKS endpoint.
-	agentCardHandler http.HandlerFunc                    // Handler for agent card endpoint.
+	middleWare   []Middleware                        // Authentication middlewares.
+	pushAuth     *auth.PushNotificationAuthenticator // Push notification authenticator.
+	jwksEnabled  bool                                // Flag to enable/disable JWKS endpoint.
+	jwksEndpoint string                              // Path for the JWKS endpoint.
 }
 
 // NewA2AServer creates a new A2AServer instance with the given agent card
@@ -146,17 +147,24 @@ func (s *A2AServer) Stop(ctx context.Context) error {
 // Handler returns an http.Handler for the server.
 // This can be used to integrate the A2A server into existing HTTP servers.
 func (s *A2AServer) Handler() http.Handler {
-	router := http.NewServeMux()
+	// Default router using standard library ServeMux.
+	var router HTTPRouter
+	if s.customRouter != nil {
+		router = s.customRouter
+	} else {
+		router = http.NewServeMux()
+	}
+
 	// Endpoint for agent metadata (.well-known convention).
 	if s.agentCardHandler != nil {
-		router.HandleFunc(s.agentCardPath, s.agentCardHandler)
+		router.Handle(s.agentCardPath, s.agentCardHandler)
 	} else {
-		router.HandleFunc(s.agentCardPath, s.handleAgentCard)
+		router.Handle(s.agentCardPath, http.HandlerFunc(s.handleAgentCard))
 	}
 
 	// JWKS endpoint for JWT authentication if enabled.
 	if s.jwksEnabled && s.pushAuth != nil {
-		router.HandleFunc(s.jwksEndpoint, s.pushAuth.HandleJWKS)
+		router.Handle(s.jwksEndpoint, http.HandlerFunc(s.pushAuth.HandleJWKS))
 	}
 
 	// Main JSON-RPC endpoint (configurable path) with optional authentication.
@@ -166,7 +174,7 @@ func (s *A2AServer) Handler() http.Handler {
 		router.Handle(s.jsonRPCEndpoint, chain.Wrap(http.HandlerFunc(s.handleJSONRPC)))
 	} else {
 		// No authentication required.
-		router.HandleFunc(s.jsonRPCEndpoint, s.handleJSONRPC)
+		router.Handle(s.jsonRPCEndpoint, http.HandlerFunc(s.handleJSONRPC))
 	}
 	return router
 }

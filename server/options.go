@@ -29,6 +29,12 @@ type Middleware interface {
 // MiddlewareChain represents a chain of middlewares that can be composed together.
 type MiddlewareChain []Middleware
 
+// HTTPRouter represents a router for HTTP requests.
+type HTTPRouter interface {
+	Handle(pattern string, handler http.Handler)
+	ServeHTTP(w http.ResponseWriter, r *http.Request)
+}
+
 // Wrap applies all middlewares in the chain to the given handler.
 // Middlewares are applied in reverse order so the first middleware in the slice
 // becomes the outermost wrapper.
@@ -154,6 +160,7 @@ func WithBasePath(basePath string) Option {
 // WithMiddleWare sets the authentication middleware for the server.
 // Multiple middlewares can be provided and will be chained together.
 // The first middleware in the slice will be the outermost wrapper.
+// middlewares only take effect on JSON-RPC endpoint.
 func WithMiddleWare(middlewares ...Middleware) Option {
 	return func(s *A2AServer) {
 		s.middleWare = append(s.middleWare, middlewares...)
@@ -161,8 +168,17 @@ func WithMiddleWare(middlewares ...Middleware) Option {
 }
 
 // WithAgentCardHandler sets the handler for the agent card endpoint.
-func WithAgentCardHandler(handler http.HandlerFunc) Option {
+func WithAgentCardHandler(handler http.Handler) Option {
 	return func(s *A2AServer) {
 		s.agentCardHandler = handler
+	}
+}
+
+// WithHTTPRouter sets the custom HTTP router for the server.
+// This allows for advanced routing features like multi-agent support, path parameters, and wildcards.
+// Example: WithHTTPRouter(mux.NewRouter()) for Gorilla Mux support.
+func WithHTTPRouter(router HTTPRouter) Option {
+	return func(s *A2AServer) {
+		s.customRouter = router
 	}
 }
