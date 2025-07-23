@@ -7,7 +7,7 @@ This example demonstrates how to run **multiple agents in a single process** usi
 **Single Process, Multiple Agents**: This implementation runs all agents within one server process, using URL path routing to distinguish between different agents. Each agent gets its own endpoint path but shares the same server resources.
 
 ```
-Single Server Process (21.6.224.104:8088)
+Single Server Process (localhost:8080)
 ├── /api/v1/agent/chatAgent/     → Chat Agent
 └── /api/v1/agent/workerAgent/   → Worker Agent  
 ```
@@ -44,13 +44,13 @@ cd examples/multiagent/server
 go run main.go
 ```
 
-The server will start on `21.6.224.104:8088` and display available endpoints:
+The server will start on `localhost:8080` and display available endpoints:
 ```
-Starting A2A server listening on 21.6.224.104:8088
-Chat agent card url : http://21.6.224.104:8088/api/v1/agent/chatAgent/.well-known/agent.json:
-Chat agent interfaces: http://21.6.224.104:8088/api/v1/agent/chatAgent/
-Worker agent card url: http://21.6.224.104:8088/api/v1/agent/workerAgent/.well-known/agent.json
-Worker agent interfaces: http://21.6.224.104:8088/api/v1/agent/workerAgent/
+Starting A2A server listening on localhost:8080
+Chat agent card url : http://localhost:8080/api/v1/agent/chatAgent/.well-known/agent.json:
+Chat agent interfaces: http://localhost:8080/api/v1/agent/chatAgent/
+Worker agent card url: http://localhost:8080/api/v1/agent/workerAgent/.well-known/agent.json
+Worker agent interfaces: http://localhost:8080/api/v1/agent/workerAgent/
 ```
 
 ### 2. Run the Test Client
@@ -70,21 +70,21 @@ go run main.go -message="How are you today?"
 #### Get Agent Cards
 ```bash
 # Chat Agent
-curl http://21.6.224.104:8088/api/v1/agent/chatAgent/.well-known/agent.json
+curl http://localhost:8080/api/v1/agent/chatAgent/.well-known/agent.json
 
 # Worker Agent
-curl http://21.6.224.104:8088/api/v1/agent/workerAgent/.well-known/agent.json
+curl http://localhost:8080/api/v1/agent/workerAgent/.well-known/agent.json
 ```
 
 #### Send Messages to Agents
 ```bash
 # Send message to Chat Agent
-curl -X POST http://21.6.224.104:8088/api/v1/agent/chatAgent/ \
+curl -X POST http://localhost:8080/api/v1/agent/chatAgent/ \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"message/send","params":{"message":{"role":"user","kind":"message","messageId":"test-123","parts":[{"kind":"text","text":"Hello!"}]}},"id":1}'
 
 # Send message to Worker Agent
-curl -X POST http://21.6.224.104:8088/api/v1/agent/workerAgent/ \
+curl -X POST http://localhost:8080/api/v1/agent/workerAgent/ \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"message/send","params":{"message":{"role":"user","kind":"message","messageId":"test-456","parts":[{"kind":"text","text":"What can you do?"}]}},"id":1}'
 ```
@@ -202,7 +202,7 @@ The client automatically tests both agents and displays their responses:
 
 ```bash
 === Multi-Agent tRPC Client Demo ===
-Server: http://21.6.224.104:8088
+Server: http://localhost:8080
 Testing both agents...
 
 --- Conversation with chatAgent ---

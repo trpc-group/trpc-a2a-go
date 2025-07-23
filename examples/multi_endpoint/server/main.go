@@ -18,7 +18,7 @@ import (
 
 const ctxAgentNameKey = "agentName"
 
-var host = flag.String("host", "21.6.224.104:8088", "host")
+var host = flag.String("host", "localhost:8080", "host")
 
 func main() {
 	flag.Parse()

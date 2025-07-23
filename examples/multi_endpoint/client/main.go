@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	host    = flag.String("host", "21.6.224.104:8088", "server host")
+	host    = flag.String("host", "localhost:8080", "server host")
 	message = flag.String("message", "Hello!", "message to send")
 )
 
