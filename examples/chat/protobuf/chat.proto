@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package chat;
+option go_package = "chat/protobuf;chat";
+
+message ChatroomMessage {
+  string room_id = 1; // 聊天室的唯一标识
+  string sender = 2;  // 消息发送者
+  string content = 3; // 消息内容
+}
+
+service ChatroomService {
+  // 双向流式的聊天室通信方法
+  rpc Chat(stream ChatroomMessage) returns (stream ChatroomMessage);
+}
