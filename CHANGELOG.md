@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2 (2025-07-28)
+
+- Redis TaskManager use UniversalClient interface (#59)
+- Add client rpc method tasks/resubscribe (#61)
+- Optimize middleware And Support multi a2a endpoint in one process (#64)
+
 ## 0.2.1 (2025-07-14)
 
 - Fix jsonrpc ID generation（#41）
