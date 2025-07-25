@@ -153,7 +153,7 @@ func (p *reimbursementProcessor) ProcessMessage(
 				Parts:       []protocol.Part{protocol.NewTextPart(string(reimbursementJSON))},
 			}
 
-			_ = handle.AddArtifact(&task.Task.ID, artifact, true, false)
+			_ = handle.AddArtifact(&task, artifact, true, false)
 		}
 	}
 
@@ -265,12 +265,13 @@ func validateForm(form map[string]interface{}) []string {
 
 // extractText extracts the text content from a message
 func extractText(message protocol.Message) string {
+	var result strings.Builder
 	for _, part := range message.Parts {
 		if textPart, ok := part.(*protocol.TextPart); ok {
-			return textPart.Text
+			result.WriteString(textPart.Text)
 		}
 	}
-	return ""
+	return result.String()
 }
 
 // generateReferenceID generates a simple reference ID for demonstration

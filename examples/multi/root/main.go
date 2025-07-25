@@ -171,78 +171,112 @@ func (p *rootAgentProcessor) routeTaskToSubagent(ctx context.Context, text strin
 
 // callCreativeAgent forwards a task to the creative writing agent.
 func (p *rootAgentProcessor) callCreativeAgent(ctx context.Context, text string) (string, error) {
-	task, err := p.creativeClient.SendTasks(ctx, protocol.SendTaskParams{
-		Message: protocol.Message{
-			Role: protocol.MessageRoleUser,
-			Parts: []protocol.Part{
-				protocol.NewTextPart(text),
-			},
-		},
-	})
+	// Create the message to send
+	message := protocol.NewMessage(
+		protocol.MessageRoleUser,
+		[]protocol.Part{protocol.NewTextPart(text)},
+	)
 
+	// Send the message to the creative agent
+	params := protocol.SendMessageParams{
+		Message: message,
+	}
+	result, err := p.creativeClient.SendMessage(ctx, params)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to send message to creative agent: %w", err)
 	}
 
-	if task.Status.Message == nil {
+	// Handle the response based on its type
+	switch result.Result.GetKind() {
+	case protocol.KindMessage:
+		msg := result.Result.(*protocol.Message)
+		return extractText(*msg), nil
+	case protocol.KindTask:
+		task := result.Result.(*protocol.Task)
+		if task.Status.Message != nil {
+			return extractText(*task.Status.Message), nil
+		}
 		return "", fmt.Errorf("no response message from creative agent")
+	default:
+		return "", fmt.Errorf("unexpected response type from creative agent: %T", result.Result)
 	}
-
-	return extractText(*task.Status.Message), nil
 }
 
 // callExchangeAgent forwards a task to the exchange agent.
 func (p *rootAgentProcessor) callExchangeAgent(ctx context.Context, text string) (string, error) {
-	task, err := p.exchangeClient.SendTasks(ctx, protocol.SendTaskParams{
-		Message: protocol.Message{
-			Role: protocol.MessageRoleUser,
-			Parts: []protocol.Part{
-				protocol.NewTextPart(text),
-			},
-		},
-	})
+	// Create the message to send
+	message := protocol.NewMessage(
+		protocol.MessageRoleUser,
+		[]protocol.Part{protocol.NewTextPart(text)},
+	)
 
+	// Send the message to the exchange agent
+	params := protocol.SendMessageParams{
+		Message: message,
+	}
+	result, err := p.exchangeClient.SendMessage(ctx, params)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to send message to exchange agent: %w", err)
 	}
 
-	if task.Status.Message == nil {
+	// Handle the response based on its type
+	switch result.Result.GetKind() {
+	case protocol.KindMessage:
+		msg := result.Result.(*protocol.Message)
+		return extractText(*msg), nil
+	case protocol.KindTask:
+		task := result.Result.(*protocol.Task)
+		if task.Status.Message != nil {
+			return extractText(*task.Status.Message), nil
+		}
 		return "", fmt.Errorf("no response message from exchange agent")
+	default:
+		return "", fmt.Errorf("unexpected response type from exchange agent: %T", result.Result)
 	}
-
-	return extractText(*task.Status.Message), nil
 }
 
 // callReimbursementAgent forwards a task to the reimbursement agent.
 func (p *rootAgentProcessor) callReimbursementAgent(ctx context.Context, text string) (string, error) {
-	task, err := p.reimbursementClient.SendTasks(ctx, protocol.SendTaskParams{
-		Message: protocol.Message{
-			Role: protocol.MessageRoleUser,
-			Parts: []protocol.Part{
-				protocol.NewTextPart(text),
-			},
-		},
-	})
+	// Create the message to send
+	message := protocol.NewMessage(
+		protocol.MessageRoleUser,
+		[]protocol.Part{protocol.NewTextPart(text)},
+	)
 
+	// Send the message to the reimbursement agent
+	params := protocol.SendMessageParams{
+		Message: message,
+	}
+	result, err := p.reimbursementClient.SendMessage(ctx, params)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to send message to reimbursement agent: %w", err)
 	}
 
-	if task.Status.Message == nil {
+	// Handle the response based on its type
+	switch result.Result.GetKind() {
+	case protocol.KindMessage:
+		msg := result.Result.(*protocol.Message)
+		return extractText(*msg), nil
+	case protocol.KindTask:
+		task := result.Result.(*protocol.Task)
+		if task.Status.Message != nil {
+			return extractText(*task.Status.Message), nil
+		}
 		return "", fmt.Errorf("no response message from reimbursement agent")
+	default:
+		return "", fmt.Errorf("unexpected response type from reimbursement agent: %T", result.Result)
 	}
-
-	return extractText(*task.Status.Message), nil
 }
 
 // extractText extracts the text content from a message.
 func extractText(message protocol.Message) string {
+	var result strings.Builder
 	for _, part := range message.Parts {
 		if textPart, ok := part.(*protocol.TextPart); ok {
-			return textPart.Text
+			result.WriteString(textPart.Text)
 		}
 	}
-	return ""
+	return result.String()
 }
 
 // getAgentCard returns the agent's metadata.

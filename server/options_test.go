@@ -297,14 +297,6 @@ func (m *optionsTestTaskManager) OnSendMessageStream(ctx context.Context, params
 	return nil, nil
 }
 
-func (m *optionsTestTaskManager) OnSendTask(ctx context.Context, params protocol.SendTaskParams) (*protocol.Task, error) {
-	return nil, nil
-}
-
-func (m *optionsTestTaskManager) OnSendTaskSubscribe(ctx context.Context, params protocol.SendTaskParams) (<-chan protocol.TaskEvent, error) {
-	return nil, nil
-}
-
 func (m *optionsTestTaskManager) OnGetTask(ctx context.Context, params protocol.TaskQueryParams) (*protocol.Task, error) {
 	return nil, nil
 }

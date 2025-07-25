@@ -584,8 +584,8 @@ func startWebhookServer(cfg *Config, handler http.Handler) {
 	}()
 }
 
-// sendTaskToServer demonstrates sending a task using the new message API
-func sendTaskToServer(ctx context.Context, a2aClient *client.A2AClient, content string) (string, error) {
+// sendMessage demonstrates sending a task using the new message API
+func sendMessage(ctx context.Context, a2aClient *client.A2AClient, content string) (string, error) {
 	log.Infof("Sending message with content: %s", content)
 
 	// Create a message with the content
@@ -657,7 +657,7 @@ func main() {
 		content := fmt.Sprintf("Task %d: Process this message asynchronously", i)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		taskID, err := sendTaskToServer(ctx, a2aClient, content)
+		taskID, err := sendMessage(ctx, a2aClient, content)
 		cancel()
 
 		if err != nil {

@@ -428,30 +428,36 @@ srv, err := server.NewA2AServer(
 
 ## Session Management
 
-The A2A protocol supports session management to group related tasks:
+The A2A protocol supports session management to group related messages and tasks:
 
 ```go
-// Client-side: Creating a task with session ID
+// Client-side: Sending a message with session ID
 sessionID := "your-session-id" // Or generate one with uuid.New().String()
-taskParams := protocol.SendTaskParams{
-    ID:        "task-123",
-    SessionID: &sessionID,
-    Message:   message,
+message := protocol.NewMessage(
+    protocol.MessageRoleUser,
+    []protocol.Part{protocol.NewTextPart("Hello, agent!")},
+)
+message.SessionID = &sessionID
+
+// Send the message with the session ID
+result, err := client.SendMessage(ctx, message, nil)
+if err != nil {
+    log.Fatalf("Failed to send message: %v", err)
 }
 
-// Server-side: Tasks with the same sessionID are recognized
+// Server-side: Messages with the same sessionID are recognized
 // as belonging to the same conversation or workflow
 ```
 
 This allows for:
-- Grouping related tasks under a single session
-- Multi-turn conversations across different task IDs
-- Better organization and retrieval of task history
+- Grouping related messages under a single session
+- Multi-turn conversations across different message exchanges
+- Better organization and retrieval of conversation history
 
 ## Future Enhancements
 
-- Persistent storage options for task history
-- More utilities and helper functions
+- Persistent storage options for message history
+- More utilities and helper functions for message processing
 - Metrics and logging integrations
 - Comprehensive test suite
 - Advanced session management capabilities

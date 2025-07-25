@@ -230,15 +230,6 @@ func (m *testBasicTaskManager) OnPushNotificationGet(
 	return m.MemoryTaskManager.OnPushNotificationGet(ctx, params)
 }
 
-// OnSendTask delegates to the composed MemoryTaskManager (deprecated).
-func (m *testBasicTaskManager) OnSendTask(
-	ctx context.Context,
-	params protocol.SendTaskParams,
-) (*protocol.Task, error) {
-	log.Printf("[Test TM Wrapper] OnSendTask called for %s, delegating to base.", params.ID)
-	return m.MemoryTaskManager.OnSendTask(ctx, params)
-}
-
 // OnGetTask delegates to the composed MemoryTaskManager.
 func (m *testBasicTaskManager) OnGetTask(
 	ctx context.Context,
@@ -255,15 +246,6 @@ func (m *testBasicTaskManager) OnCancelTask(
 ) (*protocol.Task, error) {
 	log.Printf("[Test TM Wrapper] OnCancelTask called for %s, delegating to base.", params.ID)
 	return m.MemoryTaskManager.OnCancelTask(ctx, params)
-}
-
-// OnSendTaskSubscribe delegates to the composed MemoryTaskManager (deprecated).
-func (m *testBasicTaskManager) OnSendTaskSubscribe(
-	ctx context.Context,
-	params protocol.SendTaskParams,
-) (<-chan protocol.TaskEvent, error) {
-	log.Printf("[Test TM Wrapper] OnSendTaskSubscribe called for %s, delegating to base.", params.ID)
-	return m.MemoryTaskManager.OnSendTaskSubscribe(ctx, params)
 }
 
 // testHelper contains common utilities and setup for e2e tests.
@@ -390,43 +372,6 @@ func collectAllStreamingEvents(eventChan <-chan protocol.StreamingMessageEvent) 
 					}
 					return events
 				}
-			}
-		case <-timeout:
-			// If we timeout, just return whatever events we've collected so far
-			return events
-		}
-	}
-	return events
-}
-
-// collectAllTaskEvents collects all events from a task event channel until it's closed.
-func collectAllTaskEvents(eventChan <-chan protocol.TaskEvent) []protocol.TaskEvent {
-	var events []protocol.TaskEvent
-	timeout := time.After(3 * time.Second) // Safety timeout
-	done := false
-	for !done {
-		select {
-		case event, ok := <-eventChan:
-			if !ok {
-				done = true // Channel closed
-				break
-			}
-			events = append(events, event)
-
-			// Check if this is a final event (completed, failed, canceled)
-			if event.IsFinal() {
-				// Wait just a tiny bit more to see if there are any trailing events
-				time.Sleep(50 * time.Millisecond)
-				// Try to drain one more event non-blocking
-				select {
-				case lastEvent, ok := <-eventChan:
-					if ok {
-						events = append(events, lastEvent)
-					}
-				default:
-					// No more events available
-				}
-				return events
 			}
 		case <-timeout:
 			// If we timeout, just return whatever events we've collected so far
@@ -629,70 +574,6 @@ func TestE2E_MessageAPI_NonStreaming(t *testing.T) {
 
 	// Verify artifact content
 	artifact := finalTask.Artifacts[0]
-	require.NotNil(t, artifact.Parts, "Artifact should have parts")
-	require.Equal(t, 1, len(artifact.Parts), "Artifact should have 1 part")
-
-	// Check the reversed text
-	reversedText := getTextPartContent(artifact.Parts)
-	expectedText := testReverseString(inputText)
-	require.Equal(t, expectedText, reversedText, "Artifact should contain reversed text")
-}
-
-// TestE2E_TaskAPI_Streaming tests the streaming functionality using the legacy task API.
-func TestE2E_TaskAPI_Streaming(t *testing.T) {
-	helper := newTestHelper(t, &testProcessor{})
-	defer helper.cleanup()
-
-	// Test code
-	taskID := "test-streaming-1"
-	inputText := "Hello world!"
-
-	// Generate context ID and task ID
-	contextID := protocol.GenerateContextID()
-
-	// Subscribe to task events
-	eventChan, err := helper.client.StreamTask(
-		context.Background(), protocol.SendTaskParams{
-			ID: taskID,
-			Message: protocol.NewMessageWithContext(
-				protocol.MessageRoleUser,
-				[]protocol.Part{
-					protocol.NewTextPart(inputText),
-				},
-				&taskID,
-				&contextID,
-			),
-		})
-	require.NoError(t, err)
-
-	// Collect all events
-	events := collectAllTaskEvents(eventChan)
-
-	// Verify events
-	require.NotEmpty(t, events, "Should have received events")
-
-	// Check final state
-	lastEvent := events[len(events)-1]
-	if statusEvent, ok := lastEvent.(*protocol.TaskStatusUpdateEvent); ok {
-		require.Equal(t, protocol.TaskStateCompleted, statusEvent.Status.State, "Task should be completed")
-	} else {
-		t.Fatalf("Last event should be a TaskStatusUpdateEvent")
-	}
-
-	// Verify task result
-	task, err := helper.client.GetTasks(
-		context.Background(),
-		protocol.TaskQueryParams{ID: taskID},
-	)
-	require.NoError(t, err)
-	require.Equal(t, protocol.TaskStateCompleted, task.Status.State)
-
-	// Verify artifacts
-	require.NotEmpty(t, task.Artifacts, "Task should have artifacts")
-	require.Equal(t, 1, len(task.Artifacts), "Task should have 1 artifact")
-
-	// Verify artifact content
-	artifact := task.Artifacts[0]
 	require.NotNil(t, artifact.Parts, "Artifact should have parts")
 	require.Equal(t, 1, len(artifact.Parts), "Artifact should have 1 part")
 

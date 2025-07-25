@@ -18,18 +18,18 @@ import (
 // and maintain their expected values.
 func TestMethodConstants(t *testing.T) {
 	// Test RPC method constants
-	assert.Equal(t, "tasks/send", protocol.MethodTasksSend,
-		"MethodTasksSend should be 'tasks/send'")
-	assert.Equal(t, "tasks/sendSubscribe", protocol.MethodTasksSendSubscribe,
-		"MethodTasksSendSubscribe should be 'tasks/sendSubscribe'")
+	assert.Equal(t, "message/send", protocol.MethodMessageSend,
+		"MethodMessageSend should be 'message/send'")
+	assert.Equal(t, "message/stream", protocol.MethodMessageStream,
+		"MethodMessageStream should be 'message/stream'")
 	assert.Equal(t, "tasks/get", protocol.MethodTasksGet,
 		"MethodTasksGet should be 'tasks/get'")
 	assert.Equal(t, "tasks/cancel", protocol.MethodTasksCancel,
 		"MethodTasksCancel should be 'tasks/cancel'")
-	assert.Equal(t, "tasks/pushNotification/set", protocol.MethodTasksPushNotificationSet,
-		"MethodTasksPushNotificationSet should be 'tasks/pushNotification/set'")
-	assert.Equal(t, "tasks/pushNotification/get", protocol.MethodTasksPushNotificationGet,
-		"MethodTasksPushNotificationGet should be 'tasks/pushNotification/get'")
+	assert.Equal(t, "tasks/pushNotificationConfig/set", protocol.MethodTasksPushNotificationConfigSet,
+		"MethodTasksPushNotificationConfigSet should be 'tasks/pushNotificationConfig/set'")
+	assert.Equal(t, "tasks/pushNotificationConfig/get", protocol.MethodTasksPushNotificationConfigGet,
+		"MethodTasksPushNotificationConfigGet should be 'tasks/pushNotificationConfig/get'")
 	assert.Equal(t, "tasks/resubscribe", protocol.MethodTasksResubscribe,
 		"MethodTasksResubscribe should be 'tasks/resubscribe'")
 }
@@ -59,7 +59,7 @@ func TestEndpointPathConstants(t *testing.T) {
 // to ensure protocol coherence.
 func TestConstantRelationships(t *testing.T) {
 	// Test that push notification methods are properly paired
-	assert.True(t, protocol.MethodTasksPushNotificationSet != protocol.MethodTasksPushNotificationGet,
+	assert.True(t, protocol.MethodTasksPushNotificationConfigSet != protocol.MethodTasksPushNotificationConfigGet,
 		"Push notification set and get methods should be distinct")
 
 	// Test that event types are distinct
@@ -84,26 +84,38 @@ func TestConstantRelationships(t *testing.T) {
 func TestConsistencyWithSpecification(t *testing.T) {
 	// These tests ensure that key constants follow the patterns defined in the specification
 
-	// All method constants should start with "tasks/"
-	methodConstants := []string{
-		protocol.MethodTasksSend,
-		protocol.MethodTasksSendSubscribe,
+	// Task-related methods should start with "tasks/"
+	taskMethodConstants := []string{
 		protocol.MethodTasksGet,
 		protocol.MethodTasksCancel,
-		protocol.MethodTasksPushNotificationSet,
-		protocol.MethodTasksPushNotificationGet,
+		protocol.MethodTasksPushNotificationConfigSet,
+		protocol.MethodTasksPushNotificationConfigGet,
 		protocol.MethodTasksResubscribe,
 	}
 
-	for _, method := range methodConstants {
+	for _, method := range taskMethodConstants {
 		assert.True(t, len(method) >= 6 && method[0:6] == "tasks/",
-			"Method %s should start with 'tasks/'", method)
+			"Task method %s should start with 'tasks/'", method)
 	}
+
+	// Message-related methods should be exactly "message/send" and "message/stream"
+	messageMethods := map[string]bool{
+		protocol.MethodMessageSend:   true,
+		protocol.MethodMessageStream: true,
+	}
+
+	expectedMessageMethods := map[string]bool{
+		"message/send":   true,
+		"message/stream": true,
+	}
+
+	// Check that we have exactly the expected message methods
+	assert.Equal(t, expectedMessageMethods, messageMethods, "Unexpected message methods")
 
 	// Push notification methods should include 'pushNotification' in the path
 	pushNotificationMethods := []string{
-		protocol.MethodTasksPushNotificationSet,
-		protocol.MethodTasksPushNotificationGet,
+		protocol.MethodTasksPushNotificationConfigSet,
+		protocol.MethodTasksPushNotificationConfigGet,
 	}
 
 	for _, method := range pushNotificationMethods {

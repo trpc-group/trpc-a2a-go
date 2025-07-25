@@ -273,12 +273,13 @@ func getExchangeRate(fromCurrency, toCurrency, date string) (string, error) {
 
 // extractText extracts the text content from a message.
 func extractText(message protocol.Message) string {
+	var result strings.Builder
 	for _, part := range message.Parts {
-		if textPart, ok := part.(protocol.TextPart); ok {
-			return textPart.Text
+		if textPart, ok := part.(*protocol.TextPart); ok {
+			result.WriteString(textPart.Text)
 		}
 	}
-	return ""
+	return result.String()
 }
 
 // Helper functions
