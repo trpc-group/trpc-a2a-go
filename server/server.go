@@ -32,22 +32,23 @@ var errUnknownEvent = errors.New("unknown event type")
 // A2AServer implements the HTTP server for the A2A protocol.
 // It handles agent card requests and routes JSON-RPC calls to the TaskManager.
 type A2AServer struct {
-	agentCard       AgentCard               // Metadata for this agent.
-	taskManager     taskmanager.TaskManager // Handles task logic.
-	httpServer      *http.Server            // Underlying HTTP server.
-	corsEnabled     bool                    // Flag to enable/disable CORS headers.
-	jsonRPCEndpoint string                  // Path for the JSON-RPC endpoint.
-	agentCardPath   string                  // Path for the agent card endpoint.
-	readTimeout     time.Duration           // HTTP server read timeout.
-	writeTimeout    time.Duration           // HTTP server write timeout.
-	idleTimeout     time.Duration           // HTTP server idle timeout.
+	agentCard        AgentCard               // Metadata for this agent.
+	taskManager      taskmanager.TaskManager // Handles task logic.
+	httpServer       *http.Server            // Underlying HTTP server.
+	corsEnabled      bool                    // Flag to enable/disable CORS headers.
+	jsonRPCEndpoint  string                  // Path for the JSON-RPC endpoint.
+	agentCardPath    string                  // Path for the agent card endpoint.
+	readTimeout      time.Duration           // HTTP server read timeout.
+	writeTimeout     time.Duration           // HTTP server write timeout.
+	idleTimeout      time.Duration           // HTTP server idle timeout.
+	agentCardHandler http.Handler            // Handler for agent card endpoint.
+	customRouter     HTTPRouter              // Custom router for advanced routing (e.g., Gorilla Mux).
 
 	// Authentication related fields
-	authProvider   auth.Provider                       // Authentication provider.
-	authMiddleware *auth.Middleware                    // Authentication middleware.
-	pushAuth       *auth.PushNotificationAuthenticator // Push notification authenticator.
-	jwksEnabled    bool                                // Flag to enable/disable JWKS endpoint.
-	jwksEndpoint   string                              // Path for the JWKS endpoint.
+	middleWare   []Middleware                        // Authentication middlewares.
+	pushAuth     *auth.PushNotificationAuthenticator // Push notification authenticator.
+	jwksEnabled  bool                                // Flag to enable/disable JWKS endpoint.
+	jwksEndpoint string                              // Path for the JWKS endpoint.
 }
 
 // NewA2AServer creates a new A2AServer instance with the given agent card
@@ -95,10 +96,6 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 		}
 	}
 
-	// Initialize authentication components if auth provider is set.
-	if server.authProvider != nil {
-		server.authMiddleware = auth.NewMiddleware(server.authProvider)
-	}
 	// Initialize push notification authenticator.
 	if server.jwksEnabled {
 		if server.pushAuth == nil {
@@ -149,20 +146,35 @@ func (s *A2AServer) Stop(ctx context.Context) error {
 // Handler returns an http.Handler for the server.
 // This can be used to integrate the A2A server into existing HTTP servers.
 func (s *A2AServer) Handler() http.Handler {
-	router := http.NewServeMux()
+	// If custom router is provided, use it; otherwise, use default router.
+	// Mainly used for provide multi endpoints support.
+	var router HTTPRouter
+	if s.customRouter != nil {
+		router = s.customRouter
+	} else {
+		router = http.NewServeMux()
+	}
+
 	// Endpoint for agent metadata (.well-known convention).
-	router.HandleFunc(s.agentCardPath, s.handleAgentCard)
+	if s.agentCardHandler != nil {
+		router.Handle(s.agentCardPath, s.agentCardHandler)
+	} else {
+		router.Handle(s.agentCardPath, http.HandlerFunc(s.handleAgentCard))
+	}
+
 	// JWKS endpoint for JWT authentication if enabled.
 	if s.jwksEnabled && s.pushAuth != nil {
-		router.HandleFunc(s.jwksEndpoint, s.pushAuth.HandleJWKS)
+		router.Handle(s.jwksEndpoint, http.HandlerFunc(s.pushAuth.HandleJWKS))
 	}
+
 	// Main JSON-RPC endpoint (configurable path) with optional authentication.
-	if s.authMiddleware != nil {
-		// Apply authentication middleware to JSON-RPC endpoint.
-		router.Handle(s.jsonRPCEndpoint, s.authMiddleware.Wrap(http.HandlerFunc(s.handleJSONRPC)))
+	if len(s.middleWare) > 0 {
+		// Apply authentication middleware chain to JSON-RPC endpoint.
+		chain := MiddlewareChain(s.middleWare)
+		router.Handle(s.jsonRPCEndpoint, chain.Wrap(http.HandlerFunc(s.handleJSONRPC)))
 	} else {
 		// No authentication required.
-		router.HandleFunc(s.jsonRPCEndpoint, s.handleJSONRPC)
+		router.Handle(s.jsonRPCEndpoint, http.HandlerFunc(s.handleJSONRPC))
 	}
 	return router
 }

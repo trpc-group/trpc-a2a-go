@@ -67,17 +67,6 @@ func TestWithIdleTimeout(t *testing.T) {
 	assert.Equal(t, timeout, s.idleTimeout)
 }
 
-func TestWithAuthProvider(t *testing.T) {
-	// Create a mock auth provider
-	provider := &mockAuthProvider{}
-
-	// Test with auth provider
-	opt := WithAuthProvider(provider)
-	s := &A2AServer{}
-	opt(s)
-	assert.Equal(t, provider, s.authProvider)
-}
-
 func TestWithJWKSEndpoint(t *testing.T) {
 	// Test with JWKS endpoint enabled and custom path
 	customPath := "/custom/jwks.json"

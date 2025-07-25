@@ -7,6 +7,7 @@
 package server
 
 import (
+	"net/http"
 	"strings"
 	"time"
 
@@ -19,6 +20,30 @@ const (
 	defaultWriteTimeout = 60 * time.Second
 	defaultIdleTimeout  = 300 * time.Second
 )
+
+// Middleware is an interface for authentication middlewares.
+type Middleware interface {
+	Wrap(next http.Handler) http.Handler
+}
+
+// MiddlewareChain represents a chain of middlewares that can be composed together.
+type MiddlewareChain []Middleware
+
+// HTTPRouter represents a router for HTTP requests.
+type HTTPRouter interface {
+	Handle(pattern string, handler http.Handler)
+	ServeHTTP(w http.ResponseWriter, r *http.Request)
+}
+
+// Wrap applies all middlewares in the chain to the given handler.
+// Middlewares are applied in reverse order so the first middleware in the slice
+// becomes the outermost wrapper.
+func (chain MiddlewareChain) Wrap(handler http.Handler) http.Handler {
+	for i := len(chain) - 1; i >= 0; i-- {
+		handler = chain[i].Wrap(handler)
+	}
+	return handler
+}
 
 // Option is a function that configures the A2AServer.
 type Option func(*A2AServer)
@@ -60,10 +85,11 @@ func WithIdleTimeout(timeout time.Duration) Option {
 }
 
 // WithAuthProvider sets the authentication provider for the server.
-// If not set, the server will not require authentication.
+// This function converts the auth provider to a middleware and adds it to the middleware chain.
 func WithAuthProvider(provider auth.Provider) Option {
 	return func(s *A2AServer) {
-		s.authProvider = provider
+		// Convert auth provider to middleware and add to chain
+		s.middleWare = append(s.middleWare, auth.NewMiddleware(provider))
 	}
 }
 
@@ -128,5 +154,31 @@ func WithBasePath(basePath string) Option {
 		s.jsonRPCEndpoint = basePath + "/"
 		s.agentCardPath = basePath + protocol.AgentCardPath
 		s.jwksEndpoint = basePath + protocol.JWKSPath
+	}
+}
+
+// WithMiddleWare sets the authentication middleware for the server.
+// Multiple middlewares can be provided and will be chained together.
+// The first middleware in the slice will be the outermost wrapper.
+// Middlewares only take effect on JSON-RPC endpoint.
+func WithMiddleWare(middlewares ...Middleware) Option {
+	return func(s *A2AServer) {
+		s.middleWare = append(s.middleWare, middlewares...)
+	}
+}
+
+// WithAgentCardHandler sets the handler for the agent card endpoint.
+func WithAgentCardHandler(handler http.Handler) Option {
+	return func(s *A2AServer) {
+		s.agentCardHandler = handler
+	}
+}
+
+// WithHTTPRouter sets the custom HTTP router for the server.
+// This allows for advanced routing features like multi-agent support, path parameters, and wildcards.
+// Example: WithHTTPRouter(mux.NewRouter()) for Gorilla Mux support.
+func WithHTTPRouter(router HTTPRouter) Option {
+	return func(s *A2AServer) {
+		s.customRouter = router
 	}
 }
