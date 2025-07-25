@@ -454,12 +454,6 @@ This allows for:
 - Multi-turn conversations across different message exchanges
 - Better organization and retrieval of conversation history
 
-## Deprecation Notice
-
-- The `SendTask` API and related task-based endpoints have been deprecated in favor of the more flexible `SendMessage` API.
-- The new message-based approach provides better support for streaming and real-time interactions.
-- Existing code using `SendTask` should be migrated to use `SendMessage` with appropriate message types.
-
 ## Future Enhancements
 
 - Persistent storage options for message history

@@ -99,7 +99,7 @@ The example demonstrates these A2A API features:
 - `server.NewA2AServer()` - Create an A2A server
 - `server.WithJWKSEndpoint()` - Enable JWKS endpoint
 - `server.WithPushNotificationAuthenticator()` - Configure JWT authentication
-- `a2aClient.SendTasks()` - Send task via non-streaming API
+- `a2aClient.SendMessage()` - Send message via non-streaming API
 - `a2aClient.SetPushNotification()` - Register webhook for notifications
 
 ## License
