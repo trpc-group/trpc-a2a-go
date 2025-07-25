@@ -68,30 +68,6 @@ func NewA2AClient(agentURL string, opts ...Option) (*A2AClient, error) {
 	return client, nil
 }
 
-// SendTasks sends a message using the tasks/send method.
-// deprecated: use SendMessage instead
-// It returns the initial task state received from the agent.
-func (c *A2AClient) SendTasks(
-	ctx context.Context,
-	params protocol.SendTaskParams,
-) (*protocol.Task, error) {
-	log.Info("SendTasks is deprecated in a2a specification, use SendMessage instead")
-
-	request := jsonrpc.NewRequest(protocol.MethodTasksSend, params.RPCID)
-	paramsBytes, err := json.Marshal(params)
-	if err != nil {
-		return nil, fmt.Errorf("a2aClient.SendTasks: failed to marshal params: %w", err)
-	}
-	request.Params = paramsBytes
-	// Execute the request and decode the result field directly into task.
-	task, err := c.doRequestAndDecodeTask(ctx, request)
-	if err != nil {
-		// Return error, potentially wrapping a *jsonrpc.JSONRPCError.
-		return nil, fmt.Errorf("a2aClient.SendTasks: %w", err)
-	}
-	return task, nil
-}
-
 // SendMessage sends a message using the message/send method.
 func (c *A2AClient) SendMessage(
 	ctx context.Context,
@@ -142,31 +118,6 @@ func (c *A2AClient) CancelTasks(
 		return nil, fmt.Errorf("a2aClient.CancelTasks: %w", err)
 	}
 	return task, nil
-}
-
-// StreamTask sends a message using tasks_sendSubscribe and returns a channel for receiving SSE events.
-// deprecated: use StreamMessage instead
-// It handles setting up the SSE connection and parsing events.
-// The returned channel will be closed when the stream ends (task completion, error, or context cancellation).
-func (c *A2AClient) StreamTask(
-	ctx context.Context,
-	params protocol.SendTaskParams,
-) (<-chan protocol.TaskEvent, error) {
-	log.Info("StreamTask is deprecated in a2a specification, use StreamMessage instead")
-	// Create the JSON-RPC request.
-	paramsBytes, err := json.Marshal(params)
-	if err != nil {
-		return nil, fmt.Errorf("a2aClient.StreamTask: failed to marshal params: %w", err)
-	}
-	resp, err := c.sendA2AStreamRequest(ctx, params.RPCID, protocol.MethodMessageStream, paramsBytes)
-	if err != nil {
-		return nil, fmt.Errorf("a2aClient.StreamTask: failed to build stream request: %w", err)
-	}
-	// Create the channel to send events back to the caller.
-	eventsChan := make(chan protocol.TaskEvent, 10) // Buffered channel.
-	// Start a goroutine to read from the SSE stream.
-	go processSSEStream(ctx, resp, params.ID, eventsChan)
-	return eventsChan, nil
 }
 
 // ResubscribeTask sends a message using tasks/resubscribe and returns a channel for receiving SSE events.
@@ -269,11 +220,11 @@ func (c *A2AClient) sendA2AStreamRequest(ctx context.Context, id, method string,
 // processSSEStream reads Server-Sent Events from the response body and sends them
 // onto the provided channel. It handles closing the channel and response body.
 // Runs in its own goroutine.
-func processSSEStream[T interface{}](
+func processSSEStream(
 	ctx context.Context,
 	resp *http.Response,
 	reqID string,
-	eventsChan chan<- T,
+	eventsChan chan<- protocol.StreamingMessageEvent,
 ) {
 	// Ensure resources are cleaned up when the goroutine exits.
 	defer resp.Body.Close()
@@ -333,7 +284,7 @@ func processSSEStream[T interface{}](
 			}
 
 			// Deserialize the event data based on the event type from SSE.
-			event, err := unmarshalSSEEvent[T](eventBytes, eventType)
+			event, err := unmarshalSSEEvent(eventBytes, eventType)
 			if err != nil {
 				log.Errorf("Error unmarshaling event for request:%s data:%s, error:%v", reqID, string(eventBytes), err)
 				continue
@@ -358,71 +309,12 @@ func processSSEStream[T interface{}](
 	}
 }
 
-func unmarshalSSEEvent[T interface{}](eventBytes []byte, eventType string) (T, error) {
-	// Check if T is StreamingMessageEvent type - use V2 for new message API
-	var result T
-	switch any(result).(type) {
-	case protocol.StreamingMessageEvent:
-		return unmarshalSSEEventV2[T](eventBytes, eventType)
-	default:
-		// For backward compatibility with old task APIs, use V1
-		if len(eventBytes) > 0 {
-			return unmarshalSSEEventV1[T](eventBytes, eventType)
-		}
-		return unmarshalSSEEventV2[T](eventBytes, eventType)
-	}
-}
-
-func unmarshalSSEEventV2[T interface{}](eventBytes []byte, _ string) (T, error) {
-	var result T
+func unmarshalSSEEvent(eventBytes []byte, _ string) (protocol.StreamingMessageEvent, error) {
+	var result protocol.StreamingMessageEvent
 	if err := json.Unmarshal(eventBytes, &result); err != nil {
 		return result, fmt.Errorf("failed to unmarshal event: %w", err)
 	}
 	return result, nil
-}
-
-// todo: remove with StreamTask
-func unmarshalSSEEventV1[T interface{}](eventBytes []byte, eventType string) (T, error) {
-	var result T
-
-	// First try to unmarshal as StreamingMessageEvent
-	var streamEvent protocol.StreamingMessageEvent
-	if err := json.Unmarshal(eventBytes, &streamEvent); err == nil {
-		// If it's a StreamingMessageEvent, extract the Result
-		if taskEvent, ok := streamEvent.Result.(protocol.TaskEvent); ok {
-			if converted, ok := taskEvent.(T); ok {
-				return converted, nil
-			}
-		}
-		// Try to convert Result directly
-		if converted, ok := streamEvent.Result.(T); ok {
-			return converted, nil
-		}
-	}
-
-	// Fallback to direct unmarshaling based on event type
-	var event interface{}
-	switch eventType {
-	case protocol.EventStatusUpdate:
-		statusEvent := &protocol.TaskStatusUpdateEvent{}
-		if err := json.Unmarshal(eventBytes, statusEvent); err != nil {
-			return result, fmt.Errorf("failed to unmarshal TaskStatusUpdateEvent: %w", err)
-		}
-		event = statusEvent
-	case protocol.EventArtifactUpdate:
-		artifactEvent := &protocol.TaskArtifactUpdateEvent{}
-		if err := json.Unmarshal(eventBytes, artifactEvent); err != nil {
-			return result, fmt.Errorf("failed to unmarshal TaskArtifactUpdateEvent: %w", err)
-		}
-		event = artifactEvent
-	default:
-		return result, fmt.Errorf("unknown SSE event type: %s", eventType)
-	}
-	converted, ok := event.(T)
-	if !ok {
-		return result, fmt.Errorf("failed to convert event to %T", result)
-	}
-	return converted, nil
 }
 
 func (c *A2AClient) doRequestAndDecodeTask(

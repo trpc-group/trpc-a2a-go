@@ -25,15 +25,6 @@ const (
 	MethodTasksResubscribe = "tasks/resubscribe"
 	// MethodAgentAuthenticatedExtendedCard corresponds to the 'agent/authenticatedExtendedCard' HTTP GET endpoint.
 	MethodAgentAuthenticatedExtendedCard = "agent/authenticatedExtendedCard"
-
-	// deprecated methods
-	MethodTasksSend = "tasks/send" // Deprecated: use MethodMessageSend
-	// deprecated methods
-	MethodTasksSendSubscribe = "tasks/sendSubscribe" // Deprecated: use MethodMessageStream
-	// deprecated methods
-	MethodTasksPushNotificationSet = "tasks/pushNotification/set" // Deprecated: use MethodTasksPushNotificationConfigSet
-	// deprecated methods
-	MethodTasksPushNotificationGet = "tasks/pushNotification/get" // Deprecated: use MethodTasksPushNotificationConfigGet
 )
 
 // A2A SSE Event Types define the standard event type strings used in A2A SSE streams.

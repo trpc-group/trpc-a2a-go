@@ -302,16 +302,6 @@ func (s *A2AServer) routeJSONRPCMethod(ctx context.Context, w http.ResponseWrite
 		s.handleTasksCancel(ctx, w, request)
 	case protocol.MethodTasksResubscribe: // A2A Spec: tasks/resubscribe
 		s.handleTasksResubscribe(ctx, w, request)
-
-	// deprecated methods:
-	case protocol.MethodTasksSend: // A2A Spec: message/send
-		s.handleTasksSend(ctx, w, request)
-	case protocol.MethodTasksSendSubscribe: // A2A Spec: message/sendSubscribe
-		s.handleTasksSendSubscribe(ctx, w, request)
-	case protocol.MethodTasksPushNotificationGet: // A2A Spec: tasks/pushNotification/get
-		s.handleTasksPushNotificationGet(ctx, w, request)
-	case protocol.MethodTasksPushNotificationSet: // A2A Spec: tasks/pushNotification/config/set
-		s.handleTasksPushNotificationSet(ctx, w, request)
 	default:
 		log.Warnf("Method not found: %s (Request ID: %v)", request.Method, request.ID)
 		s.writeJSONRPCError(w, request.ID,
@@ -326,41 +316,6 @@ func (s *A2AServer) unmarshalParams(params json.RawMessage, v interface{}) *json
 		return jsonrpc.ErrInvalidParams(fmt.Sprintf("failed to parse params: %v", err))
 	}
 	return nil
-}
-
-// handleTasksSend handles the tasks_send method.
-func (s *A2AServer) handleTasksSend(ctx context.Context, w http.ResponseWriter, request jsonrpc.Request) {
-	var params protocol.SendTaskParams
-	if err := s.unmarshalParams(request.Params, &params); err != nil {
-		s.writeJSONRPCError(w, request.ID, err)
-		return
-	}
-
-	// Validate required fields
-	if params.ID == "" {
-		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
-		return
-	}
-	if params.Message.Role == "" || len(params.Message.Parts) == 0 {
-		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("message with at least one part is required"))
-		return
-	}
-
-	// Delegate to the task manager.
-	task, err := s.taskManager.OnSendTask(ctx, params)
-	if err != nil {
-		log.Errorf("Error calling OnSendTask for task %s: %v", params.ID, err)
-		// Check if it's already a JSON-RPC error
-		if rpcErr, ok := err.(*jsonrpc.Error); ok {
-			s.writeJSONRPCError(w, request.ID, rpcErr)
-		} else {
-			// Otherwise, wrap as internal error
-			s.writeJSONRPCError(w, request.ID,
-				jsonrpc.ErrInternalError(fmt.Sprintf("task processing failed: %v", err)))
-		}
-		return
-	}
-	s.writeJSONRPCResponse(w, request.ID, task)
 }
 
 // handleTasksGet handles the tasks_get method.
@@ -407,50 +362,6 @@ func (s *A2AServer) handleTasksCancel(ctx context.Context, w http.ResponseWriter
 		return
 	}
 	s.writeJSONRPCResponse(w, request.ID, task)
-}
-
-// handleTasksSendSubscribe handles the tasks_sendSubscribe method using Server-Sent Events (SSE).
-func (s *A2AServer) handleTasksSendSubscribe(ctx context.Context, w http.ResponseWriter, request jsonrpc.Request) {
-	var params protocol.SendTaskParams
-	if err := s.unmarshalParams(request.Params, &params); err != nil {
-		s.writeJSONRPCError(w, request.ID, err)
-		return
-	}
-
-	// Validate required fields.
-	if params.ID == "" {
-		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
-		return
-	}
-	if params.Message.Role == "" || len(params.Message.Parts) == 0 {
-		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("message with at least one part is required"))
-		return
-	}
-
-	// Check if client supports SSE.
-	// Since we're in a JSON-RPC context, we can't directly access the HTTP Accept header.
-	// We'll assume the client wants SSE since they called the sendSubscribe method.
-	// In a real implementation, this could be determined by looking at the HTTP request directly.
-
-	// Client wants SSE response.
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		log.Error("Streaming is not supported by the underlying http responseWriter")
-		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInternalError("server does not support streaming"))
-		return
-	}
-
-	// Get the event channel from the task manager.
-	eventsChan, err := s.taskManager.OnSendTaskSubscribe(ctx, params)
-	if err != nil {
-		log.Errorf("Error calling OnSendTaskSubscribe for task %s: %v", params.ID, err)
-		s.writeJSONRPCError(w, request.ID,
-			jsonrpc.ErrInternalError(fmt.Sprintf("failed to subscribe to task events: %v", err)))
-		return
-	}
-
-	// Use the helper function to handle the SSE stream
-	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, request.ID.(string), false)
 }
 
 // writeJSONRPCResponse encodes and writes a successful JSON-RPC response.
@@ -662,7 +573,8 @@ func (s *A2AServer) handleTasksResubscribe(ctx context.Context, w http.ResponseW
 	}
 
 	// Use the helper function to handle the SSE stream
-	handleSSEStream[protocol.StreamingMessageEvent](ctx, s.corsEnabled, w, flusher, eventsChan, request.ID.(string), true)
+	log.Debugf("SSE stream reopened for request ID: %v)", request.ID)
+	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, fmt.Sprintf("%v", request.ID))
 }
 
 // handleMessageSend handles the message_send method.
@@ -720,20 +632,19 @@ func (s *A2AServer) handleMessageStream(ctx context.Context, w http.ResponseWrit
 	}
 
 	// Use the helper function to handle the SSE stream
-	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, request.ID.(string), false)
+	log.Debugf("SSE stream opened for request ID: %v)", request.ID)
+	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, fmt.Sprintf("%v", request.ID))
 }
 
 // handleSSEStream handles an SSE stream for a task, including setup and event forwarding.
 // It sets the appropriate headers, logs connection status, and forwards events to the client.
-func handleSSEStream[T interface{}](
+func handleSSEStream(
 	ctx context.Context,
 	corsEnabled bool,
 	w http.ResponseWriter,
 	flusher http.Flusher,
-	eventsChan <-chan T,
-	rpcID string,
-	isResubscribe bool,
-) {
+	eventsChan <-chan protocol.StreamingMessageEvent,
+	rpcID string) {
 	// Set headers for SSE.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -745,13 +656,6 @@ func handleSSEStream[T interface{}](
 	// Indicate successful subscription setup.
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush() // Send headers immediately.
-
-	// Log appropriate message based on whether this is a new subscription or resubscribe
-	if isResubscribe {
-		log.Infof("SSE stream reopened for request ID: %v)", rpcID)
-	} else {
-		log.Infof("SSE stream opened for request ID: %v)", rpcID)
-	}
 
 	// Use request context to detect client disconnection.
 	clientClosed := ctx.Done()
@@ -790,8 +694,6 @@ func sendSSEEvent(w http.ResponseWriter, rpcID string, event interface{}) error 
 	// Handle StreamingMessageEvent by extracting the inner Result
 	if streamEvent, ok := event.(*protocol.StreamingMessageEvent); ok {
 		actualEvent = streamEvent.Result
-	} else if taskEvent, ok := event.(*protocol.TaskEvent); ok {
-		actualEvent = *taskEvent
 	} else {
 		return errUnknownEvent
 	}

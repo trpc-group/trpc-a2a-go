@@ -199,23 +199,4 @@ type TaskManager interface {
 		ctx context.Context,
 		params protocol.TaskIDParams,
 	) (<-chan protocol.StreamingMessageEvent, error)
-
-	// deprecated
-	// OnSendTask handles a request corresponding to the 'tasks/send' RPC method.
-	// It creates and potentially starts processing a new task via the MessageProcessor.
-	// It returns the initial state of the task, possibly reflecting immediate processing results.
-	OnSendTask(
-		ctx context.Context,
-		request protocol.SendTaskParams,
-	) (*protocol.Task, error)
-
-	// deprecated
-	// OnSendTaskSubscribe handles a request corresponding to the 'tasks/sendSubscribe' RPC method.
-	// It creates a new task and returns a channel for receiving TaskEvent updates (streaming).
-	// It initiates asynchronous processing via the MessageProcessor.
-	// The channel will be closed when the task reaches a final state or an error occurs during setup/processing.
-	OnSendTaskSubscribe(
-		ctx context.Context,
-		request protocol.SendTaskParams,
-	) (<-chan protocol.TaskEvent, error)
 }

@@ -83,7 +83,7 @@ func TestTaskEvent_IsFinal(t *testing.T) {
 	// Use boolPtr helper for pointer boolean values
 	tests := []struct {
 		name     string
-		event    TaskEvent
+		event    StreamingMessageResult
 		expected bool
 	}{
 		{
@@ -135,7 +135,18 @@ func TestTaskEvent_IsFinal(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.expected, tc.event.IsFinal())
+			if event, ok := tc.event.(*TaskArtifactUpdateEvent); ok {
+				assert.Equal(t, tc.expected, event.IsFinal())
+				return
+			}
+
+			if event, ok := tc.event.(*TaskStatusUpdateEvent); ok {
+				assert.Equal(t, tc.expected, event.IsFinal())
+				return
+			}
+
+			t.Fatal("unexpected event type")
+
 		})
 	}
 }
@@ -363,8 +374,8 @@ func TestMarkerFunctions(t *testing.T) {
 	artifactEvent := TaskArtifactUpdateEvent{TaskID: "test"}
 
 	// This test simply ensures the marker functions exist and don't panic
-	statusEvent.eventMarker()
-	artifactEvent.eventMarker()
+	statusEvent.streamingMessageResultMarker()
+	artifactEvent.streamingMessageResultMarker()
 
 	// Verify these functions don't have any observable behavior
 	// This is just to increase test coverage, as these are marker functions

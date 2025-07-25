@@ -281,7 +281,6 @@ type PushNotificationAuthenticationInfo struct {
 }
 
 // AuthenticationInfo is deprecated, use PushNotificationAuthenticationInfo instead.
-// TODO: Remove in next major version.
 type AuthenticationInfo = PushNotificationAuthenticationInfo
 
 // OAuth2AuthInfo contains OAuth2-specific authentication details.
@@ -512,18 +511,6 @@ type Task struct {
 	Status TaskStatus `json:"status"`
 }
 
-// TaskEvent is an interface for events published during task execution (streaming).
-// Deprecated, use StreamingMessageEvent instead.
-// It uses an unexported method to ensure only defined event types implement it.
-// See A2A Spec section on Streaming and Events.
-// Exported interface.
-type TaskEvent interface {
-	Event
-	eventMarker() // Internal marker method.
-	// IsFinal returns true if this is the final event for the task.
-	IsFinal() bool
-}
-
 // TaskStatusUpdateEvent indicates a change in the task's lifecycle state.
 // Corresponds to the 'task_status_update' event in A2A Spec 0.2.2.
 type TaskStatusUpdateEvent struct {
@@ -540,9 +527,6 @@ type TaskStatusUpdateEvent struct {
 	// TaskID is the ID of the task.
 	TaskID string `json:"taskId"`
 }
-
-// eventMarker implementation (unexported method).
-func (TaskStatusUpdateEvent) eventMarker() {}
 
 // IsFinal returns true if this is a final event.
 func (r *TaskStatusUpdateEvent) IsFinal() bool {
@@ -567,9 +551,6 @@ type TaskArtifactUpdateEvent struct {
 	// TaskID is the ID of the task.
 	TaskID string `json:"taskId"`
 }
-
-// eventMarker implementation (unexported method).
-func (TaskArtifactUpdateEvent) eventMarker() {}
 
 // IsFinal returns true if this is the final artifact event.
 func (r TaskArtifactUpdateEvent) IsFinal() bool {
