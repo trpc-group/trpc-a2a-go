@@ -22,6 +22,7 @@ import (
 type taskHandler struct {
 	manager                *TaskManager
 	messageID              string
+	metadata               map[string]any
 	ctx                    context.Context
 	subscriberBufSize      int
 	subscriberBlockingSend bool
@@ -276,6 +277,15 @@ func (h *taskHandler) GetContextID() string {
 		return *msg.ContextID
 	}
 	return ""
+}
+
+// GetMetadata returns the metadata of the current request.
+func (h *taskHandler) GetMetadata() (map[string]interface{}, error) {
+	if h.metadata == nil {
+		return nil, fmt.Errorf("metadata is nil")
+	}
+
+	return h.metadata, nil
 }
 
 // GetMessageHistory returns the conversation history for the current context.

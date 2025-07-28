@@ -72,6 +72,9 @@ type TaskHandler interface {
 
 	// GetContextID returns the context ID of the current message, if any.
 	GetContextID() string
+
+	// GetMetadata returns the metadata of the current task.
+	GetMetadata() (map[string]interface{}, error)
 }
 
 // MessageProcessingResult represents the result of processing a message.
