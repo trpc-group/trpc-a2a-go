@@ -8,6 +8,7 @@ package taskmanager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -23,7 +24,7 @@ import (
 type memoryTaskHandler struct {
 	manager                *MemoryTaskManager
 	messageID              string
-	metadata               map[string]any
+	metadata               map[string]interface{}
 	ctx                    context.Context
 	subscriberBufSize      int
 	subscriberBlockingSend bool
@@ -180,7 +181,7 @@ func (h *memoryTaskHandler) GetContextID() string {
 // GetMetadata returns the metadata of the current request.
 func (h *memoryTaskHandler) GetMetadata() (map[string]interface{}, error) {
 	if h.metadata == nil {
-		return nil, fmt.Errorf("metadata is nil")
+		return nil, errors.New("metadata is nil")
 	}
 
 	return h.metadata, nil

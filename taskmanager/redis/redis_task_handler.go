@@ -10,6 +10,7 @@ package redis
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -22,7 +23,7 @@ import (
 type taskHandler struct {
 	manager                *TaskManager
 	messageID              string
-	metadata               map[string]any
+	metadata               map[string]interface{}
 	ctx                    context.Context
 	subscriberBufSize      int
 	subscriberBlockingSend bool
@@ -282,7 +283,7 @@ func (h *taskHandler) GetContextID() string {
 // GetMetadata returns the metadata of the current request.
 func (h *taskHandler) GetMetadata() (map[string]interface{}, error) {
 	if h.metadata == nil {
-		return nil, fmt.Errorf("metadata is nil")
+		return nil, errors.New("metadata is nil")
 	}
 
 	return h.metadata, nil
