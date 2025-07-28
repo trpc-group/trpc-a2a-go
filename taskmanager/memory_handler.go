@@ -23,6 +23,7 @@ import (
 type memoryTaskHandler struct {
 	manager                *MemoryTaskManager
 	messageID              string
+	metadata               map[string]any
 	ctx                    context.Context
 	subscriberBufSize      int
 	subscriberBlockingSend bool
@@ -174,6 +175,15 @@ func (h *memoryTaskHandler) GetContextID() string {
 		return *msg.ContextID
 	}
 	return ""
+}
+
+// GetMetadata returns the metadata of the current request.
+func (h *memoryTaskHandler) GetMetadata() (map[string]interface{}, error) {
+	if h.metadata == nil {
+		return nil, fmt.Errorf("metadata is nil")
+	}
+
+	return h.metadata, nil
 }
 
 // GetMessageHistory gets message history

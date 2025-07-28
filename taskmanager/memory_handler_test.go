@@ -8,6 +8,7 @@ package taskmanager
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
@@ -238,6 +239,56 @@ func TestMemoryTaskHandler_GetMessageHistory(t *testing.T) {
 	if !found {
 		t.Error("Expected to find context message in history")
 	}
+}
+
+func TestMemoryTaskHandler_Metadata(t *testing.T) {
+	t.Run("GetPopulatedMetadata", func(t *testing.T) {
+		handler, _ := setupTestHandler(t)
+
+		// add metadata to the handler
+		expectedMetadata := map[string]interface{}{
+			"strKey":  "value1",
+			"intKey":  2,
+			"boolKey": true,
+			"mapKey": map[string]interface{}{
+				"nestedKey": "nestedValue",
+			},
+			"sliceKey": []string{"item1", "item2"},
+		}
+
+		handler.metadata = expectedMetadata
+
+		// retrieve metadata from handler method
+		md, err := handler.GetMetadata()
+
+		if err != nil {
+			t.Errorf("Expected no error, got %v", err)
+		}
+
+		if md == nil {
+			t.Error("Expected metadata to be populated, got nil")
+		}
+
+		if reflect.DeepEqual(md, expectedMetadata) == false {
+			t.Errorf("Expected metadata %v, got %v", expectedMetadata, md)
+		}
+	})
+
+	t.Run("GetNilMetadata", func(t *testing.T) {
+		handler, _ := setupTestHandler(t)
+
+		// retrieve metadata from handler method
+		md, err := handler.GetMetadata()
+
+		if err == nil {
+			t.Error("Expected error for nil metadata, got none")
+		}
+
+		if md != nil {
+			t.Errorf("Expected nil metadata, got %v", md)
+		}
+	})
+
 }
 
 func TestMemoryTaskHandler_GetContextID(t *testing.T) {
