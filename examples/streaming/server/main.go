@@ -61,14 +61,9 @@ func (p *streamingMessageProcessor) ProcessMessage(
 
 	// For non-streaming processing, use simplified flow
 	if !options.Streaming {
-		log.Infof("Using non-streaming mode")
 		return p.processNonStreaming(ctx, text, handle)
 	}
 
-	// Continue with streaming process
-	log.Infof("Using streaming mode")
-
-	// Create a task for streaming
 	taskID, err := handle.BuildTask(nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build task: %w", err)
@@ -88,26 +83,12 @@ func (p *streamingMessageProcessor) ProcessMessage(
 			}
 		}()
 
-		contextID := handle.GetContextID()
-		// Send initial working status
-		workingEvent := protocol.StreamingMessageEvent{
-			Result: &protocol.TaskStatusUpdateEvent{
-				TaskID:    taskID,
-				ContextID: contextID,
-				Kind:      "status-update",
-				Status: protocol.TaskStatus{
-					State: protocol.TaskStateWorking,
-					Message: &protocol.Message{
-						MessageID: uuid.New().String(),
-						Kind:      "message",
-						Role:      protocol.MessageRoleAgent,
-						Parts:     []protocol.Part{protocol.NewTextPart("Starting to process your streaming data...")},
-					},
-				},
-			},
-		}
-		err = subscriber.Send(workingEvent)
-		if err != nil {
+		msg := protocol.NewMessage(
+			protocol.MessageRoleAgent,
+			[]protocol.Part{protocol.NewTextPart("Starting to process your streaming data...")},
+		)
+
+		if err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &msg); err != nil {
 			log.Errorf("Failed to send working event: %v", err)
 		}
 
@@ -120,51 +101,21 @@ func (p *streamingMessageProcessor) ProcessMessage(
 			// Check for cancellation
 			if err := ctx.Err(); err != nil {
 				log.Errorf("Task %s cancelled during streaming: %v", taskID, err)
-				cancelEvent := protocol.StreamingMessageEvent{
-					Result: &protocol.TaskStatusUpdateEvent{
-						TaskID:    taskID,
-						ContextID: contextID,
-						Kind:      "status-update",
-						Status: protocol.TaskStatus{
-							State: protocol.TaskStateCanceled,
-						},
-						Final: true,
-					},
-				}
-				err = subscriber.Send(cancelEvent)
-				if err != nil {
-					log.Errorf("Failed to send cancel event: %v", err)
-				}
+				handle.UpdateTaskState(&taskID, protocol.TaskStateCanceled, nil)
 				return
 			}
 
 			// Process the chunk (in this example, just reverse it)
 			processedChunk := reverseString(chunk)
-
-			// Create a progress update message
 			progressMsg := fmt.Sprintf("Processing chunk %d of %d: %s -> %s",
 				i+1, totalChunks, chunk, processedChunk)
 
-			// Send progress status update
-			progressEvent := protocol.StreamingMessageEvent{
-				Result: &protocol.TaskStatusUpdateEvent{
-					TaskID:    taskID,
-					ContextID: contextID,
-					Kind:      "status-update",
-					Status: protocol.TaskStatus{
-						State: protocol.TaskStateWorking,
-						Message: &protocol.Message{
-							MessageID: uuid.New().String(),
-							Kind:      "message",
-							Role:      protocol.MessageRoleAgent,
-							Parts:     []protocol.Part{protocol.NewTextPart(progressMsg)},
-						},
-					},
-				},
-			}
-			err = subscriber.Send(progressEvent)
-			if err != nil {
-				log.Errorf("Failed to send progress event: %v", err)
+			msg := protocol.NewMessage(
+				protocol.MessageRoleAgent,
+				[]protocol.Part{protocol.NewTextPart(progressMsg)},
+			)
+			if err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &msg); err != nil {
+				log.Errorf("Failed to send working event: %v", err)
 			}
 
 			// Create an artifact for this chunk
@@ -176,40 +127,15 @@ func (p *streamingMessageProcessor) ProcessMessage(
 				Parts:       []protocol.Part{protocol.NewTextPart(processedChunk)},
 			}
 
-			// Send artifact update event
-			artifactEvent := protocol.StreamingMessageEvent{
-				Result: &protocol.TaskArtifactUpdateEvent{
-					TaskID:    taskID,
-					ContextID: contextID,
-					Kind:      "artifact-update",
-					Artifact:  chunkArtifact,
-					Append:    boolPtr(i > 0),       // Append after the first chunk
-					LastChunk: boolPtr(isLastChunk), // Mark the last chunk
-				},
-			}
-			err = subscriber.Send(artifactEvent)
-			if err != nil {
-				log.Errorf("Failed to send artifact event: %v", err)
+			if err := handle.AddArtifact(&taskID, chunkArtifact, isLastChunk, false); err != nil {
+				log.Errorf("Failed to add artifact: %v", err)
 			}
 
-			// Simulate processing time
 			select {
 			case <-ctx.Done():
 				log.Infof("Task %s cancelled during delay: %v", taskID, ctx.Err())
-				cancelEvent := protocol.StreamingMessageEvent{
-					Result: &protocol.TaskStatusUpdateEvent{
-						TaskID:    taskID,
-						ContextID: contextID,
-						Kind:      "status-update",
-						Status: protocol.TaskStatus{
-							State: protocol.TaskStateCanceled,
-						},
-						Final: true,
-					},
-				}
-				err = subscriber.Send(cancelEvent)
-				if err != nil {
-					log.Errorf("Failed to send cancel event: %v", err)
+				if err := handle.UpdateTaskState(&taskID, protocol.TaskStateCanceled, nil); err != nil {
+					log.Errorf("Failed to update task state: %v", err)
 				}
 				return
 			case <-time.After(500 * time.Millisecond): // Simulate work with delay
@@ -217,27 +143,14 @@ func (p *streamingMessageProcessor) ProcessMessage(
 			}
 		}
 
+		msg = protocol.NewMessage(
+			protocol.MessageRoleAgent,
+			[]protocol.Part{protocol.NewTextPart(fmt.Sprintf("Completed processing all %d chunks successfully!", totalChunks))},
+		)
+
 		// Final completion status update
-		completeEvent := protocol.StreamingMessageEvent{
-			Result: &protocol.TaskStatusUpdateEvent{
-				TaskID:    taskID,
-				ContextID: contextID,
-				Kind:      "status-update",
-				Status: protocol.TaskStatus{
-					State: protocol.TaskStateCompleted,
-					Message: &protocol.Message{
-						MessageID: uuid.New().String(),
-						Kind:      "message",
-						Role:      protocol.MessageRoleAgent,
-						Parts:     []protocol.Part{protocol.NewTextPart(fmt.Sprintf("Completed processing all %d chunks successfully!", totalChunks))},
-					},
-				},
-				Final: true,
-			},
-		}
-		err = subscriber.Send(completeEvent)
-		if err != nil {
-			log.Errorf("Failed to send complete event: %v", err)
+		if err := handle.UpdateTaskState(&taskID, protocol.TaskStateCompleted, &msg); err != nil {
+			log.Errorf("Failed to update task state: %v", err)
 		}
 
 		log.Infof("Task %s streaming completed successfully.", taskID)
@@ -413,7 +326,7 @@ func main() {
 	)
 
 	flag.StringVar(&host, "host", "localhost", "Server host address")
-	flag.IntVar(&port, "port", 8080, "Server port")
+	flag.IntVar(&port, "port", 8089, "Server port")
 	flag.Parse()
 
 	address := fmt.Sprintf("%s:%d", host, port)

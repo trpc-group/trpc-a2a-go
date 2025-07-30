@@ -352,22 +352,6 @@ func (m *TaskManager) OnResubscribe(
 	return subscriber.Channel(), nil
 }
 
-// OnSendTask deprecated method empty implementation.
-func (m *TaskManager) OnSendTask(
-	ctx context.Context,
-	request protocol.SendTaskParams,
-) (*protocol.Task, error) {
-	return nil, fmt.Errorf("OnSendTask is deprecated, use OnSendMessage instead")
-}
-
-// OnSendTaskSubscribe deprecated method empty implementation.
-func (m *TaskManager) OnSendTaskSubscribe(
-	ctx context.Context,
-	request protocol.SendTaskParams,
-) (<-chan protocol.TaskEvent, error) {
-	return nil, fmt.Errorf("OnSendTaskSubscribe is deprecated, use OnSendMessageStream instead")
-}
-
 // =============================================================================
 // Internal helper methods
 // =============================================================================

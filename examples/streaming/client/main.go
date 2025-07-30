@@ -15,8 +15,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
-
 	"trpc.group/trpc-go/trpc-a2a-go/client"
 	"trpc.group/trpc-go/trpc-a2a-go/log"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
@@ -24,7 +22,7 @@ import (
 )
 
 func main() {
-	serverURL := "http://localhost:8080"
+	serverURL := "http://localhost:8089"
 
 	// 1. Create a new client instance.
 	c, err := client.NewA2AClient(serverURL)
@@ -41,15 +39,6 @@ func main() {
 
 	log.Infof("Server streaming capability: %t", streamingSupported)
 
-	// 3. Define the task specification with a unique ID
-	taskID := fmt.Sprintf("task-%d-%s", time.Now().UnixNano(), uuid.New().String())
-	message := protocol.Message{
-		Role: protocol.MessageRoleUser,
-		Parts: []protocol.Part{
-			protocol.NewTextPart("Process this streaming data chunk by chunk."),
-		},
-	}
-
 	// Create context with timeout for the operation
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -58,12 +47,14 @@ func main() {
 		// 4. Use streaming approach if supported
 		log.Info("Server supports streaming, using StreamTask...")
 
-		taskParams := protocol.SendTaskParams{
-			ID:      taskID,
-			Message: message,
+		msgParams := protocol.SendMessageParams{
+			Message: protocol.NewMessage(
+				protocol.MessageRoleUser,
+				[]protocol.Part{protocol.NewTextPart("Process this streaming data chunk by chunk.")},
+			),
 		}
 
-		streamChan, err := c.StreamTask(ctx, taskParams)
+		streamChan, err := c.StreamMessage(ctx, msgParams)
 		if err != nil {
 			log.Fatalf("Error starting stream task: %v.", err)
 		}
@@ -71,33 +62,29 @@ func main() {
 		processStreamEvents(ctx, streamChan)
 	} else {
 		// 5. Fallback to non-streaming approach
-		log.Info("Server does not support streaming, using SendTasks...")
+		log.Info("Server does not support streaming, using SendMessage...")
 
-		taskParams := protocol.SendTaskParams{
-			ID:      taskID,
-			Message: message,
+		msgParams := protocol.SendMessageParams{
+			Message: protocol.NewMessage(protocol.MessageRoleUser, []protocol.Part{
+				protocol.NewTextPart("Process this data."),
+			}),
 		}
 
-		task, err := c.SendTasks(ctx, taskParams)
+		result, err := c.SendMessage(ctx, msgParams)
 		if err != nil {
 			log.Fatalf("Error sending task: %v.", err)
 		}
 
-		log.Infof("Task completed with state: %s", task.Status.State)
-		if task.Status.Message != nil {
-			log.Infof("Final message: Role=%s", task.Status.Message.Role)
-			for i, part := range task.Status.Message.Parts {
-				if textPart, ok := part.(protocol.TextPart); ok {
-					log.Infof("  Part %d text: %s", i, textPart.Text)
-				}
-			}
-		}
-
-		if len(task.Artifacts) > 0 {
-			log.Infof("Task produced %d artifacts:", len(task.Artifacts))
-			for i, artifact := range task.Artifacts {
-				log.Infof("  Artifact %d: %s", i, getArtifactName(artifact))
-			}
+		switch result.Result.GetKind() {
+		case protocol.KindMessage:
+			msg := result.Result.(*protocol.Message)
+			text := extractTextFromMessage(msg)
+			log.Infof("Final message: Role=%s, Text=%s", msg.Role, text)
+		case protocol.KindTask:
+			task := result.Result.(*protocol.Task)
+			log.Infof("Final task: ID=%s, State=%s", task.ID, task.Status.State)
+		default:
+			log.Infof("Unexpected result type: %T", result.Result)
 		}
 	}
 }
@@ -152,7 +139,7 @@ func checkStreamingSupport(serverURL string) (bool, error) {
 }
 
 // processStreamEvents handles events received from a streaming task
-func processStreamEvents(ctx context.Context, streamChan <-chan protocol.TaskEvent) {
+func processStreamEvents(ctx context.Context, streamChan <-chan protocol.StreamingMessageEvent) {
 	log.Info("Waiting for streaming updates...")
 
 	for {
@@ -172,36 +159,32 @@ func processStreamEvents(ctx context.Context, streamChan <-chan protocol.TaskEve
 			}
 
 			// Process the received event
-			switch e := event.(type) {
-			case *protocol.TaskStatusUpdateEvent:
-				log.Infof("Received Status Update - TaskID: %s, State: %s, Final: %v", e.TaskID, e.Status.State, e.Final)
-				if e.Status.Message != nil {
-					log.Infof("  Status Message: Role=%s, Parts=%+v", e.Status.Message.Role, e.Status.Message.Parts)
-				}
-
-				// Exit when we receive a final status update (indicating a terminal state)
-				// Per A2A spec, this should be the definitive way to know the task is complete
-				if e.Final {
-					switch e.Status.State {
-					case protocol.TaskStateCompleted:
-						log.Info("Task completed successfully.")
-					case protocol.TaskStateFailed:
-						log.Info("Task failed.")
-					case protocol.TaskStateCanceled:
-						log.Info("Task was canceled.")
+			switch event.Result.GetKind() {
+			case protocol.KindMessage:
+				msg := event.Result.(*protocol.Message)
+				text := extractTextFromMessage(msg)
+				log.Infof("Received Message - MessageID: %s", msg.MessageID)
+				log.Infof("  Message Text: %s", text)
+			case protocol.KindTaskArtifactUpdate:
+				artifact := event.Result.(*protocol.TaskArtifactUpdateEvent)
+				log.Infof("Received Artifact Update - TaskID: %s, ArtifactID: %s", artifact.TaskID, artifact.Artifact.ArtifactID)
+				for _, part := range artifact.Artifact.Parts {
+					if textPart, ok := part.(*protocol.TextPart); ok {
+						log.Infof("  Artifact Text (Reversed Text): %s", textPart.Text)
 					}
-					log.Info("Received final status update, exiting.")
-					return
 				}
-			case *protocol.TaskArtifactUpdateEvent:
-				log.Infof("Received Artifact Update - TaskID: %s, ArtifactID: %s", e.TaskID, e.Artifact.ArtifactID)
-				log.Infof("  Artifact Parts: %+v", e.Artifact.Parts)
 
 				// For artifact updates, we note it's the final artifact,
 				// but we don't exit yet - per A2A spec, we should wait for the final status update
-				if e.LastChunk != nil && *e.LastChunk {
+				if artifact.LastChunk != nil && *artifact.LastChunk {
 					log.Info("Received final artifact update, waiting for final status.")
 				}
+			case protocol.KindTask:
+				task := event.Result.(*protocol.Task)
+				log.Infof("Received Task - TaskID: %s, State: %s", task.ID, task.Status.State)
+			case protocol.KindTaskStatusUpdate:
+				statusUpdate := event.Result.(*protocol.TaskStatusUpdateEvent)
+				log.Infof("Received Task Status Update - TaskID: %s, State: %s", statusUpdate.TaskID, statusUpdate.Status.State)
 			default:
 				log.Infof("Received unknown event type: %T %v", event, event)
 			}
@@ -209,10 +192,12 @@ func processStreamEvents(ctx context.Context, streamChan <-chan protocol.TaskEve
 	}
 }
 
-// getArtifactName returns the name of an artifact or a default if name is nil
-func getArtifactName(artifact protocol.Artifact) string {
-	if artifact.Name != nil {
-		return *artifact.Name
+func extractTextFromMessage(msg *protocol.Message) string {
+	var text string
+	for _, part := range msg.Parts {
+		if textPart, ok := part.(protocol.TextPart); ok {
+			text += textPart.Text
+		}
 	}
-	return fmt.Sprintf("Unnamed artifact (ArtifactID: %s)", artifact.ArtifactID)
+	return text
 }

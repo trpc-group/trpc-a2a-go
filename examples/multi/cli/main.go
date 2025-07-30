@@ -53,7 +53,7 @@ func main() {
 		}
 
 		// Send the task to the agent
-		response, err := sendTask(a2aClient, input)
+		response, err := sendMessage(a2aClient, input)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			continue
@@ -68,41 +68,50 @@ func main() {
 	}
 }
 
-// sendTask sends a task to the agent and waits for the response.
-func sendTask(client *client.A2AClient, text string) (string, error) {
+// sendMessage sends a message to the agent and waits for the response.
+func sendMessage(client *client.A2AClient, text string) (string, error) {
 	ctx := context.Background()
 
-	// Create the task parameters with the user's message
-	params := protocol.SendTaskParams{
-		Message: protocol.Message{
-			Role: protocol.MessageRoleUser,
-			Parts: []protocol.Part{
-				protocol.NewTextPart(text),
-			},
-		},
+	// Create the message to send
+	message := protocol.NewMessage(
+		protocol.MessageRoleUser,
+		[]protocol.Part{protocol.NewTextPart(text)},
+	)
+
+	// Prepare the message parameters
+	params := protocol.SendMessageParams{
+		Message: message,
 	}
 
-	// Send the task to the agent
-	task, err := client.SendTasks(ctx, params)
+	// Send the message to the agent
+	result, err := client.SendMessage(ctx, params)
 	if err != nil {
-		return "", fmt.Errorf("failed to send task: %w", err)
-	}
-
-	// Extract the response text from the task status message
-	if task.Status.Message == nil {
-		return "", fmt.Errorf("no response message from agent")
+		return "", fmt.Errorf("failed to send message: %w", err)
 	}
 
 	// Extract text from the response message
-	return extractText(*task.Status.Message), nil
+	switch result.Result.GetKind() {
+	case protocol.KindMessage:
+		msg := result.Result.(*protocol.Message)
+		return extractText(*msg), nil
+	case protocol.KindTask:
+		task := result.Result.(*protocol.Task)
+		if task.Status.Message != nil {
+			return extractText(*task.Status.Message), nil
+		}
+		return "", fmt.Errorf("no response message from agent")
+	default:
+		return "", fmt.Errorf("unexpected response type: %T", result.Result)
+	}
 }
 
 // extractText extracts the text content from a message.
 func extractText(message protocol.Message) string {
+	var result strings.Builder
 	for _, part := range message.Parts {
-		if textPart, ok := part.(protocol.TextPart); ok {
-			return textPart.Text
+		if textPart, ok := part.(*protocol.TextPart); ok {
+			result.WriteString(textPart.Text)
 		}
 	}
-	return ""
+	return result.String()
 }

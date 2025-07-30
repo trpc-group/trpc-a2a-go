@@ -58,8 +58,7 @@ func TestJWTAuthentication(t *testing.T) {
 
 	// Test that unauthenticated requests fail
 	ctx := context.Background()
-	_, err = basicClient.SendTasks(ctx, protocol.SendTaskParams{
-		ID:      "task1",
+	_, err = basicClient.SendMessage(ctx, protocol.SendMessageParams{
 		Message: createTextMessage("Hello, World!"),
 	})
 	assert.Error(t, err, "Unauthenticated request should fail")
@@ -82,17 +81,19 @@ func TestJWTAuthentication(t *testing.T) {
 	require.NoError(t, err, "Failed to create authenticated A2A client")
 
 	// Test that authenticated requests succeed
-	task, err := authClient.SendTasks(ctx, protocol.SendTaskParams{
-		ID:      "task1",
+	messageResult, err := authClient.SendMessage(ctx, protocol.SendMessageParams{
 		Message: createTextMessage("Hello, World!"),
 	})
-	require.NoError(t, err, "Authenticated request failed")
-	assert.Equal(t, "task1", task.ID, "Task ID mismatch")
 
-	// Get the processed task to verify it was processed
-	processedTask, err := taskMgr.(*mockTaskManager).Task("task1")
-	require.NoError(t, err, "Failed to get task")
-	assert.Equal(t, protocol.TaskStateCompleted, processedTask.Status.State, "Task should be done")
+	require.NoError(t, err, "Authenticated request failed")
+	assert.NotNil(t, messageResult.Result, "Message result should not be nil")
+
+	// Get the processed message to verify it was processed
+	resultMessage, ok := messageResult.Result.(*protocol.Message)
+	require.True(t, ok, "Expected Message result")
+	processedMessage, exists := taskMgr.(*mockTaskManager).messages[resultMessage.MessageID]
+	require.True(t, exists, "Failed to get processed message")
+	assert.NotNil(t, processedMessage, "Processed message should not be nil")
 }
 
 // TestAPIKeyAuthentication tests the API key authentication mechanism.
@@ -113,8 +114,7 @@ func TestAPIKeyAuthentication(t *testing.T) {
 
 	// Test that unauthenticated requests fail
 	ctx := context.Background()
-	_, err = basicClient.SendTasks(ctx, protocol.SendTaskParams{
-		ID:      "task2",
+	_, err = basicClient.SendMessage(ctx, protocol.SendMessageParams{
 		Message: createTextMessage("Hello from API key test!"),
 	})
 	assert.Error(t, err, "Unauthenticated request should fail")
@@ -136,17 +136,18 @@ func TestAPIKeyAuthentication(t *testing.T) {
 	require.NoError(t, err, "Failed to create authenticated A2A client")
 
 	// Test that authenticated requests succeed
-	task, err := authClient.SendTasks(ctx, protocol.SendTaskParams{
-		ID:      "task2",
+	messageResult, err := authClient.SendMessage(ctx, protocol.SendMessageParams{
 		Message: createTextMessage("Hello from API key test!"),
 	})
 	require.NoError(t, err, "Authenticated request failed")
-	assert.Equal(t, "task2", task.ID, "Task ID mismatch")
+	assert.NotNil(t, messageResult.Result, "Message result should not be nil")
 
-	// Get the processed task to verify it was processed
-	processedTask, err := taskMgr.(*mockTaskManager).Task("task2")
-	require.NoError(t, err, "Failed to get task")
-	assert.Equal(t, protocol.TaskStateCompleted, processedTask.Status.State, "Task should be done")
+	// Get the processed message to verify it was processed
+	resultMessage, ok := messageResult.Result.(*protocol.Message)
+	require.True(t, ok, "Expected Message result")
+	processedMessage, exists := taskMgr.(*mockTaskManager).messages[resultMessage.MessageID]
+	require.True(t, exists, "Failed to get processed message")
+	assert.NotNil(t, processedMessage, "Processed message should not be nil")
 }
 
 // TestChainAuthentication tests that the chain auth provider works with multiple auth methods.
@@ -183,8 +184,7 @@ func TestChainAuthentication(t *testing.T) {
 
 	// Test that unauthenticated requests fail
 	ctx := context.Background()
-	_, err = basicClient.SendTasks(ctx, protocol.SendTaskParams{
-		ID:      "task3",
+	_, err = basicClient.SendMessage(ctx, protocol.SendMessageParams{
 		Message: createTextMessage("Hello from chain auth test!"),
 	})
 	assert.Error(t, err, "Unauthenticated request should fail")
@@ -208,12 +208,11 @@ func TestChainAuthentication(t *testing.T) {
 	)
 	require.NoError(t, err, "Failed to create JWT authenticated client")
 
-	task, err := jwtClient.SendTasks(ctx, protocol.SendTaskParams{
-		ID:      "task3",
+	messageResult, err := jwtClient.SendMessage(ctx, protocol.SendMessageParams{
 		Message: createTextMessage("Hello with JWT auth!"),
 	})
 	require.NoError(t, err, "JWT authenticated request failed")
-	assert.Equal(t, "task3", task.ID, "Task ID mismatch")
+	assert.NotNil(t, messageResult.Result, "Message result should not be nil")
 
 	// Test with API key authentication
 	apiKeyTransport := &authRoundTripper{
@@ -229,12 +228,11 @@ func TestChainAuthentication(t *testing.T) {
 	)
 	require.NoError(t, err, "Failed to create API key authenticated client")
 
-	task, err = apiKeyClient.SendTasks(ctx, protocol.SendTaskParams{
-		ID:      "task4",
+	messageResult2, err := apiKeyClient.SendMessage(ctx, protocol.SendMessageParams{
 		Message: createTextMessage("Hello with API key auth!"),
 	})
 	require.NoError(t, err, "API key authenticated request failed")
-	assert.Equal(t, "task4", task.ID, "Task ID mismatch")
+	assert.NotNil(t, messageResult2.Result, "Message result should not be nil")
 }
 
 // TestPushNotificationAuthentication tests push notification authentication.
@@ -430,7 +428,9 @@ func (t *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 // createTextMessage creates a simple text message for testing.
 func createTextMessage(text string) protocol.Message {
 	return protocol.Message{
-		Role: protocol.MessageRoleUser,
+		Kind:      protocol.KindMessage,
+		MessageID: fmt.Sprintf("msg-%d", time.Now().UnixNano()),
+		Role:      protocol.MessageRoleUser,
 		Parts: []protocol.Part{
 			protocol.NewTextPart(text),
 		},
@@ -537,45 +537,6 @@ func (m *mockTaskManager) OnSendMessageStream(
 	return eventCh, nil
 }
 
-// OnSendTask handles sending a task. (deprecated)
-func (m *mockTaskManager) OnSendTask(
-	ctx context.Context, params protocol.SendTaskParams,
-) (*protocol.Task, error) {
-	var contextID string
-	if params.SessionID != nil {
-		contextID = *params.SessionID
-	} else {
-		contextID = ""
-	}
-
-	task := protocol.NewTask(params.ID, contextID)
-	m.tasks[params.ID] = task
-
-	handle := &mockTaskHandle{
-		taskID:  params.ID,
-		manager: m,
-	}
-
-	if err := handle.UpdateStatus(protocol.TaskStateWorking, nil); err != nil {
-		return task, err
-	}
-
-	if m.processor != nil {
-		// Note: This is a simplified mock implementation
-		// Real implementation would call processor with proper parameters
-		if err := handle.UpdateStatus(protocol.TaskStateCompleted, nil); err != nil {
-			return task, err
-		}
-	} else {
-		// Mark the task as done if no processor
-		if err := handle.UpdateStatus(protocol.TaskStateCompleted, nil); err != nil {
-			return task, err
-		}
-	}
-
-	return m.tasks[params.ID], nil
-}
-
 // OnGetTask handles getting a task.
 func (m *mockTaskManager) OnGetTask(
 	ctx context.Context, params protocol.TaskQueryParams,
@@ -671,44 +632,6 @@ func (m *mockTaskManager) OnCancelTask(
 	}
 
 	return m.tasks[params.ID], nil
-}
-
-// OnSendTaskSubscribe handles sending a task and subscribing to updates. (deprecated)
-func (m *mockTaskManager) OnSendTaskSubscribe(
-	ctx context.Context, params protocol.SendTaskParams,
-) (<-chan protocol.TaskEvent, error) {
-	// Create a channel for events
-	eventCh := make(chan protocol.TaskEvent, 10)
-
-	// Create the task
-	task, err := m.OnSendTask(ctx, params)
-	if err != nil {
-		close(eventCh)
-		return nil, err
-	}
-
-	// For a mock implementation, just send one event with the current status and close the channel
-	go func() {
-		defer close(eventCh)
-
-		// Send the current task status
-		final := true
-		event := &protocol.TaskStatusUpdateEvent{
-			TaskID: task.ID,
-			Status: task.Status,
-			Final:  final,
-		}
-
-		// Try to send the event, but don't block forever
-		select {
-		case eventCh <- event:
-			// Event sent successfully
-		case <-ctx.Done():
-			// Context was canceled
-		}
-	}()
-
-	return eventCh, nil
 }
 
 // mockTaskHandle implements the TaskHandle interface.
