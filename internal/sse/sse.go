@@ -30,11 +30,23 @@ type EventReader struct {
 	scanner *bufio.Scanner
 }
 
+type Option func(*EventReader)
+
+func WithBuffer(initialBuf []byte, maxBufSize int) Option {
+	return func(reader *EventReader) {
+		reader.scanner.Buffer(initialBuf, maxBufSize)
+	}
+}
+
 // NewEventReader creates a new reader for SSE events.
 // Exported function.
-func NewEventReader(r io.Reader) *EventReader {
+func NewEventReader(r io.Reader, opts ...Option) *EventReader {
 	scanner := bufio.NewScanner(r)
-	return &EventReader{scanner: scanner}
+	reader := &EventReader{scanner: scanner}
+	for _, opt := range opts {
+		opt(reader)
+	}
+	return reader
 }
 
 // ReadEvent reads the next complete event from the stream.

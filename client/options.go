@@ -32,6 +32,13 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
+func WithBuffer(initialBufSize, maxBufSize int) Option {
+	return func(c *A2AClient) {
+		c.initialBufSize = initialBufSize
+		c.maxBufSize = maxBufSize
+	}
+}
+
 // WithTimeout sets the timeout for the underlying http.Client.
 // If a custom client was provided via WithHTTPClient, this modifies its timeout.
 func WithTimeout(timeout time.Duration) Option {
