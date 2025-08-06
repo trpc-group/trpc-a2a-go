@@ -8,6 +8,7 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -39,6 +40,9 @@ type A2AClient struct {
 	userAgent      string              // User-Agent header string.
 	authProvider   auth.ClientProvider // Authentication provider.
 	httpReqHandler HTTPReqHandler      // Custom HTTP request handler.
+
+	maxBufSize     int
+	initialBufSize int
 }
 
 // NewA2AClient creates a new A2A client targeting the specified agentURL.
@@ -60,6 +64,8 @@ func NewA2AClient(agentURL string, opts ...Option) (*A2AClient, error) {
 		},
 		userAgent:      defaultUserAgent,
 		httpReqHandler: &httpRequestHandler{},
+		initialBufSize: 4096,
+		maxBufSize:     bufio.MaxScanTokenSize * 10,
 	}
 	// Apply functional options.
 	for _, opt := range opts {
@@ -139,7 +145,7 @@ func (c *A2AClient) ResubscribeTask(
 	// Create the channel to send events back to the caller.
 	eventsChan := make(chan protocol.StreamingMessageEvent, 10) // Buffered channel.
 	// Start a goroutine to read from the SSE stream.
-	go processSSEStream(ctx, resp, params.ID, eventsChan)
+	go c.processSSEStream(ctx, resp, params.ID, eventsChan)
 	return eventsChan, nil
 }
 
@@ -161,7 +167,7 @@ func (c *A2AClient) StreamMessage(
 	}
 	eventsChan := make(chan protocol.StreamingMessageEvent, 10) // Buffered channel.
 	// Start a goroutine to read from the SSE stream.
-	go processSSEStream(ctx, resp, params.RPCID, eventsChan)
+	go c.processSSEStream(ctx, resp, params.RPCID, eventsChan)
 	return eventsChan, nil
 }
 
@@ -220,7 +226,7 @@ func (c *A2AClient) sendA2AStreamRequest(ctx context.Context, id, method string,
 // processSSEStream reads Server-Sent Events from the response body and sends them
 // onto the provided channel. It handles closing the channel and response body.
 // Runs in its own goroutine.
-func processSSEStream(
+func (c *A2AClient) processSSEStream(
 	ctx context.Context,
 	resp *http.Response,
 	reqID string,
@@ -230,7 +236,7 @@ func processSSEStream(
 	defer resp.Body.Close()
 	defer close(eventsChan)
 
-	reader := sse.NewEventReader(resp.Body)
+	reader := sse.NewEventReader(resp.Body, sse.WithBuffer(make([]byte, c.initialBufSize), c.maxBufSize))
 	log.Debugf("SSE Processor started for request %s", reqID)
 	for {
 		select {
