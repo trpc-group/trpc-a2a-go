@@ -30,8 +30,11 @@ type EventReader struct {
 	scanner *bufio.Scanner
 }
 
+// Option is a function that can be used to configure the EventReader.
 type Option func(*EventReader)
 
+// WithBuffer configures the buffer for the EventReader.
+// It sets the initial buffer size and the maximum buffer size.
 func WithBuffer(initialBuf []byte, maxBufSize int) Option {
 	return func(reader *EventReader) {
 		reader.scanner.Buffer(initialBuf, maxBufSize)
