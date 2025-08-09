@@ -16,7 +16,7 @@ managed:
   override:
     - file_option: go_package
       path: a2a.proto
-      value: github.com/a2aproject/a2a/grpc
+      value: trpc.group/trpc-a2a-go/protocol/a2apb
 
 plugins:
   - remote: buf.build/protocolbuffers/go

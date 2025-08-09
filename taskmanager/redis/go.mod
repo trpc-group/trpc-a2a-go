@@ -6,6 +6,7 @@ replace trpc.group/trpc-go/trpc-a2a-go => ../../
 
 require (
 	github.com/redis/go-redis/v9 v9.10.0
+	google.golang.org/protobuf v1.36.6
 	trpc.group/trpc-go/trpc-a2a-go v0.0.3
 )
 
@@ -33,5 +34,4 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20250707201910-8d1bb00bc6a7 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250715232539-7130f93afb79 // indirect
 	google.golang.org/grpc v1.73.0 // indirect
-	google.golang.org/protobuf v1.36.6 // indirect
 )
