@@ -25,6 +25,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/client"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	v1 "trpc.group/trpc-go/trpc-a2a-go/protocol/a2apb"
 	"trpc.group/trpc-go/trpc-a2a-go/server"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
@@ -91,7 +92,7 @@ func TestJWTAuthentication(t *testing.T) {
 	// Get the processed message to verify it was processed
 	resultMessage, ok := messageResult.Result.(*protocol.Message)
 	require.True(t, ok, "Expected Message result")
-	processedMessage, exists := taskMgr.(*mockTaskManager).messages[resultMessage.MessageID]
+	processedMessage, exists := taskMgr.(*mockTaskManager).messages[resultMessage.MessageId]
 	require.True(t, exists, "Failed to get processed message")
 	assert.NotNil(t, processedMessage, "Processed message should not be nil")
 }
@@ -145,7 +146,7 @@ func TestAPIKeyAuthentication(t *testing.T) {
 	// Get the processed message to verify it was processed
 	resultMessage, ok := messageResult.Result.(*protocol.Message)
 	require.True(t, ok, "Expected Message result")
-	processedMessage, exists := taskMgr.(*mockTaskManager).messages[resultMessage.MessageID]
+	processedMessage, exists := taskMgr.(*mockTaskManager).messages[resultMessage.MessageId]
 	require.True(t, exists, "Failed to get processed message")
 	assert.NotNil(t, processedMessage, "Processed message should not be nil")
 }
@@ -428,11 +429,16 @@ func (t *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 // createTextMessage creates a simple text message for testing.
 func createTextMessage(text string) protocol.Message {
 	return protocol.Message{
-		Kind:      protocol.KindMessage,
-		MessageID: fmt.Sprintf("msg-%d", time.Now().UnixNano()),
-		Role:      protocol.MessageRoleUser,
-		Parts: []protocol.Part{
-			protocol.NewTextPart(text),
+		Message: &v1.Message{
+			MessageId: fmt.Sprintf("msg-%d", time.Now().UnixNano()),
+			Role:      v1.Role_ROLE_USER,
+			Content: []*v1.Part{
+				{
+					Part: &v1.Part_Text{
+						Text: text,
+					},
+				},
+			},
 		},
 	}
 }
@@ -468,7 +474,7 @@ func setupAuthServer(t *testing.T, provider auth.Provider) (taskmanager.TaskMana
 type mockTaskManager struct {
 	processor   taskmanager.MessageProcessor
 	tasks       map[string]*protocol.Task
-	pushConfigs map[string]protocol.PushNotificationConfig
+	pushConfigs map[string]*v1.PushNotificationConfig
 	messages    map[string]*protocol.Message
 }
 
@@ -479,7 +485,7 @@ func newMockTaskManager(processor taskmanager.MessageProcessor) *mockTaskManager
 	return &mockTaskManager{
 		processor:   processor,
 		tasks:       make(map[string]*protocol.Task),
-		pushConfigs: make(map[string]protocol.PushNotificationConfig),
+		pushConfigs: make(map[string]*v1.PushNotificationConfig),
 		messages:    make(map[string]*protocol.Message),
 	}
 }
@@ -498,7 +504,7 @@ func (m *mockTaskManager) OnSendMessage(
 	ctx context.Context, request protocol.SendMessageParams,
 ) (*protocol.MessageResult, error) {
 	// Store the message
-	m.messages[request.Message.MessageID] = &request.Message
+	m.messages[request.Message.MessageId] = &request.Message
 
 	// Create a simple message result
 	return &protocol.MessageResult{
@@ -511,7 +517,7 @@ func (m *mockTaskManager) OnSendMessageStream(
 	ctx context.Context, request protocol.SendMessageParams,
 ) (<-chan protocol.StreamingMessageEvent, error) {
 	// Store the message
-	m.messages[request.Message.MessageID] = &request.Message
+	m.messages[request.Message.MessageId] = &request.Message
 
 	// Create a channel for events
 	eventCh := make(chan protocol.StreamingMessageEvent, 10)
@@ -546,7 +552,7 @@ func (m *mockTaskManager) OnGetTask(
 
 // OnPushNotificationSet sets a push notification configuration for a task.
 func (m *mockTaskManager) OnPushNotificationSet(
-	ctx context.Context, params protocol.TaskPushNotificationConfig,
+	ctx context.Context, params *protocol.TaskPushNotificationConfig,
 ) (*protocol.TaskPushNotificationConfig, error) {
 	_, err := m.Task(params.TaskID)
 	if err != nil {
@@ -554,7 +560,7 @@ func (m *mockTaskManager) OnPushNotificationSet(
 	}
 
 	m.pushConfigs[params.TaskID] = params.PushNotificationConfig
-	return &params, nil
+	return params, nil
 }
 
 // OnPushNotificationGet gets a push notification configuration for a task.
@@ -572,8 +578,10 @@ func (m *mockTaskManager) OnPushNotificationGet(
 	}
 
 	return &protocol.TaskPushNotificationConfig{
-		TaskID:                 params.ID,
-		PushNotificationConfig: config,
+		TaskID: params.ID,
+		TaskPushNotificationConfig: &v1.TaskPushNotificationConfig{
+			PushNotificationConfig: config,
+		},
 	}, nil
 }
 
@@ -595,11 +603,7 @@ func (m *mockTaskManager) OnResubscribe(
 
 		// Send the current task status
 		final := true
-		event := protocol.TaskStatusUpdateEvent{
-			TaskID: task.ID,
-			Status: task.Status,
-			Final:  final,
-		}
+		event := protocol.NewTaskStatusUpdateEvent(task.Id, task.ContextId, task.Status, final)
 
 		// Try to send the event, but don't block forever
 		select {
@@ -649,7 +653,7 @@ func (h *mockTaskHandle) UpdateStatus(state protocol.TaskState, message *protoco
 
 	task.Status.State = state
 	if message != nil {
-		task.Status.Message = message
+		task.Status.Update = message.Message
 	}
 
 	h.manager.tasks[h.taskID] = task
@@ -663,7 +667,7 @@ func (h *mockTaskHandle) AddArtifact(artifact protocol.Artifact) error {
 		return err
 	}
 
-	task.Artifacts = append(task.Artifacts, artifact)
+	task.Artifacts = append(task.Artifacts, artifact.Artifact)
 	h.manager.tasks[h.taskID] = task
 	return nil
 }
@@ -674,7 +678,7 @@ func (h *mockTaskHandle) IsStreamingRequest() bool {
 	// In the mock implementation, we'll check for subscribers as a proxy
 	// for determining if this is a streaming request
 	for _, sub := range h.manager.tasks {
-		if sub.ID == h.taskID {
+		if sub.Id == h.taskID {
 			// For testing purposes, assume it's streaming if the task exists
 			// This is a simplification for the mock
 			return true
@@ -689,7 +693,7 @@ func (h *mockTaskHandle) GetContextID() *string {
 	if err != nil {
 		return nil
 	}
-	return &task.ContextID
+	return &task.ContextId
 }
 
 // AddResponse adds a response to a task.
@@ -700,9 +704,9 @@ func (h *mockTaskHandle) AddResponse(response protocol.Message) error {
 	}
 
 	if task.History == nil {
-		task.History = []protocol.Message{}
+		task.History = []*v1.Message{}
 	}
-	task.History = append(task.History, response)
+	task.History = append(task.History, response.Message)
 	h.manager.tasks[h.taskID] = task
 	return nil
 }
@@ -717,15 +721,24 @@ func (p *echoProcessor) ProcessMessage(
 	ctx context.Context, msg protocol.Message, opts taskmanager.ProcessOptions, handle taskmanager.TaskHandler,
 ) (*taskmanager.MessageProcessingResult, error) {
 	// Create a response that echoes back the message
-	textPart, ok := msg.Parts[0].(protocol.TextPart)
-	if !ok {
-		return nil, fmt.Errorf("expected TextPart, got %T", msg.Parts[0])
+	var text string
+	if msg.Message != nil && len(msg.Message.Content) > 0 {
+		text = msg.Message.Content[0].GetText()
+	}
+	if text == "" {
+		return nil, fmt.Errorf("no text content found in message")
 	}
 
 	response := protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
-			protocol.NewTextPart(fmt.Sprintf("Echo: %s", textPart.Text)),
+		Message: &v1.Message{
+			Role: v1.Role_ROLE_AGENT,
+			Content: []*v1.Part{
+				{
+					Part: &v1.Part_Text{
+						Text: fmt.Sprintf("Echo: %s", text),
+					},
+				},
+			},
 		},
 	}
 

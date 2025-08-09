@@ -20,6 +20,7 @@ import (
 
 	"trpc.group/trpc-go/trpc-a2a-go/client"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	v1 "trpc.group/trpc-go/trpc-a2a-go/protocol/a2apb"
 	"trpc.group/trpc-go/trpc-a2a-go/server"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
@@ -58,13 +59,13 @@ func (p *testProcessor) ProcessMessage(
 	handle taskmanager.TaskHandler,
 ) (*taskmanager.MessageProcessingResult, error) {
 	// Extract input text from the message
-	inputText := getTextPartContent(message.Parts)
+	inputText := getTextPartContent(message.Message.Content)
 	if inputText == "" {
 		return nil, fmt.Errorf("no text content found in message")
 	}
 
 	// Create a task
-	taskID, err := handle.BuildTask(message.TaskID, message.ContextID)
+	taskID, err := handle.BuildTask(&message.TaskId, &message.ContextId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build task: %w", err)
 	}
@@ -124,9 +125,15 @@ func (p *testProcessor) processTask(
 		}
 		chunk := reversedText[i:end]
 		statusMsg := &protocol.Message{
-			Role: protocol.MessageRoleAgent,
-			Parts: []protocol.Part{
-				protocol.NewTextPart(fmt.Sprintf("Processing chunk: %s", chunk)),
+			Message: &v1.Message{
+				Role: v1.Role_ROLE_AGENT,
+				Content: []*v1.Part{
+					{
+						Part: &v1.Part_Text{
+							Text: fmt.Sprintf("Processing chunk: %s", chunk),
+						},
+					},
+				},
 			},
 		}
 
@@ -139,10 +146,16 @@ func (p *testProcessor) processTask(
 
 	// Send the final artifact containing the full reversed text
 	finalArtifact := protocol.Artifact{
-		Name:        stringPtr("Processed Text"),
-		Description: stringPtr("The reversed input text."),
-		Parts: []protocol.Part{
-			protocol.NewTextPart(reversedText),
+		Artifact: &v1.Artifact{
+			Name:        "Processed Text",
+			Description: "The reversed input text.",
+			Parts: []*v1.Part{
+				{
+					Part: &v1.Part_Text{
+						Text: reversedText,
+					},
+				},
+			},
 		},
 	}
 
@@ -153,11 +166,15 @@ func (p *testProcessor) processTask(
 
 	// Send final 'Completed' status
 	completionMsg := &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
-			protocol.NewTextPart(
-				fmt.Sprintf("Task %s completed successfully. Result: %s", taskID, reversedText),
-			),
+		Message: &v1.Message{
+			Role: v1.Role_ROLE_AGENT,
+			Content: []*v1.Part{
+				{
+					Part: &v1.Part_Text{
+						Text: fmt.Sprintf("Task %s completed successfully. Result: %s", taskID, reversedText),
+					},
+				},
+			},
 		},
 	}
 
@@ -190,7 +207,7 @@ func (m *testBasicTaskManager) OnSendMessage(
 	ctx context.Context,
 	params protocol.SendMessageParams,
 ) (*protocol.MessageResult, error) {
-	log.Printf("[Test TM Wrapper] OnSendMessage called for %s, delegating to base.", params.Message.MessageID)
+	log.Printf("[Test TM Wrapper] OnSendMessage called for %s, delegating to base.", params.Message.MessageId)
 	return m.MemoryTaskManager.OnSendMessage(ctx, params)
 }
 
@@ -199,7 +216,7 @@ func (m *testBasicTaskManager) OnSendMessageStream(
 	ctx context.Context,
 	params protocol.SendMessageParams,
 ) (<-chan protocol.StreamingMessageEvent, error) {
-	log.Printf("[Test TM Wrapper] OnSendMessageStream called for %s, delegating to base.", params.Message.MessageID)
+	log.Printf("[Test TM Wrapper] OnSendMessageStream called for %s, delegating to base.", params.Message.MessageId)
 	return m.MemoryTaskManager.OnSendMessageStream(ctx, params)
 }
 
@@ -215,7 +232,7 @@ func (m *testBasicTaskManager) OnResubscribe(
 // OnPushNotificationSet delegates to the composed MemoryTaskManager.
 func (m *testBasicTaskManager) OnPushNotificationSet(
 	ctx context.Context,
-	params protocol.TaskPushNotificationConfig,
+	params *protocol.TaskPushNotificationConfig,
 ) (*protocol.TaskPushNotificationConfig, error) {
 	log.Printf("[Test TM Wrapper] OnPushNotificationSet called for %s, delegating to base.", params.TaskID)
 	return m.MemoryTaskManager.OnPushNotificationSet(ctx, params)
@@ -382,9 +399,9 @@ func collectAllStreamingEvents(eventChan <-chan protocol.StreamingMessageEvent) 
 }
 
 // getTextPartContent extracts text content from parts of a message.
-func getTextPartContent(parts []protocol.Part) string {
+func getTextPartContent(parts []*v1.Part) string {
 	for _, part := range parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
+		if textPart, ok := part.Part.(*v1.Part_Text); ok {
 			return textPart.Text
 		}
 	}
@@ -405,15 +422,22 @@ func TestE2E_MessageAPI_Streaming(t *testing.T) {
 	contextID := protocol.GenerateContextID()
 	taskID := protocol.GenerateMessageID()
 
-	// Create message using the NewMessageWithContext constructor
-	message := protocol.NewMessageWithContext(
-		protocol.MessageRoleUser,
-		[]protocol.Part{
-			protocol.NewTextPart(inputText),
+	// Create message using v1 protobuf structures
+	message := protocol.Message{
+		Message: &v1.Message{
+			MessageId: protocol.GenerateMessageID(),
+			TaskId:    taskID,
+			ContextId: contextID,
+			Role:      v1.Role_ROLE_USER,
+			Content: []*v1.Part{
+				{
+					Part: &v1.Part_Text{
+						Text: inputText,
+					},
+				},
+			},
 		},
-		&taskID,
-		&contextID,
-	)
+	}
 
 	// Subscribe to streaming message events using the new API
 	eventChan, err := helper.client.StreamMessage(
@@ -444,8 +468,8 @@ func TestE2E_MessageAPI_Resubscribe(t *testing.T) {
 	// Create message using the NewMessageWithContext constructor
 	message := protocol.NewMessageWithContext(
 		protocol.MessageRoleUser,
-		[]protocol.Part{
-			protocol.NewTextPart(inputText),
+		[]*v1.Part{
+			{Part: protocol.NewTextPart(inputText)},
 		},
 		&taskID,
 		&contextID,
@@ -488,16 +512,16 @@ func checkStreamingEvents(t *testing.T, events []protocol.StreamingMessageEvent)
 		case *protocol.TaskStatusUpdateEvent:
 			if result.Status.State == protocol.TaskStateWorking {
 				hasWorkingStatus = true
-				require.NotNil(t, result.Status.Message, "Working status should have a message")
-				require.NotEmpty(t, result.Status.Message.Parts, "Working status message should have parts")
-				textPart, ok := result.Status.Message.Parts[0].(*protocol.TextPart)
+				require.NotNil(t, result.Status.Update, "Working status should have a message")
+				require.NotEmpty(t, result.Status.Update.Content, "Working status message should have parts")
+				textPart, ok := result.Status.Update.Content[0].Part.(*v1.Part_Text)
 				require.True(t, ok, "Working status message should have text part")
 				require.Contains(t, textPart.Text, "Processing chunk:", "Working status should contain processing info")
 			} else if result.Status.State == protocol.TaskStateCompleted {
 				hasCompletedStatus = true
-				require.NotNil(t, result.Status.Message, "Completed status should have a message")
-				require.NotEmpty(t, result.Status.Message.Parts, "Completed status message should have parts")
-				textPart, ok := result.Status.Message.Parts[0].(*protocol.TextPart)
+				require.NotNil(t, result.Status.Update, "Completed status should have a message")
+				require.NotEmpty(t, result.Status.Update.Content, "Completed status message should have parts")
+				textPart, ok := result.Status.Update.Content[0].Part.(*v1.Part_Text)
 				require.True(t, ok, "Completed status message should have text part")
 				require.Contains(t, textPart.Text, "completed successfully", "Completed status should contain success info")
 				require.Contains(t, textPart.Text, "!dlrow olleH", "Completed status should contain reversed text")
@@ -505,9 +529,9 @@ func checkStreamingEvents(t *testing.T, events []protocol.StreamingMessageEvent)
 		case *protocol.TaskArtifactUpdateEvent:
 			hasArtifact = true
 			require.NotNil(t, result.Artifact.Name, "Artifact should have a name")
-			require.Equal(t, "Processed Text", *result.Artifact.Name, "Artifact name should match")
+			require.Equal(t, "Processed Text", result.Artifact.Name, "Artifact name should match")
 			require.NotEmpty(t, result.Artifact.Parts, "Artifact should have parts")
-			textPart, ok := result.Artifact.Parts[0].(*protocol.TextPart)
+			textPart, ok := result.Artifact.Parts[0].Part.(*v1.Part_Text)
 			require.True(t, ok, "Artifact should have text part")
 			require.Equal(t, "!dlrow olleH", textPart.Text, "Artifact should contain reversed text")
 		}
@@ -533,15 +557,22 @@ func TestE2E_MessageAPI_NonStreaming(t *testing.T) {
 	contextID := protocol.GenerateContextID()
 	taskID := protocol.GenerateMessageID()
 
-	// Create message using the NewMessageWithContext constructor
-	message := protocol.NewMessageWithContext(
-		protocol.MessageRoleUser,
-		[]protocol.Part{
-			protocol.NewTextPart(inputText),
+	// Create message using v1 protobuf structures
+	message := protocol.Message{
+		Message: &v1.Message{
+			MessageId: protocol.GenerateMessageID(),
+			TaskId:    taskID,
+			ContextId: contextID,
+			Role:      v1.Role_ROLE_USER,
+			Content: []*v1.Part{
+				{
+					Part: &v1.Part_Text{
+						Text: inputText,
+					},
+				},
+			},
 		},
-		&taskID,
-		&contextID,
-	)
+	}
 
 	// Send message using the new non-streaming API
 	result, err := helper.client.SendMessage(
@@ -563,7 +594,7 @@ func TestE2E_MessageAPI_NonStreaming(t *testing.T) {
 	// Get the final task state
 	finalTask, err := helper.client.GetTasks(
 		context.Background(),
-		protocol.TaskQueryParams{ID: task.ID},
+		protocol.TaskQueryParams{ID: task.Id},
 	)
 	require.NoError(t, err)
 	require.Equal(t, protocol.TaskStateCompleted, finalTask.Status.State)
