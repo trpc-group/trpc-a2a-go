@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.2.3 (2025-08-15)
+
+- Add metadata to TaskHandler interfaces (#70)
+- Remove deprecated field (#66)
+- Make bufio scanner buffer configurable (#73)
+
+Breaking Changes:
++ trpc.group/trpc-go/trpc-a2a-go/protocol
+    + MethodTasksPushNotificationGet: removed
+    + MethodTasksPushNotificationSet: removed
+    + MethodTasksSend: removed
+    + MethodTasksSendSubscribe: removed
+    + SendTaskParams: removed
+    + TaskEvent: removed
+
++ trpc.group/trpc-go/trpc-a2a-go/client
+    + (*A2AClient).SendTasks: removed
+    + (*A2AClient).StreamTask: removed
+
++ trpc.group/trpc-go/trpc-a2a-go/taskmanager
+    + (*MemoryTaskManager).OnSendTask: removed
+    + (*MemoryTaskManager).OnSendTaskSubscribe: removed
+    + TaskManager.OnSendTask: removed
+    + TaskManager.OnSendTaskSubscribe: removed
+
++ trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis
+    + (*TaskManager).OnSendTask: removed
+    + (*TaskManager).OnSendTaskSubscribe: removed
+
+
 ## 0.2.2 (2025-07-28)
 
 - Redis TaskManager use UniversalClient interface (#59)
