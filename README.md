@@ -11,7 +11,11 @@ This is tRPC group's Go implementation of the [A2A protocol](https://google.gith
 
 ## Related Projects
 
-If you're interested in **streamable MCP development**, check out [**trpc-mcp-go**](https://github.com/trpc-group/trpc-mcp-go) - our Go implementation of the Model Context Protocol (MCP) with streaming capabilities.
+tRPC AI ecosystem
+
++ [**trpc-agent-go**](https://github.com/trpc-group/trpc-agent-go) : A powerful Go framework for building intelligent agent systems with large language models (LLMs), hierarchical planners, memory, telemetry and a rich tool ecosystem. If you want to create autonomous or semi-autonomous agents that reason, call tools, collaborate with sub-agents and keep long-term state, [**tRPC-Agent-Go**](https://github.com/trpc-group/trpc-agent-go) has you covered.
+
++ [**trpc-mcp-go**](https://github.com/trpc-group/trpc-mcp-go) : If you're interested in **streamable MCP development**, check out [**trpc-mcp-go**](https://github.com/trpc-group/trpc-mcp-go) - our Go implementation of the Model Context Protocol (MCP) with streaming capabilities.
 
 ## Table of Contents
 
