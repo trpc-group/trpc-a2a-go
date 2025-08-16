@@ -577,11 +577,13 @@ func (s *A2AServer) handleTasksResubscribe(ctx context.Context, w http.ResponseW
 
 // handleMessageSend handles the message_send method.
 func (s *A2AServer) handleMessageSend(ctx context.Context, w http.ResponseWriter, request jsonrpc.Request) {
+	log.Infof("send params: %v", string(request.Params))
 	var params protocol.SendMessageParams
 	if err := s.unmarshalParams(request.Params, &params); err != nil {
 		s.writeJSONRPCError(w, request.ID, err)
 		return
 	}
+	log.Infof("params: %#v", params)
 	// Delegate to the task manager.
 	message, err := s.taskManager.OnSendMessage(ctx, params)
 	if err != nil {

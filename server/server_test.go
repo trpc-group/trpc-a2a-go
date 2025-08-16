@@ -420,9 +420,7 @@ func TestA2ASrv_HandleMessageStream_SSE(t *testing.T) {
 			continue
 		}
 
-		if event != nil {
-			receivedEvents = append(receivedEvents, *event)
-		}
+		receivedEvents = append(receivedEvents, *event)
 
 		// Check context cancellation (e.g., test timeout)
 		if ctx.Err() != nil {

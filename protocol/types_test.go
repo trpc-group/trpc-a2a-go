@@ -13,15 +13,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	v1 "trpc.group/trpc-go/trpc-a2a-go/protocol/a2apb"
 )
-
-// Helper function to get a pointer to a boolean.
-func boolPtr(b bool) *bool {
-	return &b
-}
 
 // Helper function to create string pointers
 func stringPtr(s string) *string {
@@ -31,21 +27,19 @@ func stringPtr(s string) *string {
 // Test marshalling of concrete types
 func TestPartConcreteType_MarshalJSON(t *testing.T) {
 	t.Run("TextPart", func(t *testing.T) {
-		part := NewTextPart("Hello")
-		jsonData, err := json.Marshal(part)
+		part := &v1.Part{Part: NewTextPart("Hello")}
+		jsonData, err := protojson.Marshal(part)
 		require.NoError(t, err)
-		assert.JSONEq(t, `{"kind":"text","text":"Hello"}`, string(jsonData))
+		assert.JSONEq(t, `{"text":"Hello"}`, string(jsonData))
 	})
 
 	t.Run("DataPart", func(t *testing.T) {
 		payload := map[string]any{"a": 1}
-		d, _ := structpb.NewStruct(payload)
-		part := DataPart{Data: &v1.DataPart{
-			Data: d,
-		}}
-		jsonData, err := json.Marshal(part)
+		d, _ := NewDataPart(payload)
+		part := &v1.Part{Part: &v1.Part_Data{Data: &d}}
+		jsonData, err := protojson.Marshal(part)
 		require.NoError(t, err)
-		assert.JSONEq(t, `{"kind":"data","data":{"a":1}}`, string(jsonData))
+		assert.JSONEq(t, `{"data": {"data":{"a":1}}}`, string(jsonData))
 	})
 
 	// FilePart marshalling test can be added if needed
@@ -55,11 +49,19 @@ func TestPartConcreteType_MarshalJSON(t *testing.T) {
 // This specifically tests the custom UnmarshalJSON methods.
 func TestPartIfaceUnmarshalJSONCont(t *testing.T) {
 	jsonData := `{
-		"role": "user",
-		"parts": [
-			{"kind": "text", "text": "part1"},
-			{"kind": "data", "data": {"val": true}},
-			{"kind": "text", "text": "part3"}
+		"role": 1,
+		"content": [
+			{
+				 "text": "part1"
+			},
+			{
+			"data": {
+    			"data": {"val":true}
+       	    }
+         	},
+			{
+				"text": "part3"
+			}
 		]
 	}`
 
@@ -68,14 +70,14 @@ func TestPartIfaceUnmarshalJSONCont(t *testing.T) {
 	require.NoError(t, err, "Unmarshal into Message should succeed via custom UnmarshalJSON")
 
 	require.Len(t, msg.Content, 3)
-	require.IsType(t, &TextPart{}, msg.Content[0])
-	assert.Equal(t, "part1", msg.Content[0].Part.(*TextPart).Text)
+	require.IsType(t, &Part{}, msg.Content[0])
+	assert.Equal(t, "part1", msg.Content[0].GetText())
 
-	require.IsType(t, &DataPart{}, msg.Content[1])
-	assert.Equal(t, map[string]interface{}{"val": true}, msg.Content[1].Part.(*DataPart).Data)
+	require.IsType(t, &Part{}, msg.Content[1])
+	assert.Equal(t, map[string]any{"val": true}, msg.Content[1].GetData().GetData().AsMap())
 
-	require.IsType(t, &TextPart{}, msg.Content[2])
-	assert.Equal(t, "part3", msg.Content[2].Part.(*TextPart).Text)
+	require.IsType(t, &Part{}, msg.Content[2])
+	assert.Equal(t, "part3", msg.Content[2].GetText())
 }
 
 // Removed TestArtifactPart_MarshalUnmarshalJSON as ArtifactPart type doesn't exist
@@ -150,7 +152,6 @@ func TestTaskEvent_IsFinal(t *testing.T) {
 			}
 
 			t.Fatal("unexpected event type")
-
 		})
 	}
 }
@@ -161,20 +162,20 @@ func TestTaskState(t *testing.T) {
 		state    TaskState
 		expected string
 	}{
-		{TaskStateSubmitted, "submitted"},
-		{TaskStateWorking, "working"},
-		{TaskStateCompleted, "completed"},
-		{TaskStateCanceled, "canceled"},
-		{TaskStateFailed, "failed"},
-		{TaskStateRejected, "rejected"},
-		{TaskStateAuthRequired, "auth-required"},
-		{TaskStateUnknown, "unknown"},
-		{TaskStateInputRequired, "input-required"},
+		{TaskStateSubmitted, "TASK_STATE_SUBMITTED"},
+		{TaskStateWorking, "TASK_STATE_WORKING"},
+		{TaskStateCompleted, "TASK_STATE_COMPLETED"},
+		{TaskStateCanceled, "TASK_STATE_CANCELLED"},
+		{TaskStateFailed, "TASK_STATE_FAILED"},
+		{TaskStateRejected, "TASK_STATE_REJECTED"},
+		{TaskStateAuthRequired, "TASK_STATE_AUTH_REQUIRED"},
+		{TaskStateUnknown, "TASK_STATE_UNSPECIFIED"},
+		{TaskStateInputRequired, "TASK_STATE_INPUT_REQUIRED"},
 	}
 
 	for _, test := range tests {
 		t.Run(string(test.state), func(t *testing.T) {
-			assert.Equal(t, test.expected, string(test.state))
+			assert.Equal(t, test.expected, test.state.String())
 		})
 	}
 }
@@ -201,7 +202,7 @@ func TestMessageJSON(t *testing.T) {
 	original := NewMessage(MessageRoleUser, []*v1.Part{textPart, filePart})
 
 	// Marshal the message
-	data, err := json.Marshal(original)
+	data, err := protojson.Marshal(original)
 	require.NoError(t, err)
 
 	// Unmarshal back to a message
@@ -335,7 +336,7 @@ func TestArtifact(t *testing.T) {
 	assert.NotEmpty(t, artifact.ArtifactId)
 
 	// Test JSON marshaling
-	data, err := json.Marshal(artifact)
+	data, err := protojson.Marshal(artifact)
 	require.NoError(t, err)
 
 	// Test JSON unmarshaling
@@ -470,7 +471,7 @@ func TestPartDeserialization(t *testing.T) {
 	t.Run("TextPart", func(t *testing.T) {
 		jsonData := `{"text":"Hello"}`
 		var part v1.Part
-		err := json.Unmarshal([]byte(jsonData), &part)
+		err := protojson.Unmarshal([]byte(jsonData), &part)
 		assert.NoError(t, err)
 
 		textPart := part.Part.(*v1.Part_Text)
@@ -481,19 +482,20 @@ func TestPartDeserialization(t *testing.T) {
 	t.Run("FilePart", func(t *testing.T) {
 		jsonData := `{"file":{"fileWithBytes":"SGVsbG8gV29ybGQ="}}`
 		var part v1.Part
-		err := json.Unmarshal([]byte(jsonData), &part)
+		err := protojson.Unmarshal([]byte(jsonData), &part)
 		assert.NoError(t, err)
 
 		filePart := part.Part.(*v1.Part_File)
 		fileWithBytes := filePart.File.File.(*v1.FilePart_FileWithBytes)
-		assert.Equal(t, "SGVsbG8gV29ybGQ=", string(fileWithBytes.FileWithBytes))
+		// decode_base64("SGVsbG8gV29ybGQ=")
+		assert.Equal(t, "Hello World", string(fileWithBytes.FileWithBytes))
 	})
 
 	// Test for DataPart
 	t.Run("DataPart", func(t *testing.T) {
 		jsonData := `{"data":{"data":{"key":"value","number":42}}}`
 		var part v1.Part
-		err := json.Unmarshal([]byte(jsonData), &part)
+		err := protojson.Unmarshal([]byte(jsonData), &part)
 		assert.NoError(t, err)
 
 		dataPart := part.Part.(*v1.Part_Data)
@@ -515,7 +517,7 @@ func TestMessage_MarshalJSON(t *testing.T) {
 		},
 	}
 
-	jsonData, err := json.Marshal(message)
+	jsonData, err := protojson.Marshal(message)
 	require.NoError(t, err)
 
 	var decodedMessage Message
@@ -530,7 +532,7 @@ func TestMessage_MarshalJSON(t *testing.T) {
 
 func TestMessage_UnmarshalJSON(t *testing.T) {
 	jsonData := `{
-	"role": "user",
+	"role": 1,
 	"content": [
 		{"text": "Hello"},
 		{"file": {"fileWithBytes": "SGVsbG8="}}
@@ -551,5 +553,5 @@ func TestMessage_UnmarshalJSON(t *testing.T) {
 	// Check second part (FilePart)
 	filePart := message.Content[1].Part.(*v1.Part_File)
 	fileWithBytes := filePart.File.File.(*v1.FilePart_FileWithBytes)
-	assert.Equal(t, "SGVsbG8=", string(fileWithBytes.FileWithBytes))
+	assert.Equal(t, "Hello", string(fileWithBytes.FileWithBytes))
 }
