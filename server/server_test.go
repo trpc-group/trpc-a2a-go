@@ -133,17 +133,9 @@ func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 	// --- Test message/send ---
 	t.Run("message/send success", func(t *testing.T) {
 		mockTM.sendMessageResponse = &protocol.MessageResult{
-			Result: &protocol.Message{
-				Message: &v1.Message{
-					MessageId: "msg-1",
-					Role:      protocol.MessageRoleUser,
-					Content: []*v1.Part{
-						{
-							Part: &v1.Part_Text{Text: "Response message"},
-						},
-					},
-				},
-			},
+			Result: protocol.NewMessage(v1.Role_ROLE_USER, []*protocol.Part{
+				{Part: protocol.NewTextPart("Response message")},
+			}),
 		}
 		mockTM.sendMessageError = nil
 
