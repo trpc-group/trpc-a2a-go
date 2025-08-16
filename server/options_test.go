@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"trpc.group/trpc-go/trpc-a2a-go/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	v1 "trpc.group/trpc-go/trpc-a2a-go/protocol/a2apb"
 )
 
 func TestWithCORSEnabled(t *testing.T) {
@@ -285,10 +286,19 @@ type optionsTestTaskManager struct{}
 func (m *optionsTestTaskManager) OnSendMessage(ctx context.Context, params protocol.SendMessageParams) (*protocol.MessageResult, error) {
 	return &protocol.MessageResult{
 		Result: &protocol.Message{
-			Kind:      "message",
-			MessageID: "test-message-id",
-			Role:      protocol.MessageRoleAgent,
-			Parts:     []protocol.Part{protocol.NewTextPart("test response")},
+			Message: &v1.Message{
+				MessageId: "test-message-id",
+				Role:      protocol.MessageRoleAgent,
+				Content: []*v1.Part{
+					{Part: &v1.Part_File{
+						File: &v1.FilePart{
+							File: &v1.FilePart_FileWithBytes{
+								FileWithBytes: []byte("test response"),
+							},
+						},
+					}},
+				},
+			},
 		},
 	}, nil
 }
@@ -309,15 +319,17 @@ func (m *optionsTestTaskManager) OnResubscribe(ctx context.Context, params proto
 	return nil, nil
 }
 
-func (m *optionsTestTaskManager) OnPushNotificationSet(ctx context.Context, params protocol.TaskPushNotificationConfig) (*protocol.TaskPushNotificationConfig, error) {
-	return &params, nil
+func (m *optionsTestTaskManager) OnPushNotificationSet(ctx context.Context, params *protocol.TaskPushNotificationConfig) (*protocol.TaskPushNotificationConfig, error) {
+	return params, nil
 }
 
 func (m *optionsTestTaskManager) OnPushNotificationGet(ctx context.Context, params protocol.TaskIDParams) (*protocol.TaskPushNotificationConfig, error) {
 	return &protocol.TaskPushNotificationConfig{
 		TaskID: params.ID,
-		PushNotificationConfig: protocol.PushNotificationConfig{
-			URL: "http://test.example.com/webhook",
+		TaskPushNotificationConfig: &v1.TaskPushNotificationConfig{
+			PushNotificationConfig: &v1.PushNotificationConfig{
+				Url: "http://test.example.com/webhook",
+			},
 		},
 	}, nil
 }

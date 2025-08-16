@@ -1,0 +1,30 @@
+# Ensure $GOBIN is in path and dependencies are installed:
+# > go install github.com/bufbuild/buf/cmd/buf@latest
+# > go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+# > go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+#
+# Then run:
+# > buf generate
+version: v2
+inputs:
+  - git_repo: https://github.com/a2aproject/A2A.git
+    ref: v0.2.6
+    subdir: specification/grpc
+
+managed:
+  enabled: true
+  override:
+    - file_option: go_package
+      path: a2a.proto
+      value: trpc.group/trpc-a2a-go/protocol/a2apb
+
+plugins:
+  - remote: buf.build/protocolbuffers/go
+    out: a2apb
+    opt:
+      - paths=source_relative
+
+  - remote: buf.build/grpc/go
+    out: a2apb
+    opt:
+      - paths=source_relative

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	v1 "trpc.group/trpc-go/trpc-a2a-go/protocol/a2apb"
 )
 
 // setupTestHandler creates a test handler for use in tests
@@ -24,17 +25,22 @@ func setupTestHandler(t *testing.T) (*memoryTaskHandler, *MemoryTaskManager) {
 
 	ctx := context.Background()
 	message := protocol.Message{
-		Role: protocol.MessageRoleUser,
-		Parts: []protocol.Part{
-			protocol.NewTextPart("Test message"),
+		Message: &v1.Message{
+			Role: protocol.MessageRoleUser,
+			Content: []*v1.Part{
+				{
+					Part: &v1.Part_Text{Text: "Test message"},
+				},
+			},
+			MessageId: protocol.GenerateMessageID(),
 		},
 	}
 
-	manager.storeMessage(message)
+	manager.storeMessage(message.Message)
 
 	handler := &memoryTaskHandler{
 		manager:   manager,
-		messageID: message.MessageID,
+		messageID: message.MessageId,
 		ctx:       ctx,
 	}
 
@@ -103,9 +109,13 @@ func TestMemoryTaskHandler_AddArtifact(t *testing.T) {
 
 	// Add artifact
 	artifact := protocol.Artifact{
-		ArtifactID: "test-artifact",
-		Parts: []protocol.Part{
-			protocol.NewTextPart("Artifact content"),
+		Artifact: &v1.Artifact{
+			ArtifactId: "test-artifact",
+			Parts: []*v1.Part{
+				{
+					Part: &v1.Part_Text{Text: "Artifact content"},
+				},
+			},
 		},
 	}
 
@@ -124,8 +134,8 @@ func TestMemoryTaskHandler_AddArtifact(t *testing.T) {
 		t.Error("Expected artifact to be added")
 	}
 
-	if retrievedTask.Task().Artifacts[0].ArtifactID != artifact.ArtifactID {
-		t.Errorf("Expected artifact ID %s, got %s", artifact.ArtifactID, retrievedTask.Task().Artifacts[0].ArtifactID)
+	if retrievedTask.Task().Artifacts[0].ArtifactId != artifact.ArtifactId {
+		t.Errorf("Expected artifact ID %s, got %s", artifact.ArtifactId, retrievedTask.Task().Artifacts[0].ArtifactId)
 	}
 }
 
@@ -171,8 +181,8 @@ func TestMemoryTaskHandler_GetTask(t *testing.T) {
 		t.Error("Expected task but got nil")
 	}
 
-	if retrievedTask.Task().ID != taskID {
-		t.Errorf("Expected task ID %s, got %s", taskID, retrievedTask.Task().ID)
+	if retrievedTask.Task().Id != taskID {
+		t.Errorf("Expected task ID %s, got %s", taskID, retrievedTask.Task().Id)
 	}
 }
 
@@ -203,11 +213,14 @@ func TestMemoryTaskHandler_GetMessageHistory(t *testing.T) {
 
 	// Create a message with context
 	contextID := "test-context"
-	contextMessage := protocol.Message{
-		Role:      protocol.MessageRoleUser,
-		ContextID: &contextID,
-		Parts: []protocol.Part{
-			protocol.NewTextPart("Context message"),
+	contextMessage := &v1.Message{
+		MessageId: "test-msg-id",
+		ContextId: contextID,
+		Role:      v1.Role_ROLE_USER,
+		Content: []*v1.Part{
+			{
+				Part: &v1.Part_Text{Text: "Context message"},
+			},
 		},
 	}
 
@@ -216,7 +229,7 @@ func TestMemoryTaskHandler_GetMessageHistory(t *testing.T) {
 	// Create handler with context message
 	contextHandler := &memoryTaskHandler{
 		manager:   manager,
-		messageID: contextMessage.MessageID,
+		messageID: contextMessage.MessageId,
 		ctx:       context.Background(),
 	}
 
@@ -230,7 +243,7 @@ func TestMemoryTaskHandler_GetMessageHistory(t *testing.T) {
 	// Should contain the context message
 	found := false
 	for _, msg := range history {
-		if msg.MessageID == contextMessage.MessageID {
+		if msg.MessageId == contextMessage.MessageId {
 			found = true
 			break
 		}
@@ -296,11 +309,14 @@ func TestMemoryTaskHandler_GetContextID(t *testing.T) {
 
 	// Create a message with context
 	contextID := "test-context-id"
-	contextMessage := protocol.Message{
-		Role:      protocol.MessageRoleUser,
-		ContextID: &contextID,
-		Parts: []protocol.Part{
-			protocol.NewTextPart("Context message"),
+	contextMessage := &v1.Message{
+		MessageId: "test-msg-id-2",
+		ContextId: contextID,
+		Role:      v1.Role_ROLE_USER,
+		Content: []*v1.Part{
+			{
+				Part: &v1.Part_Text{Text: "Context message"},
+			},
 		},
 	}
 
@@ -309,7 +325,7 @@ func TestMemoryTaskHandler_GetContextID(t *testing.T) {
 	// Create handler with context message
 	contextHandler := &memoryTaskHandler{
 		manager:   manager,
-		messageID: contextMessage.MessageID,
+		messageID: contextMessage.MessageId,
 		ctx:       context.Background(),
 	}
 
@@ -346,7 +362,9 @@ func TestTaskHandlerErrors(t *testing.T) {
 	t.Run("AddArtifact_NonExistentTask", func(t *testing.T) {
 		nonExistentTaskID := "non-existent-task"
 		artifact := protocol.Artifact{
-			ArtifactID: "test-artifact",
+			Artifact: &v1.Artifact{
+				ArtifactId: "test-artifact",
+			},
 		}
 
 		err := handler.AddArtifact(&nonExistentTaskID, artifact, false, true)
