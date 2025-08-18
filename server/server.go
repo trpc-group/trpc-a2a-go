@@ -284,7 +284,7 @@ func (s *A2AServer) parseJSONRPCRequest(w http.ResponseWriter, body io.ReadClose
 
 // routeJSONRPCMethod routes the request to the appropriate handler based on the method.
 func (s *A2AServer) routeJSONRPCMethod(ctx context.Context, w http.ResponseWriter, request jsonrpc.Request) {
-	log.Infof("Received JSON-RPC request (ID: %v, Method: %s)", request.ID, request.Method)
+	log.Debugf("Received JSON-RPC request (ID: %v, Method: %s)", request.ID, request.Method)
 
 	switch request.Method {
 
@@ -660,30 +660,9 @@ func handleSSEStream(
 	// Use request context to detect client disconnection.
 	clientClosed := ctx.Done()
 
-	// --- Event Forwarding Loop ---
-	for {
-		select {
-		case event, ok := <-eventsChan:
-			if !ok {
-				flusher.Flush()
-				return // End the handler.
-			}
-			if err := sendSSEEvent(w, rpcID, &event); err != nil {
-				if err == errUnknownEvent {
-					log.Warnf("Unknown event type received for request ID: %s: %T. Skipping.", rpcID, event)
-					continue
-				}
-				log.Errorf("Error writing SSE JSON-RPC event for request ID: %s (client likely disconnected): %v", rpcID, err)
-				return
-			}
-			// Flush the buffer to ensure the event is sent immediately.
-			flusher.Flush()
-		case <-clientClosed:
-			// Client disconnected (request context canceled).
-			log.Infof("SSE client disconnected for request ID: %s. Closing stream.", rpcID)
-			return // Exit the handler.
-		}
-	}
+	// Use optimized tunnel for batching events
+	tunnel := newSSETunnel(w, flusher, rpcID)
+	tunnel.start(ctx, eventsChan, clientClosed)
 }
 
 func sendSSEEvent(w http.ResponseWriter, rpcID string, event interface{}) error {
