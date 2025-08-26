@@ -43,6 +43,7 @@ type A2AClient struct {
 
 	maxBufSize     int
 	initialBufSize int
+	channelSize    int
 }
 
 // NewA2AClient creates a new A2A client targeting the specified agentURL.
@@ -66,6 +67,7 @@ func NewA2AClient(agentURL string, opts ...Option) (*A2AClient, error) {
 		httpReqHandler: &httpRequestHandler{},
 		initialBufSize: 4096,
 		maxBufSize:     bufio.MaxScanTokenSize * 10,
+		channelSize:    1024,
 	}
 	// Apply functional options.
 	for _, opt := range opts {
@@ -143,7 +145,7 @@ func (c *A2AClient) ResubscribeTask(
 		return nil, fmt.Errorf("a2aClient.ResubscribeTask: failed to build stream request: %w", err)
 	}
 	// Create the channel to send events back to the caller.
-	eventsChan := make(chan protocol.StreamingMessageEvent, 10) // Buffered channel.
+	eventsChan := make(chan protocol.StreamingMessageEvent, c.channelSize) // Buffered channel.
 	// Start a goroutine to read from the SSE stream.
 	go c.processSSEStream(ctx, resp, params.ID, eventsChan)
 	return eventsChan, nil
@@ -165,7 +167,7 @@ func (c *A2AClient) StreamMessage(
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.StreamMessage: failed to build stream request: %w", err)
 	}
-	eventsChan := make(chan protocol.StreamingMessageEvent, 10) // Buffered channel.
+	eventsChan := make(chan protocol.StreamingMessageEvent, c.channelSize) // Buffered channel.
 	// Start a goroutine to read from the SSE stream.
 	go c.processSSEStream(ctx, resp, params.RPCID, eventsChan)
 	return eventsChan, nil
