@@ -32,6 +32,14 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
+// WithChannelSize sets the size of the channel for the EventReader.
+// The default value is 1024.
+func WithChannelSize(channelSize int) Option {
+	return func(c *A2AClient) {
+		c.channelSize = channelSize
+	}
+}
+
 // WithBuffer configures the buffer for the EventReader.
 // It sets the initial buffer size and the maximum buffer size.
 func WithBuffer(initialBufSize, maxBufSize int) Option {

@@ -22,7 +22,7 @@ import (
 const defaultMaxHistoryLength = 100
 const defaultCleanupInterval = 30 * time.Second
 const defaultConversationTTL = 1 * time.Hour
-const defaultSubscriberBufferSize = 10
+const defaultSubscriberBufferSize = 1024
 
 // ConversationHistory stores conversation history information
 type ConversationHistory struct {

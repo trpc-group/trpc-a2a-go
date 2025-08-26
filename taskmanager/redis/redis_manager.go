@@ -34,7 +34,7 @@ const (
 
 	// Default configuration values.
 	defaultMaxHistoryLength         = 100
-	defaultTaskSubscriberBufferSize = 10
+	defaultTaskSubscriberBufferSize = 1024
 )
 
 // TaskManager provides a concrete, Redis-based implementation of the
