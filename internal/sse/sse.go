@@ -156,3 +156,46 @@ func FormatJSONRPCEvent(w io.Writer, eventType string, id interface{}, data inte
 	}
 	return nil
 }
+
+// EventBatch represents a single event in a batch operation
+type EventBatch struct {
+	EventType string
+	ID        interface{}
+	Data      interface{}
+}
+
+// FormatJSONRPCEventBatch formats multiple JSON-RPC events in a single write operation.
+// This reduces the number of write calls and improves performance for high-frequency event streams.
+// All events are formatted into a single buffer and written once.
+func FormatJSONRPCEventBatch(w io.Writer, events []EventBatch) error {
+	if len(events) == 0 {
+		return nil
+	}
+
+	// Pre-allocate buffer for better performance
+	// Rough estimation: each event ~200-500 bytes
+	var buf bytes.Buffer
+	for _, event := range events {
+		// Create a JSON-RPC response with the data as the result
+		response := jsonrpc.NewNotificationResponse(event.ID, event.Data)
+		// Marshal the entire JSON-RPC envelope
+		jsonData, err := json.Marshal(response)
+		if err != nil {
+			return fmt.Errorf("failed to marshal JSON-RPC SSE event data: %w", err)
+		}
+		// Format according to text/event-stream specification
+		// event: <eventType>
+		// data: <jsonrpc_envelope>
+		// <empty line>
+		if _, err := fmt.Fprintf(&buf, "event: %s\ndata: %s\n\n", event.EventType, string(jsonData)); err != nil {
+			return fmt.Errorf("failed to format JSON-RPC SSE event: %w", err)
+		}
+	}
+
+	// Write the entire batch in one operation
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		return fmt.Errorf("failed to write JSON-RPC SSE event batch: %w", err)
+	}
+
+	return nil
+}
