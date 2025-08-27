@@ -35,7 +35,7 @@ func TestWithHTTPClient(t *testing.T) {
 	defaultClient, err := NewA2AClient("http://localhost:8080", WithHTTPClient(nil))
 	require.NoError(t, err)
 	assert.NotNil(t, defaultClient.httpClient)
-	assert.Equal(t, defaultTimeout, defaultClient.httpClient.Timeout)
+	assert.EqualValues(t, defaultTimeout, defaultClient.httpClient.Timeout)
 }
 
 func TestWithTimeout(t *testing.T) {
@@ -49,7 +49,7 @@ func TestWithTimeout(t *testing.T) {
 	// Test with zero timeout (should use default)
 	defaultClient, err := NewA2AClient("http://localhost:8080", WithTimeout(0))
 	require.NoError(t, err)
-	assert.Equal(t, defaultTimeout, defaultClient.httpClient.Timeout)
+	assert.EqualValues(t, defaultTimeout, defaultClient.httpClient.Timeout)
 }
 
 func TestWithUserAgent(t *testing.T) {

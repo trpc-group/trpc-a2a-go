@@ -18,7 +18,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/internal/jsonrpc"
@@ -28,7 +27,7 @@ import (
 )
 
 const (
-	defaultTimeout   = 60 * time.Second
+	defaultTimeout   = 0 // Default to no timeout for client, let user decide the timeout.
 	defaultUserAgent = "trpc-a2a-go-client/0.1"
 )
 
