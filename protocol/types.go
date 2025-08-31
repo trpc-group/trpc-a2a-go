@@ -408,8 +408,30 @@ type TaskStatusUpdateEvent struct {
 }
 
 // IsFinal returns true if this is a final event.
-func (r *TaskStatusUpdateEvent) IsFinal() bool {
+func (r TaskStatusUpdateEvent) IsFinal() bool {
 	return r.Final
+}
+
+func (r TaskStatusUpdateEvent) MarshalJSON() ([]byte, error) {
+	pj, err := protojson.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	return sjson.SetBytes(pj, "kind", []byte(KindTaskStatusUpdate))
+}
+
+func (r *TaskStatusUpdateEvent) UnmarshalJSON(data []byte) error {
+	var err error
+	data, err = sjson.DeleteBytes(data, "kind")
+	if err != nil {
+		return err
+	}
+	var vt v1.TaskStatusUpdateEvent
+	if err := protojson.Unmarshal(data, &vt); err != nil {
+		return err
+	}
+	r.TaskStatusUpdateEvent = &vt
+	return nil
 }
 
 // TaskArtifactUpdateEvent indicates a new or updated artifact chunk.
@@ -421,6 +443,28 @@ type TaskArtifactUpdateEvent struct {
 // IsFinal returns true if this is the final artifact event.
 func (r TaskArtifactUpdateEvent) IsFinal() bool {
 	return r.LastChunk
+}
+
+func (r TaskArtifactUpdateEvent) MarshalJSON() ([]byte, error) {
+	pj, err := protojson.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	return sjson.SetBytes(pj, "kind", []byte(KindTaskArtifactUpdate))
+}
+
+func (r *TaskArtifactUpdateEvent) UnmarshalJSON(data []byte) error {
+	var err error
+	data, err = sjson.DeleteBytes(data, "kind")
+	if err != nil {
+		return err
+	}
+	var vt v1.TaskArtifactUpdateEvent
+	if err := protojson.Unmarshal(data, &vt); err != nil {
+		return err
+	}
+	r.TaskArtifactUpdateEvent = &vt
+	return nil
 }
 
 // NewTask creates a new Task with initial state (Submitted).

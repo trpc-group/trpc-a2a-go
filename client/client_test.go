@@ -396,6 +396,7 @@ func TestA2AClient_SetPushNotification(t *testing.T) {
 			TaskID: taskID,
 			TaskPushNotificationConfig: &v1.TaskPushNotificationConfig{
 				PushNotificationConfig: &v1.PushNotificationConfig{
+					Id:  taskID,
 					Url: "https://example.com/webhook",
 				},
 			},
