@@ -21,11 +21,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"trpc.group/trpc-go/trpc-a2a-go/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/internal/sse"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	v1 "trpc.group/trpc-go/trpc-a2a-go/protocol/a2apb"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
@@ -131,21 +133,23 @@ func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 	// --- Test message/send ---
 	t.Run("message/send success", func(t *testing.T) {
 		mockTM.sendMessageResponse = &protocol.MessageResult{
-			Result: &protocol.Message{
-				Kind:      "message",
-				MessageID: "msg-1",
-				Role:      protocol.MessageRoleUser,
-				Parts:     []protocol.Part{protocol.NewTextPart("Response message")},
-			},
+			Result: protocol.NewMessage(v1.Role_ROLE_USER, []*protocol.Part{
+				{Part: protocol.NewTextPart("Response message")},
+			}),
 		}
 		mockTM.sendMessageError = nil
 
 		params := protocol.SendMessageParams{
 			Message: protocol.Message{
-				Kind:      "message",
-				MessageID: "msg-1",
-				Role:      protocol.MessageRoleUser,
-				Parts:     []protocol.Part{protocol.NewTextPart("Input data")},
+				Message: &v1.Message{
+					MessageId: "msg-1",
+					Role:      protocol.MessageRoleUser,
+					Content: []*v1.Part{
+						{
+							Part: &v1.Part_Text{Text: "Input data"},
+						},
+					},
+				},
 			},
 		}
 		resp := performJSONRPCRequest(t, testServer, "message/send", params, "req-msg-send")
@@ -167,7 +171,12 @@ func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 		mockTM.sendMessageError = fmt.Errorf("mock send message failed")
 
 		params := protocol.SendMessageParams{
-			Message: protocol.NewMessage(protocol.MessageRoleUser, []protocol.Part{protocol.NewTextPart("Input data")}),
+			Message: protocol.NewMessage(protocol.MessageRoleUser, []*v1.Part{
+				{
+					Part: &v1.Part_Text{Text: "Input data"},
+				},
+			},
+			),
 		}
 		resp := performJSONRPCRequest(t, testServer, "message/send", params, "req-msg-send-fail")
 
@@ -180,8 +189,10 @@ func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 	// --- Test tasks/get ---
 	t.Run("tasks/get success", func(t *testing.T) {
 		mockTM.GetResponse = &protocol.Task{
-			ID:     taskID,
-			Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
+			Task: &v1.Task{
+				Id:     taskID,
+				Status: &v1.TaskStatus{State: protocol.TaskStateCompleted},
+			},
 		}
 		mockTM.GetError = nil
 		mockTM.tasks[taskID] = mockTM.GetResponse // Ensure task exists in mock
@@ -198,7 +209,7 @@ func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 		var resultTask protocol.Task
 		err = json.Unmarshal(resultBytes, &resultTask)
 		require.NoError(t, err, "Failed to unmarshal task from remarshalled result")
-		assert.Equal(t, taskID, resultTask.ID)
+		assert.Equal(t, taskID, resultTask.Id)
 		assert.Equal(t, protocol.TaskStateCompleted, resultTask.Status.State)
 	})
 
@@ -216,12 +227,19 @@ func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 	// --- Test tasks/cancel ---
 	t.Run("tasks/cancel success", func(t *testing.T) {
 		mockTM.CancelResponse = &protocol.Task{
-			ID:     taskID,
-			Status: protocol.TaskStatus{State: protocol.TaskStateCanceled},
+			Task: &v1.Task{
+				Id:     taskID,
+				Status: &v1.TaskStatus{State: protocol.TaskStateCanceled},
+			},
 		}
 		mockTM.CancelError = nil
 		// Ensure task exists in mock (e.g., from previous send test)
-		mockTM.tasks[taskID] = &protocol.Task{ID: taskID, Status: protocol.TaskStatus{State: protocol.TaskStateWorking}}
+		mockTM.tasks[taskID] = &protocol.Task{
+			Task: &v1.Task{
+				Id:     taskID,
+				Status: &v1.TaskStatus{State: protocol.TaskStateWorking},
+			},
+		}
 
 		params := protocol.TaskIDParams{ID: taskID}
 		resp := performJSONRPCRequest(t, testServer, "tasks/cancel", params, "req-cancel-1")
@@ -235,7 +253,7 @@ func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 		var resultTask protocol.Task
 		err = json.Unmarshal(resultBytes, &resultTask)
 		require.NoError(t, err, "Failed to unmarshal task from remarshalled result")
-		assert.Equal(t, taskID, resultTask.ID)
+		assert.Equal(t, taskID, resultTask.Id)
 		assert.Equal(t, protocol.TaskStateCanceled, resultTask.Status.State)
 	})
 
@@ -271,33 +289,42 @@ func TestA2ASrv_HandleMessageStream_SSE(t *testing.T) {
 
 	messageID := "test-message-stream-1"
 	initialMsg := protocol.Message{
-		Kind:      "message",
-		MessageID: messageID,
-		Role:      protocol.MessageRoleUser,
-		Parts:     []protocol.Part{protocol.NewTextPart("SSE test input")},
-	}
-
-	// Configure mock streaming events for message/stream
-	// Use TaskStatusUpdateEvent to simulate message streaming progress
-	event1 := protocol.TaskStatusUpdateEvent{
-		TaskID: messageID,
-		Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
-	}
-	event2 := protocol.TaskArtifactUpdateEvent{
-		TaskID: messageID,
-		Artifact: protocol.Artifact{
-			ArtifactID: "stream-artifact-1",
-			Parts:      []protocol.Part{protocol.NewTextPart("Streaming response")},
+		Message: &v1.Message{
+			Role: protocol.MessageRoleUser,
+			Content: []*v1.Part{
+				{
+					Part: &v1.Part_Text{Text: "SSE test input"},
+				},
+			},
 		},
 	}
-	final := true
-	event3 := protocol.TaskStatusUpdateEvent{
-		TaskID: messageID,
-		Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
-		Final:  final,
+
+	// Configure mock events
+	event1 := protocol.TaskStatusUpdateEvent{
+		TaskStatusUpdateEvent: &v1.TaskStatusUpdateEvent{
+			TaskId: messageID,
+			Status: &v1.TaskStatus{State: protocol.TaskStateWorking},
+		},
 	}
-	// Configure mock events for message streaming
-	mockTM.sendMessageStreamEvents = []protocol.StreamingMessageEvent{
+
+	// Create artifact for event2
+	artifactParts := []*v1.Part{
+		{
+			Part: &v1.Part_Text{Text: "Intermediate result"},
+		},
+	}
+	artifact := protocol.Artifact{
+		Artifact: &v1.Artifact{
+			ArtifactId: "test-artifact-1",
+			Parts:      artifactParts,
+		},
+	}
+	event2 := protocol.NewTaskArtifactUpdateEvent(messageID, "", artifact, false)
+
+	final := true
+	event3 := protocol.NewTaskStatusUpdateEvent(messageID, "", &v1.TaskStatus{State: protocol.TaskStateCompleted}, final)
+	// Wrap events in StreamingMessageEvent
+	mockTM.SubscribeEvents = []protocol.StreamingMessageEvent{
 		{Result: &event1},
 		{Result: &event2},
 		{Result: &event3},
@@ -385,9 +412,7 @@ func TestA2ASrv_HandleMessageStream_SSE(t *testing.T) {
 			continue
 		}
 
-		if event != nil {
-			receivedEvents = append(receivedEvents, *event)
-		}
+		receivedEvents = append(receivedEvents, *event)
 
 		// Check context cancellation (e.g., test timeout)
 		if ctx.Err() != nil {
@@ -402,13 +427,13 @@ func TestA2ASrv_HandleMessageStream_SSE(t *testing.T) {
 			break
 		}
 	}
-	require.NotEmpty(t, lastStatusEvent.TaskID, "Should have received at least one status update event")
+	require.NotEmpty(t, lastStatusEvent.TaskId, "Should have received at least one status update event")
 	assert.Equal(t, protocol.TaskStateCompleted, lastStatusEvent.Status.State, "State of last status event should be 'completed'")
 }
 
 // getCurrentTimestamp returns the current time in ISO 8601 format
-func getCurrentTimestamp() string {
-	return time.Now().UTC().Format(time.RFC3339)
+func getCurrentTimestamp() *timestamppb.Timestamp {
+	return timestamppb.New(time.Now().UTC())
 }
 
 var _ taskmanager.TaskManager = (*mockTaskManager)(nil)
@@ -570,7 +595,7 @@ func (m *mockTaskManager) OnCancelTask(
 
 // OnPushNotificationSet implements the TaskManager interface for push notifications.
 func (m *mockTaskManager) OnPushNotificationSet(
-	ctx context.Context, params protocol.TaskPushNotificationConfig,
+	ctx context.Context, params *protocol.TaskPushNotificationConfig,
 ) (*protocol.TaskPushNotificationConfig, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -585,9 +610,9 @@ func (m *mockTaskManager) OnPushNotificationSet(
 
 	// Default implementation if response not configured
 	return &protocol.TaskPushNotificationConfig{
-		RPCID:                  params.RPCID,
-		PushNotificationConfig: params.PushNotificationConfig,
-		TaskID:                 params.TaskID,
+		ConfigID:                   params.ConfigID,
+		TaskPushNotificationConfig: params.TaskPushNotificationConfig,
+		TaskID:                     params.TaskID,
 	}, nil
 }
 
@@ -647,17 +672,18 @@ func (m *mockTaskManager) OnResubscribe(
 		// No events configured, send a default completed status
 		go func() {
 			defer close(eventCh)
-			completedEvent := &protocol.TaskStatusUpdateEvent{
-				TaskID: params.ID,
-				Status: protocol.TaskStatus{
+			completedEvent := protocol.NewTaskStatusUpdateEvent(
+				params.ID,
+				"",
+				&v1.TaskStatus{
 					State:     protocol.TaskStateCompleted,
 					Timestamp: getCurrentTimestamp(),
 				},
-				Kind: protocol.KindTaskStatusUpdate,
-			}
+				false,
+			)
 
 			streamEvent := protocol.StreamingMessageEvent{
-				Result: completedEvent,
+				Result: &completedEvent,
 			}
 
 			select {
@@ -691,9 +717,9 @@ func (m *mockTaskManager) ProcessTask(
 
 	// Add message to history if it exists
 	if task.History == nil {
-		task.History = make([]protocol.Message, 0)
+		task.History = make([]*v1.Message, 0)
 	}
-	task.History = append(task.History, msg)
+	task.History = append(task.History, msg.Message)
 
 	return task, nil
 }

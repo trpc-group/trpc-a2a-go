@@ -10,35 +10,41 @@ package protocol
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/tidwall/sjson"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
+	v1 "trpc.group/trpc-go/trpc-a2a-go/protocol/a2apb"
 )
 
 // TaskState represents the lifecycle state of a task.
 // See A2A Spec section on Task Lifecycle.
-type TaskState string
+type TaskState = v1.TaskState
 
 // TaskState constants define the possible states of a task.
 const (
 	// TaskStateSubmitted is the state when the task is received but not yet processed.
-	TaskStateSubmitted TaskState = "submitted"
+	TaskStateSubmitted TaskState = v1.TaskState_TASK_STATE_SUBMITTED
 	// TaskStateWorking is the state when the task is actively being processed.
-	TaskStateWorking TaskState = "working"
+	TaskStateWorking TaskState = v1.TaskState_TASK_STATE_WORKING
 	// TaskStateInputRequired is the state when the task requires additional input (semantics evolving in spec).
-	TaskStateInputRequired TaskState = "input-required"
+	TaskStateInputRequired TaskState = v1.TaskState_TASK_STATE_INPUT_REQUIRED
 	// TaskStateCompleted is the state when the task finished successfully.
-	TaskStateCompleted TaskState = "completed"
+	TaskStateCompleted TaskState = v1.TaskState_TASK_STATE_COMPLETED
 	// TaskStateCanceled is the state when the task was canceled before completion.
-	TaskStateCanceled TaskState = "canceled"
+	TaskStateCanceled TaskState = v1.TaskState_TASK_STATE_CANCELLED
 	// TaskStateFailed is the state when the task failed during processing.
-	TaskStateFailed TaskState = "failed"
+	TaskStateFailed TaskState = v1.TaskState_TASK_STATE_FAILED
 	// TaskStateRejected is the state when the task was rejected by the agent.
-	TaskStateRejected TaskState = "rejected"
+	TaskStateRejected TaskState = v1.TaskState_TASK_STATE_REJECTED
 	// TaskStateAuthRequired is the state when the task requires authentication before processing.
-	TaskStateAuthRequired TaskState = "auth-required"
+	TaskStateAuthRequired TaskState = v1.TaskState_TASK_STATE_AUTH_REQUIRED
 	// TaskStateUnknown is the state when the task is in an unknown or indeterminate state.
-	TaskStateUnknown TaskState = "unknown"
+	TaskStateUnknown TaskState = v1.TaskState_TASK_STATE_UNSPECIFIED
 )
 
 // Event is an interface that represents the kind of the struct.
@@ -47,10 +53,10 @@ type Event interface {
 }
 
 // GetKind returns the kind of the result.
-func (m *Message) GetKind() string { return KindMessage }
+func (m Message) GetKind() string { return KindMessage }
 
 // GetKind returns the kind of the task.
-func (r *Task) GetKind() string { return KindTask }
+func (t Task) GetKind() string { return KindTask }
 
 // GetKind returns the kind of the task status update event.
 func (r *TaskStatusUpdateEvent) GetKind() string { return KindTaskStatusUpdate }
@@ -102,14 +108,7 @@ func (Task) unaryMessageResultMarker()    {}
 // It uses an unexported method to ensure only defined part types implement it.
 // See A2A Spec section on Message Parts.
 // Exported interface.
-type Part interface {
-	partMarker() // Internal marker method.
-	GetKind() string
-}
-
-func (TextPart) partMarker() {}
-func (FilePart) partMarker() {}
-func (DataPart) partMarker() {}
+type Part = v1.Part
 
 // StreamingMessageResult is an interface representing a result of SendMessageStream.
 type StreamingMessageResult interface {
@@ -142,14 +141,16 @@ const (
 
 // MessageRole indicates the originator of a message (user or agent).
 // See A2A Spec section on Messages.
-type MessageRole string
+type MessageRole = v1.Role
 
 // MessageRole constants define the possible roles for a message sender.
 const (
 	// MessageRoleUser is the role of a message originated from the user/client.
-	MessageRoleUser MessageRole = "user"
+	MessageRoleUser MessageRole = v1.Role_ROLE_USER
 	// MessageRoleAgent is the role of a message originated from the agent/server.
-	MessageRoleAgent MessageRole = "agent"
+	MessageRoleAgent MessageRole = v1.Role_ROLE_AGENT
+	// MessageRoleUnknown is the role of a message with an unknown originator.
+	MessageRoleUnknown MessageRole = v1.Role_ROLE_UNSPECIFIED
 )
 
 // FileUnion represents the union type for file content.
@@ -163,91 +164,15 @@ func (f *FileWithURI) fileUnionMarker()   {}
 
 // TextPart represents a text segment within a message.
 // Corresponds to the 'text' part type in A2A Message Parts.
-type TextPart struct {
-	// Kind is the type of the part.
-	Kind string `json:"kind"`
-	// Text is the text content.
-	Text string `json:"text"`
-	// Metadata is the optional metadata.
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
-}
-
-// GetKind returns the kind of the part.
-func (t TextPart) GetKind() string {
-	return KindText
-}
+type TextPart = v1.Part_Text
 
 // FilePart represents a file included in a message.
 // Corresponds to the 'file' part type in A2A Message Parts.
-type FilePart struct {
-	// Kind is the type of the part.
-	Kind string `json:"kind"`
-	// File is the file content.
-	File FileUnion `json:"file"`
-	// Metadata is the optional metadata.
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
-}
-
-// GetKind returns the kind of the part.
-func (f FilePart) GetKind() string {
-	return KindFile
-}
-
-// UnmarshalJSON implements custom unmarshalling logic for FilePart
-// to handle the polymorphic FileUnion interface.
-func (f *FilePart) UnmarshalJSON(data []byte) error {
-	type Alias FilePart // Alias to avoid recursion.
-	temp := &struct {
-		File json.RawMessage `json:"file"` // Unmarshal file into RawMessage first.
-		*Alias
-	}{
-		Alias: (*Alias)(f),
-	}
-	if err := json.Unmarshal(data, &temp); err != nil {
-		return fmt.Errorf("failed to unmarshal file part base: %w", err)
-	}
-
-	// Now determine the concrete type of FileUnion based on fields present
-	var fileContent map[string]interface{}
-	if err := json.Unmarshal(temp.File, &fileContent); err != nil {
-		return fmt.Errorf("failed to unmarshal file content: %w", err)
-	}
-
-	// Check if it has "bytes" field (FileWithBytes) or "uri" field (FileWithURI)
-	if _, hasBytes := fileContent["bytes"]; hasBytes {
-		var fileWithBytes FileWithBytes
-		if err := json.Unmarshal(temp.File, &fileWithBytes); err != nil {
-			return fmt.Errorf("failed to unmarshal FileWithBytes: %w", err)
-		}
-		f.File = &fileWithBytes
-	} else if _, hasURI := fileContent["uri"]; hasURI {
-		var fileWithURI FileWithURI
-		if err := json.Unmarshal(temp.File, &fileWithURI); err != nil {
-			return fmt.Errorf("failed to unmarshal FileWithURI: %w", err)
-		}
-		f.File = &fileWithURI
-	} else {
-		return fmt.Errorf("unknown file type: must have either 'bytes' or 'uri' field")
-	}
-
-	return nil
-}
+type FilePart = v1.Part_File
 
 // DataPart represents arbitrary structured data (JSON) within a message.
 // Corresponds to the 'data' part type in A2A Message Parts.
-type DataPart struct {
-	// Kind is the type of the part.
-	Kind string `json:"kind"`
-	// Data is the actual data payload.
-	Data interface{} `json:"data"`
-	// Metadata is the optional metadata.
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
-}
-
-// GetKind returns the kind of the part.
-func (d DataPart) GetKind() string {
-	return KindData
-}
+type DataPart = v1.DataPart
 
 // FileWithBytes represents file data with embedded content.
 // This is one variant of the File union type in A2A 0.2.2.
@@ -328,119 +253,88 @@ type APIKeyAuthInfo struct {
 }
 
 // PushNotificationConfig represents the configuration for task push notifications.
-type PushNotificationConfig struct {
-	// Authentication contains optional authentication details.
-	Authentication *AuthenticationInfo `json:"authentication,omitempty"`
-	// Push Notification ID, created by server to support multiple push notification.
-	ID string `json:"id,omitempty"`
-	// Token is an optional authentication token.
-	Token string `json:"token,omitempty"`
-	// URL is the endpoint where notifications should be sent.
-	URL string `json:"url"`
-	// Metadata is the optional metadata.
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
-}
+type PushNotificationConfig = v1.PushNotificationConfig
 
 // TaskPushNotificationConfig associates a task ID with push notification settings.
 type TaskPushNotificationConfig struct {
-	// RPCID is the ID of json-rpc.
-	RPCID string `json:"-"`
-	// PushNotificationConfig contains the notification settings.
-	PushNotificationConfig PushNotificationConfig `json:"pushNotificationConfig"`
-	// TaskID is the unique task identifier.
-	TaskID string `json:"taskId"`
-	// Metadata is the optional metadata.
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
+	// TaskID is extracted from TaskPushNotificationConfig's name
+	TaskID string `json:"taskId,omitempty"`
+	// ConfigID is extracted from TaskPushNotificationConfig's name
+	ConfigID string `json:"configId,omitempty"`
+	// Raw specification of the push notification config.
+	*v1.TaskPushNotificationConfig
+}
+
+// Parse parses the TaskPushNotificationConfig's name and extract out TaskID and ConfigID.
+func (t *TaskPushNotificationConfig) Parse() error {
+	rg := regexp.MustCompile(`^tasks/([^/]+)/pushNotificationConfigs/([^/]+)$`)
+	parts := rg.FindStringSubmatch(t.Name)
+	if len(parts) != 3 {
+		return fmt.Errorf("invalid TaskPushNotificationConfig name format: %s", t.Name)
+	}
+	t.TaskID = parts[1]
+	t.ConfigID = parts[2]
+	return nil
 }
 
 // Message represents a single exchange between a user and an agent.
 // See A2A Spec section on Messages.
 type Message struct {
-	// ContextID is the optional context identifier for the message.
-	ContextID *string `json:"contextId,omitempty"`
-	// Extensions is the optional list of extension URIs.
-	Extensions []string `json:"extensions,omitempty"`
-	// Kind is the type discriminator for this message (always "message").
-	Kind string `json:"kind"`
-	// MessageID is the unique identifier for this message.
-	MessageID string `json:"messageId"`
-	// Metadata is the optional metadata.
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
-	// Parts is the content parts (must implement Part).
-	Parts []Part `json:"parts"`
-	// ReferenceTaskIDs is the optional list of referenced task IDs.
-	ReferenceTaskIDs []string `json:"referenceTaskIds,omitempty"`
-	// Role is the sender of the message.
-	Role MessageRole `json:"role"`
-	// TaskID is the optional task identifier this message belongs to.
-	TaskID *string `json:"taskId,omitempty"`
+	*v1.Message
 }
 
 // UnmarshalJSON implements custom unmarshalling logic for Message
 // to handle the polymorphic Part interface slice.
 func (m *Message) UnmarshalJSON(data []byte) error {
-	type Alias Message // Alias to avoid recursion.
-	temp := &struct {
-		Parts []json.RawMessage `json:"parts"` // Unmarshal parts into RawMessage first.
-		*Alias
-	}{
-		Alias: (*Alias)(m),
+	var err error
+	data, err = sjson.DeleteBytes(data, "kind")
+	if err != nil {
+		return err
 	}
-	if err := json.Unmarshal(data, &temp); err != nil {
-		return fmt.Errorf("failed to unmarshal message base: %w", err)
+	var mm v1.Message
+	if err := protojson.Unmarshal(data, &mm); err != nil {
+		return err
 	}
-	// Now, unmarshal each part based on its type.
-	m.Parts = make([]Part, 0, len(temp.Parts))
-	for i, rawPart := range temp.Parts {
-		part, err := unmarshalPart(rawPart)
-		if err != nil {
-			return fmt.Errorf("failed to unmarshal part %d: %w", i, err)
-		}
-		m.Parts = append(m.Parts, part)
-	}
+	m.Message = &mm
 	return nil
+}
+
+func (m Message) MarshalJSON() ([]byte, error) {
+	pj, err := protojson.Marshal(m.Message)
+	if err != nil {
+		return nil, err
+	}
+	return sjson.SetBytes(pj, "kind", []byte(KindMessage))
 }
 
 // Artifact represents an output generated by a task.
 // See A2A Spec 0.2.2 section on Artifacts.
 type Artifact struct {
-	// ArtifactID is the unique identifier for the artifact.
-	ArtifactID string `json:"artifactId"`
-	// Name is the name of the artifact.
-	Name *string `json:"name,omitempty"`
-	// Description is the description of the artifact.
-	Description *string `json:"description,omitempty"`
-	// Parts is the content parts of the artifact.
-	Parts []Part `json:"parts"`
-	// Metadata is optional metadata for the artifact.
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
-	// Extensions is the optional list of extension URIs.
-	Extensions []string `json:"extensions,omitempty"`
+	*v1.Artifact
 }
 
 // UnmarshalJSON implements custom unmarshalling logic for Artifact
 // to handle the polymorphic Part interface slice.
 func (a *Artifact) UnmarshalJSON(data []byte) error {
-	type Alias Artifact // Alias to avoid recursion.
-	temp := &struct {
-		Parts []json.RawMessage `json:"parts"` // Unmarshal parts into RawMessage first.
-		*Alias
-	}{
-		Alias: (*Alias)(a),
+	var err error
+	data, err = sjson.DeleteBytes(data, "kind")
+	if err != nil {
+		return err
 	}
-	if err := json.Unmarshal(data, &temp); err != nil {
-		return fmt.Errorf("failed to unmarshal artifact base: %w", err)
+	var af v1.Artifact
+	if err := protojson.Unmarshal(data, &af); err != nil {
+		return err
 	}
-	// Now, unmarshal each part based on its type.
-	a.Parts = make([]Part, 0, len(temp.Parts))
-	for i, rawPart := range temp.Parts {
-		part, err := unmarshalPart(rawPart)
-		if err != nil {
-			return fmt.Errorf("failed to unmarshal artifact part %d: %w", i, err)
-		}
-		a.Parts = append(a.Parts, part)
-	}
+	a.Artifact = &af
 	return nil
+}
+
+func (a Artifact) MarshalJSON() ([]byte, error) {
+	pj, err := protojson.Marshal(a.Artifact)
+	if err != nil {
+		return nil, err
+	}
+	return sjson.SetBytes(pj, "kind", []byte(KindTaskArtifactUpdate))
 }
 
 // unmarshalPart determines the concrete type of a Part from raw JSON
@@ -448,224 +342,246 @@ func (a *Artifact) UnmarshalJSON(data []byte) error {
 // Internal helper function.
 func unmarshalPart(rawPart json.RawMessage) (Part, error) {
 	// First, determine the type by unmarshalling just the "kind" field.
-	var typeDetect struct {
-		Kind string `json:"kind"`
+	part := v1.Part{}
+	if err := json.Unmarshal(rawPart, &part); err != nil {
+		return Part{}, fmt.Errorf("failed to unmarshal part kind: %w", err)
 	}
-	if err := json.Unmarshal(rawPart, &typeDetect); err != nil {
-		return nil, fmt.Errorf("failed to detect part type: %w", err)
+	switch {
+	case part.GetData() != nil:
+		return Part{
+			Part: &v1.Part_Data{
+				Data: part.GetData(),
+			},
+		}, nil
+	case part.GetFile() != nil:
+		return Part{
+			Part: &v1.Part_File{
+				File: part.GetFile(),
+			},
+		}, nil
+	case part.GetText() != "":
+		return Part{
+			Part: &v1.Part_Text{
+				Text: part.GetText(),
+			},
+		}, nil
 	}
-	// Unmarshal into the correct concrete type.
-	switch typeDetect.Kind {
-	case KindText:
-		var p TextPart
-		if err := json.Unmarshal(rawPart, &p); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal TextPart: %w", err)
-		}
-		return &p, nil
-	case KindFile:
-		var p FilePart
-		if err := json.Unmarshal(rawPart, &p); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal FilePart: %w", err)
-		}
-		return &p, nil
-	case KindData:
-		var p DataPart
-		if err := json.Unmarshal(rawPart, &p); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal DataPart: %w", err)
-		}
-		return &p, nil
-	default:
-		// If we need to handle unknown part types gracefully (e.g., store raw JSON),
-		// we would add that logic here. For now, treat as an error.
-		return nil, fmt.Errorf("unsupported part kind: %s", typeDetect.Kind)
-	}
+	return Part{}, fmt.Errorf("unknown part kind")
 }
 
 // TaskStatus represents the current status of a task.
 // See A2A Spec section on Task Lifecycle.
-type TaskStatus struct {
-	// State is the current lifecycle state.
-	State TaskState `json:"state"`
-	// Message is the optional message associated with the status (e.g., final response).
-	Message *Message `json:"message,omitempty"`
-	// Timestamp is the ISO 8601 timestamp of the status change.
-	Timestamp string `json:"timestamp,omitempty"`
-}
+type TaskStatus = v1.TaskStatus
 
 // Task represents a unit of work being processed by the agent.
 // See A2A Spec section on Tasks.
 type Task struct {
-	// Artifacts is the accumulated artifacts generated by the task.
-	Artifacts []Artifact `json:"artifacts,omitempty"`
-	// ContextID is the unique context identifier for the task.
-	ContextID string `json:"contextId"`
-	// History is the history of messages exchanged for this task (if tracked).
-	History []Message `json:"history,omitempty"`
-	// ID is the unique task identifier.
-	ID string `json:"id"`
-	// Kind is the event type discriminator (always "task").
-	Kind string `json:"kind"`
-	// Metadata is the optional metadata associated with the task.
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
-	// Status is the current task status.
-	Status TaskStatus `json:"status"`
+	*v1.Task
+}
+
+func (t *Task) UnmarshalJSON(data []byte) error {
+	var err error
+	data, err = sjson.DeleteBytes(data, "kind")
+	if err != nil {
+		return err
+	}
+	var vt v1.Task
+	if err := protojson.Unmarshal(data, &vt); err != nil {
+		return err
+	}
+	t.Task = &vt
+	return nil
+}
+
+func (t Task) MarshalJSON() ([]byte, error) {
+	pj, err := protojson.Marshal(t)
+	if err != nil {
+		return nil, err
+	}
+	return sjson.SetBytes(pj, "kind", []byte(KindTask))
 }
 
 // TaskStatusUpdateEvent indicates a change in the task's lifecycle state.
 // Corresponds to the 'task_status_update' event in A2A Spec 0.2.2.
 type TaskStatusUpdateEvent struct {
-	// ContextID is the context ID of the task.
-	ContextID string `json:"contextId"`
-	// Final is a flag indicating if this is the final event for the task.
-	Final bool `json:"final"`
-	// Kind is the event type discriminator.
-	Kind string `json:"kind"`
-	// Metadata is the optional metadata.
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
-	// Status is the new status.
-	Status TaskStatus `json:"status"`
-	// TaskID is the ID of the task.
-	TaskID string `json:"taskId"`
+	*v1.TaskStatusUpdateEvent
 }
 
 // IsFinal returns true if this is a final event.
-func (r *TaskStatusUpdateEvent) IsFinal() bool {
+func (r TaskStatusUpdateEvent) IsFinal() bool {
 	return r.Final
+}
+
+func (r TaskStatusUpdateEvent) MarshalJSON() ([]byte, error) {
+	pj, err := protojson.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	return sjson.SetBytes(pj, "kind", []byte(KindTaskStatusUpdate))
+}
+
+func (r *TaskStatusUpdateEvent) UnmarshalJSON(data []byte) error {
+	var err error
+	data, err = sjson.DeleteBytes(data, "kind")
+	if err != nil {
+		return err
+	}
+	var vt v1.TaskStatusUpdateEvent
+	if err := protojson.Unmarshal(data, &vt); err != nil {
+		return err
+	}
+	r.TaskStatusUpdateEvent = &vt
+	return nil
 }
 
 // TaskArtifactUpdateEvent indicates a new or updated artifact chunk.
 // Corresponds to the 'task_artifact_update' event in A2A Spec 0.2.2.
 type TaskArtifactUpdateEvent struct {
-	// Append is a hint for the client to append data (streaming).
-	Append *bool `json:"append,omitempty"`
-	// Artifact is the artifact data.
-	Artifact Artifact `json:"artifact"`
-	// ContextID is the context ID of the task.
-	ContextID string `json:"contextId"`
-	// Kind is the event type discriminator.
-	Kind string `json:"kind"`
-	// LastChunk is a flag indicating if this is the final chunk of an artifact stream.
-	LastChunk *bool `json:"lastChunk,omitempty"`
-	// Metadata is optional metadata.
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
-	// TaskID is the ID of the task.
-	TaskID string `json:"taskId"`
+	*v1.TaskArtifactUpdateEvent
 }
 
 // IsFinal returns true if this is the final artifact event.
 func (r TaskArtifactUpdateEvent) IsFinal() bool {
-	return r.LastChunk != nil && *r.LastChunk
+	return r.LastChunk
+}
+
+func (r TaskArtifactUpdateEvent) MarshalJSON() ([]byte, error) {
+	pj, err := protojson.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	return sjson.SetBytes(pj, "kind", []byte(KindTaskArtifactUpdate))
+}
+
+func (r *TaskArtifactUpdateEvent) UnmarshalJSON(data []byte) error {
+	var err error
+	data, err = sjson.DeleteBytes(data, "kind")
+	if err != nil {
+		return err
+	}
+	var vt v1.TaskArtifactUpdateEvent
+	if err := protojson.Unmarshal(data, &vt); err != nil {
+		return err
+	}
+	r.TaskArtifactUpdateEvent = &vt
+	return nil
 }
 
 // NewTask creates a new Task with initial state (Submitted).
 func NewTask(id string, contextID string) *Task {
+	metadata, _ := structpb.NewStruct(map[string]any{})
 	return &Task{
-		ID:        id,
-		ContextID: contextID,
-		Kind:      KindTask,
-		Status: TaskStatus{
-			State:     TaskStateSubmitted,
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Task: &v1.Task{
+			Id:        id,
+			ContextId: contextID,
+			Status: &v1.TaskStatus{
+				State:     TaskStateSubmitted,
+				Timestamp: timestamppb.New(time.Now()),
+			},
+			Metadata: metadata,
 		},
-		Metadata: make(map[string]interface{}),
 	}
 }
 
 // NewMessage creates a new Message with the specified role and parts.
-func NewMessage(role MessageRole, parts []Part) Message {
+func NewMessage(role MessageRole, parts []*Part) Message {
 	messageID := GenerateMessageID()
 	return Message{
-		Role:      role,
-		Parts:     parts,
-		MessageID: messageID,
-		Kind:      KindMessage,
+		Message: &v1.Message{
+			Role:      role,
+			Content:   parts,
+			MessageId: messageID,
+		},
 	}
 }
 
 // NewMessageWithContext creates a new Message with context information.
-func NewMessageWithContext(role MessageRole, parts []Part, taskID, contextID *string) Message {
+func NewMessageWithContext(role MessageRole, parts []*Part, taskID, contextID *string) Message {
 	messageID := GenerateMessageID()
 	return Message{
-		Role:      role,
-		Parts:     parts,
-		MessageID: messageID,
-		TaskID:    taskID,
-		ContextID: contextID,
-		Kind:      "message",
+		Message: &v1.Message{
+			Role:      role,
+			Content:   parts,
+			MessageId: messageID,
+			TaskId:    *taskID,
+			ContextId: *contextID,
+		},
 	}
 }
 
 // NewTextPart creates a new TextPart containing the given text.
-func NewTextPart(text string) TextPart {
-	return TextPart{
-		Kind: KindText,
+func NewTextPart(text string) *TextPart {
+	return &TextPart{
 		Text: text,
 	}
 }
 
 // NewFilePartWithBytes creates a new FilePart with embedded bytes content.
-func NewFilePartWithBytes(name, mimeType string, bytes string) FilePart {
-	return FilePart{
-		Kind: KindFile,
-		File: &FileWithBytes{
-			Name:     &name,
-			MimeType: &mimeType,
-			Bytes:    bytes,
+func NewFilePartWithBytes(name, mimeType string, bytes string) *FilePart {
+	return &FilePart{
+		File: &v1.FilePart{
+			File: &v1.FilePart_FileWithBytes{FileWithBytes: []byte(bytes)},
 		},
 	}
 }
 
 // NewFilePartWithURI creates a new FilePart with URI reference.
-func NewFilePartWithURI(name, mimeType string, uri string) FilePart {
-	return FilePart{
-		Kind: KindFile,
-		File: &FileWithURI{
-			Name:     &name,
-			MimeType: &mimeType,
-			URI:      uri,
-		},
+func NewFilePartWithURI(name, mimeType string, uri string) *FilePart {
+	return &FilePart{
+		File: &v1.FilePart{File: &v1.FilePart_FileWithUri{
+			FileWithUri: uri,
+		}},
 	}
 }
 
 // NewDataPart creates a new DataPart with the given data.
-func NewDataPart(data interface{}) DataPart {
-	return DataPart{
-		Kind: KindData,
-		Data: data,
+func NewDataPart(data map[string]any) (DataPart, error) {
+	dataStruct, err := structpb.NewStruct(data)
+	if err != nil {
+		return DataPart{}, fmt.Errorf("failed to create structpb.Struct from data: %w", err)
 	}
+	return DataPart{
+		Data: dataStruct,
+	}, nil
 }
 
 // NewArtifactWithID creates a new Artifact with a generated ID.
-func NewArtifactWithID(name, description *string, parts []Part) *Artifact {
+func NewArtifactWithID(name, description *string, parts []*Part) *Artifact {
 	artifactID := GenerateArtifactID()
+	// ignore error here for simplicity, since metadata is empty here
+	md, _ := structpb.NewStruct(map[string]any{})
 	return &Artifact{
-		ArtifactID:  artifactID,
-		Name:        name,
-		Description: description,
-		Parts:       parts,
-		Metadata:    make(map[string]interface{}),
+		Artifact: &v1.Artifact{
+			ArtifactId:  artifactID,
+			Name:        *name,
+			Description: *description,
+			Parts:       parts,
+			Metadata:    md,
+		},
 	}
 }
 
 // NewTaskStatusUpdateEvent creates a new TaskStatusUpdateEvent.
-func NewTaskStatusUpdateEvent(taskID, contextID string, status TaskStatus, final bool) TaskStatusUpdateEvent {
+func NewTaskStatusUpdateEvent(taskID, contextID string, status *TaskStatus, final bool) TaskStatusUpdateEvent {
 	return TaskStatusUpdateEvent{
-		TaskID:    taskID,
-		ContextID: contextID,
-		Kind:      KindTaskStatusUpdate,
-		Status:    status,
-		Final:     final,
+		TaskStatusUpdateEvent: &v1.TaskStatusUpdateEvent{
+			TaskId:    taskID,
+			ContextId: contextID,
+			Status:    status,
+			Final:     final,
+		},
 	}
 }
 
 // NewTaskArtifactUpdateEvent creates a new TaskArtifactUpdateEvent.
 func NewTaskArtifactUpdateEvent(taskID, contextID string, artifact Artifact, lastChunk bool) TaskArtifactUpdateEvent {
 	return TaskArtifactUpdateEvent{
-		TaskID:    taskID,
-		ContextID: contextID,
-		Kind:      KindTaskArtifactUpdate,
-		Artifact:  artifact,
-		LastChunk: &lastChunk,
+		TaskArtifactUpdateEvent: &v1.TaskArtifactUpdateEvent{
+			TaskId:    taskID,
+			ContextId: contextID,
+			Artifact:  artifact.Artifact,
+			LastChunk: lastChunk,
+		},
 	}
 }
 
@@ -707,16 +623,7 @@ type SendMessageParams struct {
 }
 
 // SendMessageConfiguration defines optional configuration for message sending.
-type SendMessageConfiguration struct {
-	// AcceptedOutputModes is the list of accepted output modes.
-	AcceptedOutputModes []string `json:"acceptedOutputModes"`
-	// PushNotificationConfig contains optional push notification settings.
-	PushNotificationConfig *PushNotificationConfig `json:"pushNotificationConfig,omitempty"`
-	// HistoryLength is the requested history length in response.
-	HistoryLength *int `json:"historyLength,omitempty"`
-	// Blocking indicates whether to wait for task completion (message/send only).
-	Blocking *bool `json:"blocking,omitempty"`
-}
+type SendMessageConfiguration = v1.SendMessageConfiguration
 
 // MessageResult represents the union type response for Message/Task.
 type MessageResult struct {

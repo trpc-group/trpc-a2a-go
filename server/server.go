@@ -24,6 +24,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/internal/sse"
 	"trpc.group/trpc-go/trpc-a2a-go/log"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	v1 "trpc.group/trpc-go/trpc-a2a-go/protocol/a2apb"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 )
 
@@ -425,11 +426,11 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 		return
 	}
 	// Validate required fields.
-	if params.TaskID == "" {
+	if params.PushNotificationConfig.Id == "" {
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
 		return
 	}
-	if params.PushNotificationConfig.URL == "" {
+	if params.PushNotificationConfig.Url == "" {
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("push notification URL is required"))
 		return
 	}
@@ -437,7 +438,7 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 	if s.jwksEnabled && s.pushAuth != nil {
 		// Add JWT support by indicating the auth scheme in the config.
 		if params.PushNotificationConfig.Authentication == nil {
-			params.PushNotificationConfig.Authentication = &protocol.AuthenticationInfo{
+			params.PushNotificationConfig.Authentication = &v1.AuthenticationInfo{
 				Schemes: []string{"bearer"},
 			}
 		} else {
@@ -461,16 +462,13 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 		jwksURL := s.composeJWKSURL()
 		log.Infof("JWKS URL for push notifications: %s", jwksURL)
 		// Store JWKS URL in the params for the task manager to use.
-		if params.PushNotificationConfig.Metadata == nil {
-			params.PushNotificationConfig.Metadata = make(map[string]interface{})
-		}
-		params.PushNotificationConfig.Metadata["jwksUrl"] = jwksURL
+		params.PushNotificationConfig.Url = jwksURL
 	}
 
 	// Delegate to the task manager.
-	result, err := s.taskManager.OnPushNotificationSet(ctx, params)
+	result, err := s.taskManager.OnPushNotificationSet(ctx, &params)
 	if err != nil {
-		log.Errorf("Error calling OnPushNotificationSet for task %s: %v", params.TaskID, err)
+		log.Errorf("Error calling OnPushNotificationSet for task %s: %v", params.Name, err)
 		// Check if the error is already a JSONRPCError.
 		if rpcErr, ok := err.(*jsonrpc.Error); ok {
 			s.writeJSONRPCError(w, request.ID, rpcErr)
@@ -609,7 +607,7 @@ func (s *A2AServer) handleMessageStream(ctx context.Context, w http.ResponseWrit
 		return
 	}
 
-	if params.Message.Role == "" || len(params.Message.Parts) == 0 {
+	if params.Message.Role == protocol.MessageRoleUnknown || len(params.Message.Content) == 0 {
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("message with at least one part is required"))
 		return
 	}
@@ -644,7 +642,8 @@ func handleSSEStream(
 	w http.ResponseWriter,
 	flusher http.Flusher,
 	eventsChan <-chan protocol.StreamingMessageEvent,
-	rpcID string) {
+	rpcID string,
+) {
 	// Set headers for SSE.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

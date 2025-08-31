@@ -448,9 +448,9 @@ func (c *A2AClient) doRequest(ctx context.Context, request *jsonrpc.Request) (*j
 // It allows specifying a callback URL where task status updates will be sent.
 func (c *A2AClient) SetPushNotification(
 	ctx context.Context,
-	params protocol.TaskPushNotificationConfig,
+	params *protocol.TaskPushNotificationConfig,
 ) (*protocol.TaskPushNotificationConfig, error) {
-	request := jsonrpc.NewRequest(protocol.MethodTasksPushNotificationConfigSet, params.RPCID)
+	request := jsonrpc.NewRequest(protocol.MethodTasksPushNotificationConfigSet, params.Name)
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.SetPushNotification: failed to marshal params: %w", err)
@@ -526,8 +526,7 @@ func (c *A2AClient) GetPushNotification(
 }
 
 // httpRequestHandler is the HTTP request handler for a2a client.
-type httpRequestHandler struct {
-}
+type httpRequestHandler struct{}
 
 // Handle is the HTTP request handler for a2a client.
 func (h *httpRequestHandler) Handle(
