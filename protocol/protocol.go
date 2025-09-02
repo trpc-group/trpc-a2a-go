@@ -23,8 +23,8 @@ const (
 	MethodTasksPushNotificationConfigGet = "tasks/pushNotificationConfig/get"
 	// MethodTasksResubscribe corresponds to the 'tasks/resubscribe' RPC method.
 	MethodTasksResubscribe = "tasks/resubscribe"
-	// MethodAgentAuthenticatedExtendedCard corresponds to the 'agent/authenticatedExtendedCard' HTTP GET endpoint.
-	MethodAgentAuthenticatedExtendedCard = "agent/authenticatedExtendedCard"
+	// MethodAgentAuthenticatedExtendedCard corresponds to the 'agent/getAuthenticatedExtendedCard' JSON-RPC method.
+	MethodAgentAuthenticatedExtendedCard = "agent/getAuthenticatedExtendedCard"
 )
 
 // A2A SSE Event Types define the standard event type strings used in A2A SSE streams.

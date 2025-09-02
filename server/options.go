@@ -7,6 +7,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -183,5 +184,29 @@ func WithAgentCardHandler(handler http.Handler) Option {
 func WithHTTPRouter(router HTTPRouter) Option {
 	return func(s *A2AServer) {
 		s.customRouter = router
+	}
+}
+
+// WithExtendedAgentCard sets an extended agent card that will be returned to authenticated users.
+// This card can contain additional information not available in the public agent card.
+// When set, the agent will automatically set SupportsAuthenticatedExtendedCard to true.
+func WithExtendedAgentCard(extendedCard AgentCard) Option {
+	return func(s *A2AServer) {
+		s.extendedAgentCard = &extendedCard
+		// Automatically enable support for authenticated extended card
+		s.agentCard.SupportsAuthenticatedExtendedCard = &[]bool{true}[0]
+	}
+}
+
+// WithCardModifier sets a dynamic card modifier function that can customize the agent card
+// based on the request context. This allows for per-user or per-request customization.
+// The modifier function receives the base card and context, and returns a modified card.
+// If both WithExtendedAgentCard and WithCardModifier are used, the modifier will receive
+// the extended card as the base card.
+func WithCardModifier(modifier func(baseCard AgentCard, ctx context.Context) (AgentCard, error)) Option {
+	return func(s *A2AServer) {
+		s.cardModifier = modifier
+		// Automatically enable support for authenticated extended card
+		s.agentCard.SupportsAuthenticatedExtendedCard = &[]bool{true}[0]
 	}
 }
