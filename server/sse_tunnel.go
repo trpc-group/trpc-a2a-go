@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -11,8 +12,8 @@ import (
 )
 
 const (
-	defaultSSEBatchSize     = 20
-	defaultSSEFlushInterval = 1 * time.Second
+	defaultSSEBatchSize     = 5
+	defaultSSEFlushInterval = 50 * time.Millisecond
 )
 
 // sseTunnel optimizes SSE streaming by batching events before sending
@@ -90,11 +91,11 @@ func (t *sseTunnel) flushBatch() bool {
 	events := make([]sse.EventBatch, 0, len(t.batch))
 
 	// Process all events in the batch
-	for _, event := range t.batch {
-		eventType, err := t.getEventType(&event)
+	for i := range t.batch {
+		eventType, err := t.getEventType(&t.batch[i])
 		if err != nil {
 			if err == errUnknownEvent {
-				log.Warnf("Unknown event type received for request ID: %s: %T. Skipping.", t.rpcID, event)
+				log.Warnf("Unknown event type received for request ID: %s: %T. Skipping.", t.rpcID, t.batch[i])
 				continue
 			}
 			log.Errorf("Error determining event type for request ID: %s: %v", t.rpcID, err)
@@ -105,7 +106,7 @@ func (t *sseTunnel) flushBatch() bool {
 		events = append(events, sse.EventBatch{
 			EventType: eventType,
 			ID:        t.rpcID,
-			Data:      &event,
+			Data:      &t.batch[i],
 		})
 	}
 
@@ -124,6 +125,9 @@ func (t *sseTunnel) flushBatch() bool {
 
 // getEventType determines the SSE event type from a StreamingMessageEvent
 func (t *sseTunnel) getEventType(event *protocol.StreamingMessageEvent) (string, error) {
+	if event == nil {
+		return "", errors.New("event is nil")
+	}
 	actualEvent := event.Result
 
 	switch actualEvent.(type) {

@@ -21,7 +21,6 @@ import (
 
 	"trpc.group/trpc-go/trpc-a2a-go/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/internal/jsonrpc"
-	"trpc.group/trpc-go/trpc-a2a-go/internal/sse"
 	"trpc.group/trpc-go/trpc-a2a-go/log"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
@@ -663,39 +662,6 @@ func handleSSEStream(
 	// Use optimized tunnel for batching events
 	tunnel := newSSETunnel(w, flusher, rpcID)
 	tunnel.start(ctx, eventsChan, clientClosed)
-}
-
-func sendSSEEvent(w http.ResponseWriter, rpcID string, event interface{}) error {
-	// Determine event type string for SSE.
-	var eventType string
-	var actualEvent protocol.Event
-
-	// Handle StreamingMessageEvent by extracting the inner Result
-	if streamEvent, ok := event.(*protocol.StreamingMessageEvent); ok {
-		actualEvent = streamEvent.Result
-	} else {
-		return errUnknownEvent
-	}
-
-	switch actualEvent.(type) {
-	case *protocol.TaskStatusUpdateEvent:
-		eventType = protocol.EventStatusUpdate
-	case *protocol.TaskArtifactUpdateEvent:
-		eventType = protocol.EventArtifactUpdate
-	case *protocol.Message:
-		eventType = protocol.EventMessage
-	case *protocol.Task:
-		eventType = protocol.EventTask
-	default:
-		return errUnknownEvent
-	}
-
-	// For StreamMessage API, we need to send the event wrapped in StreamingMessageEvent
-	// Write the event to the SSE stream using JSON-RPC format.
-	if err := sse.FormatJSONRPCEvent(w, eventType, rpcID, event); err != nil {
-		return err
-	}
-	return nil
 }
 
 // extractBasePathFromURL extracts the base path from an agent card URL.
