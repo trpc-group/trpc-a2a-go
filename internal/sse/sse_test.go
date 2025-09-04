@@ -244,55 +244,121 @@ func TestCloseEventDataMarshaling(t *testing.T) {
 	}
 }
 
-func TestFormatJSONRPCEvent(t *testing.T) {
-	// Test data
-	eventType := "test_event"
-	eventID := "test-request-123"
-	eventData := map[string]string{
-		"key1": "value1",
-		"key2": "value2",
+func TestFormatJSONRPCEventBatch(t *testing.T) {
+	// Test data - multiple events
+	events := []EventBatch{
+		{
+			EventType: "status_update",
+			ID:        "test-request-123",
+			Data: map[string]string{
+				"status":  "working",
+				"task_id": "task-1",
+			},
+		},
+		{
+			EventType: "artifact_update",
+			ID:        "test-request-123",
+			Data: map[string]string{
+				"artifact_id": "artifact-1",
+				"content":     "test content",
+			},
+		},
+		{
+			EventType: "status_update",
+			ID:        "test-request-123",
+			Data: map[string]string{
+				"status":  "completed",
+				"task_id": "task-1",
+			},
+		},
 	}
 
 	// Buffer to capture the output
 	var buf bytes.Buffer
 
-	// Format the event
-	err := FormatJSONRPCEvent(&buf, eventType, eventID, eventData)
-	assert.NoError(t, err, "FormatJSONRPCEvent should not return an error")
+	// Format the batch
+	err := FormatJSONRPCEventBatch(&buf, events)
+	assert.NoError(t, err, "FormatJSONRPCEventBatch should not return an error")
 
 	// Get the formatted output
 	output := buf.String()
 
-	// Verify the SSE format structure
-	assert.Contains(t, output, "event: test_event", "Output should contain the event type")
-	assert.Contains(t, output, "data: {", "Output should contain JSON data")
+	// Verify the SSE format structure for all events
+	assert.Contains(t, output, "event: status_update", "Output should contain status_update event type")
+	assert.Contains(t, output, "event: artifact_update", "Output should contain artifact_update event type")
 	assert.Contains(t, output, "\"jsonrpc\":\"2.0\"", "Output should contain JSON-RPC version")
 	assert.Contains(t, output, "\"id\":\"test-request-123\"", "Output should contain the request ID")
 
-	// Verify the content can be parsed back
+	// Verify we have the expected number of events (3 events = 3 event: lines)
+	eventLines := strings.Count(output, "event: ")
+	assert.Equal(t, 3, eventLines, "Should have 3 event lines")
+
+	// Verify we have the expected number of data lines (3 events = 3 data: lines)
+	dataLines := strings.Count(output, "data: ")
+	assert.Equal(t, 3, dataLines, "Should have 3 data lines")
+
+	// Parse and verify each event
 	scanner := bufio.NewScanner(strings.NewReader(output))
-	var dataLine string
+	var currentEventType string
+	var eventCount int
+
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.HasPrefix(line, "data: ") {
-			dataLine = strings.TrimPrefix(line, "data: ")
-			break
+		if strings.HasPrefix(line, "event: ") {
+			currentEventType = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "data: ") {
+			dataLine := strings.TrimPrefix(line, "data: ")
+
+			// Parse the JSON-RPC response
+			var response jsonrpc.Response
+			err = json.Unmarshal([]byte(dataLine), &response)
+			assert.NoError(t, err, "Should be able to unmarshal the JSON-RPC response")
+
+			// Check response structure
+			assert.Equal(t, "2.0", response.JSONRPC, "JSONRPC version should be 2.0")
+			assert.Equal(t, "test-request-123", response.ID, "ID should match the provided request ID")
+
+			// Verify result based on event type
+			resultMap, ok := response.Result.(map[string]interface{})
+			assert.True(t, ok, "Result should be a map")
+
+			switch currentEventType {
+			case "status_update":
+				if resultMap["status"] == "working" {
+					assert.Equal(t, "working", resultMap["status"], "Working status should match")
+					assert.Equal(t, "task-1", resultMap["task_id"], "Task ID should match")
+				} else if resultMap["status"] == "completed" {
+					assert.Equal(t, "completed", resultMap["status"], "Completed status should match")
+					assert.Equal(t, "task-1", resultMap["task_id"], "Task ID should match")
+				}
+			case "artifact_update":
+				assert.Equal(t, "artifact-1", resultMap["artifact_id"], "Artifact ID should match")
+				assert.Equal(t, "test content", resultMap["content"], "Content should match")
+			}
+
+			eventCount++
 		}
 	}
 
-	// Parse the JSON-RPC response
-	var response jsonrpc.Response
-	err = json.Unmarshal([]byte(dataLine), &response)
-	assert.NoError(t, err, "Should be able to unmarshal the JSON-RPC response")
+	assert.Equal(t, 3, eventCount, "Should have processed 3 events")
+}
 
-	// Check response structure
-	assert.Equal(t, "2.0", response.JSONRPC, "JSONRPC version should be 2.0")
-	assert.Equal(t, eventID, response.ID, "ID should match the provided request ID")
+func TestFormatJSONRPCEventBatch_EmptySlice(t *testing.T) {
+	// Test with empty events slice
+	var buf bytes.Buffer
+	err := FormatJSONRPCEventBatch(&buf, []EventBatch{})
+	assert.NoError(t, err, "FormatJSONRPCEventBatch with empty slice should not return an error")
 
-	// Verify result contains the same key-value pairs
-	// JSON unmarshaling creates map[string]interface{}, so we can't use direct equality
-	resultMap, ok := response.Result.(map[string]interface{})
-	assert.True(t, ok, "Result should be a map")
-	assert.Equal(t, "value1", resultMap["key1"], "Value for key1 should match")
-	assert.Equal(t, "value2", resultMap["key2"], "Value for key2 should match")
+	output := buf.String()
+	assert.Empty(t, output, "Output should be empty for empty events slice")
+}
+
+func TestFormatJSONRPCEventBatch_NilSlice(t *testing.T) {
+	// Test with nil events slice
+	var buf bytes.Buffer
+	err := FormatJSONRPCEventBatch(&buf, nil)
+	assert.NoError(t, err, "FormatJSONRPCEventBatch with nil slice should not return an error")
+
+	output := buf.String()
+	assert.Empty(t, output, "Output should be empty for nil events slice")
 }
