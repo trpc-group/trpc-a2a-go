@@ -201,6 +201,6 @@ type AgentCard struct {
 	ProtocolVersion *string `json:"protocolVersion,omitempty"`
 	// Interfaces are the list of interfaces supported by the agent.
 	AdditionalInterfaces []AgentInterface `json:"additionalInterfaces,omitempty"`
-	// Signatures are the JWS signatures of the agent card for verification.
+	// Signatures are the JWS signaturesof the agent card for verification.
 	Signatures []AgentCardSignature `json:"signatures,omitempty"`
 }

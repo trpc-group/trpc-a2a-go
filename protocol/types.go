@@ -856,10 +856,3 @@ func (r *StreamingMessageEvent) MarshalJSON() ([]byte, error) {
 		return nil, fmt.Errorf("unsupported result kind: %s", r.Result.GetKind())
 	}
 }
-
-// GetAuthenticatedExtendedCardResponse represents the response for the agent/getAuthenticatedExtendedCard method.
-type GetAuthenticatedExtendedCardResponse struct {
-	// Result is the extended agent card.
-	// Note: This should be server.AgentCard but we use interface{} to avoid import cycle
-	Result interface{} `json:"result"`
-}

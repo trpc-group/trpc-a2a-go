@@ -171,13 +171,6 @@ func WithMiddleWare(middlewares ...Middleware) Option {
 	}
 }
 
-// WithAgentCardHandler sets the handler for the agent card endpoint.
-func WithAgentCardHandler(handler http.Handler) Option {
-	return func(s *A2AServer) {
-		s.agentCardHandler = handler
-	}
-}
-
 // WithHTTPRouter sets the custom HTTP router for the server.
 // This allows for advanced routing features like multi-agent support, path parameters, and wildcards.
 // Example: WithHTTPRouter(mux.NewRouter()) for Gorilla Mux support.
@@ -187,26 +180,17 @@ func WithHTTPRouter(router HTTPRouter) Option {
 	}
 }
 
-// WithExtendedAgentCard sets an extended agent card that will be returned to authenticated users.
-// This card can contain additional information not available in the public agent card.
-// When set, the agent will automatically set SupportsAuthenticatedExtendedCard to true.
-func WithExtendedAgentCard(extendedCard AgentCard) Option {
+// WithAgentCardHandler sets the handler for the well-known/agent.json endpoint.
+// It will not be authenticated.
+func WithAgentCardHandler(handler http.Handler) Option {
 	return func(s *A2AServer) {
-		s.extendedAgentCard = &extendedCard
-		// Automatically enable support for authenticated extended card
-		s.agentCard.SupportsAuthenticatedExtendedCard = &[]bool{true}[0]
+		s.agentCardHandler = handler
 	}
 }
 
-// WithCardModifier sets a dynamic card modifier function that can customize the agent card
-// based on the request context. This allows for per-user or per-request customization.
-// The modifier function receives the base card and context, and returns a modified card.
-// If both WithExtendedAgentCard and WithCardModifier are used, the modifier will receive
-// the extended card as the base card.
-func WithCardModifier(modifier func(baseCard AgentCard, ctx context.Context) (AgentCard, error)) Option {
+// WithAuthenticatedExtendedCardHandler sets a dynamic card handler function that can customize the agent card
+func WithAuthenticatedExtendedCardHandler(handler func(ctx context.Context, baseCard AgentCard) (AgentCard, error)) Option {
 	return func(s *A2AServer) {
-		s.cardModifier = modifier
-		// Automatically enable support for authenticated extended card
-		s.agentCard.SupportsAuthenticatedExtendedCard = &[]bool{true}[0]
+		s.authenticatedCardHandler = handler
 	}
 }

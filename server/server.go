@@ -51,8 +51,7 @@ type A2AServer struct {
 	jwksEndpoint string                              // Path for the JWKS endpoint.
 
 	// Extended card related fields
-	extendedAgentCard *AgentCard                                                       // Extended agent card for authenticated users.
-	cardModifier      func(baseCard AgentCard, ctx context.Context) (AgentCard, error) // Dynamic card modifier function.
+	authenticatedCardHandler func(ctx context.Context, baseCard AgentCard) (AgentCard, error) // Dynamic card modifier function.
 }
 
 // NewA2AServer creates a new A2AServer instance with the given agent card
@@ -721,29 +720,20 @@ func (s *A2AServer) handleAgentGetAuthenticatedExtendedCard(
 	// Check if the agent supports authenticated extended cards
 	if s.agentCard.SupportsAuthenticatedExtendedCard == nil || !*s.agentCard.SupportsAuthenticatedExtendedCard {
 		log.Warnf("Authenticated extended card not configured (Request ID: %v)", request.ID)
-		s.writeJSONRPCError(w, request.ID,
-			jsonrpc.ErrInternalError("Authenticated extended card not configured"))
+		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInternalError("Authenticated extended card not configured"))
 		return
 	}
 
-	// Determine which card to serve
-	var baseCard AgentCard
-	if s.extendedAgentCard != nil {
-		// Use the extended card if available
-		baseCard = *s.extendedAgentCard
-	} else {
-		// Fall back to the regular agent card
-		baseCard = s.agentCard
-	}
+	baseCard := s.agentCard
 
 	// Apply dynamic modifications if a card modifier is configured
 	var cardToServe AgentCard
-	if s.cardModifier != nil {
-		modifiedCard, err := s.cardModifier(baseCard, ctx)
+	if s.authenticatedCardHandler != nil {
+		modifiedCard, err := s.authenticatedCardHandler(ctx, baseCard)
 		if err != nil {
-			log.Errorf("Error applying card modifier: %v", err)
+			log.Errorf("Error applying authenticated card handler: %v", err)
 			s.writeJSONRPCError(w, request.ID,
-				jsonrpc.ErrInternalError(fmt.Sprintf("failed to generate extended card: %v", err)))
+				jsonrpc.ErrInternalError(fmt.Sprintf("failed to handle extended card: %v", err)))
 			return
 		}
 		cardToServe = modifiedCard
@@ -751,11 +741,6 @@ func (s *A2AServer) handleAgentGetAuthenticatedExtendedCard(
 		cardToServe = baseCard
 	}
 
-	// Create the response
-	response := protocol.GetAuthenticatedExtendedCardResponse{
-		Result: cardToServe,
-	}
-
 	log.Debugf("Serving authenticated extended card (Request ID: %v)", request.ID)
-	s.writeJSONRPCResponse(w, request.ID, response.Result)
+	s.writeJSONRPCResponse(w, request.ID, cardToServe)
 }
