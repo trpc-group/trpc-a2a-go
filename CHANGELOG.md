@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.4 (2025-09-17)
+
+- Add tunnel to optimize sse sending (#74)
+- Enlarge channel size (#79)
+- Set no default client timeout (#80)
+- Downgrade golang version to 1.20 (#82)
+
 ## 0.2.3 (2025-08-15)
 
 - Add metadata to TaskHandler interfaces (#70)
