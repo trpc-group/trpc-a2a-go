@@ -50,9 +50,9 @@ func main() {
 	}
 
 	fmt.Println("Starting A2A server listening on", *host)
-	fmt.Println("Chat agent card url :", fmt.Sprintf("http://%s/api/v1/agent/chatAgent/.well-known/agent.json:", *host))
+	fmt.Println("Chat agent card url :", fmt.Sprintf("http://%s/api/v1/agent/chatAgent/.well-known/agent-card.json:", *host))
 	fmt.Println("Chat agent interfaces:", fmt.Sprintf("http://%s/api/v1/agent/chatAgent/", *host))
-	fmt.Println("Worker agent card url:", fmt.Sprintf("http://%s/api/v1/agent/workerAgent/.well-known/agent.json", *host))
+	fmt.Println("Worker agent card url:", fmt.Sprintf("http://%s/api/v1/agent/workerAgent/.well-known/agent-card.json", *host))
 	fmt.Println("Worker agent interfaces:", fmt.Sprintf("http://%s/api/v1/agent/workerAgent/", *host))
 
 	if err := a2aServer.Start(*host); err != nil {

@@ -20,7 +20,7 @@ const (
 	defaultWriteTimeout = 60 * time.Second
 	defaultIdleTimeout  = 300 * time.Second
 	// todo: remove this in next version
-	oldAgentCardPath = "/.well-known/agent-card.json"
+	oldAgentCardPath = "/.well-known/agent.json"
 )
 
 // Middleware is an interface for authentication middlewares.

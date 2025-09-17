@@ -48,7 +48,7 @@ go run main.go
 
 The server will start on `http://localhost:8080` and provide:
 - **Text reversal service** via A2A protocol
-- Agent Card at `/.well-known/agent.json`
+- Agent Card at `/.well-known/agent-card.json`
 - JSON-RPC 2.0 endpoint at `/jsonrpc`
 
 ### 2. Test with Go Client
@@ -74,7 +74,7 @@ The Simple A2A Server demonstrates:
 
 - ✅ **A2A Protocol Compliance**: Full implementation of A2A specification
 - ✅ **JSON-RPC 2.0**: Standard JSON-RPC request/response handling
-- ✅ **Agent Card**: Metadata discovery via `/.well-known/agent.json`
+- ✅ **Agent Card**: Metadata discovery via `/.well-known/agent-card.json`
 - ✅ **Text Reversal Processing**: **Reverses input text character by character**
 - ✅ **Streaming Support**: Supports `message/stream` for streaming responses
 - ✅ **Error Handling**: Comprehensive error handling and validation
@@ -118,7 +118,7 @@ cd python_client && python official_a2a_client.py --mode test
 
 ## Agent Card
 
-The server provides an Agent Card at `/.well-known/agent.json`:
+The server provides an Agent Card at `/.well-known/agent-card.json`:
 
 ```json
 {

@@ -74,7 +74,7 @@ func main() {
 	go func() {
 		log.Printf("Server starting on :8080")
 		log.Printf("Endpoints available at:")
-		log.Printf("  Agent Card: http://localhost:8080/api/v1/agent/.well-known/agent.json")
+		log.Printf("  Agent Card: http://localhost:8080/api/v1/agent/.well-known/agent-card.json")
 		log.Printf("  JSON-RPC: http://localhost:8080/api/v1/agent/")
 		if err := a2aServer.Start(":8080"); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server failed: %v", err)
