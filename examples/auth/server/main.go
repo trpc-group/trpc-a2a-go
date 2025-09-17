@@ -319,7 +319,7 @@ func printExampleCommands(port int, token string, enableOAuth bool, tokenEndpoin
 
 	// Agent card example
 	log.Printf("\nFetch agent card:")
-	log.Printf("curl http://localhost:%d/.well-known/agent.json", port)
+	log.Printf("curl http://localhost:%d/.well-known/agent-card.json", port)
 }
 
 // echoMessageProcessor is a simple processor that echoes user messages

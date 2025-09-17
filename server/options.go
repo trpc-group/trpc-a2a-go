@@ -19,6 +19,8 @@ const (
 	defaultReadTimeout  = 60 * time.Second
 	defaultWriteTimeout = 60 * time.Second
 	defaultIdleTimeout  = 300 * time.Second
+	// todo: remove this in next version
+	oldAgentCardPath = "/.well-known/agent-card.json"
 )
 
 // Middleware is an interface for authentication middlewares.
@@ -124,12 +126,12 @@ func WithPushNotificationAuthenticator(authenticator *auth.PushNotificationAuthe
 // - You need explicit control over the serving endpoints
 //
 // The base path will be automatically prepended to all standard A2A endpoints:
-// - Agent card: basePath + "/.well-known/agent.json"
+// - Agent card: basePath + "/.well-known/agent-card.json"
 // - JSON-RPC: basePath + "/"
 // - JWKS: basePath + "/.well-known/jwks.json"
 //
 // Example: WithBasePath("/api/v1/agent") creates endpoints:
-// - /api/v1/agent/.well-known/agent.json
+// - /api/v1/agent/.well-known/agent-card.json
 // - /api/v1/agent/
 // - /api/v1/agent/.well-known/jwks.json
 //
@@ -153,6 +155,7 @@ func WithBasePath(basePath string) Option {
 		// Set all endpoint paths with the base path prefix.
 		s.jsonRPCEndpoint = basePath + "/"
 		s.agentCardPath = basePath + protocol.AgentCardPath
+		s.oldAgentCardPath = basePath + oldAgentCardPath
 		s.jwksEndpoint = basePath + protocol.JWKSPath
 	}
 }
