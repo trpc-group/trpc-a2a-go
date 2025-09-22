@@ -64,7 +64,7 @@ func main() {
 
 // getAgentCard retrieves the agent card for the specified agent
 func getAgentCard(agentURL string) (*server.AgentCard, error) {
-	cardURL := fmt.Sprintf("%s.well-known/agent.json", agentURL)
+	cardURL := fmt.Sprintf("%s.well-known/agent-card.json", agentURL)
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(cardURL)

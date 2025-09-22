@@ -109,7 +109,7 @@ The server understands the following text processing commands:
 
 This example demonstrates the following A2A protocol features:
 
-- Agent discovery via Agent Cards (/.well-known/agent.json)
+- Agent discovery via Agent Cards (/.well-known/agent-card.json)
 - Task creation using tasks/send and tasks/sendSubscribe
 - Task state retrieval using tasks/get
 - Task cancellation using tasks/cancel

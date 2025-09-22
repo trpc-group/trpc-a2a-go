@@ -151,7 +151,7 @@ class SimpleA2AClient:
         if not self.httpx_client:
             raise Exception("Not connected")
             
-        response = await self.httpx_client.get(f"{self.server_url}/.well-known/agent.json")
+        response = await self.httpx_client.get(f"{self.server_url}/.well-known/agent-card.json")
         if response.status_code == 200:
             return response.json()
         else:

@@ -26,14 +26,14 @@ Single Server Process (localhost:8080)
 - **Function**: Provides chat conversation capabilities
 - **Description**: "I am a chatbot"
 - **Endpoints**: 
-  - Agent Card: `GET /api/v1/agent/chatAgent/.well-known/agent.json`
+  - Agent Card: `GET /api/v1/agent/chatAgent/.well-known/agent-card.json`
   - JSON-RPC: `POST /api/v1/agent/chatAgent/`
 
 ### Worker Agent (`workerAgent`)
 - **Function**: Provides worker task processing
 - **Description**: "I am a worker"
 - **Endpoints**:
-  - Agent Card: `GET /api/v1/agent/workerAgent/.well-known/agent.json`
+  - Agent Card: `GET /api/v1/agent/workerAgent/.well-known/agent-card.json`
   - JSON-RPC: `POST /api/v1/agent/workerAgent/`
 
 ## Running the Example
@@ -47,9 +47,9 @@ go run main.go
 The server will start on `localhost:8080` and display available endpoints:
 ```
 Starting A2A server listening on localhost:8080
-Chat agent card url : http://localhost:8080/api/v1/agent/chatAgent/.well-known/agent.json:
+Chat agent card url : http://localhost:8080/api/v1/agent/chatAgent/.well-known/agent-card.json:
 Chat agent interfaces: http://localhost:8080/api/v1/agent/chatAgent/
-Worker agent card url: http://localhost:8080/api/v1/agent/workerAgent/.well-known/agent.json
+Worker agent card url: http://localhost:8080/api/v1/agent/workerAgent/.well-known/agent-card.json
 Worker agent interfaces: http://localhost:8080/api/v1/agent/workerAgent/
 ```
 
@@ -70,10 +70,10 @@ go run main.go -message="How are you today?"
 #### Get Agent Cards
 ```bash
 # Chat Agent
-curl http://localhost:8080/api/v1/agent/chatAgent/.well-known/agent.json
+curl http://localhost:8080/api/v1/agent/chatAgent/.well-known/agent-card.json
 
 # Worker Agent
-curl http://localhost:8080/api/v1/agent/workerAgent/.well-known/agent.json
+curl http://localhost:8080/api/v1/agent/workerAgent/.well-known/agent-card.json
 ```
 
 #### Send Messages to Agents

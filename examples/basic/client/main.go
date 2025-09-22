@@ -115,7 +115,7 @@ func fetchAgentCard(baseURL string) (*server.AgentCard, error) {
 	}
 
 	// Construct agent card URL
-	cardURL := baseURL + ".well-known/agent.json"
+	cardURL := baseURL + ".well-known/agent-card.json"
 
 	// Make the request
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

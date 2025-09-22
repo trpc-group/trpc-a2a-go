@@ -49,8 +49,8 @@ func TestEventTypeConstants(t *testing.T) {
 // and maintain their expected values.
 func TestEndpointPathConstants(t *testing.T) {
 	// Test HTTP endpoint path constants
-	assert.Equal(t, "/.well-known/agent.json", protocol.AgentCardPath,
-		"AgentCardPath should be '/.well-known/agent.json'")
+	assert.Equal(t, "/.well-known/agent-card.json", protocol.AgentCardPath,
+		"AgentCardPath should be '/.well-known/agent-card.json'")
 	assert.Equal(t, "/.well-known/jwks.json", protocol.JWKSPath, "JWKSPath should be '/.well-known/jwks.json'")
 	assert.Equal(t, "/", protocol.DefaultJSONRPCPath, "DefaultJSONRPCPath should be '/'")
 }

@@ -211,6 +211,7 @@ func main() {
 		Version:     "1.0.0",
 		Provider: &server.AgentProvider{
 			Organization: "tRPC-A2A-Go Examples",
+			URL:          stringPtr(fmt.Sprintf("http://%s:%d/", *host, *port)),
 		},
 		Capabilities: server.AgentCapabilities{
 			Streaming:              boolPtr(true),

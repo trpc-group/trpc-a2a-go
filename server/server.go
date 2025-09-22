@@ -37,6 +37,7 @@ type A2AServer struct {
 	corsEnabled      bool                    // Flag to enable/disable CORS headers.
 	jsonRPCEndpoint  string                  // Path for the JSON-RPC endpoint.
 	agentCardPath    string                  // Path for the agent card endpoint.
+	oldAgentCardPath string                  // Path for the old agent card endpoint.
 	readTimeout      time.Duration           // HTTP server read timeout.
 	writeTimeout     time.Duration           // HTTP server write timeout.
 	idleTimeout      time.Duration           // HTTP server idle timeout.
@@ -58,16 +59,17 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 		return nil, errors.New("NewA2AServer requires a non-nil taskManager")
 	}
 	server := &A2AServer{
-		agentCard:       agentCard,
-		taskManager:     taskManager,
-		corsEnabled:     true, // Enable CORS by default for easier development.
-		jsonRPCEndpoint: protocol.DefaultJSONRPCPath,
-		agentCardPath:   protocol.AgentCardPath,
-		readTimeout:     defaultReadTimeout,
-		writeTimeout:    defaultWriteTimeout,
-		idleTimeout:     defaultIdleTimeout,
-		jwksEnabled:     false,
-		jwksEndpoint:    protocol.JWKSPath,
+		agentCard:        agentCard,
+		taskManager:      taskManager,
+		corsEnabled:      true, // Enable CORS by default for easier development.
+		jsonRPCEndpoint:  protocol.DefaultJSONRPCPath,
+		agentCardPath:    protocol.AgentCardPath,
+		oldAgentCardPath: oldAgentCardPath,
+		readTimeout:      defaultReadTimeout,
+		writeTimeout:     defaultWriteTimeout,
+		idleTimeout:      defaultIdleTimeout,
+		jwksEnabled:      false,
+		jwksEndpoint:     protocol.JWKSPath,
 	}
 
 	// Store the original paths before applying options.
@@ -92,6 +94,7 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 			server.jsonRPCEndpoint = basePath + "/"
 			server.agentCardPath = basePath + protocol.AgentCardPath
 			server.jwksEndpoint = basePath + protocol.JWKSPath
+			server.oldAgentCardPath = basePath + oldAgentCardPath
 		}
 	}
 
@@ -157,8 +160,10 @@ func (s *A2AServer) Handler() http.Handler {
 	// Endpoint for agent metadata (.well-known convention).
 	if s.agentCardHandler != nil {
 		router.Handle(s.agentCardPath, s.agentCardHandler)
+		router.Handle(s.oldAgentCardPath, s.agentCardHandler)
 	} else {
 		router.Handle(s.agentCardPath, http.HandlerFunc(s.handleAgentCard))
+		router.Handle(s.oldAgentCardPath, http.HandlerFunc(s.handleAgentCard))
 	}
 
 	// JWKS endpoint for JWT authentication if enabled.
@@ -179,7 +184,7 @@ func (s *A2AServer) Handler() http.Handler {
 }
 
 // handleAgentCard serves the agent's metadata card as JSON.
-// Corresponds to GET /.well-known/agent.json in A2A Spec.
+// Corresponds to GET /.well-known/agent-card.json in A2A Spec.
 func (s *A2AServer) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 	if s.corsEnabled {
 		setCORSHeaders(w)

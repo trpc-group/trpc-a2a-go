@@ -64,7 +64,7 @@ func main() {
 ```
 
 **Result**: Endpoints available at:
-- Agent Card: `http://localhost:8080/api/v1/agent/.well-known/agent.json`  
+- Agent Card: `http://localhost:8080/api/v1/agent/.well-known/agent-card.json`  
 - JSON-RPC: `http://localhost:8080/api/v1/agent/`
 - JWKS: `http://localhost:8080/api/v1/agent/.well-known/jwks.json`
 
@@ -93,25 +93,25 @@ a2aServer, _ := server.NewA2AServer(
 ### Root Path
 ```go
 agentCard.URL = "http://localhost:8080/"
-// Endpoints: /, /.well-known/agent.json
+// Endpoints: /, /.well-known/agent-card.json
 ```
 
 ### Single Level
 ```go
 agentCard.URL = "http://localhost:8080/agent"  
-// Endpoints: /agent/, /agent/.well-known/agent.json
+// Endpoints: /agent/, /agent/.well-known/agent-card.json
 ```
 
 ### Multi Level
 ```go
 agentCard.URL = "http://localhost:8080/api/v1/myagent"
-// Endpoints: /api/v1/myagent/, /api/v1/myagent/.well-known/agent.json
+// Endpoints: /api/v1/myagent/, /api/v1/myagent/.well-known/agent-card.json
 ```
 
 ### With Port
 ```go
 agentCard.URL = "https://api.example.com:8443/agents/v2/chat"
-// Endpoints: /agents/v2/chat/, /agents/v2/chat/.well-known/agent.json
+// Endpoints: /agents/v2/chat/, /agents/v2/chat/.well-known/agent-card.json
 ```
 
 ## Framework Integration
@@ -177,7 +177,7 @@ The system automatically handles:
 
 ```bash
 # Get agent metadata
-curl http://localhost:8080/api/v1/agent/.well-known/agent.json
+curl http://localhost:8080/api/v1/agent/.well-known/agent-card.json
 
 # Send a message  
 curl -X POST http://localhost:8080/api/v1/agent/ \
