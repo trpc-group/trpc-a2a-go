@@ -41,7 +41,7 @@ const (
 
 // A2A HTTP Endpoint Paths define the standard paths used in the A2A protocol.
 const (
-	// OldAgentCardPath is the path for the old agent metadata JSON endpoint.
+	// AgentCardPath is the path for the agent metadata JSON endpoint.
 	AgentCardPath = "/.well-known/agent-card.json"
 	// JWKSPath is the path for the JWKS endpoint.
 	JWKSPath = "/.well-known/jwks.json"
