@@ -51,6 +51,42 @@ type config struct {
 	SessionID   string
 }
 
+// parseFlags parses command-line flags and returns a Config.
+func parseFlags() config {
+	var config config
+
+	// Basic options
+	flag.StringVar(&config.AuthMethod, "auth", "jwt", "Authentication method (jwt, apikey, oauth2)")
+	flag.StringVar(&config.AgentURL, "url", "http://localhost:8080/", "Target A2A agent URL")
+	flag.DurationVar(&config.Timeout, "timeout", 60*time.Second, "Request timeout")
+
+	// JWT options
+	flag.StringVar(&config.JWTSecret, "jwt-secret", "my-secret-key", "JWT secret key")
+	flag.StringVar(&config.JWTSecretFile, "jwt-secret-file", "../server/jwt-secret.key", "File containing JWT secret key")
+	flag.StringVar(&config.JWTAudience, "jwt-audience", "a2a-server", "JWT audience")
+	flag.StringVar(&config.JWTIssuer, "jwt-issuer", "example", "JWT issuer")
+	flag.DurationVar(&config.JWTExpiry, "jwt-expiry", 1*time.Hour, "JWT expiration time")
+
+	// API Key options
+	flag.StringVar(&config.APIKey, "api-key", "test-api-key", "API key")
+	flag.StringVar(&config.APIKeyHeader, "api-key-header", "X-API-Key", "API key header name")
+
+	// OAuth2 options
+	flag.StringVar(&config.OAuth2ClientID, "oauth2-client-id", "my-client-id", "OAuth2 client ID")
+	flag.StringVar(&config.OAuth2ClientSecret, "oauth2-client-secret", "my-client-secret", "OAuth2 client secret")
+	flag.StringVar(&config.OAuth2TokenURL, "oauth2-token-url", "", "OAuth2 token URL (default: derived from agent URL)")
+	flag.StringVar(&config.OAuth2Scopes, "oauth2-scopes", "a2a.read,a2a.write", "OAuth2 scopes (comma-separated)")
+
+	// Task options
+	flag.StringVar(&config.TaskID, "task-id", "auth-test-task", "ID for the task to send")
+	flag.StringVar(&config.TaskMessage, "message", "Hello, this is an authenticated request", "Message to send")
+	flag.StringVar(&config.SessionID, "session-id", "", "Optional session ID for the task")
+
+	flag.Parse()
+
+	return config
+}
+
 func main() {
 	config := parseFlags()
 
@@ -93,6 +129,15 @@ func main() {
 		// In the new protocol, we use contextID instead of sessionID
 		params.Message.ContextID = &config.SessionID
 	}
+
+	agentCard, err := a2aClient.GetAuthenticatedExtendedCard(context.Background())
+
+	if err != nil {
+		log.Fatalf("Failed to get extended card: %v", err)
+	}
+
+	fmt.Printf("Authenticated extended card: %v\n", agentCard.Name)
+	fmt.Printf("Authenticated extended card Desc: %v\n", agentCard.Description)
 
 	// Send the message
 	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
@@ -139,42 +184,6 @@ func main() {
 	default:
 		fmt.Printf("Unknown response type: %T\n", response)
 	}
-}
-
-// parseFlags parses command-line flags and returns a Config.
-func parseFlags() config {
-	var config config
-
-	// Basic options
-	flag.StringVar(&config.AuthMethod, "auth", "jwt", "Authentication method (jwt, apikey, oauth2)")
-	flag.StringVar(&config.AgentURL, "url", "http://localhost:8080/", "Target A2A agent URL")
-	flag.DurationVar(&config.Timeout, "timeout", 60*time.Second, "Request timeout")
-
-	// JWT options
-	flag.StringVar(&config.JWTSecret, "jwt-secret", "my-secret-key", "JWT secret key")
-	flag.StringVar(&config.JWTSecretFile, "jwt-secret-file", "../server/jwt-secret.key", "File containing JWT secret key")
-	flag.StringVar(&config.JWTAudience, "jwt-audience", "a2a-server", "JWT audience")
-	flag.StringVar(&config.JWTIssuer, "jwt-issuer", "example", "JWT issuer")
-	flag.DurationVar(&config.JWTExpiry, "jwt-expiry", 1*time.Hour, "JWT expiration time")
-
-	// API Key options
-	flag.StringVar(&config.APIKey, "api-key", "test-api-key", "API key")
-	flag.StringVar(&config.APIKeyHeader, "api-key-header", "X-API-Key", "API key header name")
-
-	// OAuth2 options
-	flag.StringVar(&config.OAuth2ClientID, "oauth2-client-id", "my-client-id", "OAuth2 client ID")
-	flag.StringVar(&config.OAuth2ClientSecret, "oauth2-client-secret", "my-client-secret", "OAuth2 client secret")
-	flag.StringVar(&config.OAuth2TokenURL, "oauth2-token-url", "", "OAuth2 token URL (default: derived from agent URL)")
-	flag.StringVar(&config.OAuth2Scopes, "oauth2-scopes", "a2a.read,a2a.write", "OAuth2 scopes (comma-separated)")
-
-	// Task options
-	flag.StringVar(&config.TaskID, "task-id", "auth-test-task", "ID for the task to send")
-	flag.StringVar(&config.TaskMessage, "message", "Hello, this is an authenticated request", "Message to send")
-	flag.StringVar(&config.SessionID, "session-id", "", "Optional session ID for the task")
-
-	flag.Parse()
-
-	return config
 }
 
 // getJWTSecret retrieves the JWT secret from either the direct key or a file.

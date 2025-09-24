@@ -49,6 +49,9 @@ type A2AServer struct {
 	pushAuth     *auth.PushNotificationAuthenticator // Push notification authenticator.
 	jwksEnabled  bool                                // Flag to enable/disable JWKS endpoint.
 	jwksEndpoint string                              // Path for the JWKS endpoint.
+
+	// Extended card related fields
+	authenticatedCardHandler func(ctx context.Context, baseCard AgentCard) (AgentCard, error) // Dynamic card modifier function.
 }
 
 // NewA2AServer creates a new A2AServer instance with the given agent card
@@ -306,6 +309,8 @@ func (s *A2AServer) routeJSONRPCMethod(ctx context.Context, w http.ResponseWrite
 		s.handleTasksCancel(ctx, w, request)
 	case protocol.MethodTasksResubscribe: // A2A Spec: tasks/resubscribe
 		s.handleTasksResubscribe(ctx, w, request)
+	case protocol.MethodAgentAuthenticatedExtendedCard: // A2A Spec: agent/getAuthenticatedExtendedCard
+		s.handleAgentGetAuthenticatedExtendedCard(ctx, w, request)
 	default:
 		log.Warnf("Method not found: %s (Request ID: %v)", request.Method, request.ID)
 		s.writeJSONRPCError(w, request.ID,
@@ -703,4 +708,39 @@ func extractBasePathFromURL(agentURL string) string {
 	}
 
 	return basePath
+}
+
+// handleAgentGetAuthenticatedExtendedCard handles the agent/getAuthenticatedExtendedCard JSON-RPC method.
+// This method returns an extended version of the agent card for authenticated users.
+func (s *A2AServer) handleAgentGetAuthenticatedExtendedCard(
+	ctx context.Context,
+	w http.ResponseWriter,
+	request jsonrpc.Request,
+) {
+	// Check if the agent supports authenticated extended cards
+	if s.agentCard.SupportsAuthenticatedExtendedCard == nil || !*s.agentCard.SupportsAuthenticatedExtendedCard {
+		log.Warnf("Authenticated extended card not configured (Request ID: %v)", request.ID)
+		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInternalError("Authenticated extended card not configured"))
+		return
+	}
+
+	baseCard := s.agentCard
+
+	// Apply dynamic modifications if a card modifier is configured
+	var cardToServe AgentCard
+	if s.authenticatedCardHandler != nil {
+		modifiedCard, err := s.authenticatedCardHandler(ctx, baseCard)
+		if err != nil {
+			log.Errorf("Error applying authenticated card handler: %v", err)
+			s.writeJSONRPCError(w, request.ID,
+				jsonrpc.ErrInternalError(fmt.Sprintf("failed to handle extended card: %v", err)))
+			return
+		}
+		cardToServe = modifiedCard
+	} else {
+		cardToServe = baseCard
+	}
+
+	log.Debugf("Serving authenticated extended card (Request ID: %v)", request.ID)
+	s.writeJSONRPCResponse(w, request.ID, cardToServe)
 }

@@ -7,6 +7,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -170,18 +171,26 @@ func WithMiddleWare(middlewares ...Middleware) Option {
 	}
 }
 
-// WithAgentCardHandler sets the handler for the agent card endpoint.
-func WithAgentCardHandler(handler http.Handler) Option {
-	return func(s *A2AServer) {
-		s.agentCardHandler = handler
-	}
-}
-
 // WithHTTPRouter sets the custom HTTP router for the server.
 // This allows for advanced routing features like multi-agent support, path parameters, and wildcards.
 // Example: WithHTTPRouter(mux.NewRouter()) for Gorilla Mux support.
 func WithHTTPRouter(router HTTPRouter) Option {
 	return func(s *A2AServer) {
 		s.customRouter = router
+	}
+}
+
+// WithAgentCardHandler sets the handler for the well-known/agent.json endpoint.
+// It will not be authenticated.
+func WithAgentCardHandler(handler http.Handler) Option {
+	return func(s *A2AServer) {
+		s.agentCardHandler = handler
+	}
+}
+
+// WithAuthenticatedExtendedCardHandler sets a dynamic card handler function that can customize the agent card
+func WithAuthenticatedExtendedCardHandler(handler func(ctx context.Context, baseCard AgentCard) (AgentCard, error)) Option {
+	return func(s *A2AServer) {
+		s.authenticatedCardHandler = handler
 	}
 }

@@ -24,6 +24,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/internal/sse"
 	"trpc.group/trpc-go/trpc-a2a-go/log"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/server"
 )
 
 const (
@@ -523,6 +524,26 @@ func (c *A2AClient) GetPushNotification(
 	}
 
 	return config, nil
+}
+
+// GetAuthenticatedExtendedCard retrieves the extended agent card for authenticated users.
+func (c *A2AClient) GetAuthenticatedExtendedCard(ctx context.Context) (*server.AgentCard, error) {
+	request := jsonrpc.NewRequest(protocol.MethodAgentAuthenticatedExtendedCard, "")
+	fullResponse, err := c.doRequest(ctx, request)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.GetExtendedCard: %w", err)
+	}
+	if fullResponse.Error != nil {
+		return nil, fullResponse.Error
+	}
+	if len(fullResponse.Result) == 0 {
+		return nil, fmt.Errorf("rpc response missing required 'result' field for id %v", request.ID)
+	}
+	extendedCard := &server.AgentCard{}
+	if err := json.Unmarshal(fullResponse.Result, extendedCard); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal extended card: %w. Raw result: %s", err, string(fullResponse.Result))
+	}
+	return extendedCard, nil
 }
 
 // httpRequestHandler is the HTTP request handler for a2a client.

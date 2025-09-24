@@ -766,3 +766,159 @@ func TestServer_WithPushNotificationAuthenticator(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
 }
+
+// Test for authenticated extended card functionality
+func TestA2AServer_HandleAgentGetAuthenticatedExtendedCard(t *testing.T) {
+	tests := []struct {
+		name                     string
+		supportsExtendedCard     *bool
+		authenticatedCardHandler func(ctx context.Context, baseCard AgentCard) (AgentCard, error)
+		expectedError            bool
+		expectedErrorCode        int
+	}{
+		{
+			name:                 "not_configured",
+			supportsExtendedCard: nil,
+			expectedError:        true,
+			expectedErrorCode:    jsonrpc.CodeInternalError,
+		},
+		{
+			name:                 "disabled",
+			supportsExtendedCard: func() *bool { b := false; return &b }(),
+			expectedError:        true,
+			expectedErrorCode:    jsonrpc.CodeInternalError,
+		},
+		{
+			name:                 "enabled_no_handler",
+			supportsExtendedCard: func() *bool { b := true; return &b }(),
+			expectedError:        false,
+		},
+		{
+			name:                 "enabled_with_handler",
+			supportsExtendedCard: func() *bool { b := true; return &b }(),
+			authenticatedCardHandler: func(ctx context.Context, baseCard AgentCard) (AgentCard, error) {
+				// Modify the card to add additional information
+				baseCard.Description = "Extended: " + baseCard.Description
+				return baseCard, nil
+			},
+			expectedError: false,
+		},
+		{
+			name:                 "handler_error",
+			supportsExtendedCard: func() *bool { b := true; return &b }(),
+			authenticatedCardHandler: func(ctx context.Context, baseCard AgentCard) (AgentCard, error) {
+				return AgentCard{}, fmt.Errorf("handler failed")
+			},
+			expectedError:     true,
+			expectedErrorCode: jsonrpc.CodeInternalError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockTM := newMockTaskManager()
+			agentCard := defaultAgentCard()
+			agentCard.SupportsAuthenticatedExtendedCard = tt.supportsExtendedCard
+
+			a2aServer, err := NewA2AServer(agentCard, mockTM)
+			require.NoError(t, err)
+
+			if tt.authenticatedCardHandler != nil {
+				a2aServer.authenticatedCardHandler = tt.authenticatedCardHandler
+			}
+
+			testServer := httptest.NewServer(http.HandlerFunc(a2aServer.handleJSONRPC))
+			defer testServer.Close()
+
+			// Perform JSON-RPC request
+			resp := performJSONRPCRequest(t, testServer, protocol.MethodAgentAuthenticatedExtendedCard, nil, "req-extended-card")
+
+			if tt.expectedError {
+				assert.Nil(t, resp.Result, "Response result should be nil")
+				require.NotNil(t, resp.Error, "Response error should not be nil")
+				assert.Equal(t, tt.expectedErrorCode, resp.Error.Code)
+			} else {
+				assert.Nil(t, resp.Error, "Response error should be nil")
+				require.NotNil(t, resp.Result, "Response result should not be nil")
+
+				// Unmarshal and verify the result
+				resultBytes, err := json.Marshal(resp.Result)
+				require.NoError(t, err)
+				var resultCard AgentCard
+				err = json.Unmarshal(resultBytes, &resultCard)
+				require.NoError(t, err)
+
+				if tt.authenticatedCardHandler != nil {
+					// Verify the handler was called and modified the card
+					assert.True(t, strings.HasPrefix(resultCard.Description, "Extended: "))
+				} else {
+					// Verify the original card was returned
+					assert.Equal(t, agentCard.Name, resultCard.Name)
+					assert.Equal(t, agentCard.Description, resultCard.Description)
+				}
+			}
+		})
+	}
+}
+
+// Test for JWKS URL composition
+func TestA2AServer_ComposeJWKSURL(t *testing.T) {
+	tests := []struct {
+		name         string
+		agentCardURL string
+		jwksEndpoint string
+		expected     string
+	}{
+		{
+			name:         "empty_agent_url",
+			agentCardURL: "",
+			jwksEndpoint: "/.well-known/jwks.json",
+			expected:     "/.well-known/jwks.json",
+		},
+		{
+			name:         "valid_http_url",
+			agentCardURL: "http://localhost:8080/agent",
+			jwksEndpoint: "/.well-known/jwks.json",
+			expected:     "http://localhost:8080/.well-known/jwks.json",
+		},
+		{
+			name:         "valid_https_url",
+			agentCardURL: "https://api.example.com/v1/agent",
+			jwksEndpoint: "/.well-known/jwks.json",
+			expected:     "https://api.example.com/.well-known/jwks.json",
+		},
+		{
+			name:         "url_with_port",
+			agentCardURL: "https://api.example.com:9443/agent",
+			jwksEndpoint: "/.well-known/jwks.json",
+			expected:     "https://api.example.com:9443/.well-known/jwks.json",
+		},
+		{
+			name:         "invalid_url",
+			agentCardURL: "not-a-valid-url",
+			jwksEndpoint: "/.well-known/jwks.json",
+			expected:     "/.well-known/jwks.json",
+		},
+		{
+			name:         "url_without_scheme",
+			agentCardURL: "localhost:8080/agent",
+			jwksEndpoint: "/.well-known/jwks.json",
+			expected:     "/.well-known/jwks.json",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockTM := newMockTaskManager()
+			agentCard := defaultAgentCard()
+			agentCard.URL = tt.agentCardURL
+
+			a2aServer, err := NewA2AServer(agentCard, mockTM)
+			require.NoError(t, err)
+			a2aServer.jwksEndpoint = tt.jwksEndpoint
+
+			result := a2aServer.composeJWKSURL()
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}

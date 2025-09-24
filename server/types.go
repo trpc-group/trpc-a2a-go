@@ -152,6 +152,18 @@ type AgentInterface struct {
 	Transport string `json:"transport"`
 }
 
+// AgentCardSignature represents a JWS signature of an AgentCard.
+// This follows the JSON format of an RFC 7515 JSON Web Signature (JWS).
+type AgentCardSignature struct {
+	// Header contains the unprotected JWS header values.
+	Header map[string]interface{} `json:"header,omitempty"`
+	// Protected is the protected JWS header for the signature. This is a Base64url-encoded
+	// JSON object, as per RFC 7515.
+	Protected string `json:"protected"`
+	// Signature is the computed signature, Base64url-encoded.
+	Signature string `json:"signature"`
+}
+
 // AgentCard is the metadata structure describing an A2A agent.
 // Updated for A2A 0.2.2 specification compliance.
 type AgentCard struct {
@@ -189,4 +201,6 @@ type AgentCard struct {
 	ProtocolVersion *string `json:"protocolVersion,omitempty"`
 	// Interfaces are the list of interfaces supported by the agent.
 	AdditionalInterfaces []AgentInterface `json:"additionalInterfaces,omitempty"`
+	// Signatures are the JWS signaturesof the agent card for verification.
+	Signatures []AgentCardSignature `json:"signatures,omitempty"`
 }

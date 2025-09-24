@@ -44,6 +44,29 @@ type config struct {
 	EnableOAuth   bool
 }
 
+// parseFlags parses command line flags and returns a configuration
+func parseFlags() *config {
+	config := &config{
+		APIKeys: map[string]string{
+			"test-api-key": "test-user",
+		},
+		APIKeyHeader: "X-API-Key",
+	}
+
+	flag.StringVar(&config.Host, "host", "localhost", "Host address to bind to")
+	flag.IntVar(&config.Port, "port", 8080, "Port to listen on")
+	flag.StringVar(&config.JWTSecretFile, "jwt-secret-file", "jwt-secret.key", "File to store JWT secret")
+	flag.StringVar(&config.JWTAudience, "jwt-audience", "a2a-server", "JWT audience claim")
+	flag.StringVar(&config.JWTIssuer, "jwt-issuer", "example", "JWT issuer claim")
+	flag.BoolVar(&config.UseHTTPS, "https", false, "Use HTTPS")
+	flag.StringVar(&config.CertFile, "cert", "server.crt", "TLS certificate file (for HTTPS)")
+	flag.StringVar(&config.KeyFile, "key", "server.key", "TLS key file (for HTTPS)")
+	flag.BoolVar(&config.EnableOAuth, "enable-oauth", true, "Enable OAuth2 mock server")
+
+	flag.Parse()
+	return config
+}
+
 func main() {
 	// Parse command line flags
 	config := parseFlags()
@@ -155,6 +178,7 @@ func main() {
 				OutputModes: []string{"text"},
 			},
 		},
+		SupportsAuthenticatedExtendedCard: boolPtr(true),
 	}
 
 	// Create the server with authentication
@@ -162,6 +186,12 @@ func main() {
 		agentCard,
 		taskManager,
 		server.WithAuthProvider(chainProvider),
+		server.WithAuthenticatedExtendedCardHandler(
+			func(ctx context.Context, baseCard server.AgentCard) (server.AgentCard, error) {
+				baseCard.Description = "Authenticated extended card"
+				return baseCard, nil
+			},
+		),
 	)
 	if err != nil {
 		log.Fatalf("Failed to create A2A server: %v", err)
@@ -224,29 +254,6 @@ func main() {
 		log.Printf("Error during server shutdown: %v", err)
 	}
 	log.Println("Server shutdown complete")
-}
-
-// parseFlags parses command line flags and returns a configuration
-func parseFlags() *config {
-	config := &config{
-		APIKeys: map[string]string{
-			"test-api-key": "test-user",
-		},
-		APIKeyHeader: "X-API-Key",
-	}
-
-	flag.StringVar(&config.Host, "host", "localhost", "Host address to bind to")
-	flag.IntVar(&config.Port, "port", 8080, "Port to listen on")
-	flag.StringVar(&config.JWTSecretFile, "jwt-secret-file", "jwt-secret.key", "File to store JWT secret")
-	flag.StringVar(&config.JWTAudience, "jwt-audience", "a2a-server", "JWT audience claim")
-	flag.StringVar(&config.JWTIssuer, "jwt-issuer", "example", "JWT issuer claim")
-	flag.BoolVar(&config.UseHTTPS, "https", false, "Use HTTPS")
-	flag.StringVar(&config.CertFile, "cert", "server.crt", "TLS certificate file (for HTTPS)")
-	flag.StringVar(&config.KeyFile, "key", "server.key", "TLS key file (for HTTPS)")
-	flag.BoolVar(&config.EnableOAuth, "enable-oauth", true, "Enable OAuth2 mock server")
-
-	flag.Parse()
-	return config
 }
 
 // loadOrGenerateSecret loads a JWT secret from file or generates and saves a new one
@@ -351,10 +358,6 @@ func (p *echoMessageProcessor) ProcessMessage(
 	return &taskmanager.MessageProcessingResult{
 		Result: &responseMsg,
 	}, nil
-}
-
-func addressableStr(s string) *string {
-	return &s
 }
 
 // mockOAuthServer implements a simple OAuth2 server for demonstration purposes.
