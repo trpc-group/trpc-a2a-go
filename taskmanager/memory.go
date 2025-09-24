@@ -351,15 +351,15 @@ func (m *MemoryTaskManager) OnSendMessageStream(
 // OnGetTask handles the tasks/get request
 func (m *MemoryTaskManager) OnGetTask(ctx context.Context, params protocol.TaskQueryParams) (*protocol.Task, error) {
 	m.taskMu.RLock()
-	defer m.taskMu.RUnlock()
-
 	task, exists := m.Tasks[params.ID]
 	if !exists {
+		m.taskMu.RUnlock()
 		return nil, fmt.Errorf("task not found: %s", params.ID)
 	}
 
 	// return a copy of the task
 	taskCopy := *task.Task()
+	m.taskMu.RUnlock()
 
 	// if the request contains history length, fill the message history
 	if params.HistoryLength != nil && *params.HistoryLength > 0 {
@@ -500,31 +500,6 @@ func (m *MemoryTaskManager) storeMessage(message protocol.Message) {
 	}
 }
 
-// getMessageHistory gets message history
-func (m *MemoryTaskManager) getMessageHistory(contextID string) []protocol.Message {
-	var history []protocol.Message
-	if contextID == "" {
-		return history
-	}
-
-	// Need to protect access to both conversations and messages
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if conversation, exists := m.Conversations[contextID]; exists {
-		// Update last access time
-		conversation.LastAccessTime = time.Now()
-
-		history = make([]protocol.Message, 0, len(conversation.MessageIDs))
-		for _, msgID := range conversation.MessageIDs {
-			if msg, exists := m.Messages[msgID]; exists {
-				history = append(history, msg)
-			}
-		}
-	}
-	return history
-}
-
 // getConversationHistory gets conversation history of specified length
 func (m *MemoryTaskManager) getConversationHistory(contextID string, length int) []protocol.Message {
 	m.conversationMu.RLock()
@@ -663,16 +638,6 @@ func (m *MemoryTaskManager) checkTaskExists(taskID string) bool {
 	return exists
 }
 
-func (m *MemoryTaskManager) getTask(taskID string) (*MemoryCancellableTask, error) {
-	m.taskMu.RLock()
-	defer m.taskMu.RUnlock()
-	task, exists := m.Tasks[taskID]
-	if !exists {
-		return nil, fmt.Errorf("task not found: %s", taskID)
-	}
-	return task, nil
-}
-
 // notifySubscribers notifies all subscribers of the task
 func (m *MemoryTaskManager) notifySubscribers(taskID string, event protocol.StreamingMessageEvent) {
 	m.taskMu.RLock()
@@ -760,21 +725,11 @@ func (m *MemoryTaskManager) addSubscriber(taskID string, sub *MemoryTaskSubscrib
 	m.Subscribers[taskID] = append(m.Subscribers[taskID], sub)
 }
 
-// cleanSubscribers cleans up subscribers
-func (m *MemoryTaskManager) cleanSubscribers(taskID string) {
-	m.taskMu.Lock()
-	defer m.taskMu.Unlock()
-	for _, sub := range m.Subscribers[taskID] {
-		sub.Close()
-	}
-	delete(m.Subscribers, taskID)
-}
-
 // CleanExpiredConversations cleans up expired conversation history
 // maxAge: the maximum lifetime of the conversation, conversations not accessed beyond this time will be cleaned up
 func (m *MemoryTaskManager) CleanExpiredConversations(maxAge time.Duration) int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.conversationMu.Lock()
+	defer m.conversationMu.Unlock()
 
 	now := time.Now()
 	expiredContexts := make([]string, 0)
@@ -808,8 +763,8 @@ func (m *MemoryTaskManager) CleanExpiredConversations(maxAge time.Duration) int 
 
 // GetConversationStats gets conversation statistics
 func (m *MemoryTaskManager) GetConversationStats() map[string]interface{} {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.conversationMu.RLock()
+	defer m.conversationMu.RUnlock()
 
 	totalConversations := len(m.Conversations)
 	totalMessages := len(m.Messages)

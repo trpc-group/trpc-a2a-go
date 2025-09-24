@@ -56,7 +56,6 @@ func (h *memoryTaskHandler) UpdateTaskState(
 		Message:   message,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
-	h.manager.taskMu.Unlock()
 
 	log.Debugf("Updated task %s state to %s", *taskID, state)
 
@@ -70,6 +69,9 @@ func (h *memoryTaskHandler) UpdateTaskState(
 		Final:     finalState,
 	}
 	streamEvent := protocol.StreamingMessageEvent{Result: event}
+	h.manager.taskMu.Unlock()
+
+	// notify subscribers will lock again
 	h.manager.notifySubscribers(*taskID, streamEvent)
 	return nil
 }
@@ -144,9 +146,9 @@ func (h *memoryTaskHandler) GetTask(taskID *string) (CancellableTask, error) {
 	h.manager.taskMu.RLock()
 	defer h.manager.taskMu.RUnlock()
 
-	task, err := h.manager.getTask(*taskID)
-	if err != nil {
-		return nil, err
+	task, exists := h.manager.Tasks[*taskID]
+	if !exists {
+		return nil, fmt.Errorf("task not found: %s", *taskID)
 	}
 
 	// return task copy to avoid external modification
@@ -192,10 +194,31 @@ func (h *memoryTaskHandler) GetMessageHistory() []protocol.Message {
 	h.manager.conversationMu.RLock()
 	defer h.manager.conversationMu.RUnlock()
 
-	if msg, exists := h.manager.Messages[h.messageID]; exists && msg.ContextID != nil {
-		return h.manager.getMessageHistory(*msg.ContextID)
+	msg, exists := h.manager.Messages[h.messageID]
+	if !exists {
+		return []protocol.Message{}
 	}
-	return []protocol.Message{}
+	contextID := msg.ContextID
+	if msg.ContextID == nil || *msg.ContextID == "" {
+		return []protocol.Message{}
+	}
+
+	var history []protocol.Message
+	if *msg.ContextID == "" {
+		return history
+	}
+
+	if conversation, exists := h.manager.Conversations[*contextID]; exists {
+		// Update last access time
+		conversation.LastAccessTime = time.Now()
+		history = make([]protocol.Message, 0, len(conversation.MessageIDs))
+		for _, msgID := range conversation.MessageIDs {
+			if msg, exists := h.manager.Messages[msgID]; exists {
+				history = append(history, msg)
+			}
+		}
+	}
+	return history
 }
 
 // BuildTask creates a new task and returns task object
