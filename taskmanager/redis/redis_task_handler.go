@@ -108,8 +108,11 @@ func (h *taskHandler) UpdateTaskState(
 	// Update task status.
 	task.Status = protocol.TaskStatus{
 		State:     state,
-		Message:   message,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if message != nil {
+		task.Status.Message = message
 	}
 
 	// Store updated task.
