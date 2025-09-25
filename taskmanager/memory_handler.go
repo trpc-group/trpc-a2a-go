@@ -53,9 +53,14 @@ func (h *memoryTaskHandler) UpdateTaskState(
 	originalTask := task.Task()
 	originalTask.Status = protocol.TaskStatus{
 		State:     state,
-		Message:   message,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
+
+	if message != nil {
+		originalTask.Status.Message = message
+	}
+
+	h.manager.taskMu.Unlock()
 
 	log.Debugf("Updated task %s state to %s", *taskID, state)
 
