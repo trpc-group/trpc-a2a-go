@@ -60,10 +60,7 @@ func (h *memoryTaskHandler) UpdateTaskState(
 		originalTask.Status.Message = message
 	}
 
-	h.manager.taskMu.Unlock()
-
 	log.Debugf("Updated task %s state to %s", *taskID, state)
-
 	// notify subscribers
 	finalState := isFinalState(state)
 	event := &protocol.TaskStatusUpdateEvent{
