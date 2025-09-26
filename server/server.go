@@ -583,7 +583,7 @@ func (s *A2AServer) handleTasksResubscribe(ctx context.Context, w http.ResponseW
 
 	// Use the helper function to handle the SSE stream
 	log.Debugf("SSE stream reopened for request ID: %v)", request.ID)
-	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, fmt.Sprintf("%v", request.ID))
+	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, request.ID)
 }
 
 // handleMessageSend handles the message_send method.
@@ -642,7 +642,7 @@ func (s *A2AServer) handleMessageStream(ctx context.Context, w http.ResponseWrit
 
 	// Use the helper function to handle the SSE stream
 	log.Debugf("SSE stream opened for request ID: %v)", request.ID)
-	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, fmt.Sprintf("%v", request.ID))
+	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, request.ID)
 }
 
 // handleSSEStream handles an SSE stream for a task, including setup and event forwarding.
@@ -653,7 +653,10 @@ func handleSSEStream(
 	w http.ResponseWriter,
 	flusher http.Flusher,
 	eventsChan <-chan protocol.StreamingMessageEvent,
-	rpcID string) {
+	rpcID interface{}) {
+	if rpcID == nil {
+		rpcID = ""
+	}
 	// Set headers for SSE.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
