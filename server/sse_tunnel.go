@@ -20,14 +20,14 @@ const (
 type sseTunnel struct {
 	w             http.ResponseWriter
 	flusher       http.Flusher
-	rpcID         string
+	rpcID         interface{}
 	batchSize     int
 	flushInterval time.Duration
 	batch         []protocol.StreamingMessageEvent
 }
 
 // newSSETunnel creates a new SSE tunnel with default settings
-func newSSETunnel(w http.ResponseWriter, flusher http.Flusher, rpcID string) *sseTunnel {
+func newSSETunnel(w http.ResponseWriter, flusher http.Flusher, rpcID interface{}) *sseTunnel {
 	return &sseTunnel{
 		w:             w,
 		flusher:       flusher,
