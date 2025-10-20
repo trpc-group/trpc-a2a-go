@@ -125,3 +125,47 @@ func WithHTTPReqHandler(handler HTTPReqHandler) Option {
 		c.httpReqHandler = handler
 	}
 }
+
+// RequestOption is a functional option type for configuring individual requests.
+type RequestOption func(*requestConfig)
+
+// requestConfig holds per-request configuration.
+type requestConfig struct {
+	headers map[string]string
+}
+
+// WithRequestHeaders sets custom HTTP headers for a single request.
+// These headers will be added to the specific request only.
+// If a header key already exists (e.g., Content-Type, Accept), it will be overwritten.
+//
+// Example:
+//
+//	client.SendMessage(ctx, params, client.WithRequestHeaders(map[string]string{
+//	    "X-Request-ID": "12345",
+//	    "X-Custom-Header": "value",
+//	}))
+func WithRequestHeaders(headers map[string]string) RequestOption {
+	return func(rc *requestConfig) {
+		if rc.headers == nil {
+			rc.headers = make(map[string]string)
+		}
+		for k, v := range headers {
+			rc.headers[k] = v
+		}
+	}
+}
+
+// WithRequestHeader sets a single custom HTTP header for a single request.
+// This is a convenience function for setting one header at a time.
+//
+// Example:
+//
+//	client.SendMessage(ctx, params, client.WithRequestHeader("X-Request-ID", "12345"))
+func WithRequestHeader(key, value string) RequestOption {
+	return func(rc *requestConfig) {
+		if rc.headers == nil {
+			rc.headers = make(map[string]string)
+		}
+		rc.headers[key] = value
+	}
+}

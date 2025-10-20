@@ -80,6 +80,7 @@ func NewA2AClient(agentURL string, opts ...Option) (*A2AClient, error) {
 func (c *A2AClient) SendMessage(
 	ctx context.Context,
 	params protocol.SendMessageParams,
+	opts ...RequestOption,
 ) (*protocol.MessageResult, error) {
 	request := jsonrpc.NewRequest(protocol.MethodMessageSend, params.RPCID)
 	paramsBytes, err := json.Marshal(params)
@@ -87,7 +88,7 @@ func (c *A2AClient) SendMessage(
 		return nil, fmt.Errorf("a2aClient.SendMessage: failed to marshal params: %w", err)
 	}
 	request.Params = paramsBytes
-	message, err := c.doRequestAndDecodeMessage(ctx, request)
+	message, err := c.doRequestAndDecodeMessage(ctx, request, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.SendMessage: %w", err)
 	}
@@ -95,14 +96,14 @@ func (c *A2AClient) SendMessage(
 }
 
 // GetTasks retrieves the status of a task using the tasks_get method.
-func (c *A2AClient) GetTasks(ctx context.Context, params protocol.TaskQueryParams) (*protocol.Task, error) {
+func (c *A2AClient) GetTasks(ctx context.Context, params protocol.TaskQueryParams, opts ...RequestOption) (*protocol.Task, error) {
 	request := jsonrpc.NewRequest(protocol.MethodTasksGet, params.RPCID)
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.GetTasks: failed to marshal params: %w", err)
 	}
 	request.Params = paramsBytes
-	task, err := c.doRequestAndDecodeTask(ctx, request)
+	task, err := c.doRequestAndDecodeTask(ctx, request, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.GetTasks: %w", err)
 	}
@@ -114,6 +115,7 @@ func (c *A2AClient) GetTasks(ctx context.Context, params protocol.TaskQueryParam
 func (c *A2AClient) CancelTasks(
 	ctx context.Context,
 	params protocol.TaskIDParams,
+	opts ...RequestOption,
 ) (*protocol.Task, error) {
 	request := jsonrpc.NewRequest(protocol.MethodTasksCancel, params.RPCID)
 	paramsBytes, err := json.Marshal(params)
@@ -121,7 +123,7 @@ func (c *A2AClient) CancelTasks(
 		return nil, fmt.Errorf("a2aClient.CancelTasks: failed to marshal params: %w", err)
 	}
 	request.Params = paramsBytes
-	task, err := c.doRequestAndDecodeTask(ctx, request)
+	task, err := c.doRequestAndDecodeTask(ctx, request, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.CancelTasks: %w", err)
 	}
@@ -134,13 +136,14 @@ func (c *A2AClient) CancelTasks(
 func (c *A2AClient) ResubscribeTask(
 	ctx context.Context,
 	params protocol.TaskIDParams,
+	opts ...RequestOption,
 ) (<-chan protocol.StreamingMessageEvent, error) {
 	// Create the JSON-RPC request.
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.ResubscribeTask: failed to marshal params: %w", err)
 	}
-	resp, err := c.sendA2AStreamRequest(ctx, params.RPCID, protocol.MethodTasksResubscribe, paramsBytes)
+	resp, err := c.sendA2AStreamRequest(ctx, params.RPCID, protocol.MethodTasksResubscribe, paramsBytes, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.ResubscribeTask: failed to build stream request: %w", err)
 	}
@@ -157,13 +160,14 @@ func (c *A2AClient) ResubscribeTask(
 func (c *A2AClient) StreamMessage(
 	ctx context.Context,
 	params protocol.SendMessageParams,
+	opts ...RequestOption,
 ) (<-chan protocol.StreamingMessageEvent, error) {
 	// Create the JSON-RPC request.
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.StreamMessage: failed to marshal params: %w", err)
 	}
-	resp, err := c.sendA2AStreamRequest(ctx, params.RPCID, protocol.MethodMessageStream, paramsBytes)
+	resp, err := c.sendA2AStreamRequest(ctx, params.RPCID, protocol.MethodMessageStream, paramsBytes, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.StreamMessage: failed to build stream request: %w", err)
 	}
@@ -173,7 +177,13 @@ func (c *A2AClient) StreamMessage(
 	return eventsChan, nil
 }
 
-func (c *A2AClient) sendA2AStreamRequest(ctx context.Context, id, method string, paramsBytes []byte) (*http.Response, error) {
+func (c *A2AClient) sendA2AStreamRequest(ctx context.Context, id, method string, paramsBytes []byte, opts ...RequestOption) (*http.Response, error) {
+	// Apply request options
+	cfg := &requestConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	// Create the JSON-RPC request.
 	request := jsonrpc.NewRequest(method, id)
 	request.Params = paramsBytes
@@ -192,6 +202,10 @@ func (c *A2AClient) sendA2AStreamRequest(ctx context.Context, id, method string,
 	req.Header.Set("Accept", "text/event-stream") // Crucial for SSE.
 	if c.userAgent != "" {
 		req.Header.Set("User-Agent", c.userAgent)
+	}
+	// Apply custom headers from request options
+	for key, value := range cfg.headers {
+		req.Header.Set(key, value)
 	}
 	log.Debugf("A2A Client Stream Request -> Method: %s, ID: %v, URL: %s", request.Method, request.ID, targetURL)
 
@@ -328,9 +342,10 @@ func unmarshalSSEEvent(eventBytes []byte, _ string) (protocol.StreamingMessageEv
 func (c *A2AClient) doRequestAndDecodeTask(
 	ctx context.Context,
 	request *jsonrpc.Request,
+	opts ...RequestOption,
 ) (*protocol.Task, error) {
 	// Perform the HTTP request and basic JSON unmarshaling into fullResponse.
-	fullResponse, err := c.doRequest(ctx, request)
+	fullResponse, err := c.doRequest(ctx, request, opts...)
 	if err != nil {
 		return nil, err // Error is already contextualized by doRequest.
 	}
@@ -357,8 +372,9 @@ func (c *A2AClient) doRequestAndDecodeTask(
 func (c *A2AClient) doRequestAndDecodeMessage(
 	ctx context.Context,
 	request *jsonrpc.Request,
+	opts ...RequestOption,
 ) (*protocol.MessageResult, error) {
-	fullResponse, err := c.doRequest(ctx, request)
+	fullResponse, err := c.doRequest(ctx, request, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -382,7 +398,13 @@ func (c *A2AClient) doRequestAndDecodeMessage(
 // checking the HTTP status, and decoding the base JSON response structure.
 // It does NOT specifically handle the 'result' or 'error' fields, leaving that
 // to the caller or doRequestAndDecodeResult.
-func (c *A2AClient) doRequest(ctx context.Context, request *jsonrpc.Request) (*jsonrpc.RawResponse, error) {
+func (c *A2AClient) doRequest(ctx context.Context, request *jsonrpc.Request, opts ...RequestOption) (*jsonrpc.RawResponse, error) {
+	// Apply request options
+	cfg := &requestConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	reqBody, err := json.Marshal(request)
 	if err != nil {
 		// Use a more specific error message prefix.
@@ -405,6 +427,10 @@ func (c *A2AClient) doRequest(ctx context.Context, request *jsonrpc.Request) (*j
 	req.Header.Set("Accept", "application/json")
 	if c.userAgent != "" {
 		req.Header.Set("User-Agent", c.userAgent)
+	}
+	// Apply custom headers from request options
+	for key, value := range cfg.headers {
+		req.Header.Set(key, value)
 	}
 	log.Debugf("A2A Client Request -> Method: %s, ID: %v, URL: %s", request.Method, request.ID, targetURL)
 	resp, err := c.httpReqHandler.Handle(ctx, c.httpClient, req)
@@ -450,6 +476,7 @@ func (c *A2AClient) doRequest(ctx context.Context, request *jsonrpc.Request) (*j
 func (c *A2AClient) SetPushNotification(
 	ctx context.Context,
 	params protocol.TaskPushNotificationConfig,
+	opts ...RequestOption,
 ) (*protocol.TaskPushNotificationConfig, error) {
 	request := jsonrpc.NewRequest(protocol.MethodTasksPushNotificationConfigSet, params.RPCID)
 	paramsBytes, err := json.Marshal(params)
@@ -459,7 +486,7 @@ func (c *A2AClient) SetPushNotification(
 	request.Params = paramsBytes
 
 	// Perform the HTTP request and basic JSON unmarshaling
-	fullResponse, err := c.doRequest(ctx, request)
+	fullResponse, err := c.doRequest(ctx, request, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.SetPushNotification: %w", err)
 	}
@@ -490,6 +517,7 @@ func (c *A2AClient) SetPushNotification(
 func (c *A2AClient) GetPushNotification(
 	ctx context.Context,
 	params protocol.TaskIDParams,
+	opts ...RequestOption,
 ) (*protocol.TaskPushNotificationConfig, error) {
 	request := jsonrpc.NewRequest(protocol.MethodTasksPushNotificationConfigGet, params.RPCID)
 	paramsBytes, err := json.Marshal(params)
@@ -499,7 +527,7 @@ func (c *A2AClient) GetPushNotification(
 	request.Params = paramsBytes
 
 	// Perform the HTTP request and basic JSON unmarshaling
-	fullResponse, err := c.doRequest(ctx, request)
+	fullResponse, err := c.doRequest(ctx, request, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.GetPushNotification: %w", err)
 	}
@@ -527,9 +555,9 @@ func (c *A2AClient) GetPushNotification(
 }
 
 // GetAuthenticatedExtendedCard retrieves the extended agent card for authenticated users.
-func (c *A2AClient) GetAuthenticatedExtendedCard(ctx context.Context) (*server.AgentCard, error) {
+func (c *A2AClient) GetAuthenticatedExtendedCard(ctx context.Context, opts ...RequestOption) (*server.AgentCard, error) {
 	request := jsonrpc.NewRequest(protocol.MethodAgentAuthenticatedExtendedCard, "")
-	fullResponse, err := c.doRequest(ctx, request)
+	fullResponse, err := c.doRequest(ctx, request, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.GetExtendedCard: %w", err)
 	}
