@@ -554,6 +554,64 @@ func (c *A2AClient) GetPushNotification(
 	return config, nil
 }
 
+// GetAgentCard retrieves the public agent card from the /.well-known/agent-card.json endpoint.
+// This is a standard HTTP GET request, not a JSON-RPC call.
+func (c *A2AClient) GetAgentCard(ctx context.Context, opts ...RequestOption) (*server.AgentCard, error) {
+	// Apply request options to get custom headers
+	cfg := &requestConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	// Construct the agent card URL
+	cardURL := c.baseURL.ResolveReference(&url.URL{Path: protocol.AgentCardPath})
+
+	// Create HTTP request
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cardURL.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.GetAgentCard: failed to create request: %w", err)
+	}
+
+	// Set standard headers
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", c.userAgent)
+
+	// Apply custom headers from request options
+	for key, value := range cfg.headers {
+		req.Header.Set(key, value)
+	}
+
+	log.Debugf("A2A Client GetAgentCard Request -> URL: %s", cardURL)
+
+	// Execute the request through httpReqHandler
+	// Note: Authentication is handled automatically by the httpClient's Transport
+	// if an authProvider was configured via WithJWTAuth, WithAPIKeyAuth, etc.
+	resp, err := c.httpReqHandler.Handle(ctx, c.httpClient, req)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.GetAgentCard: http request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Check HTTP status
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("a2aClient.GetAgentCard: HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// Read and parse the response
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.GetAgentCard: failed to read response: %w", err)
+	}
+
+	var agentCard server.AgentCard
+	if err := json.Unmarshal(bodyBytes, &agentCard); err != nil {
+		return nil, fmt.Errorf("a2aClient.GetAgentCard: failed to unmarshal agent card: %w. Raw response: %s", err, string(bodyBytes))
+	}
+
+	return &agentCard, nil
+}
+
 // GetAuthenticatedExtendedCard retrieves the extended agent card for authenticated users.
 func (c *A2AClient) GetAuthenticatedExtendedCard(ctx context.Context, opts ...RequestOption) (*server.AgentCard, error) {
 	request := jsonrpc.NewRequest(protocol.MethodAgentAuthenticatedExtendedCard, "")
