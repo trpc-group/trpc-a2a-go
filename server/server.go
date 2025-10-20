@@ -238,7 +238,7 @@ func (s *A2AServer) validateJSONRPCRequest(w http.ResponseWriter, r *http.Reques
 	// Check HTTP method
 	if r.Method != http.MethodPost {
 		s.writeJSONRPCError(w, nil,
-			jsonrpc.ErrMethodNotFound(fmt.Sprintf("HTTP method %s not allowed, use POST", r.Method)))
+			jsonrpc.ErrInvalidRequest(fmt.Sprintf("HTTP method %s not allowed, use POST", r.Method)))
 		return false
 	}
 

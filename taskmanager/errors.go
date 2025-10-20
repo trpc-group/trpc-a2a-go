@@ -127,12 +127,3 @@ func ErrAuthenticatedExtendedCardNotConfigured() *jsonrpc.Error {
 		Data:    "This agent does not have an authenticated extended card configured",
 	}).WithWrappedError(ErrAuthenticatedExtendedCardNotConfiguredSentinel)
 }
-
-// Deprecated functions for backward compatibility
-
-// ErrTaskFinalState creates a JSON-RPC error for attempting an operation on a task
-// that is already in a final state (completed, failed, cancelled).
-// Deprecated: Use ErrTaskNotCancelable instead.
-func ErrTaskFinalState(taskID string, state protocol.TaskState) *jsonrpc.Error {
-	return ErrTaskNotCancelable(taskID, state)
-}
