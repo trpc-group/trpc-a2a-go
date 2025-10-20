@@ -556,15 +556,29 @@ func (c *A2AClient) GetPushNotification(
 
 // GetAgentCard retrieves the public agent card from the /.well-known/agent-card.json endpoint.
 // This is a standard HTTP GET request, not a JSON-RPC call.
-func (c *A2AClient) GetAgentCard(ctx context.Context, opts ...RequestOption) (*server.AgentCard, error) {
-	// Apply request options to get custom headers
-	cfg := &requestConfig{}
-	for _, opt := range opts {
-		opt(cfg)
-	}
-
+//
+// If agentCardURL is empty, it will use baseURL + /.well-known/agent-card.json.
+// If agentCardURL is provided, it will be used as-is (can be a complete URL or a relative path).
+func (c *A2AClient) GetAgentCard(ctx context.Context, agentCardURL string) (*server.AgentCard, error) {
 	// Construct the agent card URL
-	cardURL := c.baseURL.ResolveReference(&url.URL{Path: protocol.AgentCardPath})
+	var cardURL *url.URL
+	var err error
+
+	if agentCardURL == "" {
+		// Use default: baseURL + /.well-known/agent-card.json
+		cardURL = c.baseURL.ResolveReference(&url.URL{Path: protocol.AgentCardPath})
+	} else {
+		// Parse the provided URL
+		cardURL, err = url.Parse(agentCardURL)
+		if err != nil {
+			return nil, fmt.Errorf("a2aClient.GetAgentCard: invalid agent card URL: %w", err)
+		}
+
+		// If it's a relative URL, resolve it against baseURL
+		if !cardURL.IsAbs() {
+			cardURL = c.baseURL.ResolveReference(cardURL)
+		}
+	}
 
 	// Create HTTP request
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cardURL.String(), nil)
@@ -576,11 +590,6 @@ func (c *A2AClient) GetAgentCard(ctx context.Context, opts ...RequestOption) (*s
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.userAgent)
 
-	// Apply custom headers from request options
-	for key, value := range cfg.headers {
-		req.Header.Set(key, value)
-	}
-
 	log.Debugf("A2A Client GetAgentCard Request -> URL: %s", cardURL)
 
 	// Execute the request through httpReqHandler
@@ -590,20 +599,24 @@ func (c *A2AClient) GetAgentCard(ctx context.Context, opts ...RequestOption) (*s
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.GetAgentCard: http request failed: %w", err)
 	}
+	if resp == nil || resp.Body == nil {
+		return nil, fmt.Errorf("a2aClient.GetAgentCard: unexpected nil response")
+	}
 	defer resp.Body.Close()
+
+	// Read the body first for potential error reporting
+	bodyBytes, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		log.Warnf("Warning: a2aClient.GetAgentCard: failed to read response body (status %d): %v", resp.StatusCode, readErr)
+		return nil, fmt.Errorf("a2aClient.GetAgentCard: failed to read response body: %w", readErr)
+	}
 
 	// Check HTTP status
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("a2aClient.GetAgentCard: HTTP %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	// Read and parse the response
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("a2aClient.GetAgentCard: failed to read response: %w", err)
-	}
-
+	// Parse the response
 	var agentCard server.AgentCard
 	if err := json.Unmarshal(bodyBytes, &agentCard); err != nil {
 		return nil, fmt.Errorf("a2aClient.GetAgentCard: failed to unmarshal agent card: %w. Raw response: %s", err, string(bodyBytes))

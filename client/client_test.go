@@ -597,7 +597,7 @@ func createMockServerHandler(
 
 // TestA2AClient_GetAgentCard tests the GetAgentCard client method.
 func TestA2AClient_GetAgentCard(t *testing.T) {
-	t.Run("GetAgentCard Success", func(t *testing.T) {
+	t.Run("GetAgentCard Success - Default URL", func(t *testing.T) {
 		// Create a mock agent card
 		mockCard := server.AgentCard{
 			Name:        "Test Agent",
@@ -637,8 +637,8 @@ func TestA2AClient_GetAgentCard(t *testing.T) {
 		client, err := NewA2AClient(server.URL)
 		require.NoError(t, err)
 
-		// Call GetAgentCard
-		card, err := client.GetAgentCard(context.Background())
+		// Call GetAgentCard with empty URL (use default)
+		card, err := client.GetAgentCard(context.Background(), "")
 
 		// Assertions
 		require.NoError(t, err)
@@ -649,19 +649,53 @@ func TestA2AClient_GetAgentCard(t *testing.T) {
 		assert.Equal(t, len(mockCard.Skills), len(card.Skills))
 	})
 
-	t.Run("GetAgentCard with Custom Headers", func(t *testing.T) {
-		// Create a mock server that checks for custom headers
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Verify custom headers
-			assert.Equal(t, "test-value", r.Header.Get("X-Custom-Header"))
-			assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
+	t.Run("GetAgentCard Success - Custom Absolute URL", func(t *testing.T) {
+		// Create a mock server for the agent card at a different location
+		cardServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, "/custom/path/agent-card.json", r.URL.Path)
 
-			// Serve a minimal agent card
 			mockCard := server.AgentCard{
-				Name:               "Test Agent",
+				Name:               "Custom Agent",
+				Description:        "Agent from custom URL",
+				URL:                "http://custom.example.com/",
+				Version:            "2.0.0",
+				DefaultInputModes:  []string{"text"},
+				DefaultOutputModes: []string{"text"},
+				Skills:             []server.AgentSkill{},
+			}
+
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(mockCard)
+		}))
+		defer cardServer.Close()
+
+		// Create client with a different base URL
+		client, err := NewA2AClient("http://localhost:8080/")
+		require.NoError(t, err)
+
+		// Call GetAgentCard with custom absolute URL
+		customURL := cardServer.URL + "/custom/path/agent-card.json"
+		card, err := client.GetAgentCard(context.Background(), customURL)
+
+		// Assertions
+		require.NoError(t, err)
+		require.NotNil(t, card)
+		assert.Equal(t, "Custom Agent", card.Name)
+		assert.Equal(t, "2.0.0", card.Version)
+	})
+
+	t.Run("GetAgentCard Success - Custom Relative Path", func(t *testing.T) {
+		// Create a mock server
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Should resolve relative path against baseURL
+			assert.Equal(t, "/api/v1/agent-info", r.URL.Path)
+
+			mockCard := server.AgentCard{
+				Name:               "Relative Path Agent",
 				Description:        "Test",
 				URL:                "http://localhost:8080/",
-				Version:            "1.0.0",
+				Version:            "1.5.0",
 				DefaultInputModes:  []string{"text"},
 				DefaultOutputModes: []string{"text"},
 				Skills:             []server.AgentSkill{},
@@ -677,16 +711,13 @@ func TestA2AClient_GetAgentCard(t *testing.T) {
 		client, err := NewA2AClient(server.URL)
 		require.NoError(t, err)
 
-		// Call GetAgentCard with custom headers
-		card, err := client.GetAgentCard(
-			context.Background(),
-			WithRequestHeader("X-Custom-Header", "test-value"),
-			WithRequestHeader("Authorization", "Bearer test-token"),
-		)
+		// Call GetAgentCard with relative path
+		card, err := client.GetAgentCard(context.Background(), "/api/v1/agent-info")
 
 		// Assertions
 		require.NoError(t, err)
 		require.NotNil(t, card)
+		assert.Equal(t, "Relative Path Agent", card.Name)
 	})
 
 	t.Run("GetAgentCard HTTP Error", func(t *testing.T) {
@@ -702,7 +733,7 @@ func TestA2AClient_GetAgentCard(t *testing.T) {
 		require.NoError(t, err)
 
 		// Call GetAgentCard
-		card, err := client.GetAgentCard(context.Background())
+		card, err := client.GetAgentCard(context.Background(), "")
 
 		// Assertions
 		require.Error(t, err)
@@ -724,12 +755,26 @@ func TestA2AClient_GetAgentCard(t *testing.T) {
 		require.NoError(t, err)
 
 		// Call GetAgentCard
-		card, err := client.GetAgentCard(context.Background())
+		card, err := client.GetAgentCard(context.Background(), "")
 
 		// Assertions
 		require.Error(t, err)
 		assert.Nil(t, card)
 		assert.Contains(t, err.Error(), "failed to unmarshal agent card")
+	})
+
+	t.Run("GetAgentCard Invalid URL", func(t *testing.T) {
+		// Create client
+		client, err := NewA2AClient("http://localhost:8080/")
+		require.NoError(t, err)
+
+		// Call GetAgentCard with invalid URL
+		card, err := client.GetAgentCard(context.Background(), "://invalid-url")
+
+		// Assertions
+		require.Error(t, err)
+		assert.Nil(t, card)
+		assert.Contains(t, err.Error(), "invalid agent card URL")
 	})
 
 	t.Run("GetAgentCard with Custom HTTPReqHandler", func(t *testing.T) {
@@ -767,7 +812,7 @@ func TestA2AClient_GetAgentCard(t *testing.T) {
 		require.NoError(t, err)
 
 		// Call GetAgentCard
-		card, err := client.GetAgentCard(context.Background())
+		card, err := client.GetAgentCard(context.Background(), "")
 
 		// Assertions
 		require.NoError(t, err)
