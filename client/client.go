@@ -559,7 +559,13 @@ func (c *A2AClient) GetPushNotification(
 //
 // If agentCardURL is empty, it will use baseURL + /.well-known/agent-card.json.
 // If agentCardURL is provided, it will be used as-is (can be a complete URL or a relative path).
-func (c *A2AClient) GetAgentCard(ctx context.Context, agentCardURL string) (*server.AgentCard, error) {
+func (c *A2AClient) GetAgentCard(ctx context.Context, agentCardURL string, opts ...RequestOption) (*server.AgentCard, error) {
+	// Apply request options to get custom headers
+	cfg := &requestConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	// Construct the agent card URL
 	var cardURL *url.URL
 	var err error
@@ -589,6 +595,11 @@ func (c *A2AClient) GetAgentCard(ctx context.Context, agentCardURL string) (*ser
 	// Set standard headers
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.userAgent)
+
+	// Apply custom headers from request options
+	for key, value := range cfg.headers {
+		req.Header.Set(key, value)
+	}
 
 	log.Debugf("A2A Client GetAgentCard Request -> URL: %s", cardURL)
 
