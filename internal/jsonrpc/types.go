@@ -65,6 +65,10 @@ type Error struct {
 	// The value of this member is defined by the Server (e.g. detailed error
 	// information, nested errors etc.).
 	Data interface{} `json:"data,omitempty"`
+	// wrappedErr is an optional underlying error for error chain support.
+	// This enables error wrapping and use with errors.Is() and errors.As().
+	// This field is not serialized to JSON.
+	wrappedErr error
 }
 
 // Error implements the standard Go error interface for JSONRPCError, providing
@@ -74,6 +78,24 @@ func (e *Error) Error() string {
 		return "<nil jsonrpc error>"
 	}
 	return fmt.Sprintf("jsonrpc error %d: %s", e.Code, e.Message)
+}
+
+// Unwrap returns the underlying error if one exists, enabling error chain traversal.
+// This method is used by errors.Is() and errors.As() for error matching.
+func (e *Error) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.wrappedErr
+}
+
+// WithWrappedError sets the underlying error for error chain support.
+// This enables use with errors.Is() and errors.As().
+func (e *Error) WithWrappedError(err error) *Error {
+	if e != nil {
+		e.wrappedErr = err
+	}
+	return e
 }
 
 // --- Standard Error Constructors ---

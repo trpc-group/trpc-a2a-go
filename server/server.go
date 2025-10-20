@@ -336,16 +336,7 @@ func (s *A2AServer) handleTasksGet(ctx context.Context, w http.ResponseWriter, r
 	}
 	task, err := s.taskManager.OnGetTask(ctx, params)
 	if err != nil {
-		// Check if the error is already a JSONRPCError (e.g., TaskNotFound).
-		if rpcErr, ok := err.(*jsonrpc.Error); ok {
-			log.Errorf("Error calling OnGetTask for task %s: %v", params.ID, rpcErr)
-			s.writeJSONRPCError(w, request.ID, rpcErr)
-		} else {
-			// Otherwise, wrap it as a generic internal error.
-			log.Errorf("Unexpected error calling OnGetTask for task %s: %v", params.ID, err)
-			s.writeJSONRPCError(w, request.ID,
-				jsonrpc.ErrInternalError(fmt.Sprintf("failed to get task: %v", err)))
-		}
+		s.handleTaskManagerError(w, request.ID, err, "OnGetTask", params.ID)
 		return
 	}
 	s.writeJSONRPCResponse(w, request.ID, task)
@@ -360,17 +351,31 @@ func (s *A2AServer) handleTasksCancel(ctx context.Context, w http.ResponseWriter
 	}
 	task, err := s.taskManager.OnCancelTask(ctx, params)
 	if err != nil {
-		if rpcErr, ok := err.(*jsonrpc.Error); ok {
-			log.Errorf("Error calling OnCancelTask for task %s: %v", params.ID, rpcErr)
-			s.writeJSONRPCError(w, request.ID, rpcErr)
-		} else {
-			log.Errorf("Unexpected error calling OnCancelTask for task %s: %v", params.ID, err)
-			s.writeJSONRPCError(w, request.ID,
-				jsonrpc.ErrInternalError(fmt.Sprintf("failed to cancel task: %v", err)))
-		}
+		s.handleTaskManagerError(w, request.ID, err, "OnCancelTask", params.ID)
 		return
 	}
 	s.writeJSONRPCResponse(w, request.ID, task)
+}
+
+// handleTaskManagerError handles errors from task manager operations.
+// It checks if the error is already a JSON-RPC error and logs/writes it appropriately.
+func (s *A2AServer) handleTaskManagerError(
+	w http.ResponseWriter,
+	id interface{},
+	err error,
+	operation string,
+	taskID string,
+) {
+	// Check if the error is already a JSONRPCError (e.g., TaskNotFound, TaskNotCancelable).
+	if rpcErr, ok := err.(*jsonrpc.Error); ok {
+		log.Errorf("Error calling %s for task %s: %v", operation, taskID, rpcErr)
+		s.writeJSONRPCError(w, id, rpcErr)
+	} else {
+		// Otherwise, wrap it as a generic internal error.
+		log.Errorf("Unexpected error calling %s for task %s: %v", operation, taskID, err)
+		s.writeJSONRPCError(w, id,
+			jsonrpc.ErrInternalError(fmt.Sprintf("%s failed: %v", operation, err)))
+	}
 }
 
 // writeJSONRPCResponse encodes and writes a successful JSON-RPC response.
@@ -479,14 +484,7 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 	// Delegate to the task manager.
 	result, err := s.taskManager.OnPushNotificationSet(ctx, params)
 	if err != nil {
-		log.Errorf("Error calling OnPushNotificationSet for task %s: %v", params.TaskID, err)
-		// Check if the error is already a JSONRPCError.
-		if rpcErr, ok := err.(*jsonrpc.Error); ok {
-			s.writeJSONRPCError(w, request.ID, rpcErr)
-		} else {
-			s.writeJSONRPCError(w, request.ID,
-				jsonrpc.ErrInternalError(fmt.Sprintf("push notification setup failed: %v", err)))
-		}
+		s.handleTaskManagerError(w, request.ID, err, "OnPushNotificationSet", params.TaskID)
 		return
 	}
 
@@ -533,14 +531,7 @@ func (s *A2AServer) handleTasksPushNotificationGet(
 	// Delegate to the task manager.
 	result, err := s.taskManager.OnPushNotificationGet(ctx, params)
 	if err != nil {
-		log.Errorf("Error calling OnPushNotificationGet for task %s: %v", params.ID, err)
-		// Check if the error is already a JSONRPCError.
-		if rpcErr, ok := err.(*jsonrpc.Error); ok {
-			s.writeJSONRPCError(w, request.ID, rpcErr)
-		} else {
-			s.writeJSONRPCError(w, request.ID,
-				jsonrpc.ErrInternalError(fmt.Sprintf("failed to get push notification config: %v", err)))
-		}
+		s.handleTaskManagerError(w, request.ID, err, "OnPushNotificationGet", params.ID)
 		return
 	}
 
@@ -571,13 +562,7 @@ func (s *A2AServer) handleTasksResubscribe(ctx context.Context, w http.ResponseW
 	// Get the event channel from the task manager.
 	eventsChan, err := s.taskManager.OnResubscribe(ctx, params)
 	if err != nil {
-		log.Errorf("Error calling OnResubscribe for task %s: %v", params.ID, err)
-		if rpcErr, ok := err.(*jsonrpc.Error); ok {
-			s.writeJSONRPCError(w, request.ID, rpcErr)
-		} else {
-			s.writeJSONRPCError(w, request.ID,
-				jsonrpc.ErrInternalError(fmt.Sprintf("failed to resubscribe to task events: %v", err)))
-		}
+		s.handleTaskManagerError(w, request.ID, err, "OnResubscribe", params.ID)
 		return
 	}
 
@@ -596,15 +581,7 @@ func (s *A2AServer) handleMessageSend(ctx context.Context, w http.ResponseWriter
 	// Delegate to the task manager.
 	message, err := s.taskManager.OnSendMessage(ctx, params)
 	if err != nil {
-		log.Errorf("Error calling OnSendMessage for message %s: %v", params.RPCID, err)
-		// Check if it's already a JSON-RPC error
-		if rpcErr, ok := err.(*jsonrpc.Error); ok {
-			s.writeJSONRPCError(w, request.ID, rpcErr)
-		} else {
-			// Otherwise, wrap as internal error
-			s.writeJSONRPCError(w, request.ID,
-				jsonrpc.ErrInternalError(fmt.Sprintf("message processing failed: %v", err)))
-		}
+		s.handleTaskManagerError(w, request.ID, err, "OnSendMessage", params.RPCID)
 		return
 	}
 	s.writeJSONRPCResponse(w, request.ID, message)
@@ -720,7 +697,7 @@ func (s *A2AServer) handleAgentGetAuthenticatedExtendedCard(
 	// Check if the agent supports authenticated extended cards
 	if s.agentCard.SupportsAuthenticatedExtendedCard == nil || !*s.agentCard.SupportsAuthenticatedExtendedCard {
 		log.Warnf("Authenticated extended card not configured (Request ID: %v)", request.ID)
-		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInternalError("Authenticated extended card not configured"))
+		s.writeJSONRPCError(w, request.ID, taskmanager.ErrAuthenticatedExtendedCardNotConfigured())
 		return
 	}
 
