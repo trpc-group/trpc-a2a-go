@@ -554,12 +554,17 @@ func (c *A2AClient) GetPushNotification(
 	return config, nil
 }
 
-// GetAgentCard retrieves the public agent card from the /.well-known/agent-card.json endpoint.
+// GetAgentCard retrieves the public agent card from the A2A server.
 // This is a standard HTTP GET request, not a JSON-RPC call.
 //
-// If agentCardURL is empty, it will use baseURL + /.well-known/agent-card.json.
-// If agentCardURL is provided, it will be used as-is (can be a complete URL or a relative path).
-func (c *A2AClient) GetAgentCard(ctx context.Context, agentCardURL string, opts ...RequestOption) (*server.AgentCard, error) {
+// agentCardURL supports three modes:
+//   - Empty string "": Uses default path (baseURL + /.well-known/agent-card.json)
+//   - Relative path: Resolved against baseURL (e.g., "/api/card")
+//   - Absolute URL: Used as-is (e.g., "https://cdn.example.com/card.json")
+func (c *A2AClient) GetAgentCard(
+	ctx context.Context,
+	agentCardURL string,
+	opts ...RequestOption) (*server.AgentCard, error) {
 	// Apply request options to get custom headers
 	cfg := &requestConfig{}
 	for _, opt := range opts {
