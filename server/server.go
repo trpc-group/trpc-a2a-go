@@ -67,7 +67,7 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 		corsEnabled:      true, // Enable CORS by default for easier development.
 		jsonRPCEndpoint:  protocol.DefaultJSONRPCPath,
 		agentCardPath:    protocol.AgentCardPath,
-		oldAgentCardPath: oldAgentCardPath,
+		oldAgentCardPath: protocol.OldAgentCardPath,
 		readTimeout:      defaultReadTimeout,
 		writeTimeout:     defaultWriteTimeout,
 		idleTimeout:      defaultIdleTimeout,
@@ -97,7 +97,7 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 			server.jsonRPCEndpoint = basePath + "/"
 			server.agentCardPath = basePath + protocol.AgentCardPath
 			server.jwksEndpoint = basePath + protocol.JWKSPath
-			server.oldAgentCardPath = basePath + oldAgentCardPath
+			server.oldAgentCardPath = basePath + protocol.OldAgentCardPath
 		}
 	}
 

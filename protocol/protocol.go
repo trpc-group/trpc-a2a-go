@@ -44,7 +44,7 @@ const (
 	// AgentCardPath is the current path for the agent metadata JSON endpoint (A2A spec v0.2.5+).
 	AgentCardPath = "/.well-known/agent-card.json"
 	// OldAgentCardPath is the deprecated path for the agent metadata JSON endpoint (A2A spec < v0.2.5).
-	// Kept for backward compatibility.
+	// Kept for backward compatibility. It can be removed in a future version.
 	OldAgentCardPath = "/.well-known/agent.json"
 	// JWKSPath is the path for the JWKS endpoint.
 	JWKSPath = "/.well-known/jwks.json"

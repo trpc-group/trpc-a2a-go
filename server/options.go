@@ -20,8 +20,6 @@ const (
 	defaultReadTimeout  = 60 * time.Second
 	defaultWriteTimeout = 60 * time.Second
 	defaultIdleTimeout  = 300 * time.Second
-	// todo: remove this in next version
-	oldAgentCardPath = "/.well-known/agent.json"
 )
 
 // Middleware is an interface for authentication middlewares.
@@ -156,7 +154,7 @@ func WithBasePath(basePath string) Option {
 		// Set all endpoint paths with the base path prefix.
 		s.jsonRPCEndpoint = basePath + "/"
 		s.agentCardPath = basePath + protocol.AgentCardPath
-		s.oldAgentCardPath = basePath + oldAgentCardPath
+		s.oldAgentCardPath = basePath + protocol.OldAgentCardPath
 		s.jwksEndpoint = basePath + protocol.JWKSPath
 	}
 }
