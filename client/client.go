@@ -558,10 +558,42 @@ func (c *A2AClient) GetPushNotification(
 // This is a standard HTTP GET request, not a JSON-RPC call.
 //
 // agentCardURL supports three modes:
-//   - Empty string "": Uses default path (baseURL + /.well-known/agent-card.json)
+//   - Empty string "": Uses default path with fallback (tries /.well-known/agent-card.json first,
+//     then falls back to /.well-known/agent.json for backward compatibility)
 //   - Relative path: Resolved against baseURL (e.g., "/api/card")
 //   - Absolute URL: Used as-is (e.g., "https://cdn.example.com/card.json")
 func (c *A2AClient) GetAgentCard(
+	ctx context.Context,
+	agentCardURL string,
+	opts ...RequestOption) (*server.AgentCard, error) {
+	// If custom URL is provided, try it directly without fallback
+	if agentCardURL != "" {
+		return c.getAgentCardFromURL(ctx, agentCardURL, opts...)
+	}
+
+	// Try the new path first (A2A spec v0.2.5+)
+	card, err := c.getAgentCardFromURL(ctx, protocol.AgentCardPath, opts...)
+	if err == nil {
+		return card, nil
+	}
+
+	// Log the first attempt failure
+	log.Debugf("A2A Client GetAgentCard: failed to fetch from %s: %v, trying fallback path", protocol.AgentCardPath, err)
+
+	// Fallback to the old path for backward compatibility
+	card, fallbackErr := c.getAgentCardFromURL(ctx, protocol.OldAgentCardPath, opts...)
+	if fallbackErr == nil {
+		log.Debugf("A2A Client GetAgentCard: successfully fetched from fallback path %s", protocol.OldAgentCardPath)
+		return card, nil
+	}
+
+	// Both attempts failed, return the original error
+	return nil, fmt.Errorf("a2aClient.GetAgentCard: failed to fetch agent card from both %s and %s: %w",
+		protocol.AgentCardPath, protocol.OldAgentCardPath, err)
+}
+
+// getAgentCardFromURL is a helper function that fetches the agent card from a specific URL.
+func (c *A2AClient) getAgentCardFromURL(
 	ctx context.Context,
 	agentCardURL string,
 	opts ...RequestOption) (*server.AgentCard, error) {
@@ -575,26 +607,21 @@ func (c *A2AClient) GetAgentCard(
 	var cardURL *url.URL
 	var err error
 
-	if agentCardURL == "" {
-		// Use default: baseURL + /.well-known/agent-card.json
-		cardURL = c.baseURL.ResolveReference(&url.URL{Path: protocol.AgentCardPath})
-	} else {
-		// Parse the provided URL
-		cardURL, err = url.Parse(agentCardURL)
-		if err != nil {
-			return nil, fmt.Errorf("a2aClient.GetAgentCard: invalid agent card URL: %w", err)
-		}
+	// Parse the provided URL
+	cardURL, err = url.Parse(agentCardURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid agent card URL: %w", err)
+	}
 
-		// If it's a relative URL, resolve it against baseURL
-		if !cardURL.IsAbs() {
-			cardURL = c.baseURL.ResolveReference(cardURL)
-		}
+	// If it's a relative URL, resolve it against baseURL
+	if !cardURL.IsAbs() {
+		cardURL = c.baseURL.ResolveReference(cardURL)
 	}
 
 	// Create HTTP request
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cardURL.String(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("a2aClient.GetAgentCard: failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	// Set standard headers
@@ -613,29 +640,29 @@ func (c *A2AClient) GetAgentCard(
 	// if an authProvider was configured via WithJWTAuth, WithAPIKeyAuth, etc.
 	resp, err := c.httpReqHandler.Handle(ctx, c.httpClient, req)
 	if err != nil {
-		return nil, fmt.Errorf("a2aClient.GetAgentCard: http request failed: %w", err)
+		return nil, fmt.Errorf("http request failed: %w", err)
 	}
 	if resp == nil || resp.Body == nil {
-		return nil, fmt.Errorf("a2aClient.GetAgentCard: unexpected nil response")
+		return nil, fmt.Errorf("unexpected nil response")
 	}
 	defer resp.Body.Close()
 
 	// Read the body first for potential error reporting
 	bodyBytes, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
-		log.Warnf("Warning: a2aClient.GetAgentCard: failed to read response body (status %d): %v", resp.StatusCode, readErr)
-		return nil, fmt.Errorf("a2aClient.GetAgentCard: failed to read response body: %w", readErr)
+		log.Warnf("Warning: a2aClient.getAgentCardFromURL: failed to read response body (status %d): %v", resp.StatusCode, readErr)
+		return nil, fmt.Errorf("failed to read response body: %w", readErr)
 	}
 
 	// Check HTTP status
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("a2aClient.GetAgentCard: HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	// Parse the response
 	var agentCard server.AgentCard
 	if err := json.Unmarshal(bodyBytes, &agentCard); err != nil {
-		return nil, fmt.Errorf("a2aClient.GetAgentCard: failed to unmarshal agent card: %w. Raw response: %s", err, string(bodyBytes))
+		return nil, fmt.Errorf("failed to unmarshal agent card: %w. Raw response: %s", err, string(bodyBytes))
 	}
 
 	return &agentCard, nil

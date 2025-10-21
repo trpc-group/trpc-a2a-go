@@ -597,7 +597,7 @@ func createMockServerHandler(
 
 // TestA2AClient_GetAgentCard tests the GetAgentCard client method.
 func TestA2AClient_GetAgentCard(t *testing.T) {
-	t.Run("GetAgentCard Success - Default URL", func(t *testing.T) {
+	t.Run("GetAgentCard Success - Default URL (New Path)", func(t *testing.T) {
 		// Create a mock agent card
 		mockCard := server.AgentCard{
 			Name:        "Test Agent",
@@ -618,7 +618,7 @@ func TestA2AClient_GetAgentCard(t *testing.T) {
 			},
 		}
 
-		// Create a mock server that serves the agent card
+		// Create a mock server that serves the agent card at the new path
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Verify the request
 			assert.Equal(t, http.MethodGet, r.Method)
@@ -647,6 +647,74 @@ func TestA2AClient_GetAgentCard(t *testing.T) {
 		assert.Equal(t, mockCard.Description, card.Description)
 		assert.Equal(t, mockCard.Version, card.Version)
 		assert.Equal(t, len(mockCard.Skills), len(card.Skills))
+	})
+
+	t.Run("GetAgentCard Success - Fallback to Old Path", func(t *testing.T) {
+		// Create a mock agent card
+		mockCard := server.AgentCard{
+			Name:               "Legacy Agent",
+			Description:        "Agent using old path",
+			URL:                "http://localhost:8080/",
+			Version:            "0.9.0",
+			DefaultInputModes:  []string{"text"},
+			DefaultOutputModes: []string{"text"},
+			Skills:             []server.AgentSkill{},
+		}
+
+		// Create a mock server that only serves the old path
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, http.MethodGet, r.Method)
+
+			if r.URL.Path == protocol.AgentCardPath {
+				// New path returns 404
+				w.WriteHeader(http.StatusNotFound)
+				w.Write([]byte("Not found"))
+			} else if r.URL.Path == protocol.OldAgentCardPath {
+				// Old path returns the agent card
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(mockCard)
+			} else {
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		// Create client
+		client, err := NewA2AClient(server.URL)
+		require.NoError(t, err)
+
+		// Call GetAgentCard with empty URL (should fallback to old path)
+		card, err := client.GetAgentCard(context.Background(), "")
+
+		// Assertions
+		require.NoError(t, err)
+		require.NotNil(t, card)
+		assert.Equal(t, "Legacy Agent", card.Name)
+		assert.Equal(t, "0.9.0", card.Version)
+	})
+
+	t.Run("GetAgentCard Failure - Both Paths Fail", func(t *testing.T) {
+		// Create a mock server that returns 404 for both paths
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte("Not found"))
+		}))
+		defer server.Close()
+
+		// Create client
+		client, err := NewA2AClient(server.URL)
+		require.NoError(t, err)
+
+		// Call GetAgentCard
+		card, err := client.GetAgentCard(context.Background(), "")
+
+		// Assertions
+		require.Error(t, err)
+		assert.Nil(t, card)
+		assert.Contains(t, err.Error(), "failed to fetch agent card from both")
+		assert.Contains(t, err.Error(), protocol.AgentCardPath)
+		assert.Contains(t, err.Error(), protocol.OldAgentCardPath)
 	})
 
 	t.Run("GetAgentCard Success - Custom Absolute URL", func(t *testing.T) {
