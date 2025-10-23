@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 
 	"trpc.group/trpc-go/trpc-a2a-go/auth"
@@ -552,6 +553,127 @@ func (c *A2AClient) GetPushNotification(
 	}
 
 	return config, nil
+}
+
+// GetAgentCard retrieves the public agent card from the A2A server.
+// This is a standard HTTP GET request, not a JSON-RPC call.
+//
+// agentCardURL supports three modes:
+//   - Empty string "": Uses baseURL + standard paths with fallback
+//     (tries baseURL + /.well-known/agent-card.json first,
+//     then falls back to baseURL + /.well-known/agent.json)
+//   - Relative path: Uses baseURL + agentCardURL + standard paths with fallback
+//     (e.g., "/api" -> baseURL/api/.well-known/agent-card.json, then baseURL/api/.well-known/agent.json)
+//   - Absolute URL: Used as-is without fallback (e.g., "https://cdn.example.com/card.json")
+func (c *A2AClient) GetAgentCard(
+	ctx context.Context,
+	agentCardURL string,
+	opts ...RequestOption) (*server.AgentCard, error) {
+	// Parse the provided URL to determine if it's absolute
+	var baseForCard url.URL
+
+	if agentCardURL == "" {
+		// Use client's baseURL (make a copy)
+		baseForCard = *c.baseURL
+	} else {
+		parsedURL, err := url.Parse(agentCardURL)
+		if err != nil {
+			return nil, fmt.Errorf("a2aClient.GetAgentCard: invalid agent card URL: %w", err)
+		}
+
+		if parsedURL.IsAbs() {
+			// Absolute URL: use directly without fallback
+			return c.getAgentCardFromURL(ctx, agentCardURL, opts...)
+		}
+
+		// Relative path: resolve against baseURL to create new base
+		baseForCard = *c.baseURL.ResolveReference(parsedURL)
+	}
+
+	// Try the new path first (A2A spec v0.2.5+)
+	newPathURL := baseForCard
+	newPathURL.Path = path.Join(baseForCard.Path, protocol.AgentCardPath)
+	card, err := c.getAgentCardFromURL(ctx, newPathURL.String(), opts...)
+	if err == nil {
+		return card, nil
+	}
+
+	// Log the first attempt failure
+	log.Debugf("A2A Client GetAgentCard: failed to fetch from %s: %v, trying fallback path", newPathURL.String(), err)
+
+	// Fallback to the old path for backward compatibility
+	oldPathURL := baseForCard
+	oldPathURL.Path = path.Join(baseForCard.Path, protocol.OldAgentCardPath)
+	card, fallbackErr := c.getAgentCardFromURL(ctx, oldPathURL.String(), opts...)
+	if fallbackErr == nil {
+		log.Debugf("A2A Client GetAgentCard: successfully fetched from fallback path %s", oldPathURL.String())
+		return card, nil
+	}
+
+	// Both attempts failed, return the original error
+	return nil, fmt.Errorf("a2aClient.GetAgentCard: failed to fetch agent card from both %s and %s: %w",
+		newPathURL.String(), oldPathURL.String(), err)
+}
+
+// getAgentCardFromURL is a helper function that fetches the agent card from a specific URL.
+func (c *A2AClient) getAgentCardFromURL(
+	ctx context.Context,
+	fullURL string,
+	opts ...RequestOption) (*server.AgentCard, error) {
+	// Apply request options to get custom headers
+	cfg := &requestConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	// Create HTTP request
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Set standard headers
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", c.userAgent)
+
+	// Apply custom headers from request options
+	for key, value := range cfg.headers {
+		req.Header.Set(key, value)
+	}
+
+	log.Debugf("A2A Client GetAgentCard Request -> URL: %s", fullURL)
+
+	// Execute the request through httpReqHandler
+	// Note: Authentication is handled automatically by the httpClient's Transport
+	// if an authProvider was configured via WithJWTAuth, WithAPIKeyAuth, etc.
+	resp, err := c.httpReqHandler.Handle(ctx, c.httpClient, req)
+	if err != nil {
+		return nil, fmt.Errorf("http request failed: %w", err)
+	}
+	if resp == nil || resp.Body == nil {
+		return nil, fmt.Errorf("unexpected nil response")
+	}
+	defer resp.Body.Close()
+
+	// Read the body first for potential error reporting
+	bodyBytes, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		log.Warnf("Warning: a2aClient.getAgentCardFromURL: failed to read response body (status %d): %v", resp.StatusCode, readErr)
+		return nil, fmt.Errorf("failed to read response body: %w", readErr)
+	}
+
+	// Check HTTP status
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// Parse the response
+	var agentCard server.AgentCard
+	if err := json.Unmarshal(bodyBytes, &agentCard); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal agent card: %w. Raw response: %s", err, string(bodyBytes))
+	}
+
+	return &agentCard, nil
 }
 
 // GetAuthenticatedExtendedCard retrieves the extended agent card for authenticated users.
