@@ -568,7 +568,7 @@ func (m *mockTaskManager) OnPushNotificationGet(
 
 	config, ok := m.pushConfigs[params.ID]
 	if !ok {
-		return nil, taskmanager.ErrPushNotificationNotConfigured(params.ID)
+		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
 
 	return &protocol.TaskPushNotificationConfig{

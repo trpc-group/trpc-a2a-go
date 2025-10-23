@@ -153,7 +153,7 @@ func TestA2AServer_HandlerErrors(t *testing.T) {
 	// Test wrong HTTP method
 	t.Run("Wrong HTTP Method", func(t *testing.T) {
 		testJSONRPCErrorResponse(t, testServer, http.MethodGet, nil, "",
-			jsonrpc.CodeMethodNotFound, "Method not found")
+			jsonrpc.CodeInvalidRequest, "HTTP method")
 	})
 
 	// Test wrong content type

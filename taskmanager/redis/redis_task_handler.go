@@ -102,7 +102,7 @@ func (h *taskHandler) UpdateTaskState(
 	task, err := h.manager.getTaskInternal(h.ctx, *taskID)
 	if err != nil {
 		log.Warnf("UpdateTaskState called for non-existent task %s", *taskID)
-		return fmt.Errorf("task not found: %s", *taskID)
+		return taskmanager.ErrTaskNotFound(*taskID)
 	}
 
 	// Update task status.
@@ -153,7 +153,7 @@ func (h *taskHandler) AddArtifact(taskID *string, artifact protocol.Artifact, is
 
 	task, err := h.manager.getTaskInternal(h.ctx, *taskID)
 	if err != nil {
-		return fmt.Errorf("task not found: %s", *taskID)
+		return taskmanager.ErrTaskNotFound(*taskID)
 	}
 
 	// Append the artifact.
@@ -193,7 +193,7 @@ func (h *taskHandler) SubscribeTask(taskID *string) (taskmanager.TaskSubscriber,
 	// Check if task exists.
 	_, err := h.manager.getTaskInternal(h.ctx, *taskID)
 	if err != nil {
-		return nil, fmt.Errorf("task not found: %s", *taskID)
+		return nil, taskmanager.ErrTaskNotFound(*taskID)
 	}
 
 	sendHook := h.manager.sendStreamingEventHook(h.GetContextID())
@@ -243,7 +243,7 @@ func (h *taskHandler) CleanTask(taskID *string) error {
 	// Get the task first to verify it exists.
 	_, err := h.manager.getTaskInternal(h.ctx, *taskID)
 	if err != nil {
-		return fmt.Errorf("task not found: %s", *taskID)
+		return taskmanager.ErrTaskNotFound(*taskID)
 	}
 
 	// Cancel the task context.

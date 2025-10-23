@@ -780,13 +780,13 @@ func TestA2AServer_HandleAgentGetAuthenticatedExtendedCard(t *testing.T) {
 			name:                 "not_configured",
 			supportsExtendedCard: nil,
 			expectedError:        true,
-			expectedErrorCode:    jsonrpc.CodeInternalError,
+			expectedErrorCode:    taskmanager.ErrCodeAuthenticatedExtendedCardNotConfigured,
 		},
 		{
 			name:                 "disabled",
 			supportsExtendedCard: func() *bool { b := false; return &b }(),
 			expectedError:        true,
-			expectedErrorCode:    jsonrpc.CodeInternalError,
+			expectedErrorCode:    taskmanager.ErrCodeAuthenticatedExtendedCardNotConfigured,
 		},
 		{
 			name:                 "enabled_no_handler",

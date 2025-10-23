@@ -354,7 +354,7 @@ func (m *MemoryTaskManager) OnGetTask(ctx context.Context, params protocol.TaskQ
 	task, exists := m.Tasks[params.ID]
 	if !exists {
 		m.taskMu.RUnlock()
-		return nil, fmt.Errorf("task not found: %s", params.ID)
+		return nil, ErrTaskNotFound(params.ID)
 	}
 
 	// return a copy of the task
@@ -378,7 +378,7 @@ func (m *MemoryTaskManager) OnCancelTask(ctx context.Context, params protocol.Ta
 	task, exists := m.Tasks[params.ID]
 	if !exists {
 		m.taskMu.Unlock()
-		return nil, fmt.Errorf("task not found: %s", params.ID)
+		return nil, ErrTaskNotFound(params.ID)
 	}
 
 	taskCopy := *task.Task()
@@ -421,7 +421,7 @@ func (m *MemoryTaskManager) OnPushNotificationGet(
 
 	config, exists := m.PushNotifications[params.ID]
 	if !exists {
-		return nil, fmt.Errorf("push notification config not found for task: %s", params.ID)
+		return nil, ErrTaskNotFound(params.ID)
 	}
 
 	return &config, nil
@@ -438,7 +438,7 @@ func (m *MemoryTaskManager) OnResubscribe(
 	// Check if task exists
 	_, exists := m.Tasks[params.ID]
 	if !exists {
-		return nil, fmt.Errorf("task not found: %s", params.ID)
+		return nil, ErrTaskNotFound(params.ID)
 	}
 
 	bufSize := m.options.TaskSubscriberBufSize

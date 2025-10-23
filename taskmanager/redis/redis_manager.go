@@ -237,7 +237,7 @@ func (m *TaskManager) OnCancelTask(
 
 	// Check if task is already in a final state.
 	if isFinalState(task.Status.State) {
-		return task, fmt.Errorf("task %s is already in final state: %s", params.ID, task.Status.State)
+		return nil, taskmanager.ErrTaskNotCancelable(params.ID, task.Status.State)
 	}
 
 	var cancelFound bool
@@ -543,7 +543,7 @@ func (m *TaskManager) getTaskInternal(ctx context.Context, taskID string) (*prot
 	taskKey := taskPrefix + taskID
 	taskBytes, err := m.client.Get(ctx, taskKey).Bytes()
 	if err != nil {
-		return nil, fmt.Errorf("task not found: %s", taskID)
+		return nil, taskmanager.ErrTaskNotFound(taskID)
 	}
 
 	var task protocol.Task

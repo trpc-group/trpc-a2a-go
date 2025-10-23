@@ -47,7 +47,7 @@ func (h *memoryTaskHandler) UpdateTaskState(
 	if !exists {
 		h.manager.taskMu.Unlock()
 		log.Warnf("UpdateTaskState called for non-existent task %s", *taskID)
-		return fmt.Errorf("task not found: %s", *taskID)
+		return ErrTaskNotFound(*taskID)
 	}
 
 	originalTask := task.Task()
@@ -82,7 +82,7 @@ func (h *memoryTaskHandler) SubscribeTask(taskID *string) (TaskSubscriber, error
 		return nil, fmt.Errorf("taskID cannot be nil or empty")
 	}
 	if !h.manager.checkTaskExists(*taskID) {
-		return nil, fmt.Errorf("task not found: %s", *taskID)
+		return nil, ErrTaskNotFound(*taskID)
 	}
 	ctxID := h.GetContextID()
 	sendHook := h.manager.sendStreamingEventHook(ctxID)
@@ -115,7 +115,7 @@ func (h *memoryTaskHandler) AddArtifact(
 	task, exists := h.manager.Tasks[*taskID]
 	if !exists {
 		h.manager.taskMu.Unlock()
-		return fmt.Errorf("task not found: %s", *taskID)
+		return ErrTaskNotFound(*taskID)
 	}
 	task.Task().Artifacts = append(task.Task().Artifacts, artifact)
 	h.manager.taskMu.Unlock()
@@ -148,7 +148,7 @@ func (h *memoryTaskHandler) GetTask(taskID *string) (CancellableTask, error) {
 
 	task, exists := h.manager.Tasks[*taskID]
 	if !exists {
-		return nil, fmt.Errorf("task not found: %s", *taskID)
+		return nil, ErrTaskNotFound(*taskID)
 	}
 
 	// return task copy to avoid external modification
@@ -281,7 +281,7 @@ func (h *memoryTaskHandler) CleanTask(taskID *string) error {
 	task, exists := h.manager.Tasks[*taskID]
 	if !exists {
 		h.manager.taskMu.Unlock()
-		return fmt.Errorf("task not found: %s", *taskID)
+		return ErrTaskNotFound(*taskID)
 	}
 
 	// Cancel the task and remove from Tasks map while holding the lock

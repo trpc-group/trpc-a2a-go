@@ -8,6 +8,7 @@ package jsonrpc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -147,7 +148,11 @@ func TestResponse_MarshalUnmarshal(t *testing.T) {
 			if tc.input.Error != nil {
 				// Error case: Expect Error, No Result
 				require.NotNil(t, output.Error, "Unmarshal(error response): Error should not be nil")
-				assert.Equal(t, *tc.input.Error, *output.Error, "Unmarshal(error response): Error mismatch")
+				// Compare only serializable fields (Code, Message, Data)
+				// wrappedErr is not serialized and will be nil after unmarshal
+				assert.Equal(t, tc.input.Error.Code, output.Error.Code, "Error code mismatch")
+				assert.Equal(t, tc.input.Error.Message, output.Error.Message, "Error message mismatch")
+				assert.Equal(t, tc.input.Error.Data, output.Error.Data, "Error data mismatch")
 				assert.Nil(t, output.Result, "Unmarshal(error response): Result should be nil")
 			} else {
 				// Success case: Expect Result, No Error
@@ -441,6 +446,80 @@ func TestNewNotificationResponse(t *testing.T) {
 
 			// Verify the result is the data directly
 			assert.Equal(t, tc.data, response.Result, "Result should be the provided data directly")
+		})
+	}
+}
+
+// TestStandardErrorSentinels tests that standard JSON-RPC errors wrap sentinel errors
+func TestStandardErrorSentinels(t *testing.T) {
+	tests := []struct {
+		name     string
+		errFunc  func(interface{}) *Error
+		sentinel error
+		code     int
+		message  string
+		data     interface{}
+	}{
+		{
+			name:     "Parse Error",
+			errFunc:  ErrParseError,
+			sentinel: ErrParseErrorSentinel,
+			code:     CodeParseError,
+			message:  "Parse error",
+			data:     "invalid JSON",
+		},
+		{
+			name:     "Invalid Request",
+			errFunc:  ErrInvalidRequest,
+			sentinel: ErrInvalidRequestSentinel,
+			code:     CodeInvalidRequest,
+			message:  "Invalid Request",
+			data:     "missing method field",
+		},
+		{
+			name:     "Method Not Found",
+			errFunc:  ErrMethodNotFound,
+			sentinel: ErrMethodNotFoundSentinel,
+			code:     CodeMethodNotFound,
+			message:  "Method not found",
+			data:     "unknown/method",
+		},
+		{
+			name:     "Invalid Params",
+			errFunc:  ErrInvalidParams,
+			sentinel: ErrInvalidParamsSentinel,
+			code:     CodeInvalidParams,
+			message:  "Invalid params",
+			data:     "expected object, got array",
+		},
+		{
+			name:     "Internal Error",
+			errFunc:  ErrInternalError,
+			sentinel: ErrInternalErrorSentinel,
+			code:     CodeInternalError,
+			message:  "Internal error",
+			data:     "database connection failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.errFunc(tt.data)
+
+			// Check error code
+			assert.Equal(t, tt.code, err.Code, "Error code should match")
+
+			// Check error message
+			assert.Equal(t, tt.message, err.Message, "Error message should match")
+
+			// Check error data
+			assert.Equal(t, tt.data, err.Data, "Error data should match")
+
+			// Check that error wraps the sentinel
+			assert.True(t, errors.Is(err, tt.sentinel), "Error should wrap sentinel error")
+
+			// Check that Unwrap returns the sentinel
+			assert.Equal(t, tt.sentinel, err.Unwrap(), "Unwrap should return sentinel error")
 		})
 	}
 }
