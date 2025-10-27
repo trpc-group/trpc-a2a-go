@@ -10,6 +10,7 @@ package jsonrpc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -65,6 +66,10 @@ type Error struct {
 	// The value of this member is defined by the Server (e.g. detailed error
 	// information, nested errors etc.).
 	Data interface{} `json:"data,omitempty"`
+	// wrappedErr is an optional underlying error for error chain support.
+	// This enables error wrapping and use with errors.Is() and errors.As().
+	// This field is not serialized to JSON.
+	wrappedErr error
 }
 
 // Error implements the standard Go error interface for JSONRPCError, providing
@@ -76,35 +81,77 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("jsonrpc error %d: %s", e.Code, e.Message)
 }
 
+// Unwrap returns the underlying error if one exists, enabling error chain traversal.
+// This method is used by errors.Is() and errors.As() for error matching.
+func (e *Error) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.wrappedErr
+}
+
+// WithWrappedError sets the underlying error for error chain support.
+// This enables use with errors.Is() and errors.As().
+func (e *Error) WithWrappedError(err error) *Error {
+	if e != nil {
+		e.wrappedErr = err
+	}
+	return e
+}
+
 // --- Standard Error Constructors ---
+
+// Sentinel errors for standard JSON-RPC errors
+var (
+	// ErrParseErrorSentinel is a sentinel error for JSON parse errors
+	ErrParseErrorSentinel = errors.New("parse error")
+	// ErrInvalidRequestSentinel is a sentinel error for invalid requests
+	ErrInvalidRequestSentinel = errors.New("invalid request")
+	// ErrMethodNotFoundSentinel is a sentinel error for method not found
+	ErrMethodNotFoundSentinel = errors.New("method not found")
+	// ErrInvalidParamsSentinel is a sentinel error for invalid params
+	ErrInvalidParamsSentinel = errors.New("invalid params")
+	// ErrInternalErrorSentinel is a sentinel error for internal errors
+	ErrInternalErrorSentinel = errors.New("internal error")
+)
 
 // ErrParseError creates a standard Parse Error (-32700) JSONRPCError.
 // Use this when the server fails to parse the JSON request.
+// The returned error wraps ErrParseErrorSentinel for use with errors.Is().
 func ErrParseError(data interface{}) *Error {
-	return &Error{Code: CodeParseError, Message: "Parse error", Data: data}
+	return (&Error{Code: CodeParseError, Message: "Parse error", Data: data}).
+		WithWrappedError(ErrParseErrorSentinel)
 }
 
 // ErrInvalidRequest creates a standard Invalid Request error (-32600) JSONRPCError.
 // Use this when the JSON is valid, but the request object is not a valid
 // JSON-RPC Request (e.g., missing "jsonrpc" or "method").
+// The returned error wraps ErrInvalidRequestSentinel for use with errors.Is().
 func ErrInvalidRequest(data interface{}) *Error {
-	return &Error{Code: CodeInvalidRequest, Message: "Invalid Request", Data: data}
+	return (&Error{Code: CodeInvalidRequest, Message: "Invalid Request", Data: data}).
+		WithWrappedError(ErrInvalidRequestSentinel)
 }
 
 // ErrMethodNotFound creates a standard Method Not Found error (-32601) JSONRPCError.
 // Use this when the requested method does not exist on the server.
+// The returned error wraps ErrMethodNotFoundSentinel for use with errors.Is().
 func ErrMethodNotFound(data interface{}) *Error {
-	return &Error{Code: CodeMethodNotFound, Message: "Method not found", Data: data}
+	return (&Error{Code: CodeMethodNotFound, Message: "Method not found", Data: data}).
+		WithWrappedError(ErrMethodNotFoundSentinel)
 }
 
 // ErrInvalidParams creates a standard Invalid Params error (-32602) JSONRPCError.
 // Use this when the method parameters are invalid (e.g., wrong type, missing fields).
+// The returned error wraps ErrInvalidParamsSentinel for use with errors.Is().
 func ErrInvalidParams(data interface{}) *Error {
-	return &Error{Code: CodeInvalidParams, Message: "Invalid params", Data: data}
+	return (&Error{Code: CodeInvalidParams, Message: "Invalid params", Data: data}).
+		WithWrappedError(ErrInvalidParamsSentinel)
 }
 
 // ErrInternalError creates a standard Internal Error (-32603) JSONRPCError.
 // Use this for generic internal server errors not covered by other codes.
+// The returned error wraps ErrInternalErrorSentinel for use with errors.Is().
 func ErrInternalError(data interface{}) *Error {
-	return &Error{Code: CodeInternalError, Message: "Internal error", Data: data}
+	return (&Error{Code: CodeInternalError, Message: "Internal error", Data: data}).
+		WithWrappedError(ErrInternalErrorSentinel)
 }
