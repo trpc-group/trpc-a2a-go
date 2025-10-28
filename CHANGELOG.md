@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.5 (2025-10-27)
+
+- Support get agent card interface (#96)
+- Support header config of each call (#95)
+- Improve error code definition and error handling of server (#94)
+- Fix type of RpcID changed in streaming handling (#92)
+- Fix data race issue (#86)
+- Support a2a extendedAgentCard (#81)
+
 ## 0.2.4 (2025-09-17)
 
 - Add tunnel to optimize sse sending (#74)
