@@ -53,12 +53,14 @@ func (h *memoryTaskHandler) UpdateTaskState(
 	originalTask := task.Task()
 	originalTask.Status = protocol.TaskStatus{
 		State:     state,
-		Message:   message,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	log.Debugf("Updated task %s state to %s", *taskID, state)
+	if message != nil {
+		originalTask.Status.Message = message
+	}
 
+	log.Debugf("Updated task %s state to %s", *taskID, state)
 	// notify subscribers
 	finalState := isFinalState(state)
 	event := &protocol.TaskStatusUpdateEvent{
