@@ -19,11 +19,15 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
+
 	"trpc.group/trpc-go/trpc-a2a-go/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/log"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/telemetry"
+	"trpc.group/trpc-go/trpc-a2a-go/telemetry/metrics"
 )
 
 var errUnknownEvent = errors.New("unknown event type")
@@ -52,6 +56,14 @@ type A2AServer struct {
 
 	// Extended card related fields
 	authenticatedCardHandler func(ctx context.Context, baseCard AgentCard) (AgentCard, error) // Dynamic card modifier function.
+
+	// Telemetry fields
+	firstTokenMatcher      telemetry.FirstTokenMatcher
+	telemetryMeterProvider metric.MeterProvider
+	telemetryOptions       []metrics.Option
+	telemetryMetrics       *metrics.Instruments
+	telemetryShutdown      func(context.Context) error
+	telemetryOwnsProvider  bool
 }
 
 // NewA2AServer creates a new A2AServer instance with the given agent card
@@ -117,6 +129,9 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 // Start begins listening for HTTP requests on the specified network address.
 // It blocks until the server is stopped via Stop() or an error occurs.
 func (s *A2AServer) Start(address string) error {
+	if err := s.InitTelemetry(context.Background()); err != nil {
+		return fmt.Errorf("initialize telemetry: %w", err)
+	}
 	s.httpServer = &http.Server{
 		Addr:         address,
 		Handler:      s.Handler(),
@@ -141,11 +156,64 @@ func (s *A2AServer) Stop(ctx context.Context) error {
 		return errors.New("A2A server not running")
 	}
 	log.Info("Attempting graceful shutdown of A2A server...")
+	var shutdownErrs []error
 	if err := s.httpServer.Shutdown(ctx); err != nil {
-		return fmt.Errorf("http server shutdown failed: %w", err)
+		shutdownErrs = append(shutdownErrs, fmt.Errorf("http server shutdown failed: %w", err))
+	}
+	if err := s.shutdownTelemetry(ctx); err != nil {
+		shutdownErrs = append(shutdownErrs, fmt.Errorf("telemetry shutdown failed: %w", err))
+	}
+	if len(shutdownErrs) > 0 {
+		return errors.Join(shutdownErrs...)
 	}
 	log.Info("A2A server shutdown complete.")
 	return nil
+}
+
+type telemetryShutdowner interface {
+	Shutdown(context.Context) error
+}
+
+func (s *A2AServer) initTelemetry(ctx context.Context) error {
+	if s.telemetryMetrics != nil &&
+		(s.telemetryMeterProvider == nil || s.telemetryMetrics.MeterProvider == s.telemetryMeterProvider) {
+		return nil
+	}
+	if s.telemetryMeterProvider == nil && len(s.telemetryOptions) > 0 {
+		mp, err := metrics.NewMeterProvider(ctx, s.telemetryOptions...)
+		if err != nil {
+			return fmt.Errorf("create meter provider: %w", err)
+		}
+		s.telemetryMeterProvider = mp
+		s.telemetryShutdown = mp.Shutdown
+		s.telemetryOwnsProvider = true
+	}
+	if s.telemetryMeterProvider == nil {
+		return nil
+	}
+	if s.telemetryOwnsProvider && s.telemetryShutdown == nil {
+		if shutdowner, ok := s.telemetryMeterProvider.(telemetryShutdowner); ok {
+			s.telemetryShutdown = shutdowner.Shutdown
+		}
+	}
+	instruments, err := metrics.NewInstruments(s.telemetryMeterProvider)
+	if err != nil {
+		return fmt.Errorf("create metric instruments: %w", err)
+	}
+	s.telemetryMetrics = instruments
+	return nil
+}
+
+func (s *A2AServer) shutdownTelemetry(ctx context.Context) error {
+	s.telemetryMetrics = nil
+	if !s.telemetryOwnsProvider || s.telemetryShutdown == nil {
+		return nil
+	}
+	err := s.telemetryShutdown(ctx)
+	s.telemetryMeterProvider = nil
+	s.telemetryShutdown = nil
+	s.telemetryOwnsProvider = false
+	return err
 }
 
 // Handler returns an http.Handler for the server.
@@ -568,34 +636,46 @@ func (s *A2AServer) handleTasksResubscribe(ctx context.Context, w http.ResponseW
 
 	// Use the helper function to handle the SSE stream
 	log.Debugf("SSE stream reopened for request ID: %v)", request.ID)
-	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, request.ID)
+	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, request.ID, nil)
 }
 
 // handleMessageSend handles the message_send method.
 func (s *A2AServer) handleMessageSend(ctx context.Context, w http.ResponseWriter, request jsonrpc.Request) {
+	tracker := newMetricsTracker(protocol.MethodMessageSend, false, s.firstTokenMatcher, s.telemetryMetrics)
+	defer tracker.record(ctx)
+
 	var params protocol.SendMessageParams
 	if err := s.unmarshalParams(request.Params, &params); err != nil {
+		tracker.setError("invalid_params")
 		s.writeJSONRPCError(w, request.ID, err)
 		return
 	}
 	// Delegate to the task manager.
 	message, err := s.taskManager.OnSendMessage(ctx, params)
 	if err != nil {
+		tracker.setError("message_processing_failed")
 		s.handleTaskManagerError(w, request.ID, err, "OnSendMessage", params.RPCID)
 		return
 	}
+	tracker.markFirstToken()
 	s.writeJSONRPCResponse(w, request.ID, message)
 }
 
 // handleMessageStream handles the message_stream method using Server-Sent Events (SSE).
 func (s *A2AServer) handleMessageStream(ctx context.Context, w http.ResponseWriter, request jsonrpc.Request) {
+	tracker := newMetricsTracker(protocol.MethodMessageStream, true, s.firstTokenMatcher, s.telemetryMetrics)
+
 	var params protocol.SendMessageParams
 	if err := s.unmarshalParams(request.Params, &params); err != nil {
+		tracker.setError("invalid_params")
+		tracker.record(ctx)
 		s.writeJSONRPCError(w, request.ID, err)
 		return
 	}
 
 	if params.Message.Role == "" || len(params.Message.Parts) == 0 {
+		tracker.setError("invalid_params")
+		tracker.record(ctx)
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("message with at least one part is required"))
 		return
 	}
@@ -604,6 +684,8 @@ func (s *A2AServer) handleMessageStream(ctx context.Context, w http.ResponseWrit
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		log.Error("Streaming is not supported by the underlying http responseWriter")
+		tracker.setError("streaming_not_supported")
+		tracker.record(ctx)
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInternalError("server does not support streaming"))
 		return
 	}
@@ -612,6 +694,8 @@ func (s *A2AServer) handleMessageStream(ctx context.Context, w http.ResponseWrit
 	eventsChan, err := s.taskManager.OnSendMessageStream(ctx, params)
 	if err != nil {
 		log.Errorf("Error calling OnSendMessageStream for message %s: %v", params.RPCID, err)
+		tracker.setError("subscribe_failed")
+		tracker.record(ctx)
 		s.writeJSONRPCError(w, request.ID,
 			jsonrpc.ErrInternalError(fmt.Sprintf("failed to subscribe to message events: %v", err)))
 		return
@@ -619,7 +703,7 @@ func (s *A2AServer) handleMessageStream(ctx context.Context, w http.ResponseWrit
 
 	// Use the helper function to handle the SSE stream
 	log.Debugf("SSE stream opened for request ID: %v)", request.ID)
-	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, request.ID)
+	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, request.ID, tracker)
 }
 
 // handleSSEStream handles an SSE stream for a task, including setup and event forwarding.
@@ -630,7 +714,12 @@ func handleSSEStream(
 	w http.ResponseWriter,
 	flusher http.Flusher,
 	eventsChan <-chan protocol.StreamingMessageEvent,
-	rpcID interface{}) {
+	rpcID interface{},
+	tracker *metricsTracker,
+) {
+	if tracker != nil {
+		defer tracker.record(ctx)
+	}
 	if rpcID == nil {
 		rpcID = ""
 	}
@@ -649,9 +738,43 @@ func handleSSEStream(
 	// Use request context to detect client disconnection.
 	clientClosed := ctx.Done()
 
+	if tracker != nil {
+		eventsChan = trackStreamEvents(ctx, eventsChan, tracker)
+	}
+
 	// Use optimized tunnel for batching events
 	tunnel := newSSETunnel(w, flusher, rpcID)
 	tunnel.start(ctx, eventsChan, clientClosed)
+}
+
+func trackStreamEvents(
+	ctx context.Context,
+	eventsChan <-chan protocol.StreamingMessageEvent,
+	tracker *metricsTracker,
+) <-chan protocol.StreamingMessageEvent {
+	tracked := make(chan protocol.StreamingMessageEvent)
+	go func() {
+		defer close(tracked)
+		for {
+			select {
+			case <-ctx.Done():
+				tracker.setError("client_disconnected")
+				return
+			case event, ok := <-eventsChan:
+				if !ok {
+					return
+				}
+				tracker.onEvent(event)
+				select {
+				case <-ctx.Done():
+					tracker.setError("client_disconnected")
+					return
+				case tracked <- event:
+				}
+			}
+		}
+	}()
+	return tracked
 }
 
 // extractBasePathFromURL extracts the base path from an agent card URL.
