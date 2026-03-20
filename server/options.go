@@ -9,7 +9,11 @@ package server
 import (
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/mikeboe/trpc-a2a-go/auth"
+	"github.com/mikeboe/trpc-a2a-go/telemetry"
+	"github.com/mikeboe/trpc-a2a-go/telemetry/metrics"
 )
 
 const (
@@ -83,5 +87,32 @@ func WithJWKSEndpoint(enabled bool, path string) Option {
 func WithPushNotificationAuthenticator(authenticator *auth.PushNotificationAuthenticator) Option {
 	return func(s *A2AServer) {
 		s.pushAuth = authenticator
+	}
+}
+
+// WithFirstTokenMatcher sets a custom function to determine which event counts as the
+// "first token" for time-to-first-token (TTFT) measurement. If not set, the default
+// matcher treats the first Working status with a message or the first artifact event
+// as the first token in streaming mode, and the response itself in non-streaming mode.
+func WithFirstTokenMatcher(matcher telemetry.FirstTokenMatcher) Option {
+	return func(s *A2AServer) {
+		s.firstTokenMatcher = matcher
+	}
+}
+
+// WithTelemetryMeterProvider configures the server to initialize A2A metrics
+// with the provided OpenTelemetry meter provider when Start is called.
+// The provider is treated as externally owned and will not be shut down by the server.
+func WithTelemetryMeterProvider(provider metric.MeterProvider) Option {
+	return func(s *A2AServer) {
+		s.telemetryMeterProvider = provider
+	}
+}
+
+// WithTelemetryMeterProviderOptions configures the server to create and initialize
+// an OTLP-backed meter provider when Start is called.
+func WithTelemetryMeterProviderOptions(opts ...metrics.Option) Option {
+	return func(s *A2AServer) {
+		s.telemetryOptions = append([]metrics.Option(nil), opts...)
 	}
 }

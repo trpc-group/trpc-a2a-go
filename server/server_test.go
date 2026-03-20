@@ -21,6 +21,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 
 	"github.com/mikeboe/trpc-a2a-go/auth"
 	"github.com/mikeboe/trpc-a2a-go/internal/jsonrpc"
@@ -115,6 +117,69 @@ func TestA2AServer_HandleAgentCard(t *testing.T) {
 	err = json.NewDecoder(resp.Body).Decode(&receivedCard)
 	require.NoError(t, err, "Failed to decode agent card from response")
 	assert.Equal(t, agentCard, receivedCard, "Received agent card should match original")
+}
+
+func TestA2AServer_initTelemetry_WithProvidedMeterProvider(t *testing.T) {
+	provider := noop.NewMeterProvider()
+	srv := &A2AServer{telemetryMeterProvider: provider}
+
+	require.NoError(t, srv.initTelemetry(context.Background()))
+	require.NotNil(t, srv.telemetryMetrics)
+	assert.Equal(t, provider, srv.telemetryMetrics.MeterProvider)
+	assert.NotNil(t, srv.telemetryMetrics.RequestCount)
+	assert.NotNil(t, srv.telemetryMetrics.OperationDuration)
+	assert.NotNil(t, srv.telemetryMetrics.TimeToFirstToken)
+	assert.False(t, srv.telemetryOwnsProvider)
+}
+
+func TestA2AServer_shutdownTelemetry(t *testing.T) {
+	provider := &shutdownAwareMeterProvider{MeterProvider: noop.NewMeterProvider()}
+	srv := &A2AServer{
+		telemetryMeterProvider: provider,
+		telemetryOwnsProvider:  true,
+	}
+
+	require.NoError(t, srv.initTelemetry(context.Background()))
+	require.NoError(t, srv.shutdownTelemetry(context.Background()))
+	assert.True(t, provider.shutdownCalled)
+	assert.Nil(t, srv.telemetryMetrics)
+	assert.Nil(t, srv.telemetryMeterProvider)
+	assert.Nil(t, srv.telemetryShutdown)
+	assert.False(t, srv.telemetryOwnsProvider)
+}
+
+func TestA2AServer_initTelemetry_MultipleServersRemainIsolated(t *testing.T) {
+	provider1 := noop.NewMeterProvider()
+	provider2 := noop.NewMeterProvider()
+
+	srv1 := &A2AServer{telemetryMeterProvider: provider1}
+	srv2 := &A2AServer{telemetryMeterProvider: provider2}
+
+	require.NoError(t, srv1.initTelemetry(context.Background()))
+	require.NoError(t, srv2.initTelemetry(context.Background()))
+
+	require.NotNil(t, srv1.telemetryMetrics)
+	require.NotNil(t, srv2.telemetryMetrics)
+	assert.Equal(t, provider1, srv1.telemetryMetrics.MeterProvider)
+	assert.Equal(t, provider2, srv2.telemetryMetrics.MeterProvider)
+	assert.NotSame(t, srv1.telemetryMetrics, srv2.telemetryMetrics)
+}
+
+func TestA2AServer_InitTelemetry_WithInjectedProvider(t *testing.T) {
+	srv := &A2AServer{}
+	provider := noop.NewMeterProvider()
+
+	srv.SetTelemetryMeterProvider(provider)
+
+	require.NoError(t, srv.InitTelemetry(context.Background()))
+	require.NotNil(t, srv.telemetryMetrics)
+	assert.Equal(t, provider, srv.telemetryMeterProvider)
+	assert.Equal(t, provider, srv.telemetryMetrics.MeterProvider)
+	assert.False(t, srv.telemetryOwnsProvider)
+
+	firstMetrics := srv.telemetryMetrics
+	require.NoError(t, srv.InitTelemetry(context.Background()))
+	assert.Same(t, firstMetrics, srv.telemetryMetrics)
 }
 
 func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
@@ -753,6 +818,16 @@ func (m *mockProcessor) Process(
 	message protocol.Message,
 	handle taskmanager.TaskHandle,
 ) error {
+	return nil
+}
+
+type shutdownAwareMeterProvider struct {
+	metric.MeterProvider
+	shutdownCalled bool
+}
+
+func (p *shutdownAwareMeterProvider) Shutdown(context.Context) error {
+	p.shutdownCalled = true
 	return nil
 }
 

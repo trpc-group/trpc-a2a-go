@@ -17,12 +17,16 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/mikeboe/trpc-a2a-go/auth"
 	"github.com/mikeboe/trpc-a2a-go/internal/jsonrpc"
 	"github.com/mikeboe/trpc-a2a-go/internal/sse"
 	"github.com/mikeboe/trpc-a2a-go/log"
 	"github.com/mikeboe/trpc-a2a-go/protocol"
 	"github.com/mikeboe/trpc-a2a-go/taskmanager"
+	"github.com/mikeboe/trpc-a2a-go/telemetry"
+	"github.com/mikeboe/trpc-a2a-go/telemetry/metrics"
 )
 
 // A2AServer implements the HTTP server for the A2A protocol.
@@ -43,6 +47,14 @@ type A2AServer struct {
 	pushAuth       *auth.PushNotificationAuthenticator // Push notification authenticator.
 	jwksEnabled    bool                                // Flag to enable/disable JWKS endpoint.
 	jwksEndpoint   string                              // Path for the JWKS endpoint.
+
+	// Telemetry
+	firstTokenMatcher      telemetry.FirstTokenMatcher // User-defined first-token detection logic.
+	telemetryMeterProvider metric.MeterProvider        // Optional meter provider initialized on Start.
+	telemetryOptions       []metrics.Option            // Optional OTLP meter provider config initialized on Start.
+	telemetryMetrics       *metrics.Instruments        // Metrics instruments owned by this server instance.
+	telemetryShutdown      func(context.Context) error
+	telemetryOwnsProvider  bool
 }
 
 // NewA2AServer creates a new A2AServer instance with the given agent card
@@ -86,6 +98,9 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 // Start begins listening for HTTP requests on the specified network address.
 // It blocks until the server is stopped via Stop() or an error occurs.
 func (s *A2AServer) Start(address string) error {
+	if err := s.InitTelemetry(context.Background()); err != nil {
+		return fmt.Errorf("initialize telemetry: %w", err)
+	}
 	s.httpServer = &http.Server{
 		Addr:         address,
 		Handler:      s.Handler(),
@@ -110,11 +125,64 @@ func (s *A2AServer) Stop(ctx context.Context) error {
 		return errors.New("A2A server not running")
 	}
 	log.Info("Attempting graceful shutdown of A2A server...")
+	var shutdownErrs []error
 	if err := s.httpServer.Shutdown(ctx); err != nil {
-		return fmt.Errorf("http server shutdown failed: %w", err)
+		shutdownErrs = append(shutdownErrs, fmt.Errorf("http server shutdown failed: %w", err))
+	}
+	if err := s.shutdownTelemetry(ctx); err != nil {
+		shutdownErrs = append(shutdownErrs, fmt.Errorf("telemetry shutdown failed: %w", err))
+	}
+	if len(shutdownErrs) > 0 {
+		return errors.Join(shutdownErrs...)
 	}
 	log.Info("A2A server shutdown complete.")
 	return nil
+}
+
+type telemetryShutdowner interface {
+	Shutdown(context.Context) error
+}
+
+func (s *A2AServer) initTelemetry(ctx context.Context) error {
+	if s.telemetryMetrics != nil &&
+		(s.telemetryMeterProvider == nil || s.telemetryMetrics.MeterProvider == s.telemetryMeterProvider) {
+		return nil
+	}
+	if s.telemetryMeterProvider == nil && len(s.telemetryOptions) > 0 {
+		mp, err := metrics.NewMeterProvider(ctx, s.telemetryOptions...)
+		if err != nil {
+			return fmt.Errorf("create meter provider: %w", err)
+		}
+		s.telemetryMeterProvider = mp
+		s.telemetryShutdown = mp.Shutdown
+		s.telemetryOwnsProvider = true
+	}
+	if s.telemetryMeterProvider == nil {
+		return nil
+	}
+	if s.telemetryOwnsProvider && s.telemetryShutdown == nil {
+		if shutdowner, ok := s.telemetryMeterProvider.(telemetryShutdowner); ok {
+			s.telemetryShutdown = shutdowner.Shutdown
+		}
+	}
+	instruments, err := metrics.NewInstruments(s.telemetryMeterProvider)
+	if err != nil {
+		return fmt.Errorf("create metric instruments: %w", err)
+	}
+	s.telemetryMetrics = instruments
+	return nil
+}
+
+func (s *A2AServer) shutdownTelemetry(ctx context.Context) error {
+	s.telemetryMetrics = nil
+	if !s.telemetryOwnsProvider || s.telemetryShutdown == nil {
+		return nil
+	}
+	err := s.telemetryShutdown(ctx)
+	s.telemetryMeterProvider = nil
+	s.telemetryShutdown = nil
+	s.telemetryOwnsProvider = false
+	return err
 }
 
 // Handler returns an http.Handler for the server.
@@ -280,8 +348,12 @@ func (s *A2AServer) unmarshalParams(params json.RawMessage, v interface{}) *json
 
 // handleTasksSend handles the tasks_send method.
 func (s *A2AServer) handleTasksSend(ctx context.Context, w http.ResponseWriter, request jsonrpc.Request) {
+	tracker := newMetricsTracker(protocol.MethodTasksSend, false, s.firstTokenMatcher, s.telemetryMetrics)
+	defer tracker.record(ctx)
+
 	var params protocol.SendTaskParams
 	if err := s.unmarshalParams(request.Params, &params); err != nil {
+		tracker.setError("invalid_params")
 		s.writeJSONRPCError(w, request.ID, err)
 		return
 	}
@@ -289,6 +361,7 @@ func (s *A2AServer) handleTasksSend(ctx context.Context, w http.ResponseWriter, 
 	task, err := s.taskManager.OnSendTask(ctx, params)
 	if err != nil {
 		log.Errorf("Error calling OnSendTask for task %s: %v", params.ID, err)
+		tracker.setError("task_processing_failed")
 		// Check if it's already a JSON-RPC error
 		if rpcErr, ok := err.(*jsonrpc.Error); ok {
 			s.writeJSONRPCError(w, request.ID, rpcErr)
@@ -299,6 +372,8 @@ func (s *A2AServer) handleTasksSend(ctx context.Context, w http.ResponseWriter, 
 		}
 		return
 	}
+	// Non-streaming: the response itself is the first token.
+	tracker.markFirstToken()
 	s.writeJSONRPCResponse(w, request.ID, task)
 }
 
@@ -350,6 +425,8 @@ func (s *A2AServer) handleTasksCancel(ctx context.Context, w http.ResponseWriter
 
 // handleSSEStream handles an SSE stream for a task, including setup and event forwarding.
 // It sets the appropriate headers, logs connection status, and forwards events to the client.
+// If tracker is non-nil, it will be used to record TTFT on the first matching event and
+// total duration when the stream ends.
 func (s *A2AServer) handleSSEStream(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -358,7 +435,12 @@ func (s *A2AServer) handleSSEStream(
 	taskID string,
 	requestID interface{},
 	isResubscribe bool,
+	tracker *metricsTracker,
 ) {
+	if tracker != nil {
+		defer tracker.record(ctx)
+	}
+
 	// Set headers for SSE.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -395,11 +477,19 @@ func (s *A2AServer) handleSSEStream(
 				}
 				// Use JSON-RPC format for the close event
 				if err := sse.FormatJSONRPCEvent(w, protocol.EventClose, requestID, closeData); err != nil {
+					if tracker != nil {
+						tracker.setError("stream_close_write_failed")
+					}
 					log.Errorf("Error writing SSE JSON-RPC close event for task %s: %v", taskID, err)
 				} else {
 					flusher.Flush()
 				}
 				return // End the handler.
+			}
+
+			// Check first-token match for TTFT tracking.
+			if tracker != nil {
+				tracker.onEvent(event)
 			}
 
 			// Determine event type string for SSE.
@@ -417,6 +507,9 @@ func (s *A2AServer) handleSSEStream(
 			// Write the event to the SSE stream using JSON-RPC format.
 			if err := sse.FormatJSONRPCEvent(w, eventType, requestID, event); err != nil {
 				// Error writing, likely client disconnected.
+				if tracker != nil {
+					tracker.setError("stream_write_failed")
+				}
 				log.Errorf("Error writing SSE JSON-RPC event for task %s (client likely disconnected): %v. "+
 					"Closing stream.", taskID, err)
 				return // Exit the handler.
@@ -425,6 +518,9 @@ func (s *A2AServer) handleSSEStream(
 			flusher.Flush()
 		case <-clientClosed:
 			// Client disconnected (request context canceled).
+			if tracker != nil {
+				tracker.setError("client_disconnected")
+			}
 			log.Infof("SSE client disconnected for task %s (Request ID: %v). Closing stream.", taskID, requestID)
 			return // Exit the handler.
 		}
@@ -433,31 +529,36 @@ func (s *A2AServer) handleSSEStream(
 
 // handleTasksSendSubscribe handles the tasks_sendSubscribe method using Server-Sent Events (SSE).
 func (s *A2AServer) handleTasksSendSubscribe(ctx context.Context, w http.ResponseWriter, request jsonrpc.Request) {
+	tracker := newMetricsTracker(protocol.MethodTasksSendSubscribe, true, s.firstTokenMatcher, s.telemetryMetrics)
+
 	var params protocol.SendTaskParams
 	if err := s.unmarshalParams(request.Params, &params); err != nil {
+		tracker.setError("invalid_params")
+		tracker.record(ctx)
 		s.writeJSONRPCError(w, request.ID, err)
 		return
 	}
 
 	// Validate required fields.
 	if params.ID == "" {
+		tracker.setError("invalid_params")
+		tracker.record(ctx)
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
 		return
 	}
 	if params.Message.Role == "" || len(params.Message.Parts) == 0 {
+		tracker.setError("invalid_params")
+		tracker.record(ctx)
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("message with at least one part is required"))
 		return
 	}
-
-	// Check if client supports SSE.
-	// Since we're in a JSON-RPC context, we can't directly access the HTTP Accept header.
-	// We'll assume the client wants SSE since they called the sendSubscribe method.
-	// In a real implementation, this could be determined by looking at the HTTP request directly.
 
 	// Client wants SSE response.
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		log.Error("Streaming is not supported by the underlying http responseWriter")
+		tracker.setError("streaming_not_supported")
+		tracker.record(ctx)
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInternalError("server does not support streaming"))
 		return
 	}
@@ -466,13 +567,15 @@ func (s *A2AServer) handleTasksSendSubscribe(ctx context.Context, w http.Respons
 	eventsChan, err := s.taskManager.OnSendTaskSubscribe(ctx, params)
 	if err != nil {
 		log.Errorf("Error calling OnSendTaskSubscribe for task %s: %v", params.ID, err)
+		tracker.setError("subscribe_failed")
+		tracker.record(ctx)
 		s.writeJSONRPCError(w, request.ID,
 			jsonrpc.ErrInternalError(fmt.Sprintf("failed to subscribe to task events: %v", err)))
 		return
 	}
 
-	// Use the helper function to handle the SSE stream
-	s.handleSSEStream(ctx, w, flusher, eventsChan, params.ID, request.ID, false)
+	// Tracker is passed to handleSSEStream which will defer Record.
+	s.handleSSEStream(ctx, w, flusher, eventsChan, params.ID, request.ID, false, tracker)
 }
 
 // writeJSONRPCResponse encodes and writes a successful JSON-RPC response.
@@ -685,6 +788,6 @@ func (s *A2AServer) handleTasksResubscribe(ctx context.Context, w http.ResponseW
 		return
 	}
 
-	// Use the helper function to handle the SSE stream
-	s.handleSSEStream(ctx, w, flusher, eventsChan, params.ID, request.ID, true)
+	// Resubscribe does not track TTFT (the original subscription already measured it).
+	s.handleSSEStream(ctx, w, flusher, eventsChan, params.ID, request.ID, true, nil)
 }

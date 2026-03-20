@@ -11,7 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/metric/noop"
+
 	"github.com/mikeboe/trpc-a2a-go/auth"
+	"github.com/mikeboe/trpc-a2a-go/telemetry/metrics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -101,6 +104,27 @@ func TestWithPushNotificationAuthenticator(t *testing.T) {
 	opt(serverOptions)
 
 	assert.Equal(t, authenticator, serverOptions.pushAuth)
+}
+
+func TestWithTelemetryMeterProvider(t *testing.T) {
+	provider := noop.NewMeterProvider()
+
+	serverOptions := &A2AServer{}
+	opt := WithTelemetryMeterProvider(provider)
+	opt(serverOptions)
+
+	assert.Equal(t, provider, serverOptions.telemetryMeterProvider)
+}
+
+func TestWithTelemetryMeterProviderOptions(t *testing.T) {
+	serverOptions := &A2AServer{}
+	opt := WithTelemetryMeterProviderOptions(
+		metrics.WithProtocol("http"),
+		metrics.WithEndpoint("localhost:4318"),
+	)
+	opt(serverOptions)
+
+	assert.Len(t, serverOptions.telemetryOptions, 2)
 }
 
 // mockAuthProvider is a simple mock implementing auth.Provider interface
