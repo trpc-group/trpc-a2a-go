@@ -143,6 +143,12 @@ func (s *A2AServer) Start(address string) error {
 	log.Infof("Starting A2A server listening on %s...", address)
 	// ListenAndServe blocks. It returns http.ErrServerClosed on graceful shutdown.
 	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if shutdownErr := s.shutdownTelemetry(context.Background()); shutdownErr != nil {
+			return errors.Join(
+				fmt.Errorf("http server ListenAndServe error: %w", err),
+				fmt.Errorf("telemetry shutdown failed: %w", shutdownErr),
+			)
+		}
 		return fmt.Errorf("http server ListenAndServe error: %w", err)
 	}
 	log.Info("A2A server stopped.")

@@ -208,6 +208,7 @@ func WithFirstTokenMatcher(matcher telemetry.FirstTokenMatcher) Option {
 func WithTelemetryMeterProvider(provider metric.MeterProvider) Option {
 	return func(s *A2AServer) {
 		s.telemetryMeterProvider = provider
+		s.telemetryOptions = nil
 		s.telemetryOwnsProvider = false
 		s.telemetryShutdown = nil
 	}
@@ -216,6 +217,7 @@ func WithTelemetryMeterProvider(provider metric.MeterProvider) Option {
 // WithTelemetryMeterProviderOptions configures an internally managed OTLP meter provider.
 func WithTelemetryMeterProviderOptions(opts ...metrics.Option) Option {
 	return func(s *A2AServer) {
+		s.telemetryMeterProvider = nil
 		s.telemetryOptions = append([]metrics.Option(nil), opts...)
 	}
 }

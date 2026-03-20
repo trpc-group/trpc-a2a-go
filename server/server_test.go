@@ -149,6 +149,23 @@ func TestA2AServer_shutdownTelemetry(t *testing.T) {
 	assert.False(t, srv.telemetryOwnsProvider)
 }
 
+func TestA2AServer_Start_ShutdownTelemetryOnListenError(t *testing.T) {
+	provider := &shutdownAwareMeterProvider{MeterProvider: noop.NewMeterProvider()}
+	srv, err := NewA2AServer(defaultAgentCard(), newMockTaskManager())
+	require.NoError(t, err)
+	srv.telemetryMeterProvider = provider
+	srv.telemetryOwnsProvider = true
+
+	err = srv.Start("127.0.0.1:-1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ListenAndServe")
+	assert.True(t, provider.shutdownCalled)
+	assert.Nil(t, srv.telemetryMetrics)
+	assert.Nil(t, srv.telemetryMeterProvider)
+	assert.Nil(t, srv.telemetryShutdown)
+	assert.False(t, srv.telemetryOwnsProvider)
+}
+
 func TestA2AServer_initTelemetry_MultipleServersRemainIsolated(t *testing.T) {
 	provider1 := noop.NewMeterProvider()
 	provider2 := noop.NewMeterProvider()

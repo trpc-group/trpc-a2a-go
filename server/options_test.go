@@ -118,6 +118,26 @@ func TestWithTelemetryMeterProviderOptions(t *testing.T) {
 	assert.Len(t, serverOptions.telemetryOptions, 2)
 }
 
+func TestWithTelemetryMeterProviderOptionsOverrideProvider(t *testing.T) {
+	serverOptions := &A2AServer{}
+	WithTelemetryMeterProvider(noop.NewMeterProvider())(serverOptions)
+	WithTelemetryMeterProviderOptions(metrics.WithEndpoint("localhost:4318"))(serverOptions)
+
+	assert.Nil(t, serverOptions.telemetryMeterProvider)
+	assert.Len(t, serverOptions.telemetryOptions, 1)
+}
+
+func TestWithTelemetryMeterProviderOverrideOptions(t *testing.T) {
+	serverOptions := &A2AServer{}
+	WithTelemetryMeterProviderOptions(metrics.WithEndpoint("localhost:4318"))(serverOptions)
+
+	provider := noop.NewMeterProvider()
+	WithTelemetryMeterProvider(provider)(serverOptions)
+
+	assert.Equal(t, provider, serverOptions.telemetryMeterProvider)
+	assert.Nil(t, serverOptions.telemetryOptions)
+}
+
 func TestExtractBasePathFromURL(t *testing.T) {
 	tests := []struct {
 		name         string
