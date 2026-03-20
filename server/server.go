@@ -58,7 +58,7 @@ type A2AServer struct {
 	authenticatedCardHandler func(ctx context.Context, baseCard AgentCard) (AgentCard, error) // Dynamic card modifier function.
 
 	// Telemetry fields
-	firstTokenMatcher      telemetry.FirstTokenMatcher
+	firstTokenPolicy       telemetry.FirstTokenPolicy
 	telemetryMeterProvider metric.MeterProvider
 	telemetryOptions       []metrics.Option
 	telemetryMetrics       *metrics.Instruments
@@ -647,7 +647,7 @@ func (s *A2AServer) handleTasksResubscribe(ctx context.Context, w http.ResponseW
 
 // handleMessageSend handles the message_send method.
 func (s *A2AServer) handleMessageSend(ctx context.Context, w http.ResponseWriter, request jsonrpc.Request) {
-	tracker := newMetricsTracker(protocol.MethodMessageSend, false, s.firstTokenMatcher, s.telemetryMetrics)
+	tracker := newMetricsTracker(protocol.MethodMessageSend, false, s.firstTokenPolicy, s.telemetryMetrics)
 	defer tracker.record(ctx)
 
 	var params protocol.SendMessageParams
@@ -663,13 +663,13 @@ func (s *A2AServer) handleMessageSend(ctx context.Context, w http.ResponseWriter
 		s.handleTaskManagerError(w, request.ID, err, "OnSendMessage", params.RPCID)
 		return
 	}
-	tracker.markFirstToken()
+	tracker.observeNonStreamingResult(message)
 	s.writeJSONRPCResponse(w, request.ID, message)
 }
 
 // handleMessageStream handles the message_stream method using Server-Sent Events (SSE).
 func (s *A2AServer) handleMessageStream(ctx context.Context, w http.ResponseWriter, request jsonrpc.Request) {
-	tracker := newMetricsTracker(protocol.MethodMessageStream, true, s.firstTokenMatcher, s.telemetryMetrics)
+	tracker := newMetricsTracker(protocol.MethodMessageStream, true, s.firstTokenPolicy, s.telemetryMetrics)
 
 	var params protocol.SendMessageParams
 	if err := s.unmarshalParams(request.Params, &params); err != nil {

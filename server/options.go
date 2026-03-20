@@ -197,10 +197,19 @@ func WithAuthenticatedExtendedCardHandler(handler func(ctx context.Context, base
 	}
 }
 
+// WithFirstTokenPolicy sets custom TTFT detection logic for request responses.
+func WithFirstTokenPolicy(policy telemetry.FirstTokenPolicy) Option {
+	return func(s *A2AServer) {
+		s.firstTokenPolicy = policy
+	}
+}
+
 // WithFirstTokenMatcher sets custom TTFT detection logic for streaming responses.
+//
+// Deprecated: use WithFirstTokenPolicy.
 func WithFirstTokenMatcher(matcher telemetry.FirstTokenMatcher) Option {
 	return func(s *A2AServer) {
-		s.firstTokenMatcher = matcher
+		s.firstTokenPolicy = telemetry.NewFirstTokenPolicyFromMatcher(matcher)
 	}
 }
 

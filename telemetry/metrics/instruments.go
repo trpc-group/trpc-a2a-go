@@ -20,10 +20,12 @@ const (
 	metricOperationDuration = "a2a.server.operation.duration"
 	metricTimeToFirstToken  = "a2a.server.time_to_first_token"
 
-	// Attribute keys
-	AttrMethod      = "a2a.method"
+	// AttrMethod is the attribute key for the A2A method name.
+	AttrMethod = "a2a.method"
+	// AttrIsStreaming is the attribute key that indicates streaming mode.
 	AttrIsStreaming = "a2a.is_stream"
-	AttrErrorType   = "error.type"
+	// AttrErrorType is the attribute key for classifying error types.
+	AttrErrorType = "error.type"
 )
 
 // Instruments holds a set of A2A metric instruments bound to a specific meter provider.

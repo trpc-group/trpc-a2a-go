@@ -97,6 +97,39 @@ func TestWithPushNotificationAuthenticator(t *testing.T) {
 	assert.Equal(t, authenticator, serverOptions.pushAuth)
 }
 
+type firstTokenPolicyStub struct{}
+
+func (firstTokenPolicyStub) IsStreamingFirstToken(_ protocol.StreamingMessageResult) bool {
+	return false
+}
+
+func (firstTokenPolicyStub) IsNonStreamingFirstToken(_ *protocol.MessageResult) bool {
+	return true
+}
+
+func TestWithFirstTokenPolicy(t *testing.T) {
+	serverOptions := &A2AServer{}
+	policy := firstTokenPolicyStub{}
+
+	WithFirstTokenPolicy(policy)(serverOptions)
+
+	require.NotNil(t, serverOptions.firstTokenPolicy)
+	assert.Equal(t, policy, serverOptions.firstTokenPolicy)
+}
+
+func TestWithFirstTokenMatcher(t *testing.T) {
+	serverOptions := &A2AServer{}
+	matcher := func(event protocol.StreamingMessageResult, isStreaming bool) bool {
+		return isStreaming && event == nil
+	}
+
+	WithFirstTokenMatcher(matcher)(serverOptions)
+
+	require.NotNil(t, serverOptions.firstTokenPolicy)
+	assert.True(t, serverOptions.firstTokenPolicy.IsStreamingFirstToken(nil))
+	assert.True(t, serverOptions.firstTokenPolicy.IsNonStreamingFirstToken(nil))
+}
+
 func TestWithTelemetryMeterProvider(t *testing.T) {
 	provider := noop.NewMeterProvider()
 

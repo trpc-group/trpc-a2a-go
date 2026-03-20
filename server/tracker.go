@@ -29,25 +29,25 @@ type metricsTracker struct {
 	startTime          time.Time
 	firstTokenTime     time.Time
 	firstTokenRecorded bool
-	matcher            telemetry.FirstTokenMatcher
+	policy             telemetry.FirstTokenPolicy
 	errType            string
 }
 
 func newMetricsTracker(
 	method string,
 	isStreaming bool,
-	matcher telemetry.FirstTokenMatcher,
+	policy telemetry.FirstTokenPolicy,
 	inst *metrics.Instruments,
 ) *metricsTracker {
-	if matcher == nil {
-		matcher = telemetry.DefaultFirstTokenMatcher
+	if policy == nil {
+		policy = telemetry.DefaultFirstTokenPolicy
 	}
 	return &metricsTracker{
 		method:      method,
 		instruments: inst,
 		isStreaming: isStreaming,
 		startTime:   time.Now(),
-		matcher:     matcher,
+		policy:      policy,
 	}
 }
 
@@ -58,17 +58,20 @@ func (t *metricsTracker) onEvent(event protocol.StreamingMessageEvent) {
 	if t.firstTokenRecorded {
 		return
 	}
-	if event.Result != nil && t.matcher(event.Result, t.isStreaming) {
+	if event.Result != nil && t.policy.IsStreamingFirstToken(event.Result) {
 		t.firstTokenTime = time.Now()
 		t.firstTokenRecorded = true
 	}
 }
 
-func (t *metricsTracker) markFirstToken() {
+func (t *metricsTracker) observeNonStreamingResult(result *protocol.MessageResult) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	if !t.firstTokenRecorded {
+	if t.isStreaming || t.firstTokenRecorded {
+		return
+	}
+	if t.policy.IsNonStreamingFirstToken(result) {
 		t.firstTokenTime = time.Now()
 		t.firstTokenRecorded = true
 	}
