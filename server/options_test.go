@@ -12,10 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/metric/noop"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"trpc.group/trpc-go/trpc-a2a-go/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/telemetry/metrics"
 )
 
 func TestWithCORSEnabled(t *testing.T) {
@@ -92,6 +95,80 @@ func TestWithPushNotificationAuthenticator(t *testing.T) {
 	opt(serverOptions)
 
 	assert.Equal(t, authenticator, serverOptions.pushAuth)
+}
+
+type firstTokenPolicyStub struct{}
+
+func (firstTokenPolicyStub) IsStreamingFirstToken(_ protocol.StreamingMessageResult) bool {
+	return false
+}
+
+func (firstTokenPolicyStub) IsNonStreamingFirstToken(_ *protocol.MessageResult) bool {
+	return true
+}
+
+func TestWithFirstTokenPolicy(t *testing.T) {
+	serverOptions := &A2AServer{}
+	policy := firstTokenPolicyStub{}
+
+	WithFirstTokenPolicy(policy)(serverOptions)
+
+	require.NotNil(t, serverOptions.firstTokenPolicy)
+	assert.Equal(t, policy, serverOptions.firstTokenPolicy)
+}
+
+func TestWithFirstTokenMatcher(t *testing.T) {
+	serverOptions := &A2AServer{}
+	matcher := func(event protocol.StreamingMessageResult, isStreaming bool) bool {
+		return isStreaming && event == nil
+	}
+
+	WithFirstTokenMatcher(matcher)(serverOptions)
+
+	require.NotNil(t, serverOptions.firstTokenPolicy)
+	assert.True(t, serverOptions.firstTokenPolicy.IsStreamingFirstToken(nil))
+	assert.True(t, serverOptions.firstTokenPolicy.IsNonStreamingFirstToken(nil))
+}
+
+func TestWithTelemetryMeterProvider(t *testing.T) {
+	provider := noop.NewMeterProvider()
+
+	serverOptions := &A2AServer{}
+	opt := WithTelemetryMeterProvider(provider)
+	opt(serverOptions)
+
+	assert.Equal(t, provider, serverOptions.telemetryMeterProvider)
+}
+
+func TestWithTelemetryMeterProviderOptions(t *testing.T) {
+	serverOptions := &A2AServer{}
+	opt := WithTelemetryMeterProviderOptions(
+		metrics.WithProtocol("http"),
+		metrics.WithEndpoint("localhost:4318"),
+	)
+	opt(serverOptions)
+
+	assert.Len(t, serverOptions.telemetryOptions, 2)
+}
+
+func TestWithTelemetryMeterProviderOptionsOverrideProvider(t *testing.T) {
+	serverOptions := &A2AServer{}
+	WithTelemetryMeterProvider(noop.NewMeterProvider())(serverOptions)
+	WithTelemetryMeterProviderOptions(metrics.WithEndpoint("localhost:4318"))(serverOptions)
+
+	assert.Nil(t, serverOptions.telemetryMeterProvider)
+	assert.Len(t, serverOptions.telemetryOptions, 1)
+}
+
+func TestWithTelemetryMeterProviderOverrideOptions(t *testing.T) {
+	serverOptions := &A2AServer{}
+	WithTelemetryMeterProviderOptions(metrics.WithEndpoint("localhost:4318"))(serverOptions)
+
+	provider := noop.NewMeterProvider()
+	WithTelemetryMeterProvider(provider)(serverOptions)
+
+	assert.Equal(t, provider, serverOptions.telemetryMeterProvider)
+	assert.Nil(t, serverOptions.telemetryOptions)
 }
 
 func TestExtractBasePathFromURL(t *testing.T) {

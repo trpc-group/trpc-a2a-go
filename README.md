@@ -28,6 +28,7 @@ tRPC AI ecosystem
 - [Creating Your Own Agent](#creating-your-own-agent)
 - [Authentication](#authentication)
 - [Session Management](#session-management)
+- [Telemetry Metrics](#telemetry-metrics)
 - [Future Enhancements](#future-enhancements)
 - [Contributing](#contributing)
 - [Acknowledgements](#acknowledgements)
@@ -458,11 +459,118 @@ This allows for:
 - Multi-turn conversations across different message exchanges
 - Better organization and retrieval of conversation history
 
+## Telemetry Metrics
+
+The server can emit OpenTelemetry metrics for each A2A request lifecycle. This helps you observe throughput, latency, and streaming first-token responsiveness.
+
+### Built-in Metrics
+
+- `a2a.server.request_cnt` (`Counter`)
+- `a2a.server.operation.duration` (`Histogram`, seconds)
+- `a2a.server.time_to_first_token` (`Histogram`, seconds)
+
+Default attributes:
+- `a2a.method` (JSON-RPC method, e.g. `message/send`, `message/stream`)
+- `a2a.is_stream` (whether request is streaming)
+- `error.type` (set only when request handling fails)
+
+### Option 1: Let Server Build OTLP Meter Provider
+
+```go
+import (
+    "trpc.group/trpc-go/trpc-a2a-go/server"
+    "trpc.group/trpc-go/trpc-a2a-go/telemetry/metrics"
+)
+
+srv, err := server.NewA2AServer(
+    agentCard,
+    taskManager,
+    server.WithTelemetryMeterProviderOptions(
+        metrics.WithProtocol("grpc"),            // "grpc" (default) or "http"
+        metrics.WithEndpoint("localhost:4317"), // OTLP collector endpoint
+        metrics.WithServiceName("my-a2a-server"),
+        metrics.WithServiceVersion("1.0.0"),
+        metrics.WithServiceNamespace("my-team"),
+    ),
+)
+if err != nil {
+    panic(err)
+}
+```
+
+Notes:
+- `Start()` calls telemetry initialization automatically.
+- If telemetry initialization fails, `Start()` returns an error immediately.
+- Endpoint can also come from environment variables:
+  - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (higher priority)
+  - `OTEL_EXPORTER_OTLP_ENDPOINT`
+
+### Option 2: Inject an Existing Meter Provider
+
+```go
+import (
+    "context"
+
+    "go.opentelemetry.io/otel/metric/noop"
+    "trpc.group/trpc-go/trpc-a2a-go/server"
+)
+
+provider := noop.NewMeterProvider()
+
+srv, err := server.NewA2AServer(
+    agentCard,
+    taskManager,
+    server.WithTelemetryMeterProvider(provider),
+)
+if err != nil {
+    panic(err)
+}
+
+// You can also inject later:
+srv.SetTelemetryMeterProvider(provider)
+if err := srv.InitTelemetry(context.Background()); err != nil {
+    panic(err)
+}
+```
+
+### Customize TTFT Detection
+
+You can override first-token matching logic for `time_to_first_token` using `WithFirstTokenPolicy`.
+
+```go
+import (
+    "trpc.group/trpc-go/trpc-a2a-go/protocol"
+    "trpc.group/trpc-go/trpc-a2a-go/server"
+)
+
+type customFirstTokenPolicy struct{}
+
+func (customFirstTokenPolicy) IsStreamingFirstToken(event protocol.StreamingMessageResult) bool {
+    e, ok := event.(*protocol.TaskStatusUpdateEvent)
+    return ok && e.Status.State == protocol.TaskStateWorking && e.Status.Message != nil
+}
+
+func (customFirstTokenPolicy) IsNonStreamingFirstToken(_ *protocol.MessageResult) bool {
+    return true
+}
+
+srv, err := server.NewA2AServer(
+    agentCard,
+    taskManager,
+    server.WithFirstTokenPolicy(customFirstTokenPolicy{}),
+)
+if err != nil {
+    panic(err)
+}
+```
+
+`WithFirstTokenMatcher` is still available for backward compatibility.
+
 ## Future Enhancements
 
 - Persistent storage options for message history
 - More utilities and helper functions for message processing
-- Metrics and logging integrations
+- More telemetry integrations (dashboards, alerts, and presets)
 - Comprehensive test suite
 - Advanced session management capabilities
 

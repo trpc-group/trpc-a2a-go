@@ -12,8 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
+
 	"trpc.group/trpc-go/trpc-a2a-go/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/telemetry"
+	"trpc.group/trpc-go/trpc-a2a-go/telemetry/metrics"
 )
 
 const (
@@ -190,5 +194,39 @@ func WithAgentCardHandler(handler http.Handler) Option {
 func WithAuthenticatedExtendedCardHandler(handler func(ctx context.Context, baseCard AgentCard) (AgentCard, error)) Option {
 	return func(s *A2AServer) {
 		s.authenticatedCardHandler = handler
+	}
+}
+
+// WithFirstTokenPolicy sets custom TTFT detection logic for request responses.
+func WithFirstTokenPolicy(policy telemetry.FirstTokenPolicy) Option {
+	return func(s *A2AServer) {
+		s.firstTokenPolicy = policy
+	}
+}
+
+// WithFirstTokenMatcher sets custom TTFT detection logic for streaming responses.
+//
+// Deprecated: use WithFirstTokenPolicy.
+func WithFirstTokenMatcher(matcher telemetry.FirstTokenMatcher) Option {
+	return func(s *A2AServer) {
+		s.firstTokenPolicy = telemetry.NewFirstTokenPolicyFromMatcher(matcher)
+	}
+}
+
+// WithTelemetryMeterProvider injects an externally managed meter provider.
+func WithTelemetryMeterProvider(provider metric.MeterProvider) Option {
+	return func(s *A2AServer) {
+		s.telemetryMeterProvider = provider
+		s.telemetryOptions = nil
+		s.telemetryOwnsProvider = false
+		s.telemetryShutdown = nil
+	}
+}
+
+// WithTelemetryMeterProviderOptions configures an internally managed OTLP meter provider.
+func WithTelemetryMeterProviderOptions(opts ...metrics.Option) Option {
+	return func(s *A2AServer) {
+		s.telemetryMeterProvider = nil
+		s.telemetryOptions = append([]metrics.Option(nil), opts...)
 	}
 }
