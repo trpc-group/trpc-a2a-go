@@ -22,6 +22,7 @@ import (
 const defaultMaxHistoryLength = 100
 const defaultCleanupInterval = 30 * time.Second
 const defaultConversationTTL = 1 * time.Hour
+const defaultTaskTTL = 0
 const defaultSubscriberBufferSize = 1024
 
 // ConversationHistory stores conversation history information
@@ -215,6 +216,10 @@ type MemoryTaskManager struct {
 
 	// options
 	options *MemoryTaskManagerOptions
+
+	// stopCleanup signals the cleanup goroutine to stop
+	stopCleanup chan struct{}
+	closeOnce   sync.Once
 }
 
 // NewMemoryTaskManager creates a new MemoryTaskManager instance
@@ -239,6 +244,7 @@ func NewMemoryTaskManager(processor MessageProcessor, opts ...MemoryTaskManagerO
 		Subscribers:       make(map[string][]*MemoryTaskSubscriber),
 		PushNotifications: make(map[string]protocol.TaskPushNotificationConfig),
 		options:           options,
+		stopCleanup:       make(chan struct{}),
 	}
 
 	// Start cleanup goroutine if enabled
@@ -247,8 +253,14 @@ func NewMemoryTaskManager(processor MessageProcessor, opts ...MemoryTaskManagerO
 			ticker := time.NewTicker(options.CleanupInterval)
 			defer ticker.Stop()
 
-			for range ticker.C {
-				manager.CleanExpiredConversations(options.ConversationTTL)
+			for {
+				select {
+				case <-ticker.C:
+					manager.CleanExpiredConversations(options.ConversationTTL)
+					manager.cleanExpiredTasks(options.TaskTTL)
+				case <-manager.stopCleanup:
+					return
+				}
 			}
 		}()
 	}
@@ -695,6 +707,7 @@ func (m *MemoryTaskManager) cleanupFailedSubscribers(taskID string, failedSubscr
 			if sub == failedSub {
 				shouldRemove = true
 				removedCount++
+				sub.Close()
 				break
 			}
 		}
@@ -711,6 +724,20 @@ func (m *MemoryTaskManager) cleanupFailedSubscribers(taskID string, failedSubscr
 		if len(filteredSubs) == 0 {
 			delete(m.Subscribers, taskID)
 		}
+	}
+}
+
+// cleanSubscribers closes and removes all subscribers for a task.
+func (m *MemoryTaskManager) cleanSubscribers(taskID string) {
+	m.taskMu.Lock()
+	defer m.taskMu.Unlock()
+
+	if subs, exists := m.Subscribers[taskID]; exists {
+		for _, sub := range subs {
+			sub.Close()
+		}
+		delete(m.Subscribers, taskID)
+		log.Debugf("Cleaned subscribers for task %s", taskID)
 	}
 }
 
@@ -759,6 +786,81 @@ func (m *MemoryTaskManager) CleanExpiredConversations(maxAge time.Duration) int 
 	}
 
 	return len(expiredContexts)
+}
+
+// cleanExpiredTasks cleans up tasks that have been in a terminal state longer than maxAge.
+// It removes the task, its subscribers, and associated push notification configs.
+// A maxAge of 0 disables cleanup and returns immediately.
+func (m *MemoryTaskManager) cleanExpiredTasks(maxAge time.Duration) int {
+	if maxAge <= 0 {
+		return 0
+	}
+	m.taskMu.Lock()
+
+	now := time.Now()
+	expiredTaskIDs := make([]string, 0)
+
+	for taskID, task := range m.Tasks {
+		if !isFinalState(task.Task().Status.State) {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339, task.Task().Status.Timestamp)
+		if err != nil {
+			continue
+		}
+		if now.Sub(ts) > maxAge {
+			expiredTaskIDs = append(expiredTaskIDs, taskID)
+		}
+	}
+
+	for _, taskID := range expiredTaskIDs {
+		if task, exists := m.Tasks[taskID]; exists {
+			task.Cancel()
+			delete(m.Tasks, taskID)
+		}
+		if subs, exists := m.Subscribers[taskID]; exists {
+			for _, sub := range subs {
+				sub.Close()
+			}
+			delete(m.Subscribers, taskID)
+		}
+	}
+
+	m.taskMu.Unlock()
+
+	if len(expiredTaskIDs) > 0 {
+		log.Debugf("Cleaned %d expired tasks", len(expiredTaskIDs))
+
+		m.mu.Lock()
+		for _, taskID := range expiredTaskIDs {
+			delete(m.PushNotifications, taskID)
+		}
+		m.mu.Unlock()
+	}
+
+	return len(expiredTaskIDs)
+}
+
+// Close stops the cleanup goroutine and releases all resources.
+// It is safe to call Close multiple times.
+func (m *MemoryTaskManager) Close() {
+	m.closeOnce.Do(func() {
+		close(m.stopCleanup)
+
+		m.taskMu.Lock()
+		for _, subs := range m.Subscribers {
+			for _, sub := range subs {
+				sub.Close()
+			}
+		}
+		m.Subscribers = make(map[string][]*MemoryTaskSubscriber)
+
+		for _, task := range m.Tasks {
+			task.Cancel()
+		}
+		m.Tasks = make(map[string]*MemoryCancellableTask)
+		m.taskMu.Unlock()
+	})
 }
 
 // GetConversationStats gets conversation statistics

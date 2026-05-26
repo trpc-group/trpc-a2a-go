@@ -699,6 +699,211 @@ func TestCancellableTask(t *testing.T) {
 	}
 }
 
+func TestMemoryTaskManager_UpdateTaskState_CleansSubscribersOnFinalState(t *testing.T) {
+	handler, manager := setupTestHandler(t)
+
+	taskID, err := handler.BuildTask(nil, nil)
+	if err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	sub, err := handler.SubscribeTask(&taskID)
+	if err != nil {
+		t.Fatalf("Failed to subscribe: %v", err)
+	}
+
+	// Verify subscriber exists
+	manager.taskMu.RLock()
+	if len(manager.Subscribers[taskID]) != 1 {
+		t.Fatalf("Expected 1 subscriber, got %d", len(manager.Subscribers[taskID]))
+	}
+	manager.taskMu.RUnlock()
+
+	// Drain events before completing
+	go func() {
+		for range sub.Channel() {
+		}
+	}()
+
+	// Transition to final state
+	err = handler.UpdateTaskState(&taskID, protocol.TaskStateCompleted, nil)
+	if err != nil {
+		t.Fatalf("Failed to update state: %v", err)
+	}
+
+	// Subscribers should be cleaned up
+	manager.taskMu.RLock()
+	subs := manager.Subscribers[taskID]
+	manager.taskMu.RUnlock()
+
+	if len(subs) != 0 {
+		t.Errorf("Expected subscribers to be cleaned after final state, got %d", len(subs))
+	}
+}
+
+func TestMemoryTaskManager_cleanExpiredTasks(t *testing.T) {
+	processor := &MockMessageProcessor{}
+	manager, err := NewMemoryTaskManager(processor)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+	defer manager.Close()
+
+	// Create a task and move it to a final state with an old timestamp
+	task := protocol.Task{
+		ID:   "expired-task",
+		Kind: protocol.KindTask,
+		Status: protocol.TaskStatus{
+			State:     protocol.TaskStateCompleted,
+			Timestamp: time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339),
+		},
+	}
+	cancellableTask := NewCancellableTask(task)
+
+	manager.taskMu.Lock()
+	manager.Tasks["expired-task"] = cancellableTask
+	manager.Subscribers["expired-task"] = []*MemoryTaskSubscriber{
+		NewMemoryTaskSubscriber("expired-task", 10),
+	}
+	manager.taskMu.Unlock()
+
+	// Create a non-expired task
+	activeTask := protocol.Task{
+		ID:   "active-task",
+		Kind: protocol.KindTask,
+		Status: protocol.TaskStatus{
+			State:     protocol.TaskStateWorking,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+	activeCancellable := NewCancellableTask(activeTask)
+
+	manager.taskMu.Lock()
+	manager.Tasks["active-task"] = activeCancellable
+	manager.taskMu.Unlock()
+
+	// Create a recently completed task (should NOT be cleaned)
+	recentTask := protocol.Task{
+		ID:   "recent-task",
+		Kind: protocol.KindTask,
+		Status: protocol.TaskStatus{
+			State:     protocol.TaskStateCompleted,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+	recentCancellable := NewCancellableTask(recentTask)
+
+	manager.taskMu.Lock()
+	manager.Tasks["recent-task"] = recentCancellable
+	manager.taskMu.Unlock()
+
+	// TTL=0 should skip cleanup entirely
+	skipped := manager.cleanExpiredTasks(0)
+	if skipped != 0 {
+		t.Errorf("Expected 0 cleaned tasks with TTL=0, got %d", skipped)
+	}
+	manager.taskMu.RLock()
+	if _, exists := manager.Tasks["expired-task"]; !exists {
+		t.Error("Expired task should still exist when TTL=0")
+	}
+	manager.taskMu.RUnlock()
+
+	// Clean with 1 hour TTL
+	cleaned := manager.cleanExpiredTasks(1 * time.Hour)
+
+	if cleaned != 1 {
+		t.Errorf("Expected 1 cleaned task, got %d", cleaned)
+	}
+
+	manager.taskMu.RLock()
+	defer manager.taskMu.RUnlock()
+
+	if _, exists := manager.Tasks["expired-task"]; exists {
+		t.Error("Expected expired task to be removed")
+	}
+	if _, exists := manager.Subscribers["expired-task"]; exists {
+		t.Error("Expected expired task subscribers to be removed")
+	}
+	if _, exists := manager.Tasks["active-task"]; !exists {
+		t.Error("Active task should not be removed")
+	}
+	if _, exists := manager.Tasks["recent-task"]; !exists {
+		t.Error("Recently completed task should not be removed")
+	}
+}
+
+func TestMemoryTaskManager_Close(t *testing.T) {
+	processor := &MockMessageProcessor{}
+	manager, err := NewMemoryTaskManager(processor)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+
+	// Add some tasks and subscribers
+	task := protocol.Task{
+		ID:   "close-test-task",
+		Kind: protocol.KindTask,
+		Status: protocol.TaskStatus{
+			State:     protocol.TaskStateWorking,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+	cancellableTask := NewCancellableTask(task)
+	sub := NewMemoryTaskSubscriber("close-test-task", 10)
+
+	manager.taskMu.Lock()
+	manager.Tasks["close-test-task"] = cancellableTask
+	manager.Subscribers["close-test-task"] = []*MemoryTaskSubscriber{sub}
+	manager.taskMu.Unlock()
+
+	manager.Close()
+
+	if !sub.Closed() {
+		t.Error("Expected subscriber to be closed after manager.Close()")
+	}
+
+	manager.taskMu.RLock()
+	defer manager.taskMu.RUnlock()
+
+	if len(manager.Tasks) != 0 {
+		t.Errorf("Expected all tasks to be cleaned, got %d", len(manager.Tasks))
+	}
+	if len(manager.Subscribers) != 0 {
+		t.Errorf("Expected all subscribers to be cleaned, got %d", len(manager.Subscribers))
+	}
+}
+
+func TestMemoryTaskManager_Close_Idempotent(t *testing.T) {
+	processor := &MockMessageProcessor{}
+	manager, err := NewMemoryTaskManager(processor)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+
+	// Calling Close multiple times must not panic.
+	manager.Close()
+	manager.Close()
+}
+
+func TestWithTaskTTL(t *testing.T) {
+	opts := DefaultMemoryTaskManagerOptions()
+
+	if opts.TaskTTL != 0 {
+		t.Errorf("Expected default TaskTTL=0 (disabled), got %v", opts.TaskTTL)
+	}
+
+	WithTaskTTL(30 * time.Minute)(opts)
+	if opts.TaskTTL != 30*time.Minute {
+		t.Errorf("Expected TaskTTL=30m, got %v", opts.TaskTTL)
+	}
+
+	// Zero value explicitly disables task cleanup
+	WithTaskTTL(0)(opts)
+	if opts.TaskTTL != 0 {
+		t.Errorf("Expected TaskTTL=0 after explicit disable, got %v", opts.TaskTTL)
+	}
+}
+
 func stringPtr(s string) *string {
 	return &s
 }

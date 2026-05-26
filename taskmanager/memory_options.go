@@ -19,10 +19,15 @@ type MemoryTaskManagerOptions struct {
 	// ConversationTTL is the maximum lifetime of conversations.
 	ConversationTTL time.Duration
 
+	// TaskTTL is the maximum lifetime of tasks in terminal states (completed/failed/canceled/rejected).
+	// Tasks that have been in a terminal state longer than this duration will be automatically cleaned up.
+	// Default is 0 (disabled). Use WithTaskTTL to enable automatic task cleanup.
+	TaskTTL time.Duration
+
 	// CleanupInterval is the interval for cleanup checks.
 	CleanupInterval time.Duration
 
-	// EnableCleanup enables automatic cleanup of expired conversations.
+	// EnableCleanup enables automatic cleanup of expired conversations and tasks.
 	EnableCleanup bool
 
 	// TaskSubscriberBufSize is the buffer size for task subscribers.
@@ -37,6 +42,7 @@ func DefaultMemoryTaskManagerOptions() *MemoryTaskManagerOptions {
 	return &MemoryTaskManagerOptions{
 		MaxHistoryLength:           defaultMaxHistoryLength,
 		ConversationTTL:            defaultConversationTTL,
+		TaskTTL:                    defaultTaskTTL,
 		CleanupInterval:            defaultCleanupInterval,
 		EnableCleanup:              true,
 		TaskSubscriberBufSize:      defaultSubscriberBufferSize,
@@ -66,6 +72,15 @@ func WithConversationTTL(ttl, cleanupInterval time.Duration) MemoryTaskManagerOp
 			opts.CleanupInterval = cleanupInterval
 			opts.EnableCleanup = true
 		}
+	}
+}
+
+// WithTaskTTL sets the task TTL for automatic cleanup of tasks in terminal states.
+// When enabled, tasks in terminal states (completed/failed/canceled/rejected) will be
+// automatically removed after the specified duration. A TTL of 0 disables task cleanup.
+func WithTaskTTL(ttl time.Duration) MemoryTaskManagerOption {
+	return func(opts *MemoryTaskManagerOptions) {
+		opts.TaskTTL = ttl
 	}
 }
 
