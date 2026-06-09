@@ -27,21 +27,21 @@ func (m *MockMessageProcessor) ProcessMessage(ctx context.Context, message proto
 	// Default implementation: echo the message
 	response := &protocol.Message{
 		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart("Echo: " + getTextFromMessage(message)),
 		},
 	}
 
 	return &MessageProcessingResult{
-		Result: response,
+		Result: &protocol.SendMessageResponse{Message: response},
 	}, nil
 }
 
 // Helper function to extract text from message
 func getTextFromMessage(message protocol.Message) string {
 	for _, part := range message.Parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			return textPart.Text
+		if text := part.TextContent(); text != "" {
+			return text
 		}
 	}
 	return ""
@@ -117,7 +117,7 @@ func TestMemoryTaskManager_OnSendMessage(t *testing.T) {
 			request: protocol.SendMessageParams{
 				Message: protocol.Message{
 					Role: protocol.MessageRoleUser,
-					Parts: []protocol.Part{
+					Parts: []*protocol.Part{
 						protocol.NewTextPart("Hello"),
 					},
 				},
@@ -130,7 +130,7 @@ func TestMemoryTaskManager_OnSendMessage(t *testing.T) {
 				Message: protocol.Message{
 					Role:      protocol.MessageRoleUser,
 					ContextID: stringPtr("test-context"),
-					Parts: []protocol.Part{
+					Parts: []*protocol.Part{
 						protocol.NewTextPart("Hello with context"),
 					},
 				},
@@ -160,21 +160,15 @@ func TestMemoryTaskManager_OnSendMessage(t *testing.T) {
 				return
 			}
 
-			// Check that message was stored
-			if result.Result == nil {
-				t.Error("Expected result but got nil")
-				return
-			}
-
-			// Check if result is a message
-			if message, ok := result.Result.(*protocol.Message); ok {
-				if message.MessageID == "" {
+			// Check if result contains a message
+			if result.Message != nil {
+				if result.Message.MessageID == "" {
 					t.Error("Expected message ID to be set")
 				}
 
 				// Check that message is in storage
 				manager.mu.RLock()
-				_, exists := manager.Messages[message.MessageID]
+				_, exists := manager.Messages[result.Message.MessageID]
 				manager.mu.RUnlock()
 
 				if !exists {
@@ -209,7 +203,7 @@ func TestMemoryTaskManager_OnSendMessageStream(t *testing.T) {
 				// Complete task
 				finalMessage := &protocol.Message{
 					Role: protocol.MessageRoleAgent,
-					Parts: []protocol.Part{
+					Parts: []*protocol.Part{
 						protocol.NewTextPart("Streaming completed"),
 					},
 				}
@@ -231,7 +225,7 @@ func TestMemoryTaskManager_OnSendMessageStream(t *testing.T) {
 	request := protocol.SendMessageParams{
 		Message: protocol.Message{
 			Role: protocol.MessageRoleUser,
-			Parts: []protocol.Part{
+			Parts: []*protocol.Part{
 				protocol.NewTextPart("Stream test"),
 			},
 		},
@@ -247,7 +241,7 @@ func TestMemoryTaskManager_OnSendMessageStream(t *testing.T) {
 	}
 
 	// Collect events with shorter timeout
-	var events []protocol.StreamingMessageEvent
+	var events []protocol.StreamResponse
 	timeout := time.After(500 * time.Millisecond)
 	eventCount := 0
 
@@ -283,7 +277,7 @@ CheckEvents:
 	// Should have received some events
 	hasStatusUpdate := false
 	for _, event := range events {
-		if event.Result != nil {
+		if event.StatusUpdate != nil {
 			hasStatusUpdate = true
 			break
 		}
@@ -310,7 +304,7 @@ func TestMemoryTaskManager_OnGetTask(t *testing.T) {
 			}
 
 			return &MessageProcessingResult{
-				Result: task.Task(), // Return protocol.Task, not CancellableTask
+				Result: &protocol.SendMessageResponse{Task: task.Task()},
 			}, nil
 		},
 	}
@@ -325,7 +319,7 @@ func TestMemoryTaskManager_OnGetTask(t *testing.T) {
 	request := protocol.SendMessageParams{
 		Message: protocol.Message{
 			Role: protocol.MessageRoleUser,
-			Parts: []protocol.Part{
+			Parts: []*protocol.Part{
 				protocol.NewTextPart("Test"),
 			},
 		},
@@ -337,10 +331,10 @@ func TestMemoryTaskManager_OnGetTask(t *testing.T) {
 	}
 
 	var existingTaskID string
-	if task, ok := result.Result.(*protocol.Task); ok {
-		existingTaskID = task.ID
+	if result.Task != nil {
+		existingTaskID = result.Task.ID
 	} else {
-		t.Fatalf("Expected task result but got %T", result.Result)
+		t.Fatal("Expected task result but got nil")
 	}
 
 	tests := []struct {
@@ -420,7 +414,7 @@ func TestMemoryTaskManager_OnCancelTask(t *testing.T) {
 			}
 
 			return &MessageProcessingResult{
-				Result: task.Task(),
+				Result: &protocol.SendMessageResponse{Task: task.Task()},
 			}, nil
 		},
 	}
@@ -435,7 +429,7 @@ func TestMemoryTaskManager_OnCancelTask(t *testing.T) {
 	request := protocol.SendMessageParams{
 		Message: protocol.Message{
 			Role: protocol.MessageRoleUser,
-			Parts: []protocol.Part{
+			Parts: []*protocol.Part{
 				protocol.NewTextPart("Test"),
 			},
 		},
@@ -448,10 +442,10 @@ func TestMemoryTaskManager_OnCancelTask(t *testing.T) {
 
 	// Extract task from result
 	var taskID string
-	if task, ok := result.Result.(*protocol.Task); ok {
-		taskID = task.ID
+	if result.Task != nil {
+		taskID = result.Task.ID
 	} else {
-		t.Fatal("Expected task result but got different type")
+		t.Fatal("Expected task result but got nil")
 	}
 
 	// Cancel the task
@@ -618,14 +612,12 @@ func TestTaskSubscriber(t *testing.T) {
 			taskID:   "test-task-2",
 			capacity: 5,
 			setup: func(s *MemoryTaskSubscriber) {
-				event := protocol.StreamingMessageEvent{
-					Result: &protocol.Message{
-						Role: protocol.MessageRoleAgent,
-						Parts: []protocol.Part{
-							protocol.NewTextPart("Test event"),
-						},
+				event := protocol.NewStreamResponseMessage(&protocol.Message{
+					Role: protocol.MessageRoleAgent,
+					Parts: []*protocol.Part{
+						protocol.NewTextPart("Test event"),
 					},
-				}
+				})
 				err := s.Send(event)
 				if err != nil {
 					t.Errorf("Unexpected error sending event: %v", err)
@@ -634,8 +626,8 @@ func TestTaskSubscriber(t *testing.T) {
 			validate: func(t *testing.T, s *MemoryTaskSubscriber) {
 				select {
 				case receivedEvent := <-s.eventQueue:
-					if receivedEvent.Result == nil {
-						t.Error("Expected event result but got nil")
+					if receivedEvent.Message == nil {
+						t.Error("Expected event message but got nil")
 					}
 				case <-time.After(100 * time.Millisecond):
 					t.Error("Timeout waiting for event")
@@ -655,9 +647,7 @@ func TestTaskSubscriber(t *testing.T) {
 				}
 
 				// Test sending to closed subscriber
-				event := protocol.StreamingMessageEvent{
-					Result: &protocol.Message{Role: protocol.MessageRoleAgent},
-				}
+				event := protocol.NewStreamResponseMessage(&protocol.Message{Role: protocol.MessageRoleAgent})
 				err := s.Send(event)
 				if err == nil {
 					t.Error("Expected error when sending to closed subscriber")
@@ -751,8 +741,7 @@ func TestMemoryTaskManager_cleanExpiredTasks(t *testing.T) {
 
 	// Create a task and move it to a final state with an old timestamp
 	task := protocol.Task{
-		ID:   "expired-task",
-		Kind: protocol.KindTask,
+		ID: "expired-task",
 		Status: protocol.TaskStatus{
 			State:     protocol.TaskStateCompleted,
 			Timestamp: time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339),
@@ -769,8 +758,7 @@ func TestMemoryTaskManager_cleanExpiredTasks(t *testing.T) {
 
 	// Create a non-expired task
 	activeTask := protocol.Task{
-		ID:   "active-task",
-		Kind: protocol.KindTask,
+		ID: "active-task",
 		Status: protocol.TaskStatus{
 			State:     protocol.TaskStateWorking,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -784,8 +772,7 @@ func TestMemoryTaskManager_cleanExpiredTasks(t *testing.T) {
 
 	// Create a recently completed task (should NOT be cleaned)
 	recentTask := protocol.Task{
-		ID:   "recent-task",
-		Kind: protocol.KindTask,
+		ID: "recent-task",
 		Status: protocol.TaskStatus{
 			State:     protocol.TaskStateCompleted,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -841,8 +828,7 @@ func TestMemoryTaskManager_Close(t *testing.T) {
 
 	// Add some tasks and subscribers
 	task := protocol.Task{
-		ID:   "close-test-task",
-		Kind: protocol.KindTask,
+		ID: "close-test-task",
 		Status: protocol.TaskStatus{
 			State:     protocol.TaskStateWorking,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),

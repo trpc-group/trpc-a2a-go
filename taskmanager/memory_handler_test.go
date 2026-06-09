@@ -25,7 +25,7 @@ func setupTestHandler(t *testing.T) (*memoryTaskHandler, *MemoryTaskManager) {
 	ctx := context.Background()
 	message := protocol.Message{
 		Role: protocol.MessageRoleUser,
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart("Test message"),
 		},
 	}
@@ -104,7 +104,7 @@ func TestMemoryTaskHandler_AddArtifact(t *testing.T) {
 	// Add artifact
 	artifact := protocol.Artifact{
 		ArtifactID: "test-artifact",
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart("Artifact content"),
 		},
 	}
@@ -206,7 +206,7 @@ func TestMemoryTaskHandler_GetMessageHistory(t *testing.T) {
 	contextMessage := protocol.Message{
 		Role:      protocol.MessageRoleUser,
 		ContextID: &contextID,
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart("Context message"),
 		},
 	}
@@ -299,7 +299,7 @@ func TestMemoryTaskHandler_GetContextID(t *testing.T) {
 	contextMessage := protocol.Message{
 		Role:      protocol.MessageRoleUser,
 		ContextID: &contextID,
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart("Context message"),
 		},
 	}
