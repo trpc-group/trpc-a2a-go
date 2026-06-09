@@ -396,20 +396,17 @@ func TestA2AServer_Resubscribe(t *testing.T) {
 		workingEvent := protocol.TaskStatusUpdateEvent{
 			TaskID:    "resubscribe-task",
 			ContextID: "test-context",
-			Kind:      protocol.KindTaskStatusUpdate,
 			Status:    protocol.TaskStatus{State: protocol.TaskStateWorking},
 		}
-		finalPtr := true
 		completedEvent := protocol.TaskStatusUpdateEvent{
 			TaskID:    "resubscribe-task",
 			ContextID: "test-context",
-			Kind:      protocol.KindTaskStatusUpdate,
 			Status:    protocol.TaskStatus{State: protocol.TaskStateCompleted},
-			Final:     finalPtr,
+			Final:     true,
 		}
-		mockTM.SubscribeEvents = []protocol.StreamingMessageEvent{
-			{Result: &workingEvent},
-			{Result: &completedEvent},
+		mockTM.SubscribeEvents = []protocol.StreamResponse{
+			{StatusUpdate: &workingEvent},
+			{StatusUpdate: &completedEvent},
 		}
 		mockTM.SubscribeError = nil
 
@@ -455,10 +452,12 @@ func TestA2AServer_Resubscribe(t *testing.T) {
 		require.NoError(t, err)
 
 		sseData := buf.String()
-		assert.Contains(t, sseData, "event: task_status_update")
-		assert.Contains(t, sseData, `"state":"working"`)
-		assert.Contains(t, sseData, `"state":"completed"`)
-		assert.Contains(t, sseData, `"final":true`)
+		assert.Contains(t, sseData, "event: statusUpdate")
+		assert.Contains(t, sseData, `"state":"TASK_STATE_WORKING"`)
+		assert.Contains(t, sseData, `"state":"TASK_STATE_COMPLETED"`)
+		// v1.0 wire carries no "final" field; stream termination is signaled by
+		// the SSE stream closing (the COMPLETED status above is the terminal event).
+		assert.NotContains(t, sseData, `"final"`)
 	})
 
 	t.Run("Resubscribe_Error", func(t *testing.T) {

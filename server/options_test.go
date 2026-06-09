@@ -99,11 +99,11 @@ func TestWithPushNotificationAuthenticator(t *testing.T) {
 
 type firstTokenPolicyStub struct{}
 
-func (firstTokenPolicyStub) IsStreamingFirstToken(_ protocol.StreamingMessageResult) bool {
+func (firstTokenPolicyStub) IsStreamingFirstToken(_ *protocol.StreamResponse) bool {
 	return false
 }
 
-func (firstTokenPolicyStub) IsNonStreamingFirstToken(_ *protocol.MessageResult) bool {
+func (firstTokenPolicyStub) IsNonStreamingFirstToken(_ *protocol.SendMessageResponse) bool {
 	return true
 }
 
@@ -119,7 +119,7 @@ func TestWithFirstTokenPolicy(t *testing.T) {
 
 func TestWithFirstTokenMatcher(t *testing.T) {
 	serverOptions := &A2AServer{}
-	matcher := func(event protocol.StreamingMessageResult, isStreaming bool) bool {
+	matcher := func(event *protocol.StreamResponse, isStreaming bool) bool {
 		return isStreaming && event == nil
 	}
 
@@ -359,18 +359,17 @@ func TestComposeJWKSURL(t *testing.T) {
 // optionsTestTaskManager is a simple mock implementing taskmanager.TaskManager interface
 type optionsTestTaskManager struct{}
 
-func (m *optionsTestTaskManager) OnSendMessage(ctx context.Context, params protocol.SendMessageParams) (*protocol.MessageResult, error) {
-	return &protocol.MessageResult{
-		Result: &protocol.Message{
-			Kind:      "message",
+func (m *optionsTestTaskManager) OnSendMessage(ctx context.Context, params protocol.SendMessageParams) (*protocol.SendMessageResponse, error) {
+	return &protocol.SendMessageResponse{
+		Message: &protocol.Message{
 			MessageID: "test-message-id",
 			Role:      protocol.MessageRoleAgent,
-			Parts:     []protocol.Part{protocol.NewTextPart("test response")},
+			Parts:     []*protocol.Part{protocol.NewTextPart("test response")},
 		},
 	}, nil
 }
 
-func (m *optionsTestTaskManager) OnSendMessageStream(ctx context.Context, params protocol.SendMessageParams) (<-chan protocol.StreamingMessageEvent, error) {
+func (m *optionsTestTaskManager) OnSendMessageStream(ctx context.Context, params protocol.SendMessageParams) (<-chan protocol.StreamResponse, error) {
 	return nil, nil
 }
 
@@ -382,7 +381,7 @@ func (m *optionsTestTaskManager) OnCancelTask(ctx context.Context, params protoc
 	return nil, nil
 }
 
-func (m *optionsTestTaskManager) OnResubscribe(ctx context.Context, params protocol.TaskIDParams) (<-chan protocol.StreamingMessageEvent, error) {
+func (m *optionsTestTaskManager) OnResubscribe(ctx context.Context, params protocol.TaskIDParams) (<-chan protocol.StreamResponse, error) {
 	return nil, nil
 }
 

@@ -30,8 +30,6 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/telemetry/metrics"
 )
 
-var errUnknownEvent = errors.New("unknown event type")
-
 // A2AServer implements the HTTP server for the A2A protocol.
 // It handles agent card requests and routes JSON-RPC calls to the TaskManager.
 type A2AServer struct {
@@ -521,34 +519,10 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("push notification URL is required"))
 		return
 	}
-	// Process authentication related fields for push notifications.
+	// Set JWKS endpoint information for push notification authentication.
 	if s.jwksEnabled && s.pushAuth != nil {
-		// Add JWT support by indicating the auth scheme in the config.
-		if params.PushNotificationConfig.Authentication == nil {
-			params.PushNotificationConfig.Authentication = &protocol.AuthenticationInfo{
-				Schemes: []string{"bearer"},
-			}
-		} else {
-			// Ensure "bearer" is in the list of supported schemes.
-			hasBearer := false
-			for _, scheme := range params.PushNotificationConfig.Authentication.Schemes {
-				if scheme == "bearer" {
-					hasBearer = true
-					break
-				}
-			}
-			if !hasBearer {
-				params.PushNotificationConfig.Authentication.Schemes = append(
-					params.PushNotificationConfig.Authentication.Schemes,
-					"bearer",
-				)
-			}
-		}
-		// Set JWKS endpoint information.
-		// This will be used by the client to verify JWTs sent by this server.
 		jwksURL := s.composeJWKSURL()
 		log.Infof("JWKS URL for push notifications: %s", jwksURL)
-		// Store JWKS URL in the params for the task manager to use.
 		if params.PushNotificationConfig.Metadata == nil {
 			params.PushNotificationConfig.Metadata = make(map[string]interface{})
 		}
@@ -719,7 +693,7 @@ func handleSSEStream(
 	corsEnabled bool,
 	w http.ResponseWriter,
 	flusher http.Flusher,
-	eventsChan <-chan protocol.StreamingMessageEvent,
+	eventsChan <-chan protocol.StreamResponse,
 	rpcID interface{},
 	tracker *metricsTracker,
 ) {
@@ -755,10 +729,10 @@ func handleSSEStream(
 
 func trackStreamEvents(
 	ctx context.Context,
-	eventsChan <-chan protocol.StreamingMessageEvent,
+	eventsChan <-chan protocol.StreamResponse,
 	tracker *metricsTracker,
-) <-chan protocol.StreamingMessageEvent {
-	tracked := make(chan protocol.StreamingMessageEvent)
+) <-chan protocol.StreamResponse {
+	tracked := make(chan protocol.StreamResponse)
 	go func() {
 		defer close(tracked)
 		for {

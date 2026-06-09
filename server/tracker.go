@@ -51,20 +51,20 @@ func newMetricsTracker(
 	}
 }
 
-func (t *metricsTracker) onEvent(event protocol.StreamingMessageEvent) {
+func (t *metricsTracker) onEvent(event protocol.StreamResponse) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	if t.firstTokenRecorded {
 		return
 	}
-	if event.Result != nil && t.policy.IsStreamingFirstToken(event.Result) {
+	if t.policy.IsStreamingFirstToken(&event) {
 		t.firstTokenTime = time.Now()
 		t.firstTokenRecorded = true
 	}
 }
 
-func (t *metricsTracker) observeNonStreamingResult(result *protocol.MessageResult) {
+func (t *metricsTracker) observeNonStreamingResult(result *protocol.SendMessageResponse) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
