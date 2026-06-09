@@ -18,31 +18,29 @@ import (
 // and maintain their expected values.
 func TestMethodConstants(t *testing.T) {
 	// Test RPC method constants
-	assert.Equal(t, "message/send", protocol.MethodMessageSend,
-		"MethodMessageSend should be 'message/send'")
-	assert.Equal(t, "message/stream", protocol.MethodMessageStream,
-		"MethodMessageStream should be 'message/stream'")
-	assert.Equal(t, "tasks/get", protocol.MethodTasksGet,
-		"MethodTasksGet should be 'tasks/get'")
-	assert.Equal(t, "tasks/cancel", protocol.MethodTasksCancel,
-		"MethodTasksCancel should be 'tasks/cancel'")
-	assert.Equal(t, "tasks/pushNotificationConfig/set", protocol.MethodTasksPushNotificationConfigSet,
-		"MethodTasksPushNotificationConfigSet should be 'tasks/pushNotificationConfig/set'")
-	assert.Equal(t, "tasks/pushNotificationConfig/get", protocol.MethodTasksPushNotificationConfigGet,
-		"MethodTasksPushNotificationConfigGet should be 'tasks/pushNotificationConfig/get'")
-	assert.Equal(t, "tasks/resubscribe", protocol.MethodTasksResubscribe,
-		"MethodTasksResubscribe should be 'tasks/resubscribe'")
+	assert.Equal(t, "SendMessage", protocol.MethodMessageSend,
+		"MethodMessageSend should be 'SendMessage'")
+	assert.Equal(t, "SendStreamingMessage", protocol.MethodMessageStream,
+		"MethodMessageStream should be 'SendStreamingMessage'")
+	assert.Equal(t, "GetTask", protocol.MethodTasksGet,
+		"MethodTasksGet should be 'GetTask'")
+	assert.Equal(t, "CancelTask", protocol.MethodTasksCancel,
+		"MethodTasksCancel should be 'CancelTask'")
+	assert.Equal(t, "CreateTaskPushNotificationConfig", protocol.MethodTasksPushNotificationConfigSet,
+		"MethodTasksPushNotificationConfigSet should be 'CreateTaskPushNotificationConfig'")
+	assert.Equal(t, "GetTaskPushNotificationConfig", protocol.MethodTasksPushNotificationConfigGet,
+		"MethodTasksPushNotificationConfigGet should be 'GetTaskPushNotificationConfig'")
+	assert.Equal(t, "SubscribeToTask", protocol.MethodTasksResubscribe,
+		"MethodTasksResubscribe should be 'SubscribeToTask'")
 }
 
 // TestEventTypeConstants ensures that the SSE event type constants are correctly defined
 // and maintain their expected values.
 func TestEventTypeConstants(t *testing.T) {
-	// Test SSE event type constants
-	assert.Equal(t, "task_status_update", protocol.EventStatusUpdate,
-		"EventTaskStatusUpdate should be 'task_status_update'")
-	assert.Equal(t, "task_artifact_update", protocol.EventArtifactUpdate,
-		"EventTaskArtifactUpdate should be 'task_artifact_update'")
-	assert.Equal(t, "close", protocol.EventClose, "EventClose should be 'close'")
+	// Test SSE event type constants (v1.0 uses camelCase)
+	assert.Equal(t, "statusUpdate", protocol.EventStatusUpdate)
+	assert.Equal(t, "artifactUpdate", protocol.EventArtifactUpdate)
+	assert.Equal(t, "close", protocol.EventClose)
 }
 
 // TestEndpointPathConstants ensures that the HTTP endpoint path constants are correctly defined
@@ -82,45 +80,52 @@ func TestConstantRelationships(t *testing.T) {
 // TestConsistencyWithSpecification tests that our implementation's constants
 // align with the A2A protocol specification.
 func TestConsistencyWithSpecification(t *testing.T) {
-	// These tests ensure that key constants follow the patterns defined in the specification
+	// These tests ensure that key constants follow the v1.0 specification patterns.
 
-	// Task-related methods should start with "tasks/"
-	taskMethodConstants := []string{
+	// v1.0 JSON-RPC method names are PascalCase (no slash delimiters).
+	v1Methods := []string{
+		protocol.MethodMessageSend,
+		protocol.MethodMessageStream,
 		protocol.MethodTasksGet,
 		protocol.MethodTasksCancel,
+		protocol.MethodTasksResubscribe,
+		protocol.MethodTasksList,
 		protocol.MethodTasksPushNotificationConfigSet,
 		protocol.MethodTasksPushNotificationConfigGet,
-		protocol.MethodTasksResubscribe,
+		protocol.MethodTasksPushNotificationConfigList,
+		protocol.MethodTasksPushNotificationConfigDelete,
 	}
 
-	for _, method := range taskMethodConstants {
-		assert.True(t, len(method) >= 6 && method[0:6] == "tasks/",
-			"Task method %s should start with 'tasks/'", method)
+	for _, method := range v1Methods {
+		assert.NotContains(t, method, "/",
+			"v1.0 method %s must not contain '/' (PascalCase per spec)", method)
+		assert.NotEmpty(t, method)
+		// First character should be an uppercase ASCII letter.
+		assert.True(t, method[0] >= 'A' && method[0] <= 'Z',
+			"v1.0 method %s should start with an uppercase letter", method)
 	}
 
-	// Message-related methods should be exactly "message/send" and "message/stream"
+	// Message-related methods should be exactly the v1.0 names.
 	messageMethods := map[string]bool{
 		protocol.MethodMessageSend:   true,
 		protocol.MethodMessageStream: true,
 	}
-
 	expectedMessageMethods := map[string]bool{
-		"message/send":   true,
-		"message/stream": true,
+		"SendMessage":          true,
+		"SendStreamingMessage": true,
 	}
-
-	// Check that we have exactly the expected message methods
 	assert.Equal(t, expectedMessageMethods, messageMethods, "Unexpected message methods")
 
-	// Push notification methods should include 'pushNotification' in the path
+	// Push notification config methods should include 'PushNotificationConfig'.
 	pushNotificationMethods := []string{
 		protocol.MethodTasksPushNotificationConfigSet,
 		protocol.MethodTasksPushNotificationConfigGet,
+		protocol.MethodTasksPushNotificationConfigList,
+		protocol.MethodTasksPushNotificationConfigDelete,
 	}
-
 	for _, method := range pushNotificationMethods {
-		assert.Contains(t, method, "pushNotification",
-			"Push notification method %s should contain 'pushNotification'", method)
+		assert.Contains(t, method, "PushNotificationConfig",
+			"Push notification method %s should contain 'PushNotificationConfig'", method)
 	}
 
 	// Well-known paths should start with '/.well-known/'
