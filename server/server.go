@@ -71,6 +71,9 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 	if taskManager == nil {
 		return nil, errors.New("NewA2AServer requires a non-nil taskManager")
 	}
+	// Ensure the served card carries a v1.0-conformant supportedInterfaces list,
+	// deriving it from the deprecated URL/PreferredTransport fields when needed.
+	agentCard.NormalizeInterfaces()
 	server := &A2AServer{
 		agentCard:        agentCard,
 		taskManager:      taskManager,
@@ -515,7 +518,7 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
 		return
 	}
-	if params.PushNotificationConfig.URL == "" {
+	if params.URL == "" {
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("push notification URL is required"))
 		return
 	}
@@ -523,10 +526,10 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 	if s.jwksEnabled && s.pushAuth != nil {
 		jwksURL := s.composeJWKSURL()
 		log.Infof("JWKS URL for push notifications: %s", jwksURL)
-		if params.PushNotificationConfig.Metadata == nil {
-			params.PushNotificationConfig.Metadata = make(map[string]interface{})
+		if params.Metadata == nil {
+			params.Metadata = make(map[string]interface{})
 		}
-		params.PushNotificationConfig.Metadata["jwksUrl"] = jwksURL
+		params.Metadata["jwksUrl"] = jwksURL
 	}
 
 	// Delegate to the task manager.
@@ -800,8 +803,9 @@ func (s *A2AServer) handleAgentGetAuthenticatedExtendedCard(
 	w http.ResponseWriter,
 	request jsonrpc.Request,
 ) {
-	// Check if the agent supports authenticated extended cards
-	if s.agentCard.SupportsAuthenticatedExtendedCard == nil || !*s.agentCard.SupportsAuthenticatedExtendedCard {
+	// Check if the agent supports authenticated extended cards (v1.0
+	// capabilities.extendedAgentCard or the deprecated top-level flag).
+	if !s.agentCard.ExtendedAgentCardEnabled() {
 		log.Warnf("Authenticated extended card not configured (Request ID: %v)", request.ID)
 		s.writeJSONRPCError(w, request.ID, taskmanager.ErrAuthenticatedExtendedCardNotConfigured())
 		return

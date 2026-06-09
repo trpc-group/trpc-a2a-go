@@ -565,9 +565,9 @@ func (m *MemoryTaskManager) processConfiguration(config *protocol.SendMessageCon
 		result.HistoryLength = *config.HistoryLength
 	}
 
-	// Process PushNotificationConfig
-	if config.PushNotificationConfig != nil {
-		result.PushNotificationConfig = config.PushNotificationConfig
+	// Process PushNotificationConfig (flat TaskPushNotificationConfig -> details view)
+	if config.PushConfig != nil {
+		result.PushNotificationConfig = config.PushConfig.Details()
 	}
 
 	// Process AcceptedOutputModes configuration
