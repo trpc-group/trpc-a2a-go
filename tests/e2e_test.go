@@ -100,7 +100,7 @@ func (p *testProcessor) ProcessMessage(
 	}
 
 	return &taskmanager.MessageProcessingResult{
-		Result: finalTask.Task(),
+		Result: protocol.NewSendMessageResponseTask(finalTask.Task()),
 	}, nil
 }
 
@@ -125,7 +125,7 @@ func (p *testProcessor) processTask(
 		chunk := reversedText[i:end]
 		statusMsg := &protocol.Message{
 			Role: protocol.MessageRoleAgent,
-			Parts: []protocol.Part{
+			Parts: []*protocol.Part{
 				protocol.NewTextPart(fmt.Sprintf("Processing chunk: %s", chunk)),
 			},
 		}
@@ -141,7 +141,7 @@ func (p *testProcessor) processTask(
 	finalArtifact := protocol.Artifact{
 		Name:        stringPtr("Processed Text"),
 		Description: stringPtr("The reversed input text."),
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart(reversedText),
 		},
 	}
@@ -154,7 +154,7 @@ func (p *testProcessor) processTask(
 	// Send final 'Completed' status
 	completionMsg := &protocol.Message{
 		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart(
 				fmt.Sprintf("Task %s completed successfully. Result: %s", taskID, reversedText),
 			),
@@ -189,7 +189,7 @@ func newTestBasicTaskManager(t *testing.T) *testBasicTaskManager {
 func (m *testBasicTaskManager) OnSendMessage(
 	ctx context.Context,
 	params protocol.SendMessageParams,
-) (*protocol.MessageResult, error) {
+) (*protocol.SendMessageResponse, error) {
 	log.Printf("[Test TM Wrapper] OnSendMessage called for %s, delegating to base.", params.Message.MessageID)
 	return m.MemoryTaskManager.OnSendMessage(ctx, params)
 }
@@ -198,7 +198,7 @@ func (m *testBasicTaskManager) OnSendMessage(
 func (m *testBasicTaskManager) OnSendMessageStream(
 	ctx context.Context,
 	params protocol.SendMessageParams,
-) (<-chan protocol.StreamingMessageEvent, error) {
+) (<-chan protocol.StreamResponse, error) {
 	log.Printf("[Test TM Wrapper] OnSendMessageStream called for %s, delegating to base.", params.Message.MessageID)
 	return m.MemoryTaskManager.OnSendMessageStream(ctx, params)
 }
@@ -207,7 +207,7 @@ func (m *testBasicTaskManager) OnSendMessageStream(
 func (m *testBasicTaskManager) OnResubscribe(
 	ctx context.Context,
 	params protocol.TaskIDParams,
-) (<-chan protocol.StreamingMessageEvent, error) {
+) (<-chan protocol.StreamResponse, error) {
 	log.Printf("[Test TM Wrapper] OnResubscribe called for %s, delegating to base.", params.ID)
 	return m.MemoryTaskManager.OnResubscribe(ctx, params)
 }
@@ -337,44 +337,37 @@ func createDefaultTestAgentCard() server.AgentCard {
 			Streaming:              boolPtr(true),
 			StateTransitionHistory: boolPtr(true),
 		},
-		DefaultInputModes:  []string{string(protocol.KindText)},
-		DefaultOutputModes: []string{string(protocol.KindText)},
+		DefaultInputModes:  []string{"text"},
+		DefaultOutputModes: []string{"text"},
 	}
 }
 
-// collectAllStreamingEvents collects all events from a streaming message event channel until it's closed.
-func collectAllStreamingEvents(eventChan <-chan protocol.StreamingMessageEvent) []protocol.StreamingMessageEvent {
-	var events []protocol.StreamingMessageEvent
-	timeout := time.After(3 * time.Second) // Safety timeout
+// collectAllStreamingEvents collects all events from a streaming response channel until it's closed.
+func collectAllStreamingEvents(eventChan <-chan protocol.StreamResponse) []protocol.StreamResponse {
+	var events []protocol.StreamResponse
+	timeout := time.After(3 * time.Second)
 	done := false
 	for !done {
 		select {
 		case event, ok := <-eventChan:
 			if !ok {
-				done = true // Channel closed
+				done = true
 				break
 			}
 			events = append(events, event)
 
-			// Check if this is a final event
-			if result, ok := event.Result.(*protocol.TaskStatusUpdateEvent); ok {
-				if result.IsFinal() {
-					// Wait just a tiny bit more to see if there are any trailing events
-					time.Sleep(50 * time.Millisecond)
-					// Try to drain one more event non-blocking
-					select {
-					case lastEvent, ok := <-eventChan:
-						if ok {
-							events = append(events, lastEvent)
-						}
-					default:
-						// No more events available
+			if event.StatusUpdate != nil && event.StatusUpdate.IsFinal() {
+				time.Sleep(50 * time.Millisecond)
+				select {
+				case lastEvent, ok := <-eventChan:
+					if ok {
+						events = append(events, lastEvent)
 					}
-					return events
+				default:
 				}
+				return events
 			}
 		case <-timeout:
-			// If we timeout, just return whatever events we've collected so far
 			return events
 		}
 	}
@@ -382,10 +375,10 @@ func collectAllStreamingEvents(eventChan <-chan protocol.StreamingMessageEvent) 
 }
 
 // getTextPartContent extracts text content from parts of a message.
-func getTextPartContent(parts []protocol.Part) string {
+func getTextPartContent(parts []*protocol.Part) string {
 	for _, part := range parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			return textPart.Text
+		if t := part.TextContent(); t != "" {
+			return t
 		}
 	}
 	return ""
@@ -408,7 +401,7 @@ func TestE2E_MessageAPI_Streaming(t *testing.T) {
 	// Create message using the NewMessageWithContext constructor
 	message := protocol.NewMessageWithContext(
 		protocol.MessageRoleUser,
-		[]protocol.Part{
+		[]*protocol.Part{
 			protocol.NewTextPart(inputText),
 		},
 		&taskID,
@@ -444,7 +437,7 @@ func TestE2E_MessageAPI_Resubscribe(t *testing.T) {
 	// Create message using the NewMessageWithContext constructor
 	message := protocol.NewMessageWithContext(
 		protocol.MessageRoleUser,
-		[]protocol.Part{
+		[]*protocol.Part{
 			protocol.NewTextPart(inputText),
 		},
 		&taskID,
@@ -474,46 +467,40 @@ func TestE2E_MessageAPI_Resubscribe(t *testing.T) {
 	checkStreamingEvents(t, events)
 }
 
-func checkStreamingEvents(t *testing.T, events []protocol.StreamingMessageEvent) {
-	// Verify we received events
+func checkStreamingEvents(t *testing.T, events []protocol.StreamResponse) {
 	require.NotEmpty(t, events, "Should have received events")
 
-	// Verify the events we received
 	hasWorkingStatus := false
 	hasArtifact := false
 	hasCompletedStatus := false
 
 	for _, event := range events {
-		switch result := event.Result.(type) {
-		case *protocol.TaskStatusUpdateEvent:
-			if result.Status.State == protocol.TaskStateWorking {
+		if su := event.StatusUpdate; su != nil {
+			if su.Status.State == protocol.TaskStateWorking {
 				hasWorkingStatus = true
-				require.NotNil(t, result.Status.Message, "Working status should have a message")
-				require.NotEmpty(t, result.Status.Message.Parts, "Working status message should have parts")
-				textPart, ok := result.Status.Message.Parts[0].(*protocol.TextPart)
-				require.True(t, ok, "Working status message should have text part")
-				require.Contains(t, textPart.Text, "Processing chunk:", "Working status should contain processing info")
-			} else if result.Status.State == protocol.TaskStateCompleted {
+				require.NotNil(t, su.Status.Message, "Working status should have a message")
+				require.NotEmpty(t, su.Status.Message.Parts, "Working status message should have parts")
+				text := su.Status.Message.Parts[0].TextContent()
+				require.Contains(t, text, "Processing chunk:", "Working status should contain processing info")
+			} else if su.Status.State == protocol.TaskStateCompleted {
 				hasCompletedStatus = true
-				require.NotNil(t, result.Status.Message, "Completed status should have a message")
-				require.NotEmpty(t, result.Status.Message.Parts, "Completed status message should have parts")
-				textPart, ok := result.Status.Message.Parts[0].(*protocol.TextPart)
-				require.True(t, ok, "Completed status message should have text part")
-				require.Contains(t, textPart.Text, "completed successfully", "Completed status should contain success info")
-				require.Contains(t, textPart.Text, "!dlrow olleH", "Completed status should contain reversed text")
+				require.NotNil(t, su.Status.Message, "Completed status should have a message")
+				require.NotEmpty(t, su.Status.Message.Parts, "Completed status message should have parts")
+				text := su.Status.Message.Parts[0].TextContent()
+				require.Contains(t, text, "completed successfully", "Completed status should contain success info")
+				require.Contains(t, text, "!dlrow olleH", "Completed status should contain reversed text")
 			}
-		case *protocol.TaskArtifactUpdateEvent:
+		}
+		if au := event.ArtifactUpdate; au != nil {
 			hasArtifact = true
-			require.NotNil(t, result.Artifact.Name, "Artifact should have a name")
-			require.Equal(t, "Processed Text", *result.Artifact.Name, "Artifact name should match")
-			require.NotEmpty(t, result.Artifact.Parts, "Artifact should have parts")
-			textPart, ok := result.Artifact.Parts[0].(*protocol.TextPart)
-			require.True(t, ok, "Artifact should have text part")
-			require.Equal(t, "!dlrow olleH", textPart.Text, "Artifact should contain reversed text")
+			require.NotNil(t, au.Artifact.Name, "Artifact should have a name")
+			require.Equal(t, "Processed Text", *au.Artifact.Name, "Artifact name should match")
+			require.NotEmpty(t, au.Artifact.Parts, "Artifact should have parts")
+			text := au.Artifact.Parts[0].TextContent()
+			require.Equal(t, "!dlrow olleH", text, "Artifact should contain reversed text")
 		}
 	}
 
-	// Verify we got all expected event types
 	require.True(t, hasWorkingStatus, "Should have received working status updates")
 	require.True(t, hasArtifact, "Should have received artifact update")
 	require.True(t, hasCompletedStatus, "Should have received completed status")
@@ -536,7 +523,7 @@ func TestE2E_MessageAPI_NonStreaming(t *testing.T) {
 	// Create message using the NewMessageWithContext constructor
 	message := protocol.NewMessageWithContext(
 		protocol.MessageRoleUser,
-		[]protocol.Part{
+		[]*protocol.Part{
 			protocol.NewTextPart(inputText),
 		},
 		&taskID,
@@ -553,9 +540,8 @@ func TestE2E_MessageAPI_NonStreaming(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify the result contains a task
-	task, ok := result.Result.(*protocol.Task)
-	require.True(t, ok, "Result should contain a task")
-	require.NotNil(t, task, "Task should not be nil")
+	require.NotNil(t, result.Task, "Result should contain a task")
+	task := result.Task
 
 	// Wait a bit for the task to complete
 	time.Sleep(500 * time.Millisecond)
