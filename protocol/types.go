@@ -157,9 +157,11 @@ func (e *TaskArtifactUpdateEvent) IsFinal() bool {
 // Request / Response types
 // ---------------------------------------------------------------------------
 
-// SendMessageParams defines the parameters for the message/send and message/stream methods.
+// SendMessageParams defines the parameters for the SendMessage and
+// SendStreamingMessage methods.
 type SendMessageParams struct {
 	RPCID         string                    `json:"-"`
+	Tenant        string                    `json:"tenant,omitempty"`
 	Configuration *SendMessageConfiguration `json:"configuration,omitempty"`
 	Message       Message                   `json:"message"`
 	Metadata      map[string]any            `json:"metadata,omitempty"`
@@ -167,9 +169,9 @@ type SendMessageParams struct {
 
 // SendMessageConfiguration defines optional configuration for message sending.
 type SendMessageConfiguration struct {
-	AcceptedOutputModes    []string                `json:"acceptedOutputModes,omitempty"`
-	PushNotificationConfig *PushNotificationConfig `json:"pushNotificationConfig,omitempty"`
-	HistoryLength          *int                    `json:"historyLength,omitempty"`
+	AcceptedOutputModes []string                    `json:"acceptedOutputModes,omitempty"`
+	PushConfig          *TaskPushNotificationConfig `json:"taskPushNotificationConfig,omitempty"`
+	HistoryLength       *int                        `json:"historyLength,omitempty"`
 	// ReturnImmediately replaces v0 "blocking" (inverted semantics).
 	// true = do not wait for completion, false/nil = wait.
 	ReturnImmediately *bool `json:"returnImmediately,omitempty"`
@@ -184,9 +186,10 @@ func (c *SendMessageConfiguration) IsBlocking() bool {
 	return !*c.ReturnImmediately
 }
 
-// TaskQueryParams defines the parameters for the tasks/get method.
+// TaskQueryParams defines the parameters for the GetTask method.
 type TaskQueryParams struct {
 	RPCID         string         `json:"-"`
+	Tenant        string         `json:"tenant,omitempty"`
 	ID            string         `json:"id"`
 	HistoryLength *int           `json:"historyLength,omitempty"`
 	Metadata      map[string]any `json:"metadata,omitempty"`
@@ -195,24 +198,120 @@ type TaskQueryParams struct {
 // TaskIDParams defines parameters for methods needing only a task ID.
 type TaskIDParams struct {
 	RPCID    string         `json:"-"`
+	Tenant   string         `json:"tenant,omitempty"`
 	ID       string         `json:"id"`
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
-// PushNotificationConfig represents the configuration for task push notifications (v1.0 flattened).
-type PushNotificationConfig struct {
-	ID       string         `json:"id,omitempty"`
-	URL      string         `json:"url"`
-	Token    string         `json:"token,omitempty"`
-	Metadata map[string]any `json:"metadata,omitempty"`
+// AuthenticationInfo defines authentication details a server uses when calling
+// a push notification endpoint (v1.0). Scheme is required (e.g. "Bearer",
+// "Basic"); Credentials is optional.
+type AuthenticationInfo struct {
+	Scheme      string `json:"scheme"`
+	Credentials string `json:"credentials,omitempty"`
 }
 
-// TaskPushNotificationConfig associates a task ID with push notification settings.
+// PushNotificationConfig holds the delivery details for task push notifications.
+// It is the internal "details" view used by SendMessageConfiguration and
+// ProcessOptions; the same fields are carried directly on
+// TaskPushNotificationConfig for the push-config RPC methods.
+type PushNotificationConfig struct {
+	ID             string              `json:"id,omitempty"`
+	URL            string              `json:"url"`
+	Token          string              `json:"token,omitempty"`
+	Authentication *AuthenticationInfo `json:"authentication,omitempty"`
+	Metadata       map[string]any      `json:"metadata,omitempty"`
+}
+
+// TaskPushNotificationConfig is the v1.0 flattened push-notification configuration.
+// It is the wire type for the Create/Get/List/Delete push-config methods and for
+// SendMessageConfiguration. All delivery fields live directly on this struct
+// (v0 nested the details under a "pushNotificationConfig" object).
 type TaskPushNotificationConfig struct {
-	RPCID                  string                 `json:"-"`
-	PushNotificationConfig PushNotificationConfig `json:"pushNotificationConfig"`
-	TaskID                 string                 `json:"taskId"`
-	Metadata               map[string]any         `json:"metadata,omitempty"`
+	RPCID          string              `json:"-"`
+	Tenant         string              `json:"tenant,omitempty"`
+	ID             string              `json:"id,omitempty"`
+	TaskID         string              `json:"taskId"`
+	URL            string              `json:"url"`
+	Token          string              `json:"token,omitempty"`
+	Authentication *AuthenticationInfo `json:"authentication,omitempty"`
+	Metadata       map[string]any      `json:"metadata,omitempty"`
+}
+
+// Details returns the delivery details of this config as a PushNotificationConfig
+// (the view consumed by MessageProcessor via ProcessOptions).
+func (c *TaskPushNotificationConfig) Details() *PushNotificationConfig {
+	if c == nil {
+		return nil
+	}
+	return &PushNotificationConfig{
+		ID:             c.ID,
+		URL:            c.URL,
+		Token:          c.Token,
+		Authentication: c.Authentication,
+		Metadata:       c.Metadata,
+	}
+}
+
+// ---------------------------------------------------------------------------
+// New v1.0 operations: ListTasks / push-config list & delete
+// ---------------------------------------------------------------------------
+
+// ListTasksParams defines the parameters for the ListTasks method.
+type ListTasksParams struct {
+	RPCID                string         `json:"-"`
+	Tenant               string         `json:"tenant,omitempty"`
+	ContextID            string         `json:"contextId,omitempty"`
+	Status               TaskState      `json:"status,omitempty"`
+	PageSize             *int           `json:"pageSize,omitempty"`
+	PageToken            string         `json:"pageToken,omitempty"`
+	HistoryLength        *int           `json:"historyLength,omitempty"`
+	StatusTimestampAfter string         `json:"statusTimestampAfter,omitempty"`
+	IncludeArtifacts     *bool          `json:"includeArtifacts,omitempty"`
+	Metadata             map[string]any `json:"metadata,omitempty"`
+}
+
+// ListTasksResult is the result of the ListTasks method.
+type ListTasksResult struct {
+	Tasks         []*Task `json:"tasks"`
+	NextPageToken string  `json:"nextPageToken,omitempty"`
+	PageSize      int     `json:"pageSize,omitempty"`
+	TotalSize     int     `json:"totalSize,omitempty"`
+}
+
+// ListTaskPushNotificationConfigsParams defines the parameters for the
+// ListTaskPushNotificationConfigs method.
+type ListTaskPushNotificationConfigsParams struct {
+	RPCID     string `json:"-"`
+	Tenant    string `json:"tenant,omitempty"`
+	TaskID    string `json:"taskId"`
+	PageSize  *int   `json:"pageSize,omitempty"`
+	PageToken string `json:"pageToken,omitempty"`
+}
+
+// ListTaskPushNotificationConfigsResult is the result of the
+// ListTaskPushNotificationConfigs method.
+type ListTaskPushNotificationConfigsResult struct {
+	Configs       []TaskPushNotificationConfig `json:"configs"`
+	NextPageToken string                       `json:"nextPageToken,omitempty"`
+}
+
+// DeleteTaskPushNotificationConfigParams defines the parameters for the
+// DeleteTaskPushNotificationConfig method.
+type DeleteTaskPushNotificationConfigParams struct {
+	RPCID  string `json:"-"`
+	Tenant string `json:"tenant,omitempty"`
+	TaskID string `json:"taskId"`
+	ID     string `json:"id"`
+}
+
+// GetTaskPushNotificationConfigParams defines the parameters for the
+// GetTaskPushNotificationConfig method (v1.0 can address a specific config by ID).
+type GetTaskPushNotificationConfigParams struct {
+	RPCID  string `json:"-"`
+	Tenant string `json:"tenant,omitempty"`
+	TaskID string `json:"taskId"`
+	ID     string `json:"id,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
