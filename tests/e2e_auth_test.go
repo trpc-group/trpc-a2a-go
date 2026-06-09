@@ -463,7 +463,7 @@ func setupAuthServer(t *testing.T, provider auth.Provider) (taskmanager.TaskMana
 type mockTaskManager struct {
 	processor   taskmanager.MessageProcessor
 	tasks       map[string]*protocol.Task
-	pushConfigs map[string]protocol.PushNotificationConfig
+	pushConfigs map[string]protocol.TaskPushNotificationConfig
 	messages    map[string]*protocol.Message
 }
 
@@ -474,7 +474,7 @@ func newMockTaskManager(processor taskmanager.MessageProcessor) *mockTaskManager
 	return &mockTaskManager{
 		processor:   processor,
 		tasks:       make(map[string]*protocol.Task),
-		pushConfigs: make(map[string]protocol.PushNotificationConfig),
+		pushConfigs: make(map[string]protocol.TaskPushNotificationConfig),
 		messages:    make(map[string]*protocol.Message),
 	}
 }
@@ -535,7 +535,7 @@ func (m *mockTaskManager) OnPushNotificationSet(
 		return nil, err
 	}
 
-	m.pushConfigs[params.TaskID] = params.PushNotificationConfig
+	m.pushConfigs[params.TaskID] = params
 	return &params, nil
 }
 
@@ -553,10 +553,8 @@ func (m *mockTaskManager) OnPushNotificationGet(
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
 
-	return &protocol.TaskPushNotificationConfig{
-		TaskID:                 params.ID,
-		PushNotificationConfig: config,
-	}, nil
+	config.TaskID = params.ID
+	return &config, nil
 }
 
 // OnResubscribe handles resubscribing to a task.

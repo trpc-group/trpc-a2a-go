@@ -491,10 +491,8 @@ func TestMemoryTaskManager_PushNotifications(t *testing.T) {
 			taskID: "test-task-id",
 			config: &protocol.TaskPushNotificationConfig{
 				TaskID: "test-task-id",
-				PushNotificationConfig: protocol.PushNotificationConfig{
-					URL:   "https://example.com/webhook",
-					Token: "Bearer token",
-				},
+				URL:    "https://example.com/webhook",
+				Token:  "Bearer token",
 			},
 			wantErr: false,
 			validate: func(t *testing.T, result interface{}, err error) {
@@ -525,8 +523,8 @@ func TestMemoryTaskManager_PushNotifications(t *testing.T) {
 
 				if getResult, ok := result.(*protocol.TaskPushNotificationConfig); ok {
 					expectedURL := "https://example.com/webhook"
-					if getResult.PushNotificationConfig.URL != expectedURL {
-						t.Errorf("Expected URL %s, got %s", expectedURL, getResult.PushNotificationConfig.URL)
+					if getResult.URL != expectedURL {
+						t.Errorf("Expected URL %s, got %s", expectedURL, getResult.URL)
 					}
 				} else {
 					t.Errorf("Expected TaskPushNotificationConfig, got %T", result)
@@ -552,10 +550,8 @@ func TestMemoryTaskManager_PushNotifications(t *testing.T) {
 	// First set up a push notification for the get test
 	setupConfig := protocol.TaskPushNotificationConfig{
 		TaskID: "test-task-id",
-		PushNotificationConfig: protocol.PushNotificationConfig{
-			URL:   "https://example.com/webhook",
-			Token: "Bearer token",
-		},
+		URL:    "https://example.com/webhook",
+		Token:  "Bearer token",
 	}
 	_, err = manager.OnPushNotificationSet(ctx, setupConfig)
 	if err != nil {

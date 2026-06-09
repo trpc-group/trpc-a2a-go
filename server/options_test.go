@@ -392,9 +392,7 @@ func (m *optionsTestTaskManager) OnPushNotificationSet(ctx context.Context, para
 func (m *optionsTestTaskManager) OnPushNotificationGet(ctx context.Context, params protocol.TaskIDParams) (*protocol.TaskPushNotificationConfig, error) {
 	return &protocol.TaskPushNotificationConfig{
 		TaskID: params.ID,
-		PushNotificationConfig: protocol.PushNotificationConfig{
-			URL: "http://test.example.com/webhook",
-		},
+		URL:    "http://test.example.com/webhook",
 	}, nil
 }
 

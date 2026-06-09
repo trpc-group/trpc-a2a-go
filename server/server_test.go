@@ -96,6 +96,9 @@ func performJSONRPCRequest(
 func TestA2AServer_HandleAgentCard(t *testing.T) {
 	mockTM := newMockTaskManager()
 	agentCard := defaultAgentCard()
+	// The server normalizes the card to a v1.0-conformant supportedInterfaces
+	// list; normalize the expected copy the same way for comparison.
+	agentCard.NormalizeInterfaces()
 	a2aServer, err := NewA2AServer(agentCard, mockTM)
 	require.NoError(t, err)
 	testServer := httptest.NewServer(http.HandlerFunc(a2aServer.handleAgentCard))
@@ -650,12 +653,9 @@ func (m *mockTaskManager) OnPushNotificationSet(
 		return m.pushNotificationSetResponse, nil
 	}
 
-	// Default implementation if response not configured
-	return &protocol.TaskPushNotificationConfig{
-		RPCID:                  params.RPCID,
-		PushNotificationConfig: params.PushNotificationConfig,
-		TaskID:                 params.TaskID,
-	}, nil
+	// Default implementation if response not configured: echo the flat params back.
+	cp := params
+	return &cp, nil
 }
 
 // OnPushNotificationGet implements the TaskManager interface for push notifications.

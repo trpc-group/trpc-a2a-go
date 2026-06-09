@@ -142,7 +142,7 @@ func verifyPushNotificationConfig(t *testing.T, resp *jsonrpc.Response, expected
 	require.NoError(t, err)
 
 	assert.Equal(t, expectedTaskID, config.TaskID)
-	assert.Equal(t, expectedURL, config.PushNotificationConfig.URL)
+	assert.Equal(t, expectedURL, config.URL)
 }
 
 // TestA2AServer_HandlerErrors tests various error conditions in the JSON-RPC handler
@@ -303,18 +303,14 @@ func TestA2AServer_PushNotifications(t *testing.T) {
 		// Configure mock task manager
 		mockTM.pushNotificationSetResponse = &protocol.TaskPushNotificationConfig{
 			TaskID: "test-push-task",
-			PushNotificationConfig: protocol.PushNotificationConfig{
-				URL: "https://example.com/webhook",
-			},
+			URL:    "https://example.com/webhook",
 		}
 		mockTM.pushNotificationSetError = nil
 
 		// Create request
 		params := protocol.TaskPushNotificationConfig{
 			TaskID: "test-push-task",
-			PushNotificationConfig: protocol.PushNotificationConfig{
-				URL: "https://example.com/webhook",
-			},
+			URL:    "https://example.com/webhook",
 		}
 
 		resp := performJSONRPCRequest(
@@ -334,9 +330,7 @@ func TestA2AServer_PushNotifications(t *testing.T) {
 		// Configure mock task manager
 		mockTM.pushNotificationGetResponse = &protocol.TaskPushNotificationConfig{
 			TaskID: "test-push-task",
-			PushNotificationConfig: protocol.PushNotificationConfig{
-				URL: "https://example.com/webhook",
-			},
+			URL:    "https://example.com/webhook",
 		}
 		mockTM.pushNotificationGetError = nil
 

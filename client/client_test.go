@@ -357,10 +357,8 @@ func TestA2AClient_SetPushNotification(t *testing.T) {
 	params := protocol.TaskPushNotificationConfig{
 		RPCID:  taskID,
 		TaskID: taskID,
-		PushNotificationConfig: protocol.PushNotificationConfig{
-			URL:   "https://example.com/webhook",
-			Token: "test-token",
-		},
+		URL:    "https://example.com/webhook",
+		Token:  "test-token",
 	}
 	paramsBytes, err := json.Marshal(params)
 	require.NoError(t, err)
@@ -375,9 +373,7 @@ func TestA2AClient_SetPushNotification(t *testing.T) {
 		// Prepare mock server response
 		respConfig := protocol.TaskPushNotificationConfig{
 			TaskID: taskID,
-			PushNotificationConfig: protocol.PushNotificationConfig{
-				URL: "https://example.com/webhook",
-			},
+			URL:    "https://example.com/webhook",
 		}
 		respResultBytes, err := json.Marshal(respConfig)
 		require.NoError(t, err)
@@ -405,7 +401,7 @@ func TestA2AClient_SetPushNotification(t *testing.T) {
 		require.NotNil(t, result, "Result should not be nil on success")
 
 		assert.Equal(t, taskID, result.TaskID)
-		assert.Equal(t, "https://example.com/webhook", result.PushNotificationConfig.URL)
+		assert.Equal(t, "https://example.com/webhook", result.URL)
 	})
 
 	t.Run("SetPushNotification Invalid URL", func(t *testing.T) {
@@ -463,10 +459,8 @@ func TestA2AClient_GetPushNotification(t *testing.T) {
 	t.Run("GetPushNotification Success", func(t *testing.T) {
 		respConfig := protocol.TaskPushNotificationConfig{
 			TaskID: taskID,
-			PushNotificationConfig: protocol.PushNotificationConfig{
-				URL:   "https://example.com/webhook",
-				Token: "test-token",
-			},
+			URL:    "https://example.com/webhook",
+			Token:  "test-token",
 		}
 		respResultBytes, err := json.Marshal(respConfig)
 		require.NoError(t, err)
@@ -494,8 +488,8 @@ func TestA2AClient_GetPushNotification(t *testing.T) {
 		require.NotNil(t, result, "Result should not be nil on success")
 
 		assert.Equal(t, taskID, result.TaskID)
-		assert.Equal(t, "https://example.com/webhook", result.PushNotificationConfig.URL)
-		assert.Equal(t, "test-token", result.PushNotificationConfig.Token)
+		assert.Equal(t, "https://example.com/webhook", result.URL)
+		assert.Equal(t, "test-token", result.Token)
 	})
 
 	t.Run("GetPushNotification Not Found", func(t *testing.T) {
