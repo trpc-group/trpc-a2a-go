@@ -139,16 +139,13 @@ func main() {
 func runNonStreamingDemo(ctx context.Context, client *client.A2AClient, inputText string, verbose bool) {
 	message := protocol.Message{
 		Role: protocol.MessageRoleUser,
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart(inputText),
 		},
 	}
 
 	params := protocol.SendMessageParams{
 		Message: message,
-		Configuration: &protocol.SendMessageConfiguration{
-			Blocking: boolPtr(true), // Non-streaming
-		},
 	}
 
 	if verbose {
@@ -166,14 +163,14 @@ func runNonStreamingDemo(ctx context.Context, client *client.A2AClient, inputTex
 
 	fmt.Printf("%s Processing time: %v\n", prefixSuccess, duration)
 
-	if response, ok := result.Result.(*protocol.Message); ok {
+	if response := result.Message; response != nil {
 		for i, part := range response.Parts {
-			if textPart, ok := part.(*protocol.TextPart); ok {
-				fmt.Printf("%s %d: '%s'\n", prefixResult, i+1, textPart.Text)
+			if t := part.TextContent(); t != "" {
+				fmt.Printf("%s %d: '%s'\n", prefixResult, i+1, t)
 			}
 		}
 	} else {
-		fmt.Printf("%s Unexpected result type: %T\n", prefixWarning, result.Result)
+		fmt.Printf("%s No message in result\n", prefixWarning)
 	}
 }
 
@@ -196,19 +193,16 @@ func runStreamingDemo(ctx context.Context, client *client.A2AClient, inputText s
 }
 
 // startStreamingRequest initiates a streaming request and returns the event channel
-func startStreamingRequest(ctx context.Context, client *client.A2AClient, inputText string, verbose bool) (<-chan protocol.StreamingMessageEvent, error) {
+func startStreamingRequest(ctx context.Context, client *client.A2AClient, inputText string, verbose bool) (<-chan protocol.StreamResponse, error) {
 	message := protocol.Message{
 		Role: protocol.MessageRoleUser,
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart(inputText),
 		},
 	}
 
 	params := protocol.SendMessageParams{
 		Message: message,
-		Configuration: &protocol.SendMessageConfiguration{
-			Blocking: boolPtr(false), // Streaming
-		},
 	}
 
 	if verbose {
@@ -230,7 +224,7 @@ type streamEventProcessor struct {
 }
 
 // processEvents processes streaming events from the event channel
-func (p *streamEventProcessor) processEvents(eventChan <-chan protocol.StreamingMessageEvent) {
+func (p *streamEventProcessor) processEvents(eventChan <-chan protocol.StreamResponse) {
 	fmt.Printf("%s Processing events:\n", prefixStreaming)
 
 	for {
@@ -270,21 +264,19 @@ func (p *streamEventProcessor) handleStreamComplete() {
 }
 
 // handleStreamEvent processes a single stream event
-func (p *streamEventProcessor) handleStreamEvent(event protocol.StreamingMessageEvent) {
+func (p *streamEventProcessor) handleStreamEvent(event protocol.StreamResponse) {
 	p.eventCount++
 
-	// Clear progress indicator
 	if p.verbose && p.eventCount > 1 {
 		fmt.Printf("\r")
 	}
 
-	switch result := event.Result.(type) {
-	case *protocol.TaskStatusUpdateEvent:
-		p.handleTaskStatusEvent(result)
-	case *protocol.TaskArtifactUpdateEvent:
-		p.handleTaskArtifactEvent(result)
-	default:
-		fmt.Printf("%s Event type: %T\n", prefixUnknown, result)
+	if event.StatusUpdate != nil {
+		p.handleTaskStatusEvent(event.StatusUpdate)
+	} else if event.ArtifactUpdate != nil {
+		p.handleTaskArtifactEvent(event.ArtifactUpdate)
+	} else {
+		fmt.Printf("%s Unknown event\n", prefixUnknown)
 	}
 }
 
@@ -336,18 +328,18 @@ func (p *streamEventProcessor) handleTaskArtifactEvent(event *protocol.TaskArtif
 func (p *streamEventProcessor) displayTaskMessage(message *protocol.Message) {
 	if message != nil {
 		for _, part := range message.Parts {
-			if textPart, ok := part.(*protocol.TextPart); ok {
-				fmt.Printf("   %s %s\n", prefixMessage, textPart.Text)
+			if t := part.TextContent(); t != "" {
+				fmt.Printf("   %s %s\n", prefixMessage, t)
 			}
 		}
 	}
 }
 
 // displayArtifactContent displays artifact content parts
-func (p *streamEventProcessor) displayArtifactContent(parts []protocol.Part) {
+func (p *streamEventProcessor) displayArtifactContent(parts []*protocol.Part) {
 	for _, part := range parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			fmt.Printf("   %s '%s'\n", prefixContent, textPart.Text)
+		if t := part.TextContent(); t != "" {
+			fmt.Printf("   %s '%s'\n", prefixContent, t)
 		}
 	}
 }
@@ -378,6 +370,3 @@ func getStatusPrefix(state protocol.TaskState) string {
 	}
 }
 
-func boolPtr(b bool) *bool {
-	return &b
-}

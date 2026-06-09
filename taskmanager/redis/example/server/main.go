@@ -80,7 +80,7 @@ func (p *ToLowerProcessor) ProcessMessage(
 		return &taskmanager.MessageProcessingResult{
 			Result: &protocol.Message{
 				Role: protocol.MessageRoleAgent,
-				Parts: []protocol.Part{
+				Parts: []*protocol.Part{
 					protocol.NewTextPart("Error: No text found in message"),
 				},
 			},
@@ -98,8 +98,8 @@ func (p *ToLowerProcessor) ProcessMessage(
 func extractTextFromMessage(message protocol.Message) string {
 	var inputText string
 	for _, part := range message.Parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			inputText += textPart.Text
+		if t := part.TextContent(); t != "" {
+			inputText += t
 		}
 	}
 	return inputText
@@ -137,7 +137,7 @@ func (p *ToLowerProcessor) processNonStreamingMode(inputText string) *taskmanage
 
 	response := &protocol.Message{
 		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart(result),
 		},
 	}
@@ -162,7 +162,7 @@ func (p *ToLowerProcessor) processTextAsync(
 	// Step 1: Starting processing
 	err := handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
 		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart(msgStarting),
 		},
 	})
@@ -177,7 +177,7 @@ func (p *ToLowerProcessor) processTextAsync(
 	// Step 2: Analysis phase
 	err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
 		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart(fmt.Sprintf(msgAnalyzing, len(inputText))),
 		},
 	})
@@ -192,7 +192,7 @@ func (p *ToLowerProcessor) processTextAsync(
 	// Step 3: Processing phase
 	err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
 		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart(msgProcessing),
 		},
 	})
@@ -210,7 +210,7 @@ func (p *ToLowerProcessor) processTextAsync(
 	// Step 4: Creating artifact
 	err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
 		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart(msgArtifact),
 		},
 	})
@@ -224,7 +224,7 @@ func (p *ToLowerProcessor) processTextAsync(
 		ArtifactID:  protocol.GenerateArtifactID(),
 		Name:        stringPtr(skillName),
 		Description: stringPtr(skillDescription),
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart(result),
 		},
 		Metadata: map[string]interface{}{
@@ -248,7 +248,7 @@ func (p *ToLowerProcessor) processTextAsync(
 	// Send final status with result message
 	finalMessage := &protocol.Message{
 		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart(fmt.Sprintf(msgCompleted, inputText, result)),
 		},
 	}

@@ -108,7 +108,7 @@ func NewTaskManager(
 func (m *TaskManager) OnSendMessage(
 	ctx context.Context,
 	request protocol.SendMessageParams,
-) (*protocol.MessageResult, error) {
+) (*protocol.SendMessageResponse, error) {
 	log.Debugf("RedisTaskManager: OnSendMessage for message %s", request.Message.MessageID)
 
 	// Process the request message.
@@ -146,29 +146,22 @@ func (m *TaskManager) OnSendMessage(
 		return nil, fmt.Errorf("processor returned nil result for non-streaming request")
 	}
 
-	switch result.Result.(type) {
-	case *protocol.Task:
-	case *protocol.Message:
-	default:
-		return nil, fmt.Errorf("processor returned unsupported result type %T for SendMessage request", result.Result)
-	}
-
-	if message, ok := result.Result.(*protocol.Message); ok {
+	if result.Result.Message != nil {
 		var contextID string
 		if request.Message.ContextID != nil {
 			contextID = *request.Message.ContextID
 		}
-		m.processReplyMessage(&contextID, message)
+		m.processReplyMessage(&contextID, result.Result.Message)
 	}
 
-	return &protocol.MessageResult{Result: result.Result}, nil
+	return result.Result, nil
 }
 
 // OnSendMessageStream handles message/stream requests.
 func (m *TaskManager) OnSendMessageStream(
 	ctx context.Context,
 	request protocol.SendMessageParams,
-) (<-chan protocol.StreamingMessageEvent, error) {
+) (<-chan protocol.StreamResponse, error) {
 	log.Debugf("RedisTaskManager: OnSendMessageStream for message %s", request.Message.MessageID)
 
 	m.processRequestMessage(&request.Message)
@@ -327,7 +320,7 @@ func (m *TaskManager) OnPushNotificationGet(
 func (m *TaskManager) OnResubscribe(
 	ctx context.Context,
 	params protocol.TaskIDParams,
-) (<-chan protocol.StreamingMessageEvent, error) {
+) (<-chan protocol.StreamResponse, error) {
 	// Check if task exists.
 	_, err := m.getTaskInternal(ctx, params.ID)
 	if err != nil {
@@ -369,10 +362,8 @@ func (m *TaskManager) processConfiguration(
 		return result
 	}
 
-	// Process Blocking configuration.
-	if config.Blocking != nil {
-		result.Blocking = *config.Blocking
-	}
+	// Process Blocking configuration (v1: ReturnImmediately with inverted semantics).
+	result.Blocking = config.IsBlocking()
 
 	// Process HistoryLength configuration.
 	if config.HistoryLength != nil && *config.HistoryLength > 0 {
@@ -423,28 +414,19 @@ func (m *TaskManager) processReplyMessage(ctxID *string, message *protocol.Messa
 
 // sendStreamingEventHook is a hook for sending streaming events
 // used to set contextID for task status update, task artifact update, message and task events
-func (m *TaskManager) sendStreamingEventHook(ctxID string) func(event protocol.StreamingMessageEvent) error {
-	return func(event protocol.StreamingMessageEvent) error {
-		switch event.Result.(type) {
-		case *protocol.TaskStatusUpdateEvent:
-			event := event.Result.(*protocol.TaskStatusUpdateEvent)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
-			}
-		case *protocol.TaskArtifactUpdateEvent:
-			event := event.Result.(*protocol.TaskArtifactUpdateEvent)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
-			}
-		case *protocol.Message:
-			event := event.Result.(*protocol.Message)
-			// store message
-			m.processReplyMessage(&ctxID, event)
-		case *protocol.Task:
-			event := event.Result.(*protocol.Task)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
-			}
+func (m *TaskManager) sendStreamingEventHook(ctxID string) func(event protocol.StreamResponse) error {
+	return func(event protocol.StreamResponse) error {
+		if event.StatusUpdate != nil && event.StatusUpdate.ContextID == "" {
+			event.StatusUpdate.ContextID = ctxID
+		}
+		if event.ArtifactUpdate != nil && event.ArtifactUpdate.ContextID == "" {
+			event.ArtifactUpdate.ContextID = ctxID
+		}
+		if event.Message != nil {
+			m.processReplyMessage(&ctxID, event.Message)
+		}
+		if event.Task != nil && event.Task.ContextID == "" {
+			event.Task.ContextID = ctxID
 		}
 		return nil
 	}
@@ -613,7 +595,7 @@ func (m *TaskManager) cleanSubscribers(taskID string) {
 }
 
 // notifySubscribers notifies all subscribers of a task.
-func (m *TaskManager) notifySubscribers(taskID string, event protocol.StreamingMessageEvent) {
+func (m *TaskManager) notifySubscribers(taskID string, event protocol.StreamResponse) {
 	m.subMu.RLock()
 	subs, exists := m.subscribers[taskID]
 	if !exists || len(subs) == 0 {
@@ -625,7 +607,7 @@ func (m *TaskManager) notifySubscribers(taskID string, event protocol.StreamingM
 	copy(subsCopy, subs)
 	m.subMu.RUnlock()
 
-	log.Debugf("Notifying %d subscribers for task %s (Event Type: %T)", len(subsCopy), taskID, event.Result)
+	log.Debugf("Notifying %d subscribers for task %s", len(subsCopy), taskID)
 
 	var failedSubscribers []*TaskSubscriber
 

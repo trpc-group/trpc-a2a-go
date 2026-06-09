@@ -49,7 +49,7 @@ func (t *CancellableTask) Cancel() {
 
 // TaskSubscriberOpts is the options for the TaskSubscriber
 type TaskSubscriberOpts struct {
-	sendHook     func(event protocol.StreamingMessageEvent) error
+	sendHook     func(event protocol.StreamResponse) error
 	blockingSend bool
 }
 
@@ -57,7 +57,7 @@ type TaskSubscriberOpts struct {
 type TaskSubscriberOption func(s *TaskSubscriberOpts)
 
 // WithSubscriberSendHook sets the send hook for the task subscriber
-func WithSubscriberSendHook(hook func(event protocol.StreamingMessageEvent) error) TaskSubscriberOption {
+func WithSubscriberSendHook(hook func(event protocol.StreamResponse) error) TaskSubscriberOption {
 	return func(s *TaskSubscriberOpts) {
 		s.sendHook = hook
 	}
@@ -73,7 +73,7 @@ func WithSubscriberBlockingSend(blockingSend bool) TaskSubscriberOption {
 // TaskSubscriber implements the TaskSubscriber interface for Redis storage.
 type TaskSubscriber struct {
 	taskID     string
-	eventQueue chan protocol.StreamingMessageEvent
+	eventQueue chan protocol.StreamResponse
 	closed     atomic.Bool
 	mu         sync.RWMutex
 	lastAccess time.Time
@@ -96,14 +96,14 @@ func NewTaskSubscriber(taskID string, bufferSize int, opts ...TaskSubscriberOpti
 
 	return &TaskSubscriber{
 		taskID:     taskID,
-		eventQueue: make(chan protocol.StreamingMessageEvent, bufferSize),
+		eventQueue: make(chan protocol.StreamResponse, bufferSize),
 		lastAccess: time.Now(),
 		opts:       subscriberOpts,
 	}
 }
 
 // Send sends an event to the subscriber's event queue.
-func (s *TaskSubscriber) Send(event protocol.StreamingMessageEvent) error {
+func (s *TaskSubscriber) Send(event protocol.StreamResponse) error {
 	if s.Closed() {
 		return fmt.Errorf("task subscriber for task %s is closed", s.taskID)
 	}
@@ -138,7 +138,7 @@ func (s *TaskSubscriber) Send(event protocol.StreamingMessageEvent) error {
 }
 
 // Channel returns the event channel for receiving streaming events.
-func (s *TaskSubscriber) Channel() <-chan protocol.StreamingMessageEvent {
+func (s *TaskSubscriber) Channel() <-chan protocol.StreamResponse {
 	return s.eventQueue
 }
 

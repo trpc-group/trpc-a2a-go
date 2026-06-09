@@ -63,7 +63,6 @@ func (h *taskHandler) BuildTask(specificTaskID *string, contextID *string) (stri
 	task := &protocol.Task{
 		ID:        actualTaskID,
 		ContextID: actualContextID,
-		Kind:      protocol.KindTask,
 		Status: protocol.TaskStatus{
 			State:     protocol.TaskStateSubmitted,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -128,10 +127,9 @@ func (h *taskHandler) UpdateTaskState(
 		TaskID:    *taskID,
 		ContextID: task.ContextID,
 		Status:    task.Status,
-		Kind:      protocol.KindTaskStatusUpdate,
 		Final:     finalState,
 	}
-	streamEvent := protocol.StreamingMessageEvent{Result: event}
+	streamEvent := protocol.NewStreamResponseStatusUpdate(event)
 	h.manager.notifySubscribers(*taskID, streamEvent)
 
 	if finalState {
@@ -177,11 +175,10 @@ func (h *taskHandler) AddArtifact(taskID *string, artifact protocol.Artifact, is
 		TaskID:    *taskID,
 		ContextID: task.ContextID,
 		Artifact:  artifact,
-		Kind:      protocol.KindTaskArtifactUpdate,
 		LastChunk: &isFinal,
 		Append:    &needMoreData,
 	}
-	streamEvent := protocol.StreamingMessageEvent{Result: event}
+	streamEvent := protocol.NewStreamResponseArtifactUpdate(event)
 	h.manager.notifySubscribers(*taskID, streamEvent)
 
 	return nil
