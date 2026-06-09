@@ -194,18 +194,22 @@ func TestRequestOptions_CustomHeaders(t *testing.T) {
 		var req jsonrpc.Request
 		json.Unmarshal(body, &req)
 
-		// Return a valid response based on the method
-		result := protocol.Task{
+		task := protocol.Task{
 			ID:        "test-task-id",
 			ContextID: "test-context-id",
-			Kind:      protocol.KindTask,
 			Status: protocol.TaskStatus{
 				State: protocol.TaskStateCompleted,
 			},
 		}
-		resultBytes, _ := json.Marshal(result)
 
-		// Create JSON-RPC response with raw JSON result
+		var resultBytes []byte
+		switch req.Method {
+		case protocol.MethodMessageSend:
+			resultBytes, _ = json.Marshal(protocol.SendMessageResponse{Task: &task})
+		default:
+			resultBytes, _ = json.Marshal(task)
+		}
+
 		responseMap := map[string]interface{}{
 			"jsonrpc": "2.0",
 			"id":      req.ID,
@@ -231,13 +235,7 @@ func TestRequestOptions_CustomHeaders(t *testing.T) {
 			Message: protocol.Message{
 				MessageID: "msg-1",
 				Role:      protocol.MessageRoleUser,
-				Kind:      protocol.KindMessage,
-				Parts: []protocol.Part{
-					protocol.TextPart{
-						Kind: protocol.KindText,
-						Text: "test message",
-					},
-				},
+				Parts:     []*protocol.Part{protocol.NewTextPart("test message")},
 			},
 		}
 
@@ -267,13 +265,7 @@ func TestRequestOptions_CustomHeaders(t *testing.T) {
 			Message: protocol.Message{
 				MessageID: "msg-2",
 				Role:      protocol.MessageRoleUser,
-				Kind:      protocol.KindMessage,
-				Parts: []protocol.Part{
-					protocol.TextPart{
-						Kind: protocol.KindText,
-						Text: "test message",
-					},
-				},
+				Parts:     []*protocol.Part{protocol.NewTextPart("test message")},
 			},
 		}
 
@@ -311,13 +303,7 @@ func TestRequestOptions_CustomHeaders(t *testing.T) {
 			Message: protocol.Message{
 				MessageID: "msg-3",
 				Role:      protocol.MessageRoleUser,
-				Kind:      protocol.KindMessage,
-				Parts: []protocol.Part{
-					protocol.TextPart{
-						Kind: protocol.KindText,
-						Text: "test message",
-					},
-				},
+				Parts:     []*protocol.Part{protocol.NewTextPart("test message")},
 			},
 		}
 
@@ -387,13 +373,7 @@ func TestRequestOptions_CustomHeaders(t *testing.T) {
 			Message: protocol.Message{
 				MessageID: "msg-5",
 				Role:      protocol.MessageRoleUser,
-				Kind:      protocol.KindMessage,
-				Parts: []protocol.Part{
-					protocol.TextPart{
-						Kind: protocol.KindText,
-						Text: "test message",
-					},
-				},
+				Parts:     []*protocol.Part{protocol.NewTextPart("test message")},
 			},
 		}
 
@@ -434,7 +414,7 @@ func TestRequestOptions_StreamingMethods(t *testing.T) {
 
 		// Send a simple event and close
 		flusher, _ := w.(http.Flusher)
-		w.Write([]byte("event: message\ndata: {\"type\":\"message\",\"message\":\"test\"}\n\n"))
+		w.Write([]byte("event: statusUpdate\ndata: {\"statusUpdate\":{\"taskId\":\"t1\",\"contextId\":\"c1\",\"status\":{\"state\":\"COMPLETED\"},\"final\":true}}\n\n"))
 		flusher.Flush()
 	}))
 	defer server.Close()
@@ -452,13 +432,7 @@ func TestRequestOptions_StreamingMethods(t *testing.T) {
 			Message: protocol.Message{
 				MessageID: "msg-stream-1",
 				Role:      protocol.MessageRoleUser,
-				Kind:      protocol.KindMessage,
-				Parts: []protocol.Part{
-					protocol.TextPart{
-						Kind: protocol.KindText,
-						Text: "test message",
-					},
-				},
+				Parts:     []*protocol.Part{protocol.NewTextPart("test message")},
 			},
 		}
 

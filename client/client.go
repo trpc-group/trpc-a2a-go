@@ -82,7 +82,7 @@ func (c *A2AClient) SendMessage(
 	ctx context.Context,
 	params protocol.SendMessageParams,
 	opts ...RequestOption,
-) (*protocol.MessageResult, error) {
+) (*protocol.SendMessageResponse, error) {
 	request := jsonrpc.NewRequest(protocol.MethodMessageSend, params.RPCID)
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
@@ -138,7 +138,7 @@ func (c *A2AClient) ResubscribeTask(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 	opts ...RequestOption,
-) (<-chan protocol.StreamingMessageEvent, error) {
+) (<-chan protocol.StreamResponse, error) {
 	// Create the JSON-RPC request.
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
@@ -149,7 +149,7 @@ func (c *A2AClient) ResubscribeTask(
 		return nil, fmt.Errorf("a2aClient.ResubscribeTask: failed to build stream request: %w", err)
 	}
 	// Create the channel to send events back to the caller.
-	eventsChan := make(chan protocol.StreamingMessageEvent, c.channelSize) // Buffered channel.
+	eventsChan := make(chan protocol.StreamResponse, c.channelSize) // Buffered channel.
 	// Start a goroutine to read from the SSE stream.
 	go c.processSSEStream(ctx, resp, params.ID, eventsChan)
 	return eventsChan, nil
@@ -162,7 +162,7 @@ func (c *A2AClient) StreamMessage(
 	ctx context.Context,
 	params protocol.SendMessageParams,
 	opts ...RequestOption,
-) (<-chan protocol.StreamingMessageEvent, error) {
+) (<-chan protocol.StreamResponse, error) {
 	// Create the JSON-RPC request.
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
@@ -172,7 +172,7 @@ func (c *A2AClient) StreamMessage(
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.StreamMessage: failed to build stream request: %w", err)
 	}
-	eventsChan := make(chan protocol.StreamingMessageEvent, c.channelSize) // Buffered channel.
+	eventsChan := make(chan protocol.StreamResponse, c.channelSize) // Buffered channel.
 	// Start a goroutine to read from the SSE stream.
 	go c.processSSEStream(ctx, resp, params.RPCID, eventsChan)
 	return eventsChan, nil
@@ -247,7 +247,7 @@ func (c *A2AClient) processSSEStream(
 	ctx context.Context,
 	resp *http.Response,
 	reqID string,
-	eventsChan chan<- protocol.StreamingMessageEvent,
+	eventsChan chan<- protocol.StreamResponse,
 ) {
 	// Ensure resources are cleaned up when the goroutine exits.
 	defer resp.Body.Close()
@@ -332,8 +332,8 @@ func (c *A2AClient) processSSEStream(
 	}
 }
 
-func unmarshalSSEEvent(eventBytes []byte, _ string) (protocol.StreamingMessageEvent, error) {
-	var result protocol.StreamingMessageEvent
+func unmarshalSSEEvent(eventBytes []byte, _ string) (protocol.StreamResponse, error) {
+	var result protocol.StreamResponse
 	if err := json.Unmarshal(eventBytes, &result); err != nil {
 		return result, fmt.Errorf("failed to unmarshal event: %w", err)
 	}
@@ -374,7 +374,7 @@ func (c *A2AClient) doRequestAndDecodeMessage(
 	ctx context.Context,
 	request *jsonrpc.Request,
 	opts ...RequestOption,
-) (*protocol.MessageResult, error) {
+) (*protocol.SendMessageResponse, error) {
 	fullResponse, err := c.doRequest(ctx, request, opts...)
 	if err != nil {
 		return nil, err
@@ -385,7 +385,7 @@ func (c *A2AClient) doRequestAndDecodeMessage(
 	if len(fullResponse.Result) == 0 {
 		return nil, fmt.Errorf("rpc response missing required 'result' field for id %v", request.ID)
 	}
-	messageResp := &protocol.MessageResult{}
+	messageResp := &protocol.SendMessageResponse{}
 	if err := json.Unmarshal(fullResponse.Result, messageResp); err != nil {
 		return nil, fmt.Errorf(
 			"failed to unmarshal rpc result: %w. Raw result: %s", err, string(fullResponse.Result),

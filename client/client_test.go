@@ -42,28 +42,31 @@ func TestA2AClient_ResubscribeTask(t *testing.T) {
 
 	t.Run("ResubscribeTask Success", func(t *testing.T) {
 		// Prepare mock SSE stream data.
-		sseEvent1Data, _ := json.Marshal(protocol.TaskStatusUpdateEvent{
-			TaskID: taskID,
-			Kind:   protocol.KindTaskStatusUpdate,
-			Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
-			Final:  false,
+		sseEvent1Data, _ := json.Marshal(protocol.StreamResponse{
+			StatusUpdate: &protocol.TaskStatusUpdateEvent{
+				TaskID: taskID,
+				Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
+				Final:  false,
+			},
 		})
-		sseEvent2Data, _ := json.Marshal(protocol.TaskArtifactUpdateEvent{
-			TaskID:   taskID,
-			Kind:     protocol.KindTaskArtifactUpdate,
-			Artifact: protocol.Artifact{ArtifactID: "0", Parts: []protocol.Part{protocol.NewTextPart("SSE data")}},
+		sseEvent2Data, _ := json.Marshal(protocol.StreamResponse{
+			ArtifactUpdate: &protocol.TaskArtifactUpdateEvent{
+				TaskID:   taskID,
+				Artifact: protocol.Artifact{ArtifactID: "0", Parts: []*protocol.Part{protocol.NewTextPart("SSE data")}},
+			},
 		})
-		sseEvent3Data, _ := json.Marshal(protocol.TaskStatusUpdateEvent{
-			TaskID: taskID,
-			Kind:   protocol.KindTaskStatusUpdate,
-			Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
-			Final:  true,
+		sseEvent3Data, _ := json.Marshal(protocol.StreamResponse{
+			StatusUpdate: &protocol.TaskStatusUpdateEvent{
+				TaskID: taskID,
+				Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
+				Final:  true,
+			},
 		})
 
 		// Format the mock SSE stream string.
-		sseStream := fmt.Sprintf("event: task_status_update\ndata: %s\n\n"+
-			"event: task_artifact_update\ndata: %s\n\n"+
-			"event: task_status_update\ndata: %s\n\n",
+		sseStream := fmt.Sprintf("event: statusUpdate\ndata: %s\n\n"+
+			"event: artifactUpdate\ndata: %s\n\n"+
+			"event: statusUpdate\ndata: %s\n\n",
 			string(sseEvent1Data), string(sseEvent2Data), string(sseEvent3Data))
 
 		// Define required SSE headers.
@@ -95,7 +98,7 @@ func TestA2AClient_ResubscribeTask(t *testing.T) {
 		require.NotNil(t, eventChan, "Event channel should not be nil")
 
 		// Read events from channel with timeout.
-		var receivedEvents []protocol.StreamingMessageEvent
+		var receivedEvents []protocol.StreamResponse
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 	loop:
@@ -113,17 +116,16 @@ func TestA2AClient_ResubscribeTask(t *testing.T) {
 
 		// Assert the content and order of received events.
 		require.Len(t, receivedEvents, 3, "Should receive exactly 3 events")
-		_, ok1 := receivedEvents[0].Result.(*protocol.TaskStatusUpdateEvent)
-		_, ok2 := receivedEvents[1].Result.(*protocol.TaskArtifactUpdateEvent)
-		_, ok3 := receivedEvents[2].Result.(*protocol.TaskStatusUpdateEvent)
-		assert.True(t, ok1 && ok2 && ok3, "Received event types mismatch expected sequence")
+		assert.NotNil(t, receivedEvents[0].StatusUpdate, "First event should be StatusUpdate")
+		assert.NotNil(t, receivedEvents[1].ArtifactUpdate, "Second event should be ArtifactUpdate")
+		assert.NotNil(t, receivedEvents[2].StatusUpdate, "Third event should be StatusUpdate")
 		assert.Equal(t, protocol.TaskStateWorking,
-			receivedEvents[0].Result.(*protocol.TaskStatusUpdateEvent).Status.State, "First event state mismatch")
-		assert.False(t, receivedEvents[0].Result.(*protocol.TaskStatusUpdateEvent).IsFinal(), "First event should not be final")
-		assert.False(t, receivedEvents[1].Result.(*protocol.TaskArtifactUpdateEvent).IsFinal(), "Second event should not be final")
+			receivedEvents[0].StatusUpdate.Status.State, "First event state mismatch")
+		assert.False(t, receivedEvents[0].StatusUpdate.IsFinal(), "First event should not be final")
+		assert.False(t, receivedEvents[1].ArtifactUpdate.IsFinal(), "Second event should not be final")
 		assert.Equal(t, protocol.TaskStateCompleted,
-			receivedEvents[2].Result.(*protocol.TaskStatusUpdateEvent).Status.State, "Third event state mismatch")
-		assert.True(t, receivedEvents[2].Result.(*protocol.TaskStatusUpdateEvent).IsFinal(), "Last event should be final")
+			receivedEvents[2].StatusUpdate.Status.State, "Third event state mismatch")
+		assert.True(t, receivedEvents[2].StatusUpdate.IsFinal(), "Last event should be final")
 	})
 
 	t.Run("ResubscribeTask HTTP Error", func(t *testing.T) {
@@ -179,7 +181,7 @@ func TestA2AClient_GetTasks(t *testing.T) {
 
 	expectedRequest := &jsonrpc.Request{
 		Message: jsonrpc.Message{JSONRPC: "2.0", ID: taskID},
-		Method:  "tasks/get",
+		Method:  "GetTask",
 		Params:  paramsBytes,
 	}
 
@@ -191,7 +193,7 @@ func TestA2AClient_GetTasks(t *testing.T) {
 			Artifacts: []protocol.Artifact{
 				{
 					Name:  stringPtr("test-artifact"),
-					Parts: []protocol.Part{protocol.NewTextPart("Test result")},
+					Parts: []*protocol.Part{protocol.NewTextPart("Test result")},
 				},
 			},
 		}
@@ -201,7 +203,7 @@ func TestA2AClient_GetTasks(t *testing.T) {
 
 		mockHandler := createMockServerHandler(
 			t,
-			"tasks/get",
+			"GetTask",
 			expectedRequest,
 			respBody,
 			http.StatusOK,
@@ -240,7 +242,7 @@ func TestA2AClient_GetTasks(t *testing.T) {
 
 		mockHandler := createMockServerHandler(
 			t,
-			"tasks/get",
+			"GetTask",
 			expectedRequest,
 			errorResp,
 			http.StatusOK,
@@ -274,7 +276,7 @@ func TestA2AClient_CancelTasks(t *testing.T) {
 
 	expectedRequest := &jsonrpc.Request{
 		Message: jsonrpc.Message{JSONRPC: "2.0", ID: taskID},
-		Method:  "tasks/cancel",
+		Method:  "CancelTask",
 		Params:  paramsBytes,
 	}
 
@@ -290,7 +292,7 @@ func TestA2AClient_CancelTasks(t *testing.T) {
 
 		mockHandler := createMockServerHandler(
 			t,
-			"tasks/cancel",
+			"CancelTask",
 			expectedRequest,
 			respBody,
 			http.StatusOK,
@@ -327,7 +329,7 @@ func TestA2AClient_CancelTasks(t *testing.T) {
 
 		mockHandler := createMockServerHandler(
 			t,
-			"tasks/cancel",
+			"CancelTask",
 			expectedRequest,
 			errorResp,
 			http.StatusOK,
@@ -356,10 +358,8 @@ func TestA2AClient_SetPushNotification(t *testing.T) {
 		RPCID:  taskID,
 		TaskID: taskID,
 		PushNotificationConfig: protocol.PushNotificationConfig{
-			URL: "https://example.com/webhook",
-			Authentication: &protocol.AuthenticationInfo{
-				Schemes: []string{"bearer"},
-			},
+			URL:   "https://example.com/webhook",
+			Token: "test-token",
 		},
 	}
 	paramsBytes, err := json.Marshal(params)
@@ -367,7 +367,7 @@ func TestA2AClient_SetPushNotification(t *testing.T) {
 
 	expectedRequest := &jsonrpc.Request{
 		Message: jsonrpc.Message{JSONRPC: "2.0", ID: taskID},
-		Method:  "tasks/pushNotificationConfig/set",
+		Method:  "CreateTaskPushNotificationConfig",
 		Params:  paramsBytes,
 	}
 
@@ -385,7 +385,7 @@ func TestA2AClient_SetPushNotification(t *testing.T) {
 
 		mockHandler := createMockServerHandler(
 			t,
-			"tasks/pushNotificationConfig/set",
+			"CreateTaskPushNotificationConfig",
 			expectedRequest,
 			respBody,
 			http.StatusOK,
@@ -422,7 +422,7 @@ func TestA2AClient_SetPushNotification(t *testing.T) {
 
 		mockHandler := createMockServerHandler(
 			t,
-			"tasks/pushNotificationConfig/set",
+			"CreateTaskPushNotificationConfig",
 			expectedRequest,
 			errorResp,
 			http.StatusOK,
@@ -456,7 +456,7 @@ func TestA2AClient_GetPushNotification(t *testing.T) {
 
 	expectedRequest := &jsonrpc.Request{
 		Message: jsonrpc.Message{JSONRPC: "2.0", ID: taskID},
-		Method:  "tasks/pushNotificationConfig/get",
+		Method:  "GetTaskPushNotificationConfig",
 		Params:  paramsBytes,
 	}
 
@@ -464,10 +464,8 @@ func TestA2AClient_GetPushNotification(t *testing.T) {
 		respConfig := protocol.TaskPushNotificationConfig{
 			TaskID: taskID,
 			PushNotificationConfig: protocol.PushNotificationConfig{
-				URL: "https://example.com/webhook",
-				Authentication: &protocol.AuthenticationInfo{
-					Schemes: []string{"bearer"},
-				},
+				URL:   "https://example.com/webhook",
+				Token: "test-token",
 			},
 		}
 		respResultBytes, err := json.Marshal(respConfig)
@@ -476,7 +474,7 @@ func TestA2AClient_GetPushNotification(t *testing.T) {
 
 		mockHandler := createMockServerHandler(
 			t,
-			"tasks/pushNotificationConfig/get",
+			"GetTaskPushNotificationConfig",
 			expectedRequest,
 			respBody,
 			http.StatusOK,
@@ -497,8 +495,7 @@ func TestA2AClient_GetPushNotification(t *testing.T) {
 
 		assert.Equal(t, taskID, result.TaskID)
 		assert.Equal(t, "https://example.com/webhook", result.PushNotificationConfig.URL)
-		require.NotNil(t, result.PushNotificationConfig.Authentication)
-		assert.Contains(t, result.PushNotificationConfig.Authentication.Schemes, "bearer")
+		assert.Equal(t, "test-token", result.PushNotificationConfig.Token)
 	})
 
 	t.Run("GetPushNotification Not Found", func(t *testing.T) {
@@ -515,7 +512,7 @@ func TestA2AClient_GetPushNotification(t *testing.T) {
 
 		mockHandler := createMockServerHandler(
 			t,
-			"tasks/pushNotificationConfig/get",
+			"GetTaskPushNotificationConfig",
 			expectedRequest,
 			errorResp,
 			http.StatusOK,
