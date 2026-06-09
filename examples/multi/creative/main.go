@@ -103,7 +103,7 @@ func (p *creativeWritingProcessor) ProcessMessage(
 		// Return error message directly
 		errorMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(errMsg)},
+			[]*protocol.Part{protocol.NewTextPart(errMsg)},
 		)
 		return &taskmanager.MessageProcessingResult{
 			Result: &errorMessage,
@@ -145,7 +145,7 @@ func (p *creativeWritingProcessor) ProcessMessage(
 
 		errorMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(errorMsg)},
+			[]*protocol.Part{protocol.NewTextPart(errorMsg)},
 		)
 		return &taskmanager.MessageProcessingResult{
 			Result: &errorMessage,
@@ -159,7 +159,7 @@ func (p *creativeWritingProcessor) ProcessMessage(
 	// Create response message with the generated text
 	responseMessage := protocol.NewMessage(
 		protocol.MessageRoleAgent,
-		[]protocol.Part{protocol.NewTextPart(response)},
+		[]*protocol.Part{protocol.NewTextPart(response)},
 	)
 
 	return &taskmanager.MessageProcessingResult{
@@ -171,8 +171,8 @@ func (p *creativeWritingProcessor) ProcessMessage(
 func extractText(message protocol.Message) string {
 	var result strings.Builder
 	for _, part := range message.Parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			result.WriteString(textPart.Text)
+		if t := part.TextContent(); t != "" {
+			result.WriteString(t)
 		}
 	}
 	return result.String()

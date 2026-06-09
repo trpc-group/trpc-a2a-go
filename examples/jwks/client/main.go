@@ -591,7 +591,7 @@ func sendMessage(ctx context.Context, a2aClient *client.A2AClient, content strin
 	// Create a message with the content
 	message := protocol.NewMessage(
 		protocol.MessageRoleUser,
-		[]protocol.Part{protocol.NewTextPart(content)},
+		[]*protocol.Part{protocol.NewTextPart(content)},
 	)
 
 	// Create send message parameters

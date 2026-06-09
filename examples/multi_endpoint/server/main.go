@@ -163,18 +163,14 @@ func (u *multiAgentProecssor) chatAgentProcessMessage(
 ) (*taskmanager.MessageProcessingResult, error) {
 	msg := &protocol.Message{
 		Role:      protocol.MessageRoleAgent,
-		Kind:      protocol.KindMessage,
 		MessageID: protocol.GenerateMessageID(),
-		Parts: []protocol.Part{
-			&protocol.TextPart{
-				Kind: protocol.KindText,
-				Text: "Hello from chat agent!",
-			},
+		Parts: []*protocol.Part{
+			protocol.NewTextPart("Hello from chat agent!"),
 		},
 	}
 
 	return &taskmanager.MessageProcessingResult{
-		Result: msg,
+		Result: protocol.NewSendMessageResponseMessage(msg),
 	}, nil
 }
 
@@ -186,18 +182,14 @@ func (u *multiAgentProecssor) workerAgentProcessMessage(
 ) (*taskmanager.MessageProcessingResult, error) {
 	msg := &protocol.Message{
 		Role:      protocol.MessageRoleAgent,
-		Kind:      protocol.KindMessage,
 		MessageID: protocol.GenerateMessageID(),
-		Parts: []protocol.Part{
-			&protocol.TextPart{
-				Kind: protocol.KindText,
-				Text: "Hello from worker agent!",
-			},
+		Parts: []*protocol.Part{
+			protocol.NewTextPart("Hello from worker agent!"),
 		},
 	}
 
 	return &taskmanager.MessageProcessingResult{
-		Result: msg,
+		Result: protocol.NewSendMessageResponseMessage(msg),
 	}, nil
 }
 

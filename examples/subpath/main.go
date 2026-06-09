@@ -32,18 +32,14 @@ func (p *simpleProcessor) ProcessMessage(
 	// Simply return a text response
 	response := &protocol.Message{
 		Role:      protocol.MessageRoleAgent,
-		Kind:      protocol.KindMessage,
 		MessageID: protocol.GenerateMessageID(),
-		Parts: []protocol.Part{
-			&protocol.TextPart{
-				Kind: protocol.KindText,
-				Text: "Hello from subpath agent!",
-			},
+		Parts: []*protocol.Part{
+			protocol.NewTextPart("Hello from subpath agent!"),
 		},
 	}
 
 	return &taskmanager.MessageProcessingResult{
-		Result: response,
+		Result: protocol.NewSendMessageResponseMessage(response),
 	}, nil
 }
 

@@ -338,25 +338,22 @@ func (p *echoMessageProcessor) ProcessMessage(
 	options taskmanager.ProcessOptions,
 	handle taskmanager.TaskHandler,
 ) (*taskmanager.MessageProcessingResult, error) {
-	// Create a concatenated string of all text parts
 	var responseText string
 	for _, part := range message.Parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			responseText += textPart.Text + " "
+		if text := part.TextContent(); text != "" {
+			responseText += text + " "
 		}
 	}
 
-	// Create response message
 	responseMsg := protocol.NewMessage(
 		protocol.MessageRoleAgent,
-		[]protocol.Part{
+		[]*protocol.Part{
 			protocol.NewTextPart(fmt.Sprintf("Echo: %s", responseText)),
 		},
 	)
 
-	// Return the response message directly
 	return &taskmanager.MessageProcessingResult{
-		Result: &responseMsg,
+		Result: &protocol.SendMessageResponse{Message: &responseMsg},
 	}, nil
 }
 

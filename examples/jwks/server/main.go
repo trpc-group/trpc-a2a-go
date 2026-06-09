@@ -57,12 +57,10 @@ func (p *pushNotificationMessageProcessor) ProcessMessage(
 	var textContent string
 
 	if len(message.Parts) > 0 {
-		if textPart, ok := message.Parts[0].(*protocol.TextPart); ok {
-			textContent = textPart.Text
-			// Try to parse as JSON, but if it fails, treat as plain text
-			if err := json.Unmarshal([]byte(textPart.Text), &payload); err != nil {
+		textContent = message.Parts[0].TextContent()
+		if textContent != "" {
+			if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
 				log.Infof("Message content is plain text, not JSON: %s", textContent)
-				// Create a simple payload with the text content
 				payload = map[string]interface{}{
 					"content": textContent,
 					"type":    "text",
@@ -118,7 +116,7 @@ func (p *pushNotificationMessageProcessor) processDirectly(
 
 	responseMessage := protocol.NewMessage(
 		protocol.MessageRoleAgent,
-		[]protocol.Part{protocol.NewTextPart(completeMsg)},
+		[]*protocol.Part{protocol.NewTextPart(completeMsg)},
 	)
 
 	return &taskmanager.MessageProcessingResult{
@@ -141,55 +139,41 @@ func (p *pushNotificationMessageProcessor) processTaskAsync(
 
 	log.Infof("Starting async processing of task: %s", taskID)
 
-	// Send working status
-	workingEvent := protocol.StreamingMessageEvent{
-		Result: &protocol.TaskStatusUpdateEvent{
-			TaskID:    taskID,
-			ContextID: "", // We'll need to get this from the task
-			Kind:      "status-update",
-			Status: protocol.TaskStatus{
-				State: protocol.TaskStateWorking,
-				Message: &protocol.Message{
-					MessageID: uuid.New().String(),
-					Kind:      "message",
-					Role:      protocol.MessageRoleAgent,
-					Parts:     []protocol.Part{protocol.NewTextPart("Task queued for processing...")},
-				},
+	workingEvent := protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{
+		TaskID: taskID,
+		Status: protocol.TaskStatus{
+			State: protocol.TaskStateWorking,
+			Message: &protocol.Message{
+				MessageID: uuid.New().String(),
+				Role:      protocol.MessageRoleAgent,
+				Parts:     []*protocol.Part{protocol.NewTextPart("Task queued for processing...")},
 			},
 		},
-	}
+	})
 	err := subscriber.Send(workingEvent)
 	if err != nil {
 		log.Errorf("Failed to send working event: %v", err)
 	}
 
-	// Process the task (simulating work)
-	time.Sleep(5 * time.Second) // Longer processing time to demonstrate async behavior
+	time.Sleep(5 * time.Second)
 
-	// Prepare message for completion
 	completeMsg := "Task completed"
 	if content, ok := payload["content"].(string); ok {
 		completeMsg = fmt.Sprintf("Task completed: %s", content)
 	}
 
-	// Send completion status
-	completedEvent := protocol.StreamingMessageEvent{
-		Result: &protocol.TaskStatusUpdateEvent{
-			TaskID:    taskID,
-			ContextID: "", // We'll need to get this from the task
-			Kind:      "status-update",
-			Status: protocol.TaskStatus{
-				State: protocol.TaskStateCompleted,
-				Message: &protocol.Message{
-					MessageID: uuid.New().String(),
-					Kind:      "message",
-					Role:      protocol.MessageRoleAgent,
-					Parts:     []protocol.Part{protocol.NewTextPart(completeMsg)},
-				},
+	completedEvent := protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{
+		TaskID: taskID,
+		Status: protocol.TaskStatus{
+			State: protocol.TaskStateCompleted,
+			Message: &protocol.Message{
+				MessageID: uuid.New().String(),
+				Role:      protocol.MessageRoleAgent,
+				Parts:     []*protocol.Part{protocol.NewTextPart(completeMsg)},
 			},
-			Final: true,
 		},
-	}
+		Final: true,
+	})
 	err = subscriber.Send(completedEvent)
 	if err != nil {
 		log.Errorf("Failed to send completed event: %v", err)

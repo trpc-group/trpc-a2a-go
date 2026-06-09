@@ -537,10 +537,9 @@ func processUserInput(
 	config Config,
 	useStreaming bool,
 ) string {
-	// Create message with context
 	message := protocol.NewMessageWithContext(
 		protocol.MessageRoleUser,
-		[]protocol.Part{protocol.NewTextPart(input)},
+		[]*protocol.Part{protocol.NewTextPart(input)},
 		nil, // taskID
 		&contextID,
 	)
@@ -629,23 +628,18 @@ func handleStandardInteraction(
 	fmt.Println(strings.Repeat("-", 10))
 
 	var taskID string
-	switch response := result.Result.(type) {
-	case *protocol.Message:
+	if response := result.Message; response != nil {
 		fmt.Println("  Message Response:")
 		printMessage(*response)
-
-	case *protocol.Task:
+	} else if response := result.Task; response != nil {
 		taskID = response.ID
-		// Display task state
 		fmt.Printf("  Task %s State: %s (%s)\n", response.ID, response.Status.State, formatTimestamp(response.Status.Timestamp))
 
-		// Display message if present
 		if response.Status.Message != nil {
 			fmt.Println("  Message:")
 			printMessage(*response.Status.Message)
 		}
 
-		// Display artifacts if present
 		if len(response.Artifacts) > 0 {
 			fmt.Println("  Artifacts:")
 			for i, artifact := range response.Artifacts {
@@ -658,7 +652,6 @@ func handleStandardInteraction(
 			}
 		}
 
-		// Display history if present
 		if response.History != nil && len(response.History) > 0 {
 			fmt.Println("  History:")
 			for i, msg := range response.History {
@@ -671,13 +664,11 @@ func handleStandardInteraction(
 			}
 		}
 
-		// Add special handling for input-required state
 		if response.Status.State == protocol.TaskStateInputRequired {
 			fmt.Println("  [Additional input required]")
 		}
-
-	default:
-		fmt.Printf("  Unknown response type: %T\n", response)
+	} else {
+		fmt.Println("  Unknown response type")
 	}
 
 	fmt.Println(strings.Repeat("-", 60))
@@ -686,7 +677,7 @@ func handleStandardInteraction(
 
 // processStreamResponse processes the stream of events from the agent.
 func processStreamResponse(
-	ctx context.Context, eventChan <-chan protocol.StreamingMessageEvent,
+	ctx context.Context, eventChan <-chan protocol.StreamResponse,
 ) string {
 	fmt.Println("\n<< Agent Response Stream:")
 	fmt.Println(strings.Repeat("-", 10))
@@ -696,13 +687,11 @@ func processStreamResponse(
 	for {
 		select {
 		case <-ctx.Done():
-			// Context timed out or was cancelled
 			log.Printf("ERROR: Context timeout or cancellation while waiting for stream events: %v", ctx.Err())
 			return taskID
 
 		case event, ok := <-eventChan:
 			if !ok {
-				// Channel closed by the client/server
 				log.Println("Stream channel closed.")
 				if ctx.Err() != nil {
 					log.Printf("Context error after stream close: %v", ctx.Err())
@@ -710,34 +699,28 @@ func processStreamResponse(
 				return taskID
 			}
 
-			// Process the received event based on its type
-			switch e := event.Result.(type) {
-			case *protocol.Message:
+			if e := event.Message; e != nil {
 				fmt.Println("  [Message Response:]")
 				printMessage(*e)
-
-			case *protocol.Task:
+			} else if e := event.Task; e != nil {
 				taskID = e.ID
 				fmt.Printf("  [Task %s State: %s (%s)]\n", e.ID, e.Status.State, formatTimestamp(e.Status.Timestamp))
 				if e.Status.Message != nil {
 					printMessage(*e.Status.Message)
 				}
-
-			case *protocol.TaskStatusUpdateEvent:
+			} else if e := event.StatusUpdate; e != nil {
 				taskID = e.TaskID
 				fmt.Printf("  [Status Update: %s (%s)]\n", e.Status.State, formatTimestamp(e.Status.Timestamp))
 				if e.Status.Message != nil {
 					printMessage(*e.Status.Message)
 				}
 
-				// Handle final states and input-required state
 				if e.Status.State == protocol.TaskStateInputRequired {
 					fmt.Println("  [Additional input required]")
 					return taskID
 				} else if e.Final {
 					log.Printf("Final status received: %s", e.Status.State)
 
-					// Print a message indicating task completion state
 					if e.Status.State == protocol.TaskStateCompleted {
 						fmt.Println("  [Task completed successfully]")
 					} else if e.Status.State == protocol.TaskStateFailed {
@@ -747,25 +730,18 @@ func processStreamResponse(
 					}
 					return taskID
 				}
-
-			case *protocol.TaskArtifactUpdateEvent:
+			} else if e := event.ArtifactUpdate; e != nil {
 				taskID = e.TaskID
-				// Get the artifact name or use a default
 				name := getArtifactName(e.Artifact)
 
 				fmt.Printf("  [Artifact Update: %s]\n", name)
-
-				// Print the artifact parts
 				printParts(e.Artifact.Parts)
 
-				// For artifact updates, we note it's the final artifact,
-				// but we don't exit yet - per A2A spec, we should wait for the final status update
 				if e.LastChunk != nil && *e.LastChunk {
 					log.Printf("Final artifact received with ID %s", e.Artifact.ArtifactID)
 				}
-
-			default:
-				log.Printf("Warning: Received unknown event type: %T\n", event.Result)
+			} else {
+				log.Println("Warning: Received unknown stream event")
 			}
 		}
 	}
@@ -867,32 +843,19 @@ func printMessage(message protocol.Message) {
 }
 
 // printParts iterates through and prints different message/artifact part types.
-func printParts(parts []protocol.Part) {
+func printParts(parts []*protocol.Part) {
 	for _, part := range parts {
 		printPart(part)
 	}
 }
 
 // printPart prints a single part with proper indentation.
-func printPart(part interface{}) {
+func printPart(part *protocol.Part) {
 	const indent = "    "
-	switch p := part.(type) {
-	case *protocol.TextPart:
-		fmt.Println(indent + p.Text)
-	case protocol.TextPart:
-		fmt.Println(indent + p.Text)
-	case map[string]interface{}:
-		// Handle parts that come as maps (from JSON)
-		if typeStr, ok := p["type"].(string); ok && typeStr == "text" {
-			if text, ok := p["text"].(string); ok {
-				fmt.Println(indent + text)
-			}
-		} else {
-			// For other types, just print the map
-			fmt.Printf("%s[Structured Content: %+v]\n", indent, p)
-		}
-	default:
-		fmt.Printf("%s[Unknown Part Type: %T]\n", indent, p)
+	if text := part.TextContent(); text != "" {
+		fmt.Println(indent + text)
+	} else {
+		fmt.Printf("%s[Non-text Part: %T]\n", indent, part.Content)
 	}
 }
 
@@ -1117,17 +1080,6 @@ func getPushNotification(a2aClient *client.A2AClient, taskID string, timeout tim
 	fmt.Printf("  URL: %s\n", result.PushNotificationConfig.URL)
 	if result.PushNotificationConfig.Token != "" {
 		fmt.Printf("  Token: %s\n", result.PushNotificationConfig.Token)
-	}
-
-	// Display authentication info if present
-	if result.PushNotificationConfig.Authentication != nil {
-		auth := result.PushNotificationConfig.Authentication
-		if len(auth.Schemes) > 0 {
-			fmt.Printf("  Authentication Schemes: %v\n", auth.Schemes)
-		}
-		if auth.Credentials != nil {
-			fmt.Printf("  Credentials: %s\n", *auth.Credentials)
-		}
 	}
 
 	// Display metadata if present

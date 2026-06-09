@@ -35,54 +35,46 @@ func (p *simpleMessageProcessor) ProcessMessage(
 	options taskmanager.ProcessOptions,
 	handler taskmanager.TaskHandler,
 ) (*taskmanager.MessageProcessingResult, error) {
-	// Extract text from the incoming message.
 	text := extractText(message)
 	if text == "" {
 		errMsg := "input message must contain text."
 		log.Errorf("Message processing failed: %s", errMsg)
 
-		// Return error message directly
 		errorMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(errMsg)},
+			[]*protocol.Part{protocol.NewTextPart(errMsg)},
 		)
 
 		return &taskmanager.MessageProcessingResult{
-			Result: &errorMessage,
+			Result: protocol.NewSendMessageResponseMessage(&errorMessage),
 		}, nil
 	}
 
 	log.Infof("Processing message with input: %s", text)
 
-	// Process the input text (in this simple example, we'll just reverse it).
 	result := reverseString(text)
 
-	// For non-streaming processing, we can return either a Message or Task
 	if !options.Streaming {
-		// Return a direct message response
 		responseMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(fmt.Sprintf("Processed result: %s", result))},
+			[]*protocol.Part{protocol.NewTextPart(fmt.Sprintf("Processed result: %s", result))},
 		)
 
 		return &taskmanager.MessageProcessingResult{
-			Result: &responseMessage,
+			Result: protocol.NewSendMessageResponseMessage(&responseMessage),
 		}, nil
 	}
 
-	// For streaming processing, create a task and subscribe to it
 	taskID, err := handler.BuildTask(nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build task: %w", err)
 	}
 
-	// Subscribe to the task for streaming events
 	subscriber, err := handler.SubscribeTask(&taskID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to subscribe to task: %w", err)
 	}
 
-	// Start processing in a goroutine
 	go func() {
 		defer func() {
 			if subscriber != nil {
@@ -93,70 +85,52 @@ func (p *simpleMessageProcessor) ProcessMessage(
 
 		startMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart("Task started, processing...")},
+			[]*protocol.Part{protocol.NewTextPart("Task started, processing...")},
 		)
-		err = subscriber.Send(protocol.StreamingMessageEvent{
-			Result: &startMessage,
-		})
+		err = subscriber.Send(protocol.NewStreamResponseMessage(&startMessage))
 		if err != nil {
 			log.Errorf("Failed to send start message: %v", err)
 		}
 
-		// Send task status update - working
-		workingEvent := protocol.StreamingMessageEvent{
-			Result: &protocol.TaskStatusUpdateEvent{
-				TaskID: taskID,
-				Kind:   protocol.KindTaskStatusUpdate,
-				Status: protocol.TaskStatus{
-					State: protocol.TaskStateWorking,
-				},
+		err := subscriber.Send(protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{
+			TaskID: taskID,
+			Status: protocol.TaskStatus{
+				State: protocol.TaskStateWorking,
 			},
-		}
-		err := subscriber.Send(workingEvent)
+		}))
 		if err != nil {
 			log.Errorf("Failed to send working event: %v", err)
 		}
 
-		// Create response message
 		responseMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(fmt.Sprintf("Processed result: %s", result))},
+			[]*protocol.Part{protocol.NewTextPart(fmt.Sprintf("Processed result: %s", result))},
 		)
 
-		// Send task completion
-		completedEvent := protocol.StreamingMessageEvent{
-			Result: &protocol.TaskStatusUpdateEvent{
-				TaskID: taskID,
-				Kind:   protocol.KindTaskStatusUpdate,
-				Status: protocol.TaskStatus{
-					State:   protocol.TaskStateCompleted,
-					Message: &responseMessage,
-				},
-				Final: true,
+		err = subscriber.Send(protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{
+			TaskID: taskID,
+			Status: protocol.TaskStatus{
+				State:   protocol.TaskStateCompleted,
+				Message: &responseMessage,
 			},
-		}
-		err = subscriber.Send(completedEvent)
+			Final: true,
+		}))
 		if err != nil {
 			log.Errorf("Failed to send completed event: %v", err)
 		}
 
-		// Add artifact
 		artifact := protocol.Artifact{
 			ArtifactID:  uuid.New().String(),
 			Name:        stringPtr("Reversed Text"),
 			Description: stringPtr("The input text reversed"),
-			Parts:       []protocol.Part{protocol.NewTextPart(result)},
+			Parts:       []*protocol.Part{protocol.NewTextPart(result)},
 		}
 
-		artifactEvent := protocol.StreamingMessageEvent{
-			Result: &protocol.TaskArtifactUpdateEvent{
-				TaskID:    taskID,
-				Kind:      protocol.KindTaskArtifactUpdate,
-				Artifact:  artifact,
-				LastChunk: boolPtr(true),
-			},
-		}
-		err = subscriber.Send(artifactEvent)
+		err = subscriber.Send(protocol.NewStreamResponseArtifactUpdate(&protocol.TaskArtifactUpdateEvent{
+			TaskID:    taskID,
+			Artifact:  artifact,
+			LastChunk: boolPtr(true),
+		}))
 		if err != nil {
 			log.Errorf("Failed to send artifact event: %v", err)
 		}
@@ -170,8 +144,8 @@ func (p *simpleMessageProcessor) ProcessMessage(
 // extractText extracts the text content from a message.
 func extractText(message protocol.Message) string {
 	for _, part := range message.Parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			return textPart.Text
+		if t := part.TextContent(); t != "" {
+			return t
 		}
 	}
 	return ""

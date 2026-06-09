@@ -67,7 +67,7 @@ func (p *exchangeProcessor) ProcessMessage(
 		// Return error message directly
 		errorMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(errMsg)},
+			[]*protocol.Part{protocol.NewTextPart(errMsg)},
 		)
 		return &taskmanager.MessageProcessingResult{
 			Result: &errorMessage,
@@ -135,7 +135,7 @@ func (p *exchangeProcessor) ProcessMessage(
 			// The LLM indicated this wasn't about exchange rates
 			responseMessage := protocol.NewMessage(
 				protocol.MessageRoleAgent,
-				[]protocol.Part{protocol.NewTextPart(completion)},
+				[]*protocol.Part{protocol.NewTextPart(completion)},
 			)
 			return &taskmanager.MessageProcessingResult{
 				Result: &responseMessage,
@@ -149,7 +149,7 @@ func (p *exchangeProcessor) ProcessMessage(
 		log.Error("Exchange rate error: %v", err)
 		errorMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(fmt.Sprintf("Error processing request: %v", err))},
+			[]*protocol.Part{protocol.NewTextPart(fmt.Sprintf("Error processing request: %v", err))},
 		)
 		return &taskmanager.MessageProcessingResult{
 			Result: &errorMessage,
@@ -165,7 +165,7 @@ func (p *exchangeProcessor) ProcessMessage(
 	// Create response message
 	responseMessage := protocol.NewMessage(
 		protocol.MessageRoleAgent,
-		[]protocol.Part{protocol.NewTextPart(finalResponse)},
+		[]*protocol.Part{protocol.NewTextPart(finalResponse)},
 	)
 
 	return &taskmanager.MessageProcessingResult{
@@ -275,8 +275,8 @@ func getExchangeRate(fromCurrency, toCurrency, date string) (string, error) {
 func extractText(message protocol.Message) string {
 	var result strings.Builder
 	for _, part := range message.Parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			result.WriteString(textPart.Text)
+		if t := part.TextContent(); t != "" {
+			result.WriteString(t)
 		}
 	}
 	return result.String()

@@ -92,7 +92,7 @@ func sendMessageToAgent(ctx context.Context, a2aClient *client.A2AClient, messag
 	// Create the message to send
 	userMessage := protocol.NewMessage(
 		protocol.MessageRoleUser,
-		[]protocol.Part{protocol.NewTextPart(messageText)},
+		[]*protocol.Part{protocol.NewTextPart(messageText)},
 	)
 
 	// Create message parameters
@@ -131,8 +131,8 @@ func extractTextFromMessage(msg *protocol.Message) string {
 	}
 
 	for _, part := range msg.Parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			return textPart.Text
+		if t := part.TextContent(); t != "" {
+			return t
 		}
 	}
 

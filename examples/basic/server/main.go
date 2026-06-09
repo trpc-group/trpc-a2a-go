@@ -78,10 +78,10 @@ func (p *basicMessageProcessor) ProcessMessage(
 		// Return error message directly
 		errorMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(errMsg)},
+			[]*protocol.Part{protocol.NewTextPart(errMsg)},
 		)
 		return &taskmanager.MessageProcessingResult{
-			Result: &errorMessage,
+			Result: &protocol.SendMessageResponse{Message: &errorMessage},
 		}, nil
 	}
 
@@ -138,10 +138,10 @@ func (p *basicMessageProcessor) ProcessMessage(
 		// Return a message indicating async processing
 		responseMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart("Multi-turn interaction started. Please continue the conversation.")},
+			[]*protocol.Part{protocol.NewTextPart("Multi-turn interaction started. Please continue the conversation.")},
 		)
 		return &taskmanager.MessageProcessingResult{
-			Result: &responseMessage,
+			Result: &protocol.SendMessageResponse{Message: &responseMessage},
 		}, nil
 	}
 
@@ -163,11 +163,11 @@ func (p *basicMessageProcessor) processSimpleCommand(text string) (*taskmanager.
 	result := p.processTextWithMode(content, command)
 	responseMessage := protocol.NewMessage(
 		protocol.MessageRoleAgent,
-		[]protocol.Part{protocol.NewTextPart(result)},
+		[]*protocol.Part{protocol.NewTextPart(result)},
 	)
 
 	return &taskmanager.MessageProcessingResult{
-		Result: &responseMessage,
+		Result: &protocol.SendMessageResponse{Message: &responseMessage},
 	}, nil
 }
 
@@ -191,10 +191,10 @@ func (p *basicMessageProcessor) processMultiTurnSession(
 	// Return message indicating processing
 	responseMessage := protocol.NewMessage(
 		protocol.MessageRoleAgent,
-		[]protocol.Part{protocol.NewTextPart("Processing your multi-turn request...")},
+		[]*protocol.Part{protocol.NewTextPart("Processing your multi-turn request...")},
 	)
 	return &taskmanager.MessageProcessingResult{
-		Result: &responseMessage,
+		Result: &protocol.SendMessageResponse{Message: &responseMessage},
 	}, nil
 }
 
@@ -234,13 +234,13 @@ Example: reverse hello world`
 
 // extractText extracts text content from a message
 func extractText(message protocol.Message) string {
-	var parts []string
+	var texts []string
 	for _, part := range message.Parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			parts = append(parts, textPart.Text)
+		if text := part.TextContent(); text != "" {
+			texts = append(texts, text)
 		}
 	}
-	return strings.Join(parts, " ")
+	return strings.Join(texts, " ")
 }
 
 // main is the entry point for the server
@@ -427,12 +427,10 @@ func newPushNotificationSender(base taskmanager.TaskManager) *pushNotificationSe
 func (p *pushNotificationSender) OnSendMessage(
 	ctx context.Context,
 	params protocol.SendMessageParams,
-) (*protocol.MessageResult, error) {
-	// Call the underlying implementation
+) (*protocol.SendMessageResponse, error) {
 	result, err := p.TaskManager.OnSendMessage(ctx, params)
 	if err == nil && result != nil {
-		// Check if result is a task and send notification if needed
-		if task, ok := result.Result.(*protocol.Task); ok {
+		if task := result.Task; task != nil {
 			go p.maybeSendStatusPushNotification(ctx, task.ID, task.Status.State)
 		}
 	}
@@ -443,24 +441,20 @@ func (p *pushNotificationSender) OnSendMessage(
 func (p *pushNotificationSender) OnSendMessageStream(
 	ctx context.Context,
 	params protocol.SendMessageParams,
-) (<-chan protocol.StreamingMessageEvent, error) {
-	// Call the underlying implementation
+) (<-chan protocol.StreamResponse, error) {
 	eventChan, err := p.TaskManager.OnSendMessageStream(ctx, params)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create a wrapper channel to monitor events and send notifications
-	wrappedChan := make(chan protocol.StreamingMessageEvent)
+	wrappedChan := make(chan protocol.StreamResponse)
 
 	go func() {
 		defer close(wrappedChan)
 		for event := range eventChan {
-			// Forward the event
 			wrappedChan <- event
 
-			// Check if it's a task status update and send notification
-			if statusEvent, ok := event.Result.(*protocol.TaskStatusUpdateEvent); ok {
+			if statusEvent := event.StatusUpdate; statusEvent != nil {
 				go p.maybeSendStatusPushNotification(ctx, statusEvent.TaskID, statusEvent.Status.State)
 			}
 		}
@@ -601,7 +595,7 @@ func (p *basicMessageProcessor) handleMultiTurnSessionAsync(
 		// Ask for the text to process
 		msg := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart("Please enter the text you want to process:")},
+			[]*protocol.Part{protocol.NewTextPart("Please enter the text you want to process:")},
 		)
 
 		// Update task to input-required state
@@ -626,15 +620,14 @@ func (p *basicMessageProcessor) handleMultiTurnSessionAsync(
 		// Create the completed message
 		finalMsg := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(result)},
+			[]*protocol.Part{protocol.NewTextPart(result)},
 		)
 
-		// Add artifact with the processed result
 		artifact := protocol.Artifact{
 			ArtifactID:  "processed-text-" + taskID,
 			Name:        stringPtr("Processed Text"),
 			Description: stringPtr(fmt.Sprintf("Text processed with mode: %s", session.mode)),
-			Parts:       []protocol.Part{protocol.NewTextPart(result)},
+			Parts:       []*protocol.Part{protocol.NewTextPart(result)},
 			Metadata: map[string]interface{}{
 				"operation":    session.mode,
 				"originalText": session.text,
@@ -692,7 +685,7 @@ func (p *basicMessageProcessor) handleNewInteractionAsync(
 		// Ask for the processing mode
 		msg := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(
+			[]*protocol.Part{protocol.NewTextPart(
 				"This is a multi-step interaction. Please select a processing mode:\n" +
 					"- reverse: Reverses the text\n" +
 					"- uppercase: Converts text to uppercase\n" +
@@ -712,7 +705,7 @@ func (p *basicMessageProcessor) handleNewInteractionAsync(
 	if command == modeInputExample {
 		msg := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart("Please provide more information to continue:")},
+			[]*protocol.Part{protocol.NewTextPart("Please provide more information to continue:")},
 		)
 
 		// Update task to input-required state
@@ -750,7 +743,7 @@ func (p *basicMessageProcessor) handleNewInteractionAsync(
 		ArtifactID:  "processed-text-" + taskID,
 		Name:        stringPtr("Processed Text"),
 		Description: stringPtr(fmt.Sprintf("Text processed with mode: %s", command)),
-		Parts:       []protocol.Part{protocol.NewTextPart(result)},
+		Parts:       []*protocol.Part{protocol.NewTextPart(result)},
 		Metadata: map[string]interface{}{
 			"operation":    command,
 			"originalText": content,
@@ -768,7 +761,7 @@ func (p *basicMessageProcessor) handleNewInteractionAsync(
 	// Create final message
 	finalMsg := protocol.NewMessage(
 		protocol.MessageRoleAgent,
-		[]protocol.Part{protocol.NewTextPart(result)},
+		[]*protocol.Part{protocol.NewTextPart(result)},
 	)
 
 	// Update task to completed state

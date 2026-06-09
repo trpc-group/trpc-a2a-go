@@ -39,7 +39,7 @@ func main() {
 	// Create the message to send using the new constructor.
 	userMessage := protocol.NewMessage(
 		protocol.MessageRoleUser,
-		[]protocol.Part{protocol.NewTextPart(*message)},
+		[]*protocol.Part{protocol.NewTextPart(*message)},
 	)
 
 	// Create message parameters using the new SendMessageParams structure.
@@ -119,101 +119,103 @@ func handleStandardMode(ctx context.Context, a2aClient *client.A2AClient, params
 	// Display the result.
 	log.Infof("Message sent successfully")
 
-	// Handle the result based on its type
-	switch result := messageResult.Result.(type) {
-	case *protocol.Message:
+	if msg := messageResult.Message; msg != nil {
 		log.Infof("Received message response:")
-		printMessage(*result)
-	case *protocol.Task:
-		log.Infof("Received task response - ID: %s, State: %s", result.ID, result.Status.State)
+		printMessage(*msg)
+	} else if task := messageResult.Task; task != nil {
+		log.Infof("Received task response - ID: %s, State: %s", task.ID, task.Status.State)
 
-		// If task is not completed, wait and check again
-		if result.Status.State != protocol.TaskStateCompleted &&
-			result.Status.State != protocol.TaskStateFailed &&
-			result.Status.State != protocol.TaskStateCanceled {
+		if task.Status.State != protocol.TaskStateCompleted &&
+			task.Status.State != protocol.TaskStateFailed &&
+			task.Status.State != protocol.TaskStateCanceled {
 
-			log.Infof("Task %s is %s, fetching final state...", result.ID, result.Status.State)
+			log.Infof("Task %s is %s, fetching final state...", task.ID, task.Status.State)
 
-			// Get the task's final state.
 			queryParams := protocol.TaskQueryParams{
-				ID: result.ID,
+				ID: task.ID,
 			}
 
-			// Give the server some time to process.
 			time.Sleep(500 * time.Millisecond)
 
-			task, err := a2aClient.GetTasks(ctx, queryParams)
+			finalTask, err := a2aClient.GetTasks(ctx, queryParams)
 			if err != nil {
 				log.Fatalf("Failed to get task status: %v", err)
 			}
 
-			log.Infof("Task %s final state: %s", task.ID, task.Status.State)
-			printTaskResult(task)
+			log.Infof("Task %s final state: %s", finalTask.ID, finalTask.Status.State)
+			printTaskResult(finalTask)
 		} else {
-			printTaskResult(result)
+			printTaskResult(task)
 		}
-	default:
-		log.Infof("Received unknown result type: %T", result)
+	} else {
+		log.Infof("Received empty result")
 	}
 }
 
 // getEventDescription returns a human-readable description of the streaming event
-func getEventDescription(event protocol.StreamingMessageEvent) string {
-	switch result := event.Result.(type) {
-	case *protocol.Message:
+func getEventDescription(event protocol.StreamResponse) string {
+	if msg := event.Message; msg != nil {
 		ctxID := "unknown"
-		if result.ContextID != nil {
-			ctxID = *result.ContextID
+		if msg.ContextID != nil {
+			ctxID = *msg.ContextID
 		}
-		return fmt.Sprintf("Message from %s, ContextID: %v", result.Role, ctxID)
-	case *protocol.Task:
-		return fmt.Sprintf("Task %s - State: %s, ContextID: %v", result.ID, result.Status.State, result.ContextID)
-	case *protocol.TaskStatusUpdateEvent:
-		return fmt.Sprintf(
-			"Status Update - Task: %s, State: %s, ContextID: %v",
-			result.TaskID,
-			result.Status.State,
-			result.ContextID,
-		)
-	case *protocol.TaskArtifactUpdateEvent:
-		artifactName := "Unnamed"
-		if result.Artifact.Name != nil {
-			artifactName = *result.Artifact.Name
-		}
-		return fmt.Sprintf("Artifact Update - %s, ContextID: %v", artifactName, result.ContextID)
-	default:
-		return fmt.Sprintf("Unknown event type: %T", result)
+		return fmt.Sprintf("Message from %s, ContextID: %v", msg.Role, ctxID)
 	}
+	if task := event.Task; task != nil {
+		return fmt.Sprintf("Task %s - State: %s, ContextID: %v", task.ID, task.Status.State, task.ContextID)
+	}
+	if su := event.StatusUpdate; su != nil {
+		return fmt.Sprintf("Status Update - Task: %s, State: %s, ContextID: %v", su.TaskID, su.Status.State, su.ContextID)
+	}
+	if au := event.ArtifactUpdate; au != nil {
+		artifactName := "Unnamed"
+		if au.Artifact.Name != nil {
+			artifactName = *au.Artifact.Name
+		}
+		return fmt.Sprintf("Artifact Update - %s, ContextID: %v", artifactName, au.ContextID)
+	}
+	return "Unknown event"
 }
 
 // extractFinalResult extracts the final text result from streaming events
-func extractFinalResult(event protocol.StreamingMessageEvent) string {
-	switch result := event.Result.(type) {
-	case *protocol.Message:
-		// Extract text from message parts
-		for _, part := range result.Parts {
-			if textPart, ok := part.(*protocol.TextPart); ok {
-				return textPart.Text
+func extractFinalResult(event protocol.StreamResponse) string {
+	if msg := event.Message; msg != nil {
+		for _, part := range msg.Parts {
+			if t := part.TextContent(); t != "" {
+				return t
 			}
 		}
-	case *protocol.Task:
-		// Extract text from task status message
-		if result.Status.Message != nil {
-			for _, part := range result.Status.Message.Parts {
-				if textPart, ok := part.(*protocol.TextPart); ok {
-					return textPart.Text
+	}
+	if task := event.Task; task != nil {
+		if task.Status.Message != nil {
+			for _, part := range task.Status.Message.Parts {
+				if t := part.TextContent(); t != "" {
+					return t
 				}
 			}
 		}
-	case *protocol.TaskArtifactUpdateEvent:
-		// Extract text from artifact parts
-		for _, part := range result.Artifact.Parts {
-			if textPart, ok := part.(*protocol.TextPart); ok {
-				return textPart.Text
+	}
+	if au := event.ArtifactUpdate; au != nil {
+		for _, part := range au.Artifact.Parts {
+			if t := part.TextContent(); t != "" {
+				return t
 			}
 		}
 	}
 	return ""
+}
+
+func printPartContent(prefix string, i int, part *protocol.Part) {
+	switch c := part.Content.(type) {
+	case protocol.Text:
+		log.Infof("%sPart %d (text): %s", prefix, i+1, c.Text)
+	case protocol.URL:
+		log.Infof("%sPart %d (url): %s", prefix, i+1, c.URI)
+	case protocol.Data:
+		log.Infof("%sPart %d (data): %+v", prefix, i+1, c.Data)
+	default:
+		log.Infof("%sPart %d (unknown): %+v", prefix, i+1, part)
+	}
 }
 
 // printMessage prints the contents of a message.
@@ -226,16 +228,7 @@ func printMessage(message protocol.Message) {
 
 	log.Infof("Message parts:")
 	for i, part := range message.Parts {
-		switch p := part.(type) {
-		case *protocol.TextPart:
-			log.Infof("  Part %d (text): %s", i+1, p.Text)
-		case *protocol.FilePart:
-			log.Infof("  Part %d (file): [file content]", i+1)
-		case *protocol.DataPart:
-			log.Infof("  Part %d (data): %+v", i+1, p.Data)
-		default:
-			log.Infof("  Part %d (unknown): %+v", i+1, part)
-		}
+		printPartContent("  ", i, part)
 	}
 }
 
@@ -246,7 +239,6 @@ func printTaskResult(task *protocol.Task) {
 		printMessage(*task.Status.Message)
 	}
 
-	// Print artifacts if any
 	if len(task.Artifacts) > 0 {
 		log.Infof("Task artifacts:")
 		for i, artifact := range task.Artifacts {
@@ -256,16 +248,7 @@ func printTaskResult(task *protocol.Task) {
 			}
 			log.Infof("  Artifact %d: %s", i+1, name)
 			for j, part := range artifact.Parts {
-				switch p := part.(type) {
-				case *protocol.TextPart:
-					log.Infof("    Part %d (text): %s", j+1, p.Text)
-				case *protocol.FilePart:
-					log.Infof("    Part %d (file): [file content]", j+1)
-				case *protocol.DataPart:
-					log.Infof("    Part %d (data): %+v", j+1, p.Data)
-				default:
-					log.Infof("    Part %d (unknown): %+v", j+1, part)
-				}
+				printPartContent("    ", j, part)
 			}
 		}
 	}

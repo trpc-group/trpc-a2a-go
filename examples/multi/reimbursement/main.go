@@ -45,7 +45,7 @@ func (p *reimbursementProcessor) ProcessMessage(
 		// Return error message directly
 		errorMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(errMsg)},
+			[]*protocol.Part{protocol.NewTextPart(errMsg)},
 		)
 		return &taskmanager.MessageProcessingResult{
 			Result: &errorMessage,
@@ -131,7 +131,7 @@ func (p *reimbursementProcessor) ProcessMessage(
 	// Create response message
 	responseMessage := protocol.NewMessage(
 		protocol.MessageRoleAgent,
-		[]protocol.Part{protocol.NewTextPart(result)},
+		[]*protocol.Part{protocol.NewTextPart(result)},
 	)
 
 	// Create result with potential artifact for completed requests
@@ -150,7 +150,7 @@ func (p *reimbursementProcessor) ProcessMessage(
 				ArtifactID:  fmt.Sprintf("reimb-%s", reimbursement["request_id"]),
 				Name:        stringPtr("Reimbursement Details"),
 				Description: stringPtr(fmt.Sprintf("Processed reimbursement request %s", reimbursement["request_id"])),
-				Parts:       []protocol.Part{protocol.NewTextPart(string(reimbursementJSON))},
+				Parts:       []*protocol.Part{protocol.NewTextPart(string(reimbursementJSON))},
 			}
 
 			_ = handle.AddArtifact(&task, artifact, true, false)
@@ -267,8 +267,8 @@ func validateForm(form map[string]interface{}) []string {
 func extractText(message protocol.Message) string {
 	var result strings.Builder
 	for _, part := range message.Parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			result.WriteString(textPart.Text)
+		if t := part.TextContent(); t != "" {
+			result.WriteString(t)
 		}
 	}
 	return result.String()
