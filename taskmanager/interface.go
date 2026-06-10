@@ -182,19 +182,40 @@ type TaskManager interface {
 		params protocol.TaskIDParams,
 	) (*protocol.Task, error)
 
-	// OnPushNotificationSet handles a request corresponding to the 'tasks/pushNotification/set' RPC method.
+	// OnListTasks handles a request corresponding to the v1.0 'ListTasks' RPC method.
+	// It returns tasks visible to the caller, with optional filtering and pagination.
+	OnListTasks(
+		ctx context.Context,
+		params protocol.ListTasksParams,
+	) (*protocol.ListTasksResult, error)
+
+	// OnPushNotificationSet handles the 'CreateTaskPushNotificationConfig' RPC method.
 	// It configures push notifications for a specific task.
 	OnPushNotificationSet(
 		ctx context.Context,
 		params protocol.TaskPushNotificationConfig,
 	) (*protocol.TaskPushNotificationConfig, error)
 
-	// OnPushNotificationGet handles a request corresponding to the 'tasks/pushNotification/get' RPC method.
+	// OnPushNotificationGet handles the 'GetTaskPushNotificationConfig' RPC method.
 	// It retrieves the current push notification configuration for a task.
 	OnPushNotificationGet(
 		ctx context.Context,
 		params protocol.TaskIDParams,
 	) (*protocol.TaskPushNotificationConfig, error)
+
+	// OnPushNotificationList handles the v1.0 'ListTaskPushNotificationConfigs' RPC method.
+	// It lists the push notification configurations registered for a task.
+	OnPushNotificationList(
+		ctx context.Context,
+		params protocol.ListTaskPushNotificationConfigsParams,
+	) (*protocol.ListTaskPushNotificationConfigsResult, error)
+
+	// OnPushNotificationDelete handles the v1.0 'DeleteTaskPushNotificationConfig' RPC method.
+	// It removes a push notification configuration from a task.
+	OnPushNotificationDelete(
+		ctx context.Context,
+		params protocol.DeleteTaskPushNotificationConfigParams,
+	) error
 
 	// OnResubscribe handles a request corresponding to the 'tasks/resubscribe' RPC method.
 	// It reestablishes an SSE stream for an existing task.

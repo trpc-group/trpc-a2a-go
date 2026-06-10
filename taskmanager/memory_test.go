@@ -889,3 +889,134 @@ func TestWithTaskTTL(t *testing.T) {
 func stringPtr(s string) *string {
 	return &s
 }
+
+func intPtr(i int) *int {
+	return &i
+}
+
+func boolPtr(b bool) *bool {
+	return &b
+}
+
+// TestMemoryTaskManager_OnListTasks covers the v1.0 ListTasks filtering and pagination.
+func TestMemoryTaskManager_OnListTasks(t *testing.T) {
+	processor := &MockMessageProcessor{}
+	manager, err := NewMemoryTaskManager(processor)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	seed := []protocol.Task{
+		{ID: "task-a", ContextID: "ctx-1", Status: protocol.TaskStatus{
+			State: protocol.TaskStateCompleted, Timestamp: now.Add(-2 * time.Hour).Format(time.RFC3339)}},
+		{ID: "task-b", ContextID: "ctx-1", Status: protocol.TaskStatus{
+			State: protocol.TaskStateWorking, Timestamp: now.Format(time.RFC3339)}},
+		{ID: "task-c", ContextID: "ctx-2", Status: protocol.TaskStatus{
+			State: protocol.TaskStateWorking, Timestamp: now.Format(time.RFC3339)},
+			Artifacts: []protocol.Artifact{{ArtifactID: "art-1"}}},
+	}
+	manager.taskMu.Lock()
+	for i := range seed {
+		manager.Tasks[seed[i].ID] = NewCancellableTask(seed[i])
+	}
+	manager.taskMu.Unlock()
+
+	// No filter: all tasks, sorted by ID.
+	result, err := manager.OnListTasks(ctx, protocol.ListTasksParams{})
+	if err != nil {
+		t.Fatalf("OnListTasks failed: %v", err)
+	}
+	if result.TotalSize != 3 || len(result.Tasks) != 3 {
+		t.Fatalf("Expected 3 tasks, got total=%d len=%d", result.TotalSize, len(result.Tasks))
+	}
+	if result.Tasks[0].ID != "task-a" || result.Tasks[2].ID != "task-c" {
+		t.Errorf("Expected ID-sorted order, got %s..%s", result.Tasks[0].ID, result.Tasks[2].ID)
+	}
+	// Artifacts stripped by default.
+	if result.Tasks[2].Artifacts != nil {
+		t.Errorf("Expected artifacts stripped by default")
+	}
+
+	// Filter by contextId + status.
+	result, err = manager.OnListTasks(ctx, protocol.ListTasksParams{
+		ContextID: "ctx-1", Status: protocol.TaskStateWorking,
+	})
+	if err != nil {
+		t.Fatalf("OnListTasks with filter failed: %v", err)
+	}
+	if len(result.Tasks) != 1 || result.Tasks[0].ID != "task-b" {
+		t.Fatalf("Expected only task-b, got %+v", result.Tasks)
+	}
+
+	// IncludeArtifacts keeps artifacts.
+	result, err = manager.OnListTasks(ctx, protocol.ListTasksParams{
+		ContextID: "ctx-2", IncludeArtifacts: boolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("OnListTasks failed: %v", err)
+	}
+	if len(result.Tasks) != 1 || len(result.Tasks[0].Artifacts) != 1 {
+		t.Fatalf("Expected task-c with artifact, got %+v", result.Tasks)
+	}
+
+	// Pagination: page size 2 -> next page token "2", second page has 1 task.
+	result, err = manager.OnListTasks(ctx, protocol.ListTasksParams{PageSize: intPtr(2)})
+	if err != nil {
+		t.Fatalf("OnListTasks paged failed: %v", err)
+	}
+	if len(result.Tasks) != 2 || result.NextPageToken != "2" {
+		t.Fatalf("Expected 2 tasks + token \"2\", got len=%d token=%q", len(result.Tasks), result.NextPageToken)
+	}
+	result, err = manager.OnListTasks(ctx, protocol.ListTasksParams{
+		PageSize: intPtr(2), PageToken: result.NextPageToken,
+	})
+	if err != nil {
+		t.Fatalf("OnListTasks page 2 failed: %v", err)
+	}
+	if len(result.Tasks) != 1 || result.NextPageToken != "" {
+		t.Fatalf("Expected final page with 1 task, got len=%d token=%q", len(result.Tasks), result.NextPageToken)
+	}
+}
+
+// TestMemoryTaskManager_PushNotificationListDelete covers the v1.0 list/delete push-config methods.
+func TestMemoryTaskManager_PushNotificationListDelete(t *testing.T) {
+	processor := &MockMessageProcessor{}
+	manager, err := NewMemoryTaskManager(processor)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+	ctx := context.Background()
+
+	if _, err := manager.OnPushNotificationSet(ctx, protocol.TaskPushNotificationConfig{
+		TaskID: "task-1", URL: "https://example.com/webhook",
+	}); err != nil {
+		t.Fatalf("OnPushNotificationSet failed: %v", err)
+	}
+
+	list, err := manager.OnPushNotificationList(ctx, protocol.ListTaskPushNotificationConfigsParams{TaskID: "task-1"})
+	if err != nil {
+		t.Fatalf("OnPushNotificationList failed: %v", err)
+	}
+	if len(list.Configs) != 1 || list.Configs[0].URL != "https://example.com/webhook" {
+		t.Fatalf("Expected one config, got %+v", list.Configs)
+	}
+
+	if err := manager.OnPushNotificationDelete(ctx, protocol.DeleteTaskPushNotificationConfigParams{TaskID: "task-1"}); err != nil {
+		t.Fatalf("OnPushNotificationDelete failed: %v", err)
+	}
+
+	list, err = manager.OnPushNotificationList(ctx, protocol.ListTaskPushNotificationConfigsParams{TaskID: "task-1"})
+	if err != nil {
+		t.Fatalf("OnPushNotificationList after delete failed: %v", err)
+	}
+	if len(list.Configs) != 0 {
+		t.Fatalf("Expected empty config list after delete, got %+v", list.Configs)
+	}
+
+	// Deleting again is a no-op.
+	if err := manager.OnPushNotificationDelete(ctx, protocol.DeleteTaskPushNotificationConfigParams{TaskID: "task-1"}); err != nil {
+		t.Fatalf("Idempotent delete failed: %v", err)
+	}
+}
