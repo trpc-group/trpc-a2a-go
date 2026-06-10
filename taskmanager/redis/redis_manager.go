@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -314,6 +316,147 @@ func (m *TaskManager) OnPushNotificationGet(
 	}
 
 	return &config, nil
+}
+
+// listTasksDefaultPageSize is the default page size for OnListTasks (per v1.0 spec: 1-100, default 50).
+const listTasksDefaultPageSize = 50
+
+// listTasksMaxPageSize is the maximum page size for OnListTasks.
+const listTasksMaxPageSize = 100
+
+// OnListTasks handles the v1.0 ListTasks request by scanning stored tasks,
+// filtering, and applying offset-based pagination.
+func (m *TaskManager) OnListTasks(
+	ctx context.Context,
+	params protocol.ListTasksParams,
+) (*protocol.ListTasksResult, error) {
+	var afterTime time.Time
+	if params.StatusTimestampAfter != "" {
+		t, err := time.Parse(time.RFC3339, params.StatusTimestampAfter)
+		if err != nil {
+			return nil, fmt.Errorf("invalid statusTimestampAfter %q: %w", params.StatusTimestampAfter, err)
+		}
+		afterTime = t
+	}
+
+	// Scan all task keys and collect matching tasks.
+	var filtered []*protocol.Task
+	iter := m.client.Scan(ctx, 0, taskPrefix+"*", 0).Iterator()
+	for iter.Next(ctx) {
+		taskBytes, err := m.client.Get(ctx, iter.Val()).Bytes()
+		if err != nil {
+			continue // Key expired between SCAN and GET.
+		}
+		var task protocol.Task
+		if err := json.Unmarshal(taskBytes, &task); err != nil {
+			log.Errorf("RedisTaskManager: skip malformed task at %s: %v", iter.Val(), err)
+			continue
+		}
+		if params.ContextID != "" && task.ContextID != params.ContextID {
+			continue
+		}
+		if params.Status != "" && task.Status.State != params.Status {
+			continue
+		}
+		if !afterTime.IsZero() {
+			ts, err := time.Parse(time.RFC3339, task.Status.Timestamp)
+			if err != nil || !ts.After(afterTime) {
+				continue
+			}
+		}
+		filtered = append(filtered, &task)
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("failed to scan tasks: %w", err)
+	}
+	// Deterministic order for stable pagination.
+	sort.Slice(filtered, func(i, j int) bool { return filtered[i].ID < filtered[j].ID })
+
+	pageSize := listTasksDefaultPageSize
+	if params.PageSize != nil && *params.PageSize > 0 {
+		pageSize = *params.PageSize
+		if pageSize > listTasksMaxPageSize {
+			pageSize = listTasksMaxPageSize
+		}
+	}
+	offset := 0
+	if params.PageToken != "" {
+		o, err := strconv.Atoi(params.PageToken)
+		if err != nil || o < 0 {
+			return nil, fmt.Errorf("invalid pageToken %q", params.PageToken)
+		}
+		offset = o
+	}
+
+	totalSize := len(filtered)
+	end := offset + pageSize
+	if offset > totalSize {
+		offset = totalSize
+	}
+	if end > totalSize {
+		end = totalSize
+	}
+
+	tasks := make([]*protocol.Task, 0, end-offset)
+	for _, task := range filtered[offset:end] {
+		if params.HistoryLength != nil && *params.HistoryLength >= 0 && len(task.History) > *params.HistoryLength {
+			task.History = task.History[len(task.History)-*params.HistoryLength:]
+		}
+		if params.IncludeArtifacts == nil || !*params.IncludeArtifacts {
+			task.Artifacts = nil
+		}
+		tasks = append(tasks, task)
+	}
+
+	result := &protocol.ListTasksResult{
+		Tasks:     tasks,
+		PageSize:  pageSize,
+		TotalSize: totalSize,
+	}
+	if end < totalSize {
+		result.NextPageToken = strconv.Itoa(end)
+	}
+	return result, nil
+}
+
+// OnPushNotificationList handles the v1.0 ListTaskPushNotificationConfigs request.
+// The Redis manager stores at most one configuration per task, so the result
+// contains zero or one entries.
+func (m *TaskManager) OnPushNotificationList(
+	ctx context.Context,
+	params protocol.ListTaskPushNotificationConfigsParams,
+) (*protocol.ListTaskPushNotificationConfigsResult, error) {
+	// Check if task exists.
+	if _, err := m.getTaskInternal(ctx, params.TaskID); err != nil {
+		return nil, err
+	}
+
+	result := &protocol.ListTaskPushNotificationConfigsResult{
+		Configs: []protocol.TaskPushNotificationConfig{},
+	}
+	configBytes, err := m.client.Get(ctx, pushNotificationPrefix+params.TaskID).Bytes()
+	if err != nil {
+		return result, nil // No config registered.
+	}
+	var config protocol.TaskPushNotificationConfig
+	if err := json.Unmarshal(configBytes, &config); err != nil {
+		return nil, fmt.Errorf("failed to deserialize push notification config: %w", err)
+	}
+	result.Configs = append(result.Configs, config)
+	return result, nil
+}
+
+// OnPushNotificationDelete handles the v1.0 DeleteTaskPushNotificationConfig request.
+// Deleting a non-existent configuration is a no-op.
+func (m *TaskManager) OnPushNotificationDelete(
+	ctx context.Context,
+	params protocol.DeleteTaskPushNotificationConfigParams,
+) error {
+	if err := m.client.Del(ctx, pushNotificationPrefix+params.TaskID).Err(); err != nil {
+		return fmt.Errorf("failed to delete push notification config: %w", err)
+	}
+	log.Debugf("RedisTaskManager: Push notification config deleted for task %s", params.TaskID)
+	return nil
 }
 
 // OnResubscribe handles tasks/resubscribe requests.
