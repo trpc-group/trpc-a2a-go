@@ -557,6 +557,35 @@ func (m *mockTaskManager) OnPushNotificationGet(
 	return &config, nil
 }
 
+// OnListTasks implements the v1.0 ListTasks method.
+func (m *mockTaskManager) OnListTasks(
+	ctx context.Context, params protocol.ListTasksParams,
+) (*protocol.ListTasksResult, error) {
+	return &protocol.ListTasksResult{Tasks: []*protocol.Task{}}, nil
+}
+
+// OnPushNotificationList implements the v1.0 ListTaskPushNotificationConfigs method.
+func (m *mockTaskManager) OnPushNotificationList(
+	ctx context.Context, params protocol.ListTaskPushNotificationConfigsParams,
+) (*protocol.ListTaskPushNotificationConfigsResult, error) {
+	result := &protocol.ListTaskPushNotificationConfigsResult{
+		Configs: []protocol.TaskPushNotificationConfig{},
+	}
+	if config, ok := m.pushConfigs[params.TaskID]; ok {
+		config.TaskID = params.TaskID
+		result.Configs = append(result.Configs, config)
+	}
+	return result, nil
+}
+
+// OnPushNotificationDelete implements the v1.0 DeleteTaskPushNotificationConfig method.
+func (m *mockTaskManager) OnPushNotificationDelete(
+	ctx context.Context, params protocol.DeleteTaskPushNotificationConfigParams,
+) error {
+	delete(m.pushConfigs, params.TaskID)
+	return nil
+}
+
 // OnResubscribe handles resubscribing to a task.
 func (m *mockTaskManager) OnResubscribe(
 	ctx context.Context, params protocol.TaskIDParams,
