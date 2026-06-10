@@ -161,7 +161,7 @@ func main() {
 				BearerFormat: stringPtr("JWT"),
 			},
 		},
-		Security: []map[string][]string{
+		SecurityRequirements: []map[string][]string{
 			{"apiKey": {}},
 			{"jwt": {}},
 		},

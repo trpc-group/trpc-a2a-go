@@ -99,7 +99,7 @@ func sendMessageToAgent(ctx context.Context, a2aClient *client.A2AClient, messag
 	params := protocol.SendMessageParams{
 		Message: userMessage,
 		Configuration: &protocol.SendMessageConfiguration{
-			Blocking:            boolPtr(true), // Use blocking mode for simplicity
+			ReturnImmediately:   boolPtr(false), // v1.0: false = wait for completion (was Blocking: true)
 			AcceptedOutputModes: []string{"text"},
 		},
 	}
@@ -110,17 +110,18 @@ func sendMessageToAgent(ctx context.Context, a2aClient *client.A2AClient, messag
 		return "", fmt.Errorf("failed to send message: %w", err)
 	}
 
-	// Extract text from the response
-	switch result := messageResult.Result.(type) {
-	case *protocol.Message:
-		return extractTextFromMessage(result), nil
-	case *protocol.Task:
-		if result.Status.Message != nil {
-			return extractTextFromMessage(result.Status.Message), nil
+	// Extract text from the response (v1.0: SendMessageResponse is a Message/Task union)
+	switch {
+	case messageResult.Message != nil:
+		return extractTextFromMessage(messageResult.Message), nil
+	case messageResult.Task != nil:
+		task := messageResult.Task
+		if task.Status.Message != nil {
+			return extractTextFromMessage(task.Status.Message), nil
 		}
-		return fmt.Sprintf("Task %s - State: %s", result.ID, result.Status.State), nil
+		return fmt.Sprintf("Task %s - State: %s", task.ID, task.Status.State), nil
 	default:
-		return fmt.Sprintf("Unknown result type: %T", result), nil
+		return "", fmt.Errorf("unexpected empty SendMessage response")
 	}
 }
 

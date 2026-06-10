@@ -120,7 +120,7 @@ func (p *pushNotificationMessageProcessor) processDirectly(
 	)
 
 	return &taskmanager.MessageProcessingResult{
-		Result: &responseMessage,
+		Result: protocol.NewSendMessageResponseMessage(&responseMessage),
 	}, nil
 }
 
@@ -206,7 +206,7 @@ func (m *pushNotificationTaskManager) sendPushNotification(ctx context.Context, 
 	}
 
 	// Send push notification
-	if err := m.authenticator.SendPushNotification(ctx, pushConfig.PushNotificationConfig.URL, map[string]interface{}{
+	if err := m.authenticator.SendPushNotification(ctx, pushConfig.URL, map[string]interface{}{
 		"task_id":   taskID,
 		"status":    status,
 		"timestamp": time.Now().Format(time.RFC3339),

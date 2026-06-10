@@ -55,7 +55,7 @@ func (p *streamingMessageProcessor) ProcessMessage(
 		)
 
 		return &taskmanager.MessageProcessingResult{
-			Result: &errorMessage,
+			Result: protocol.NewSendMessageResponseMessage(&errorMessage),
 		}, nil
 	}
 
@@ -178,7 +178,7 @@ func (p *streamingMessageProcessor) processNonStreaming(
 	)
 
 	return &taskmanager.MessageProcessingResult{
-		Result: &responseMessage,
+		Result: protocol.NewSendMessageResponseMessage(&responseMessage),
 	}, nil
 }
 

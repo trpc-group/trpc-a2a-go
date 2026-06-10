@@ -78,12 +78,12 @@ func (p *ToLowerProcessor) ProcessMessage(
 	inputText := extractTextFromMessage(message)
 	if inputText == "" {
 		return &taskmanager.MessageProcessingResult{
-			Result: &protocol.Message{
+			Result: protocol.NewSendMessageResponseMessage(&protocol.Message{
 				Role: protocol.MessageRoleAgent,
 				Parts: []*protocol.Part{
 					protocol.NewTextPart("Error: No text found in message"),
 				},
-			},
+			}),
 		}, nil
 	}
 
@@ -143,7 +143,7 @@ func (p *ToLowerProcessor) processNonStreamingMode(inputText string) *taskmanage
 	}
 
 	return &taskmanager.MessageProcessingResult{
-		Result: response,
+		Result: protocol.NewSendMessageResponseMessage(response),
 	}
 }
 

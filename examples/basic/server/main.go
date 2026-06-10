@@ -498,8 +498,8 @@ func (p *pushNotificationSender) maybeSendStatusPushNotification(
 		"status": status,
 	}
 
-	// Send the notification
-	p.sendPushNotification(config.PushNotificationConfig, payload)
+	// Send the notification (flat v1.0 config -> delivery-details view)
+	p.sendPushNotification(*config.Details(), payload)
 }
 
 // sendPushNotification sends a notification to the configured webhook URL

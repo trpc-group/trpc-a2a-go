@@ -1021,20 +1021,15 @@ func setPushNotification(
 
 	log.Printf("Setting push notification for task %s to URL %s", taskID, callbackURL)
 
-	// Create the push notification configuration
-	pushConfig := protocol.PushNotificationConfig{
-		URL: callbackURL,
+	// Create the task push notification configuration (v1.0 flat shape)
+	taskPushConfig := protocol.TaskPushNotificationConfig{
+		TaskID: taskID,
+		URL:    callbackURL,
 	}
 
 	// Set token if provided
 	if token != nil {
-		pushConfig.Token = *token
-	}
-
-	// Create the task push notification configuration using TaskID field
-	taskPushConfig := protocol.TaskPushNotificationConfig{
-		TaskID:                 taskID,
-		PushNotificationConfig: pushConfig,
+		taskPushConfig.Token = *token
 	}
 
 	// Call the client method to set push notification
@@ -1048,9 +1043,9 @@ func setPushNotification(
 	// Display success
 	fmt.Println("Push notification set successfully:")
 	fmt.Printf("  Task ID: %s\n", result.TaskID)
-	fmt.Printf("  URL: %s\n", result.PushNotificationConfig.URL)
-	if result.PushNotificationConfig.Token != "" {
-		fmt.Printf("  Token: %s\n", result.PushNotificationConfig.Token)
+	fmt.Printf("  URL: %s\n", result.URL)
+	if result.Token != "" {
+		fmt.Printf("  Token: %s\n", result.Token)
 	}
 }
 
@@ -1077,15 +1072,15 @@ func getPushNotification(a2aClient *client.A2AClient, taskID string, timeout tim
 	// Display the push notification configuration
 	fmt.Println("Push notification configuration:")
 	fmt.Printf("  Task ID: %s\n", result.TaskID)
-	fmt.Printf("  URL: %s\n", result.PushNotificationConfig.URL)
-	if result.PushNotificationConfig.Token != "" {
-		fmt.Printf("  Token: %s\n", result.PushNotificationConfig.Token)
+	fmt.Printf("  URL: %s\n", result.URL)
+	if result.Token != "" {
+		fmt.Printf("  Token: %s\n", result.Token)
 	}
 
 	// Display metadata if present
-	if len(result.PushNotificationConfig.Metadata) > 0 {
+	if len(result.Metadata) > 0 {
 		fmt.Println("  Metadata:")
-		for key, value := range result.PushNotificationConfig.Metadata {
+		for key, value := range result.Metadata {
 			fmt.Printf("    %s: %v\n", key, value)
 		}
 	}

@@ -46,7 +46,7 @@ func main() {
 	params := protocol.SendMessageParams{
 		Message: userMessage,
 		Configuration: &protocol.SendMessageConfiguration{
-			Blocking:            boolPtr(false), // Non-blocking for streaming, blocking for standard
+			ReturnImmediately:   boolPtr(true), // v1.0: replaces Blocking with inverted semantics (true = don't wait)
 			AcceptedOutputModes: []string{"text"},
 		},
 	}
@@ -208,11 +208,11 @@ func extractFinalResult(event protocol.StreamResponse) string {
 func printPartContent(prefix string, i int, part *protocol.Part) {
 	switch c := part.Content.(type) {
 	case protocol.Text:
-		log.Infof("%sPart %d (text): %s", prefix, i+1, c.Text)
+		log.Infof("%sPart %d (text): %s", prefix, i+1, string(c))
 	case protocol.URL:
-		log.Infof("%sPart %d (url): %s", prefix, i+1, c.URI)
+		log.Infof("%sPart %d (url): %s", prefix, i+1, string(c))
 	case protocol.Data:
-		log.Infof("%sPart %d (data): %+v", prefix, i+1, c.Data)
+		log.Infof("%sPart %d (data): %+v", prefix, i+1, c.Value)
 	default:
 		log.Infof("%sPart %d (unknown): %+v", prefix, i+1, part)
 	}
