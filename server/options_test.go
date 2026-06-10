@@ -396,6 +396,26 @@ func (m *optionsTestTaskManager) OnPushNotificationGet(ctx context.Context, para
 	}, nil
 }
 
+func (m *optionsTestTaskManager) OnListTasks(
+	ctx context.Context, params protocol.ListTasksParams,
+) (*protocol.ListTasksResult, error) {
+	return &protocol.ListTasksResult{Tasks: []*protocol.Task{}}, nil
+}
+
+func (m *optionsTestTaskManager) OnPushNotificationList(
+	ctx context.Context, params protocol.ListTaskPushNotificationConfigsParams,
+) (*protocol.ListTaskPushNotificationConfigsResult, error) {
+	return &protocol.ListTaskPushNotificationConfigsResult{
+		Configs: []protocol.TaskPushNotificationConfig{},
+	}, nil
+}
+
+func (m *optionsTestTaskManager) OnPushNotificationDelete(
+	ctx context.Context, params protocol.DeleteTaskPushNotificationConfigParams,
+) error {
+	return nil
+}
+
 // mockAuthProvider is a simple mock implementing auth.Provider interface
 type mockAuthProvider struct{}
 

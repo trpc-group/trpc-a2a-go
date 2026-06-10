@@ -378,10 +378,16 @@ func (s *A2AServer) routeJSONRPCMethod(ctx context.Context, w http.ResponseWrite
 		s.handleTasksPushNotificationGet(ctx, w, request)
 	case protocol.MethodTasksPushNotificationConfigSet: // A2A Spec: tasks/pushNotification/config/set
 		s.handleTasksPushNotificationSet(ctx, w, request)
-	case protocol.MethodTasksGet: // A2A Spec: tasks/get
+	case protocol.MethodTasksGet: // A2A Spec: GetTask
 		s.handleTasksGet(ctx, w, request)
-	case protocol.MethodTasksCancel: // A2A Spec: tasks/cancel
+	case protocol.MethodTasksList: // A2A Spec: ListTasks (v1.0)
+		s.handleTasksList(ctx, w, request)
+	case protocol.MethodTasksCancel: // A2A Spec: CancelTask
 		s.handleTasksCancel(ctx, w, request)
+	case protocol.MethodTasksPushNotificationConfigList: // A2A Spec: ListTaskPushNotificationConfigs (v1.0)
+		s.handleTasksPushNotificationList(ctx, w, request)
+	case protocol.MethodTasksPushNotificationConfigDelete: // A2A Spec: DeleteTaskPushNotificationConfig (v1.0)
+		s.handleTasksPushNotificationDelete(ctx, w, request)
 	case protocol.MethodTasksResubscribe: // A2A Spec: tasks/resubscribe
 		s.handleTasksResubscribe(ctx, w, request)
 	case protocol.MethodAgentAuthenticatedExtendedCard: // A2A Spec: agent/getAuthenticatedExtendedCard
@@ -415,6 +421,63 @@ func (s *A2AServer) handleTasksGet(ctx context.Context, w http.ResponseWriter, r
 		return
 	}
 	s.writeJSONRPCResponse(w, request.ID, task)
+}
+
+// handleTasksList handles the v1.0 ListTasks method.
+func (s *A2AServer) handleTasksList(ctx context.Context, w http.ResponseWriter, request jsonrpc.Request) {
+	var params protocol.ListTasksParams
+	if err := s.unmarshalParams(request.Params, &params); err != nil {
+		s.writeJSONRPCError(w, request.ID, err)
+		return
+	}
+	result, err := s.taskManager.OnListTasks(ctx, params)
+	if err != nil {
+		s.handleTaskManagerError(w, request.ID, err, "OnListTasks", params.ContextID)
+		return
+	}
+	s.writeJSONRPCResponse(w, request.ID, result)
+}
+
+// handleTasksPushNotificationList handles the v1.0 ListTaskPushNotificationConfigs method.
+func (s *A2AServer) handleTasksPushNotificationList(
+	ctx context.Context, w http.ResponseWriter, request jsonrpc.Request,
+) {
+	var params protocol.ListTaskPushNotificationConfigsParams
+	if err := s.unmarshalParams(request.Params, &params); err != nil {
+		s.writeJSONRPCError(w, request.ID, err)
+		return
+	}
+	if params.TaskID == "" {
+		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
+		return
+	}
+	result, err := s.taskManager.OnPushNotificationList(ctx, params)
+	if err != nil {
+		s.handleTaskManagerError(w, request.ID, err, "OnPushNotificationList", params.TaskID)
+		return
+	}
+	s.writeJSONRPCResponse(w, request.ID, result)
+}
+
+// handleTasksPushNotificationDelete handles the v1.0 DeleteTaskPushNotificationConfig method.
+func (s *A2AServer) handleTasksPushNotificationDelete(
+	ctx context.Context, w http.ResponseWriter, request jsonrpc.Request,
+) {
+	var params protocol.DeleteTaskPushNotificationConfigParams
+	if err := s.unmarshalParams(request.Params, &params); err != nil {
+		s.writeJSONRPCError(w, request.ID, err)
+		return
+	}
+	if params.TaskID == "" {
+		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
+		return
+	}
+	if err := s.taskManager.OnPushNotificationDelete(ctx, params); err != nil {
+		s.handleTaskManagerError(w, request.ID, err, "OnPushNotificationDelete", params.TaskID)
+		return
+	}
+	// v1.0 DeleteTaskPushNotificationConfig returns an empty result on success.
+	s.writeJSONRPCResponse(w, request.ID, struct{}{})
 }
 
 // handleTasksCancel handles the tasks_cancel method.

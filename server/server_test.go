@@ -677,6 +677,29 @@ func (m *mockTaskManager) OnPushNotificationGet(
 	return nil, fmt.Errorf("push notification config not found for task %s", params.ID)
 }
 
+// OnListTasks implements the TaskManager interface (v1.0 ListTasks).
+func (m *mockTaskManager) OnListTasks(
+	ctx context.Context, params protocol.ListTasksParams,
+) (*protocol.ListTasksResult, error) {
+	return &protocol.ListTasksResult{Tasks: []*protocol.Task{}}, nil
+}
+
+// OnPushNotificationList implements the TaskManager interface (v1.0 list push configs).
+func (m *mockTaskManager) OnPushNotificationList(
+	ctx context.Context, params protocol.ListTaskPushNotificationConfigsParams,
+) (*protocol.ListTaskPushNotificationConfigsResult, error) {
+	return &protocol.ListTaskPushNotificationConfigsResult{
+		Configs: []protocol.TaskPushNotificationConfig{},
+	}, nil
+}
+
+// OnPushNotificationDelete implements the TaskManager interface (v1.0 delete push config).
+func (m *mockTaskManager) OnPushNotificationDelete(
+	ctx context.Context, params protocol.DeleteTaskPushNotificationConfigParams,
+) error {
+	return nil
+}
+
 // OnResubscribe implements the TaskManager interface for resubscribing to task events.
 func (m *mockTaskManager) OnResubscribe(
 	ctx context.Context, params protocol.TaskIDParams,
