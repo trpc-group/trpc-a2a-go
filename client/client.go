@@ -111,6 +111,36 @@ func (c *A2AClient) GetTasks(ctx context.Context, params protocol.TaskQueryParam
 	return task, nil
 }
 
+// ListTasks lists tasks using the v1.0 ListTasks method, with optional
+// filtering and pagination.
+func (c *A2AClient) ListTasks(
+	ctx context.Context,
+	params protocol.ListTasksParams,
+	opts ...RequestOption,
+) (*protocol.ListTasksResult, error) {
+	request := jsonrpc.NewRequest(protocol.MethodTasksList, params.RPCID)
+	paramsBytes, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.ListTasks: failed to marshal params: %w", err)
+	}
+	request.Params = paramsBytes
+	fullResponse, err := c.doRequest(ctx, request, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.ListTasks: %w", err)
+	}
+	if fullResponse.Error != nil {
+		return nil, fullResponse.Error
+	}
+	if len(fullResponse.Result) == 0 {
+		return nil, fmt.Errorf("rpc response missing required 'result' field for id %v", request.ID)
+	}
+	result := &protocol.ListTasksResult{}
+	if err := json.Unmarshal(fullResponse.Result, result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal list tasks result: %w", err)
+	}
+	return result, nil
+}
+
 // CancelTasks cancels an in-progress task using the tasks/cancel method.
 // It returns the task state immediately after the cancellation request.
 func (c *A2AClient) CancelTasks(
@@ -553,6 +583,59 @@ func (c *A2AClient) GetPushNotification(
 	}
 
 	return config, nil
+}
+
+// ListPushNotifications lists the push notification configurations of a task
+// using the v1.0 ListTaskPushNotificationConfigs method.
+func (c *A2AClient) ListPushNotifications(
+	ctx context.Context,
+	params protocol.ListTaskPushNotificationConfigsParams,
+	opts ...RequestOption,
+) (*protocol.ListTaskPushNotificationConfigsResult, error) {
+	request := jsonrpc.NewRequest(protocol.MethodTasksPushNotificationConfigList, params.RPCID)
+	paramsBytes, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.ListPushNotifications: failed to marshal params: %w", err)
+	}
+	request.Params = paramsBytes
+	fullResponse, err := c.doRequest(ctx, request, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.ListPushNotifications: %w", err)
+	}
+	if fullResponse.Error != nil {
+		return nil, fullResponse.Error
+	}
+	if len(fullResponse.Result) == 0 {
+		return nil, fmt.Errorf("rpc response missing required 'result' field for id %v", request.ID)
+	}
+	result := &protocol.ListTaskPushNotificationConfigsResult{}
+	if err := json.Unmarshal(fullResponse.Result, result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal push notification config list: %w", err)
+	}
+	return result, nil
+}
+
+// DeletePushNotification removes a push notification configuration from a task
+// using the v1.0 DeleteTaskPushNotificationConfig method.
+func (c *A2AClient) DeletePushNotification(
+	ctx context.Context,
+	params protocol.DeleteTaskPushNotificationConfigParams,
+	opts ...RequestOption,
+) error {
+	request := jsonrpc.NewRequest(protocol.MethodTasksPushNotificationConfigDelete, params.RPCID)
+	paramsBytes, err := json.Marshal(params)
+	if err != nil {
+		return fmt.Errorf("a2aClient.DeletePushNotification: failed to marshal params: %w", err)
+	}
+	request.Params = paramsBytes
+	fullResponse, err := c.doRequest(ctx, request, opts...)
+	if err != nil {
+		return fmt.Errorf("a2aClient.DeletePushNotification: %w", err)
+	}
+	if fullResponse.Error != nil {
+		return fullResponse.Error
+	}
+	return nil
 }
 
 // GetAgentCard retrieves the public agent card from the A2A server.
