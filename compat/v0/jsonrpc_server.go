@@ -364,6 +364,14 @@ func writeTaskManagerError(w http.ResponseWriter, id interface{}, err error, ope
 // compatibility handler, everything else (v1.0 PascalCase names, GET
 // requests, malformed bodies) falls through to the v1 handler. This works
 // because the two method-name sets are disjoint.
+//
+// WARNING: this dispatches BEFORE any authentication middleware that an
+// A2AServer applies inside Server.Handler(), so composing
+// NewDualHandler(server.Handler(), v0Handler) would let legacy requests bypass
+// authentication. For an auth-protected server, do NOT use this; instead pass
+// the v0 handler to the server via server.WithCompatHandler, which dispatches
+// inside the middleware chain. Use NewDualHandler only when the server has no
+// authentication.
 func NewDualHandler(v1Handler http.Handler, v0Handler *Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.Body == nil {

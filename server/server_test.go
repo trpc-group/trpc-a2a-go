@@ -1021,3 +1021,51 @@ func TestA2AServer_ComposeJWKSURL(t *testing.T) {
 		})
 	}
 }
+
+// blockMiddleware rejects every request with 401, used to prove the compat
+// path is covered by the middleware chain.
+type blockMiddleware struct{}
+
+func (blockMiddleware) Wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("blocked"))
+	})
+}
+
+// TestCompatHandler_CoveredByMiddleware verifies that a compat handler
+// installed via WithCompatHandler is dispatched INSIDE the auth middleware, so
+// legacy (slash) methods cannot bypass authentication. Regression for the
+// NewDualHandler auth-bypass finding.
+func TestCompatHandler_CoveredByMiddleware(t *testing.T) {
+	mockTM := newMockTaskManager()
+
+	compatHit := false
+	compat := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		compatHit = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	srv, err := NewA2AServer(defaultAgentCard(), mockTM,
+		WithMiddleWare(blockMiddleware{}),
+		WithCompatHandler(compat),
+	)
+	require.NoError(t, err)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Legacy slash method must be blocked by the middleware, NOT reach compat.
+	resp, err := http.Post(ts.URL, "application/json",
+		bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":"1","method":"message/send","params":{}}`)))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "legacy method must be authenticated")
+	assert.False(t, compatHit, "compat handler must not run before auth middleware")
+
+	// v1 method is likewise blocked.
+	resp2, err := http.Post(ts.URL, "application/json",
+		bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":"2","method":"SendMessage","params":{}}`)))
+	require.NoError(t, err)
+	defer resp2.Body.Close()
+	assert.Equal(t, http.StatusUnauthorized, resp2.StatusCode)
+}

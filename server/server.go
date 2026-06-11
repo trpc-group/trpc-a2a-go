@@ -8,6 +8,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -45,6 +46,12 @@ type A2AServer struct {
 	idleTimeout      time.Duration           // HTTP server idle timeout.
 	agentCardHandler http.Handler            // Handler for agent card endpoint.
 	customRouter     HTTPRouter              // Custom router for advanced routing (e.g., Gorilla Mux).
+
+	// compatHandler, when set, handles JSON-RPC requests whose method name is
+	// not a v1.0 method (e.g. the legacy slash-delimited names). It is invoked
+	// on the same endpoint and INSIDE the authentication middleware chain, so
+	// the legacy protocol path is authenticated exactly like the v1 path.
+	compatHandler http.Handler
 
 	// Authentication related fields
 	middleWare   []Middleware                        // Authentication middlewares.
@@ -250,15 +257,55 @@ func (s *A2AServer) Handler() http.Handler {
 	}
 
 	// Main JSON-RPC endpoint (configurable path) with optional authentication.
+	// When a compat handler is configured, dispatch non-v1 (legacy) methods to
+	// it from within the same handler so the authentication middleware below
+	// covers both protocol generations.
+	var jsonRPCHandler http.Handler = http.HandlerFunc(s.handleJSONRPC)
+	if s.compatHandler != nil {
+		jsonRPCHandler = s.dispatchByProtocol(jsonRPCHandler, s.compatHandler)
+	}
 	if len(s.middleWare) > 0 {
 		// Apply authentication middleware chain to JSON-RPC endpoint.
 		chain := MiddlewareChain(s.middleWare)
-		router.Handle(s.jsonRPCEndpoint, chain.Wrap(http.HandlerFunc(s.handleJSONRPC)))
+		router.Handle(s.jsonRPCEndpoint, chain.Wrap(jsonRPCHandler))
 	} else {
 		// No authentication required.
-		router.Handle(s.jsonRPCEndpoint, http.HandlerFunc(s.handleJSONRPC))
+		router.Handle(s.jsonRPCEndpoint, jsonRPCHandler)
 	}
 	return router
+}
+
+// dispatchByProtocol returns a handler that routes a JSON-RPC POST to the
+// legacy handler when its "method" is a legacy (slash-delimited) name and to
+// the v1 handler otherwise. The v1.0 PascalCase method names never contain a
+// slash, so the two sets are disjoint. Non-POST requests and unreadable
+// bodies fall through to the v1 handler.
+func (s *A2AServer) dispatchByProtocol(v1Handler, legacyHandler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.Body == nil {
+			v1Handler.ServeHTTP(w, r)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if closeErr := r.Body.Close(); closeErr != nil {
+			log.Errorf("Failed to close request body during protocol dispatch: %v", closeErr)
+		}
+		if err != nil {
+			s.writeJSONRPCError(w, nil, jsonrpc.ErrParseError(fmt.Sprintf("failed to read request body: %v", err)))
+			return
+		}
+		// Restore the body for the downstream handler.
+		r.Body = io.NopCloser(bytes.NewReader(body))
+
+		var probe struct {
+			Method string `json:"method"`
+		}
+		if json.Unmarshal(body, &probe) == nil && strings.Contains(probe.Method, "/") {
+			legacyHandler.ServeHTTP(w, r)
+			return
+		}
+		v1Handler.ServeHTTP(w, r)
+	})
 }
 
 // handleAgentCard serves the agent's metadata card as JSON.
@@ -630,22 +677,32 @@ func (s *A2AServer) handleTasksPushNotificationGet(
 	w http.ResponseWriter,
 	request jsonrpc.Request,
 ) {
-	var params protocol.TaskIDParams
+	var params protocol.GetTaskPushNotificationConfigParams
 	if err := s.unmarshalParams(request.Params, &params); err != nil {
 		s.writeJSONRPCError(w, request.ID, err)
 		return
 	}
 
-	// Validate required fields.
-	if params.ID == "" {
+	// v1.0 addresses the task by "taskId"; older clients put the task ID in
+	// "id". Accept both so the config-id field ("id") is not mistaken for the
+	// task ID.
+	taskID := params.TaskID
+	if taskID == "" {
+		taskID = params.ID
+	}
+	if taskID == "" {
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
 		return
 	}
 
 	// Delegate to the task manager.
-	result, err := s.taskManager.OnPushNotificationGet(ctx, params)
+	result, err := s.taskManager.OnPushNotificationGet(ctx, protocol.TaskIDParams{
+		RPCID:    params.RPCID,
+		ID:       taskID,
+		Metadata: nil,
+	})
 	if err != nil {
-		s.handleTaskManagerError(w, request.ID, err, "OnPushNotificationGet", params.ID)
+		s.handleTaskManagerError(w, request.ID, err, "OnPushNotificationGet", taskID)
 		return
 	}
 

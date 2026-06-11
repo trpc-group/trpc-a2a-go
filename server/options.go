@@ -68,6 +68,20 @@ func WithJSONRPCEndpoint(path string) Option {
 	}
 }
 
+// WithCompatHandler installs a fallback handler for JSON-RPC requests whose
+// method name is not a v1.0 method (e.g. the legacy slash-delimited names
+// served by compat/v0). The handler is mounted on the same JSON-RPC endpoint
+// and runs INSIDE the authentication middleware chain, so the legacy protocol
+// path is authenticated exactly like the v1 path.
+//
+// Prefer this over composing compat/v0.NewDualHandler around Server.Handler():
+// the latter dispatches before the middleware and therefore bypasses auth.
+func WithCompatHandler(h http.Handler) Option {
+	return func(s *A2AServer) {
+		s.compatHandler = h
+	}
+}
+
 // WithReadTimeout sets the read timeout for the HTTP server.
 func WithReadTimeout(timeout time.Duration) Option {
 	return func(s *A2AServer) {
