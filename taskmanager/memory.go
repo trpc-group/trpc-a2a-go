@@ -371,11 +371,18 @@ func (m *MemoryTaskManager) OnGetTask(ctx context.Context, params protocol.TaskQ
 	taskCopy := *task.Task()
 	m.taskMu.RUnlock()
 
-	// if the request contains history length, fill the message history
-	if params.HistoryLength != nil && *params.HistoryLength > 0 {
-		if taskCopy.ContextID != "" {
-			history := m.getConversationHistory(taskCopy.ContextID, *params.HistoryLength)
-			taskCopy.History = history
+	// Fill message history per the v1.0 GetTaskRequest semantics:
+	//   - historyLength unset -> no limit (full history)
+	//   - historyLength == 0  -> no messages
+	//   - historyLength > 0   -> the most recent N messages
+	if taskCopy.ContextID != "" {
+		switch {
+		case params.HistoryLength == nil:
+			taskCopy.History = m.getConversationHistory(taskCopy.ContextID, unlimitedHistoryLength)
+		case *params.HistoryLength > 0:
+			taskCopy.History = m.getConversationHistory(taskCopy.ContextID, *params.HistoryLength)
+		default: // == 0 (or negative): no messages
+			taskCopy.History = nil
 		}
 	}
 
@@ -436,6 +443,10 @@ func (m *MemoryTaskManager) OnPushNotificationGet(
 
 	return &config, nil
 }
+
+// unlimitedHistoryLength is used to request the full conversation history when
+// a v1.0 request leaves historyLength unset (spec: unset means no limit).
+const unlimitedHistoryLength = 1 << 30
 
 // listTasksDefaultPageSize is the default page size for OnListTasks (per v1.0 spec: 1-100, default 50).
 const listTasksDefaultPageSize = 50
@@ -677,7 +688,9 @@ func isFinalState(state protocol.TaskState) bool {
 // processConfiguration processes and normalizes Configuration
 func (m *MemoryTaskManager) processConfiguration(config *protocol.SendMessageConfiguration) ProcessOptions {
 	result := ProcessOptions{
-		Blocking:      false,
+		// v1.0 default: returnImmediately=false means the request blocks until a
+		// terminal/interrupted state, so a missing configuration is blocking.
+		Blocking:      true,
 		HistoryLength: 0,
 	}
 

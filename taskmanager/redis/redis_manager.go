@@ -204,10 +204,22 @@ func (m *TaskManager) OnGetTask(
 		return nil, err
 	}
 
-	// If the request contains history length, fill the message history.
-	if params.HistoryLength != nil && *params.HistoryLength > 0 {
-		if task.ContextID != "" {
-			history, err := m.getConversationHistory(ctx, task.ContextID, *params.HistoryLength)
+	// Fill message history per the v1.0 GetTaskRequest semantics:
+	//   - historyLength unset -> no limit (full history)
+	//   - historyLength == 0  -> no messages
+	//   - historyLength > 0   -> the most recent N messages
+	if task.ContextID != "" {
+		length := -1 // sentinel: unset -> unlimited
+		switch {
+		case params.HistoryLength == nil:
+			length = unlimitedHistoryLength
+		case *params.HistoryLength > 0:
+			length = *params.HistoryLength
+		default: // == 0 (or negative): no messages
+			task.History = nil
+		}
+		if length >= 0 {
+			history, err := m.getConversationHistory(ctx, task.ContextID, length)
 			if err != nil {
 				log.Warnf("Failed to retrieve message history for task %s: %v", params.ID, err)
 				// Continue without history rather than failing the whole request.
@@ -317,6 +329,10 @@ func (m *TaskManager) OnPushNotificationGet(
 
 	return &config, nil
 }
+
+// unlimitedHistoryLength is used to request the full conversation history when
+// a v1.0 request leaves historyLength unset (spec: unset means no limit).
+const unlimitedHistoryLength = 1 << 30
 
 // listTasksDefaultPageSize is the default page size for OnListTasks (per v1.0 spec: 1-100, default 50).
 const listTasksDefaultPageSize = 50
@@ -497,7 +513,9 @@ func (m *TaskManager) processConfiguration(
 	config *protocol.SendMessageConfiguration,
 ) taskmanager.ProcessOptions {
 	result := taskmanager.ProcessOptions{
-		Blocking:      false,
+		// v1.0 default: returnImmediately=false means the request blocks until a
+		// terminal/interrupted state, so a missing configuration is blocking.
+		Blocking:      true,
 		HistoryLength: 0,
 	}
 
