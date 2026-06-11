@@ -109,3 +109,49 @@ func TestClientServerLoopback(t *testing.T) {
 		assert.True(t, received[1].IsFinal())
 	})
 }
+
+// TestClientServerLoopback_MoreMethods covers the remaining legacy methods over
+// the real HTTP loopback (cancel, push get, resubscribe).
+func TestClientServerLoopback_MoreMethods(t *testing.T) {
+	fake := &fakeTaskManager{
+		task: &protocol.Task{
+			ID: "task-1", ContextID: "ctx-1",
+			Status: protocol.TaskStatus{State: protocol.TaskStateCanceled},
+		},
+		pushConfig: &protocol.TaskPushNotificationConfig{
+			TaskID: "task-1", URL: "https://example.com/hook",
+		},
+		streamEvents: []protocol.StreamResponse{
+			{StatusUpdate: &protocol.TaskStatusUpdateEvent{
+				TaskID: "task-1", Status: protocol.TaskStatus{State: protocol.TaskStateCompleted}}},
+		},
+	}
+	server := httptest.NewServer(NewJSONRPCHandler(fake))
+	defer server.Close()
+	client, err := NewClient(server.URL)
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	t.Run("CancelTasks", func(t *testing.T) {
+		task, err := client.CancelTasks(ctx, protocol.TaskIDParams{ID: "task-1"})
+		require.NoError(t, err)
+		assert.Equal(t, protocol.TaskStateCanceled, task.Status.State)
+	})
+
+	t.Run("GetPushNotification", func(t *testing.T) {
+		cfg, err := client.GetPushNotification(ctx, protocol.TaskIDParams{ID: "task-1"})
+		require.NoError(t, err)
+		assert.Equal(t, "https://example.com/hook", cfg.URL)
+	})
+
+	t.Run("ResubscribeTask", func(t *testing.T) {
+		events, err := client.ResubscribeTask(ctx, protocol.TaskIDParams{ID: "task-1"})
+		require.NoError(t, err)
+		var got []protocol.StreamResponse
+		for ev := range events {
+			got = append(got, ev)
+		}
+		require.Len(t, got, 1)
+		assert.True(t, got[0].IsFinal())
+	})
+}

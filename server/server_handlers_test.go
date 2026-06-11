@@ -509,3 +509,54 @@ func TestA2AServer_StartStop(t *testing.T) {
 		t.Fatal("Timed out waiting for server to stop")
 	}
 }
+
+// TestA2AServer_V1Operations covers the v1.0 ListTasks / push-config list+delete
+// dispatch and the GetTaskPushNotificationConfig taskId/id parsing.
+func TestA2AServer_V1Operations(t *testing.T) {
+	mockTM := newMockTaskManager()
+	testServer := newTestServer(t, mockTM)
+	defer testServer.Close()
+
+	t.Run("ListTasks", func(t *testing.T) {
+		resp := performJSONRPCRequest(t, testServer, protocol.MethodTasksList,
+			protocol.ListTasksParams{ContextID: "c1"}, "req-list-1")
+		require.Nil(t, resp.Error)
+		require.NotNil(t, resp.Result)
+	})
+
+	t.Run("ListPushConfigs", func(t *testing.T) {
+		resp := performJSONRPCRequest(t, testServer, protocol.MethodTasksPushNotificationConfigList,
+			protocol.ListTaskPushNotificationConfigsParams{TaskID: "t1"}, "req-listpush-1")
+		require.Nil(t, resp.Error)
+	})
+
+	t.Run("DeletePushConfig", func(t *testing.T) {
+		resp := performJSONRPCRequest(t, testServer, protocol.MethodTasksPushNotificationConfigDelete,
+			protocol.DeleteTaskPushNotificationConfigParams{TaskID: "t1", ID: "cfg-1"}, "req-delpush-1")
+		require.Nil(t, resp.Error)
+	})
+
+	t.Run("ListPushConfigs missing taskId -> invalid params", func(t *testing.T) {
+		resp := performJSONRPCRequest(t, testServer, protocol.MethodTasksPushNotificationConfigList,
+			protocol.ListTaskPushNotificationConfigsParams{}, "req-listpush-2")
+		require.NotNil(t, resp.Error)
+	})
+
+	t.Run("GetPushConfig parses v1 taskId+id", func(t *testing.T) {
+		mockTM.pushNotificationGetResponse = &protocol.TaskPushNotificationConfig{
+			TaskID: "t1", URL: "https://example.com/hook",
+		}
+		// v1.0 shape: the config id goes in "id", the task in "taskId".
+		resp := performJSONRPCRequest(t, testServer, protocol.MethodTasksPushNotificationConfigGet,
+			map[string]string{"taskId": "t1", "id": "cfg-1"}, "req-getpush-1")
+		require.Nil(t, resp.Error, "v1 {taskId,id} shape must be accepted")
+	})
+}
+
+// newTestServer builds an httptest server serving the full A2A router.
+func newTestServer(t *testing.T, tm taskmanager.TaskManager) *httptest.Server {
+	t.Helper()
+	srv, err := NewA2AServer(defaultAgentCard(), tm)
+	require.NoError(t, err)
+	return httptest.NewServer(srv.Handler())
+}
