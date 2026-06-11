@@ -9,6 +9,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -177,11 +178,13 @@ type SendMessageConfiguration struct {
 	ReturnImmediately *bool `json:"returnImmediately,omitempty"`
 }
 
-// IsBlocking returns the effective blocking flag for backward-compatible logic.
-// When ReturnImmediately is nil or false, the request is blocking.
+// IsBlocking returns the effective blocking flag.
+// Per the v1.0 spec, returnImmediately defaults to false, meaning the server
+// MUST wait for a terminal/interrupted state before returning. So an unset
+// configuration (or unset ReturnImmediately) is blocking.
 func (c *SendMessageConfiguration) IsBlocking() bool {
 	if c == nil || c.ReturnImmediately == nil {
-		return false
+		return true
 	}
 	return !*c.ReturnImmediately
 }
@@ -344,6 +347,16 @@ func (r *SendMessageResponse) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &w); err != nil {
 		return err
 	}
+	count := 0
+	if w.Message != nil {
+		count++
+	}
+	if w.Task != nil {
+		count++
+	}
+	if count != 1 {
+		return fmt.Errorf("send message response must have exactly one of message/task, got %d", count)
+	}
 	r.Message = w.Message
 	r.Task = w.Task
 	return nil
@@ -384,6 +397,22 @@ func (r *StreamResponse) UnmarshalJSON(data []byte) error {
 	var w streamResponseWire
 	if err := json.Unmarshal(data, &w); err != nil {
 		return err
+	}
+	count := 0
+	if w.StatusUpdate != nil {
+		count++
+	}
+	if w.ArtifactUpdate != nil {
+		count++
+	}
+	if w.Task != nil {
+		count++
+	}
+	if w.Message != nil {
+		count++
+	}
+	if count != 1 {
+		return fmt.Errorf("stream response must have exactly one of statusUpdate/artifactUpdate/task/message, got %d", count)
 	}
 	r.StatusUpdate = w.StatusUpdate
 	r.ArtifactUpdate = w.ArtifactUpdate
@@ -525,4 +554,3 @@ func NewStreamResponseTask(t *Task) StreamResponse {
 func NewStreamResponseMessage(m *Message) StreamResponse {
 	return StreamResponse{Message: m}
 }
-

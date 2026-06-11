@@ -161,3 +161,54 @@ func TestConvenienceAccessors(t *testing.T) {
 	assert.Equal(t, "", nilPart.TextContent())
 	assert.Nil(t, nilPart.RawContent())
 }
+
+func TestPart_DataNilRoundTrip(t *testing.T) {
+	// A Data part whose value is nil must round-trip through JSON as data:null,
+	// not be rejected on decode (regression: previously "got 0" content fields).
+	p := &Part{Content: Data{Value: nil}}
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(b) != `{"data":null}` {
+		t.Fatalf("expected {\"data\":null}, got %s", string(b))
+	}
+	var back Part
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatalf("unmarshal data:null failed: %v", err)
+	}
+	d, ok := back.Content.(Data)
+	if !ok {
+		t.Fatalf("expected Data content, got %T", back.Content)
+	}
+	if d.Value != nil {
+		t.Fatalf("expected nil value, got %v", d.Value)
+	}
+}
+
+func TestStreamResponse_ExactlyOneVariant(t *testing.T) {
+	// No variant key present -> error (regression: previously decoded to an
+	// all-nil wrapper silently).
+	var sr StreamResponse
+	if err := json.Unmarshal([]byte(`{"kind":"status-update"}`), &sr); err == nil {
+		t.Fatal("expected error for stream response with no v1 variant key")
+	}
+	// Two variants present -> error.
+	if err := json.Unmarshal([]byte(`{"task":{"id":"t"},"message":{"messageId":"m"}}`), &sr); err == nil {
+		t.Fatal("expected error for stream response with two variants")
+	}
+	// Exactly one -> ok.
+	if err := json.Unmarshal([]byte(`{"task":{"id":"t","contextId":"c","status":{"state":"TASK_STATE_WORKING"}}}`), &sr); err != nil {
+		t.Fatalf("valid single-variant stream response rejected: %v", err)
+	}
+}
+
+func TestSendMessageResponse_ExactlyOneVariant(t *testing.T) {
+	var r SendMessageResponse
+	if err := json.Unmarshal([]byte(`{}`), &r); err == nil {
+		t.Fatal("expected error for empty send message response")
+	}
+	if err := json.Unmarshal([]byte(`{"message":{"messageId":"m","role":"ROLE_AGENT","parts":[{"text":"x"}]}}`), &r); err != nil {
+		t.Fatalf("valid single-variant send response rejected: %v", err)
+	}
+}

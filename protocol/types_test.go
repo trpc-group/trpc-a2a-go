@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func boolPtr(b bool) *bool   { return &b }
+func boolPtr(b bool) *bool       { return &b }
 func stringPtr(s string) *string { return &s }
 
 func TestTaskState(t *testing.T) {
@@ -87,9 +87,9 @@ func TestArtifactJSON(t *testing.T) {
 
 func TestTaskEventIsFinal(t *testing.T) {
 	tests := []struct {
-		name     string
-		final    bool
-		event    interface{ IsFinal() bool }
+		name  string
+		final bool
+		event interface{ IsFinal() bool }
 	}{
 		{"StatusUpdate non-final", false, &TaskStatusUpdateEvent{Final: false}},
 		{"StatusUpdate final", true, &TaskStatusUpdateEvent{Final: true}},
@@ -225,8 +225,10 @@ func TestStreamResponseJSON(t *testing.T) {
 }
 
 func TestSendMessageConfigurationIsBlocking(t *testing.T) {
-	assert.False(t, (*SendMessageConfiguration)(nil).IsBlocking())
-	assert.False(t, (&SendMessageConfiguration{}).IsBlocking())
+	// v1.0: returnImmediately defaults to false, so an unset config (or unset
+	// ReturnImmediately) blocks until a terminal/interrupted state.
+	assert.True(t, (*SendMessageConfiguration)(nil).IsBlocking())
+	assert.True(t, (&SendMessageConfiguration{}).IsBlocking())
 	assert.False(t, (&SendMessageConfiguration{ReturnImmediately: boolPtr(true)}).IsBlocking())
 	assert.True(t, (&SendMessageConfiguration{ReturnImmediately: boolPtr(false)}).IsBlocking())
 }

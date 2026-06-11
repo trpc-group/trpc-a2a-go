@@ -122,13 +122,16 @@ func NewDataPart(data any) *Part {
 // partWire is the private mirror struct for Part JSON serialization.
 // Fields map directly to the v1.0 JSON wire format.
 type partWire struct {
-	Text      *string        `json:"text,omitempty"`
-	Raw       *string        `json:"raw,omitempty"`
-	URL       *string        `json:"url,omitempty"`
-	Data      *any           `json:"data,omitempty"`
-	Filename  string         `json:"filename,omitempty"`
-	MediaType string         `json:"mediaType,omitempty"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
+	Text *string `json:"text,omitempty"`
+	Raw  *string `json:"raw,omitempty"`
+	URL  *string `json:"url,omitempty"`
+	// Data uses RawMessage so that a Data part whose value is JSON null
+	// (data:null) is detected by key presence (len > 0) rather than a non-nil
+	// pointer, allowing it to round-trip instead of decoding to zero content.
+	Data      json.RawMessage `json:"data,omitempty"`
+	Filename  string          `json:"filename,omitempty"`
+	MediaType string          `json:"mediaType,omitempty"`
+	Metadata  map[string]any  `json:"metadata,omitempty"`
 }
 
 // MarshalJSON implements the json.Marshaler interface.
@@ -149,7 +152,11 @@ func (p Part) MarshalJSON() ([]byte, error) {
 		s := string(v)
 		w.URL = &s
 	case Data:
-		w.Data = &v.Value
+		raw, err := json.Marshal(v.Value)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal data content: %w", err)
+		}
+		w.Data = raw
 	case nil:
 		return nil, errors.New("part content is nil")
 	default:
@@ -178,7 +185,7 @@ func (p *Part) UnmarshalJSON(data []byte) error {
 	if w.URL != nil {
 		count++
 	}
-	if w.Data != nil {
+	if w.Data != nil { // len > 0: key present, including an explicit data:null
 		count++
 	}
 	if count != 1 {
@@ -197,7 +204,11 @@ func (p *Part) UnmarshalJSON(data []byte) error {
 	case w.URL != nil:
 		p.Content = URL(*w.URL)
 	case w.Data != nil:
-		p.Content = Data{Value: *w.Data}
+		var value any
+		if err := json.Unmarshal(w.Data, &value); err != nil {
+			return fmt.Errorf("failed to decode data content: %w", err)
+		}
+		p.Content = Data{Value: value}
 	}
 	return nil
 }
