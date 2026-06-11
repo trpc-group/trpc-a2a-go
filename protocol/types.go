@@ -18,6 +18,7 @@ import (
 // TaskState represents the lifecycle state of a task (SCREAMING_SNAKE_CASE per v1.0).
 type TaskState string
 
+// TaskState constants enumerate the v1.0 task lifecycle states.
 const (
 	// TaskStateUnspecified is the proto zero value (TASK_STATE_UNSPECIFIED).
 	TaskStateUnspecified   TaskState = "TASK_STATE_UNSPECIFIED"
@@ -45,6 +46,7 @@ func (s TaskState) Terminal() bool {
 // MessageRole indicates the originator of a message (SCREAMING_SNAKE_CASE per v1.0).
 type MessageRole string
 
+// MessageRole constants enumerate the v1.0 message originators.
 const (
 	// MessageRoleUnspecified is the proto zero value (ROLE_UNSPECIFIED).
 	MessageRoleUnspecified MessageRole = "ROLE_UNSPECIFIED"

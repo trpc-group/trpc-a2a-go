@@ -9,25 +9,37 @@ package server
 
 import "trpc.group/trpc-go/trpc-a2a-go/protocol"
 
-const (
-	ProtocolVersion = "1.0.1"
-)
+// ProtocolVersion is the A2A protocol version implemented by this server.
+const ProtocolVersion = "1.0"
 
-// Type aliases re-exported from protocol/ for backward compatibility.
-// New code should import protocol/ directly.
+// The following types are aliases re-exported from protocol/ for backward
+// compatibility. New code should import protocol/ directly.
 type (
-	AgentCard           = protocol.AgentCard
-	AgentProvider       = protocol.AgentProvider
-	AgentCapabilities   = protocol.AgentCapabilities
-	AgentSkill          = protocol.AgentSkill
-	AgentExtension      = protocol.AgentExtension
-	AgentInterface      = protocol.AgentInterface
-	AgentCardSignature  = protocol.AgentCardSignature
-	SecurityScheme      = protocol.SecurityScheme
-	SecuritySchemeType  = protocol.SecuritySchemeType
-	SecuritySchemeIn    = protocol.SecuritySchemeIn
-	OAuthFlows          = protocol.OAuthFlows
-	OAuthFlow           = protocol.OAuthFlow
+	// AgentCard is an alias for protocol.AgentCard.
+	AgentCard = protocol.AgentCard
+	// AgentProvider is an alias for protocol.AgentProvider.
+	AgentProvider = protocol.AgentProvider
+	// AgentCapabilities is an alias for protocol.AgentCapabilities.
+	AgentCapabilities = protocol.AgentCapabilities
+	// AgentSkill is an alias for protocol.AgentSkill.
+	AgentSkill = protocol.AgentSkill
+	// AgentExtension is an alias for protocol.AgentExtension.
+	AgentExtension = protocol.AgentExtension
+	// AgentInterface is an alias for protocol.AgentInterface.
+	AgentInterface = protocol.AgentInterface
+	// AgentCardSignature is an alias for protocol.AgentCardSignature.
+	AgentCardSignature = protocol.AgentCardSignature
+	// SecurityScheme is an alias for protocol.SecurityScheme.
+	SecurityScheme = protocol.SecurityScheme
+	// SecuritySchemeType is an alias for protocol.SecuritySchemeType.
+	SecuritySchemeType = protocol.SecuritySchemeType
+	// SecuritySchemeIn is an alias for protocol.SecuritySchemeIn.
+	SecuritySchemeIn = protocol.SecuritySchemeIn
+	// OAuthFlows is an alias for protocol.OAuthFlows.
+	OAuthFlows = protocol.OAuthFlows
+	// OAuthFlow is an alias for protocol.OAuthFlow.
+	OAuthFlow = protocol.OAuthFlow
+	// AgentAuthentication is an alias for protocol.AgentAuthentication.
 	AgentAuthentication = protocol.AgentAuthentication
 )
 

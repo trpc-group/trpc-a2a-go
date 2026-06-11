@@ -33,6 +33,7 @@ type SecurityScheme struct {
 // SecuritySchemeType represents the type of security scheme.
 type SecuritySchemeType string
 
+// SecuritySchemeType constants enumerate the supported security-scheme types.
 const (
 	SecuritySchemeTypeAPIKey        SecuritySchemeType = "apiKey"
 	SecuritySchemeTypeHTTP          SecuritySchemeType = "http"
@@ -45,6 +46,7 @@ const (
 // SecuritySchemeIn represents where to include the security credentials.
 type SecuritySchemeIn string
 
+// SecuritySchemeIn constants enumerate the API-key locations.
 const (
 	SecuritySchemeInQuery  SecuritySchemeIn = "query"
 	SecuritySchemeInHeader SecuritySchemeIn = "header"
