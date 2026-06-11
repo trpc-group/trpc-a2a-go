@@ -16,18 +16,18 @@ const (
 // Type aliases re-exported from protocol/ for backward compatibility.
 // New code should import protocol/ directly.
 type (
-	AgentCard          = protocol.AgentCard
-	AgentProvider      = protocol.AgentProvider
-	AgentCapabilities  = protocol.AgentCapabilities
-	AgentSkill         = protocol.AgentSkill
-	AgentExtension     = protocol.AgentExtension
-	AgentInterface     = protocol.AgentInterface
-	AgentCardSignature = protocol.AgentCardSignature
-	SecurityScheme     = protocol.SecurityScheme
-	SecuritySchemeType = protocol.SecuritySchemeType
-	SecuritySchemeIn   = protocol.SecuritySchemeIn
-	OAuthFlows         = protocol.OAuthFlows
-	OAuthFlow          = protocol.OAuthFlow
+	AgentCard           = protocol.AgentCard
+	AgentProvider       = protocol.AgentProvider
+	AgentCapabilities   = protocol.AgentCapabilities
+	AgentSkill          = protocol.AgentSkill
+	AgentExtension      = protocol.AgentExtension
+	AgentInterface      = protocol.AgentInterface
+	AgentCardSignature  = protocol.AgentCardSignature
+	SecurityScheme      = protocol.SecurityScheme
+	SecuritySchemeType  = protocol.SecuritySchemeType
+	SecuritySchemeIn    = protocol.SecuritySchemeIn
+	OAuthFlows          = protocol.OAuthFlows
+	OAuthFlow           = protocol.OAuthFlow
 	AgentAuthentication = protocol.AgentAuthentication
 )
 

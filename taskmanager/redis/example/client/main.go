@@ -369,4 +369,3 @@ func getStatusPrefix(state protocol.TaskState) string {
 		return "STATUS"
 	}
 }
-

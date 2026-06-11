@@ -12,8 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
-	"strconv"
 	"sync"
 	"time"
 
@@ -334,25 +332,15 @@ func (m *TaskManager) OnPushNotificationGet(
 // a v1.0 request leaves historyLength unset (spec: unset means no limit).
 const unlimitedHistoryLength = 1 << 30
 
-// listTasksDefaultPageSize is the default page size for OnListTasks (per v1.0 spec: 1-100, default 50).
-const listTasksDefaultPageSize = 50
-
-// listTasksMaxPageSize is the maximum page size for OnListTasks.
-const listTasksMaxPageSize = 100
-
 // OnListTasks handles the v1.0 ListTasks request by scanning stored tasks,
 // filtering, and applying offset-based pagination.
 func (m *TaskManager) OnListTasks(
 	ctx context.Context,
 	params protocol.ListTasksParams,
 ) (*protocol.ListTasksResult, error) {
-	var afterTime time.Time
-	if params.StatusTimestampAfter != "" {
-		t, err := time.Parse(time.RFC3339, params.StatusTimestampAfter)
-		if err != nil {
-			return nil, fmt.Errorf("invalid statusTimestampAfter %q: %w", params.StatusTimestampAfter, err)
-		}
-		afterTime = t
+	afterTime, err := taskmanager.ParseListTasksStatusTimestampAfter(params.StatusTimestampAfter)
+	if err != nil {
+		return nil, err
 	}
 
 	// Scan all task keys and collect matching tasks.
@@ -368,71 +356,14 @@ func (m *TaskManager) OnListTasks(
 			log.Errorf("RedisTaskManager: skip malformed task at %s: %v", iter.Val(), err)
 			continue
 		}
-		if params.ContextID != "" && task.ContextID != params.ContextID {
-			continue
+		if taskmanager.TaskMatchesListFilter(&task, params, afterTime) {
+			filtered = append(filtered, &task)
 		}
-		if params.Status != "" && task.Status.State != params.Status {
-			continue
-		}
-		if !afterTime.IsZero() {
-			ts, err := time.Parse(time.RFC3339, task.Status.Timestamp)
-			if err != nil || !ts.After(afterTime) {
-				continue
-			}
-		}
-		filtered = append(filtered, &task)
 	}
 	if err := iter.Err(); err != nil {
 		return nil, fmt.Errorf("failed to scan tasks: %w", err)
 	}
-	// Deterministic order for stable pagination.
-	sort.Slice(filtered, func(i, j int) bool { return filtered[i].ID < filtered[j].ID })
-
-	pageSize := listTasksDefaultPageSize
-	if params.PageSize != nil && *params.PageSize > 0 {
-		pageSize = *params.PageSize
-		if pageSize > listTasksMaxPageSize {
-			pageSize = listTasksMaxPageSize
-		}
-	}
-	offset := 0
-	if params.PageToken != "" {
-		o, err := strconv.Atoi(params.PageToken)
-		if err != nil || o < 0 {
-			return nil, fmt.Errorf("invalid pageToken %q", params.PageToken)
-		}
-		offset = o
-	}
-
-	totalSize := len(filtered)
-	end := offset + pageSize
-	if offset > totalSize {
-		offset = totalSize
-	}
-	if end > totalSize {
-		end = totalSize
-	}
-
-	tasks := make([]*protocol.Task, 0, end-offset)
-	for _, task := range filtered[offset:end] {
-		if params.HistoryLength != nil && *params.HistoryLength >= 0 && len(task.History) > *params.HistoryLength {
-			task.History = task.History[len(task.History)-*params.HistoryLength:]
-		}
-		if params.IncludeArtifacts == nil || !*params.IncludeArtifacts {
-			task.Artifacts = nil
-		}
-		tasks = append(tasks, task)
-	}
-
-	result := &protocol.ListTasksResult{
-		Tasks:     tasks,
-		PageSize:  pageSize,
-		TotalSize: totalSize,
-	}
-	if end < totalSize {
-		result.NextPageToken = strconv.Itoa(end)
-	}
-	return result, nil
+	return taskmanager.PaginateTasks(filtered, params)
 }
 
 // OnPushNotificationList handles the v1.0 ListTaskPushNotificationConfigs request.
