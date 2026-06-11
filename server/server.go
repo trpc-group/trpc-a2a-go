@@ -111,7 +111,7 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 		server.agentCardPath == originalAgentCardPath &&
 		server.jwksEndpoint == originalJWKSEndpoint {
 
-		basePath := extractBasePathFromURL(agentCard.URL)
+		basePath := extractBasePathFromURL(agentCard.PrimaryURL())
 		if basePath != "" {
 			// Configure endpoints with the extracted base path.
 			server.jsonRPCEndpoint = basePath + "/"
@@ -654,16 +654,17 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 
 // composeJWKSURL returns the fully qualified URL to the JWKS endpoint.
 func (s *A2AServer) composeJWKSURL() string {
-	if s.agentCard.URL == "" {
+	cardURL := s.agentCard.PrimaryURL()
+	if cardURL == "" {
 		// This is a fallback, but ideally the agent card should have a proper URL.
 		log.Warn("Agent card URL is empty, using relative JWKS endpoint")
 		return s.jwksEndpoint
 	}
 
 	// Parse the agent card URL to extract the base (scheme + host + port).
-	parsedURL, err := url.Parse(s.agentCard.URL)
+	parsedURL, err := url.Parse(cardURL)
 	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
-		log.Warnf("Failed to parse agent card URL '%s': %v", s.agentCard.URL, err)
+		log.Warnf("Failed to parse agent card URL '%s': %v", cardURL, err)
 		return s.jwksEndpoint
 	}
 

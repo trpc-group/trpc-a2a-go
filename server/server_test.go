@@ -1069,3 +1069,23 @@ func TestCompatHandler_CoveredByMiddleware(t *testing.T) {
 	defer resp2.Body.Close()
 	assert.Equal(t, http.StatusUnauthorized, resp2.StatusCode)
 }
+
+// TestServer_BasePathFromSupportedInterfaces verifies the JSON-RPC base path is
+// derived from SupportedInterfaces[0].URL when the deprecated top-level URL is
+// empty (regression for the server reading only agentCard.URL).
+func TestServer_BasePathFromSupportedInterfaces(t *testing.T) {
+	card := AgentCard{
+		Name:        "Test Agent",
+		Description: "x",
+		Version:     "v1",
+		SupportedInterfaces: []protocol.AgentInterface{
+			{URL: "http://localhost:8080/agent/api", ProtocolBinding: "JSONRPC", ProtocolVersion: "1.0"},
+		},
+		DefaultInputModes:  []string{"text"},
+		DefaultOutputModes: []string{"text"},
+	}
+	srv, err := NewA2AServer(card, newMockTaskManager())
+	require.NoError(t, err)
+	assert.Equal(t, "/agent/api/", srv.jsonRPCEndpoint,
+		"base path should come from SupportedInterfaces[0].URL")
+}

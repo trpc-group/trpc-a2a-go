@@ -6,6 +6,8 @@
 
 package protocol
 
+import "encoding/json"
+
 // AgentCard is the metadata structure describing an A2A agent (v1.0).
 //
 // The v1.0 wire model describes transport bindings via SupportedInterfaces. The
@@ -29,7 +31,7 @@ type AgentCard struct {
 	DocumentationURL     *string                   `json:"documentationUrl,omitempty"`
 	Capabilities         AgentCapabilities         `json:"capabilities"`
 	SecuritySchemes      map[string]SecurityScheme `json:"securitySchemes,omitempty"`
-	SecurityRequirements []map[string][]string     `json:"securityRequirements,omitempty"`
+	SecurityRequirements SecurityRequirements      `json:"securityRequirements,omitempty"`
 	DefaultInputModes    []string                  `json:"defaultInputModes"`
 	DefaultOutputModes   []string                  `json:"defaultOutputModes"`
 	Skills               []AgentSkill              `json:"skills"`
@@ -47,6 +49,10 @@ type AgentCard struct {
 	AdditionalInterfaces []AgentInterface `json:"additionalInterfaces,omitempty"`
 	// SupportsAuthenticatedExtendedCard is deprecated. Use Capabilities.ExtendedAgentCard.
 	SupportsAuthenticatedExtendedCard *bool `json:"supportsAuthenticatedExtendedCard,omitempty"`
+	// Security is the deprecated v0.x flat security-requirements list (JSON key
+	// "security"). It is mirrored from SecurityRequirements by NormalizeSecurity
+	// so that v0 clients reading the card still see their expected key.
+	Security []map[string][]string `json:"security,omitempty"`
 }
 
 // ExtendedAgentCardEnabled reports whether the authenticated extended card is
@@ -68,10 +74,15 @@ func (c *AgentCard) PrimaryURL() string {
 	return c.URL
 }
 
+// ProtocolVersionV1 is the A2A protocol version this package implements.
+const ProtocolVersionV1 = "1.0"
+
 // NormalizeInterfaces populates SupportedInterfaces (v1.0) from the deprecated
 // URL/PreferredTransport/AdditionalInterfaces fields when it is empty, so a card
 // configured the v0 way still serializes a conformant supportedInterfaces list.
+// It also normalizes the security requirements (see NormalizeSecurity).
 func (c *AgentCard) NormalizeInterfaces() {
+	c.NormalizeSecurity()
 	if len(c.SupportedInterfaces) > 0 || c.URL == "" {
 		return
 	}
@@ -79,16 +90,28 @@ func (c *AgentCard) NormalizeInterfaces() {
 	if c.PreferredTransport != nil && *c.PreferredTransport != "" {
 		binding = *c.PreferredTransport
 	}
-	version := "1.0"
-	if c.ProtocolVersion != nil && *c.ProtocolVersion != "" {
-		version = *c.ProtocolVersion
-	}
+	// The derived interface always advertises the protocol version this build
+	// speaks (v1.0). The deprecated top-level ProtocolVersion may legitimately
+	// carry a legacy value (e.g. "0.2.5") for v0 clients and must NOT leak into
+	// the v1 interface version.
 	c.SupportedInterfaces = append(c.SupportedInterfaces, AgentInterface{
 		URL:             c.URL,
 		ProtocolBinding: binding,
-		ProtocolVersion: version,
+		ProtocolVersion: ProtocolVersionV1,
 	})
 	c.SupportedInterfaces = append(c.SupportedInterfaces, c.AdditionalInterfaces...)
+}
+
+// NormalizeSecurity mirrors the security requirements between the v1.0
+// (SecurityRequirements) and the deprecated v0 (Security) representations so a
+// single served card is readable by both protocol generations. Whichever side
+// is set populates the other; if both are set, neither is overwritten.
+func (c *AgentCard) NormalizeSecurity() {
+	if len(c.SecurityRequirements) > 0 && len(c.Security) == 0 {
+		c.Security = []map[string][]string(c.SecurityRequirements)
+	} else if len(c.Security) > 0 && len(c.SecurityRequirements) == 0 {
+		c.SecurityRequirements = SecurityRequirements(c.Security)
+	}
 }
 
 // AgentProvider contains information about the agent's provider.
@@ -99,9 +122,9 @@ type AgentProvider struct {
 
 // AgentCapabilities defines the capabilities supported by an agent.
 type AgentCapabilities struct {
-	Streaming              *bool            `json:"streaming,omitempty"`
-	PushNotifications      *bool            `json:"pushNotifications,omitempty"`
-	StateTransitionHistory *bool            `json:"stateTransitionHistory,omitempty"`
+	Streaming              *bool `json:"streaming,omitempty"`
+	PushNotifications      *bool `json:"pushNotifications,omitempty"`
+	StateTransitionHistory *bool `json:"stateTransitionHistory,omitempty"`
 	// ExtendedAgentCard reports whether the agent serves an authenticated
 	// extended card (v1.0 location for the deprecated
 	// AgentCard.SupportsAuthenticatedExtendedCard flag).
@@ -134,6 +157,47 @@ type AgentInterface struct {
 	ProtocolBinding string `json:"protocolBinding"`
 	Tenant          string `json:"tenant,omitempty"`
 	ProtocolVersion string `json:"protocolVersion,omitempty"`
+}
+
+type agentInterfaceWire struct {
+	URL             string `json:"url"`
+	ProtocolBinding string `json:"protocolBinding,omitempty"`
+	// Transport is the deprecated v0.x key for the protocol binding; emitted as
+	// a mirror of ProtocolBinding so v0 clients can read it, and accepted as a
+	// fallback when decoding a card produced by a v0.x server.
+	Transport       string `json:"transport,omitempty"`
+	Tenant          string `json:"tenant,omitempty"`
+	ProtocolVersion string `json:"protocolVersion,omitempty"`
+}
+
+// MarshalJSON emits both the v1.0 "protocolBinding" key and the deprecated v0
+// "transport" key so a single card is readable by both protocol generations.
+func (i AgentInterface) MarshalJSON() ([]byte, error) {
+	return json.Marshal(agentInterfaceWire{
+		URL:             i.URL,
+		ProtocolBinding: i.ProtocolBinding,
+		Transport:       i.ProtocolBinding,
+		Tenant:          i.Tenant,
+		ProtocolVersion: i.ProtocolVersion,
+	})
+}
+
+// UnmarshalJSON reads "protocolBinding" (v1.0), falling back to the deprecated
+// "transport" key (v0.x) so cards from not-yet-upgraded servers keep their
+// binding.
+func (i *AgentInterface) UnmarshalJSON(data []byte) error {
+	var w agentInterfaceWire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	i.URL = w.URL
+	i.ProtocolBinding = w.ProtocolBinding
+	if i.ProtocolBinding == "" {
+		i.ProtocolBinding = w.Transport
+	}
+	i.Tenant = w.Tenant
+	i.ProtocolVersion = w.ProtocolVersion
+	return nil
 }
 
 // AgentCardSignature represents a JWS signature of an AgentCard (RFC 7515).

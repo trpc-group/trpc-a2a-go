@@ -21,6 +21,8 @@ func FillLegacyCardFields(card *protocol.AgentCard) {
 	if card == nil {
 		return
 	}
+	// Mirror v1.0 security requirements into the deprecated v0 "security" key.
+	card.NormalizeSecurity()
 	if len(card.SupportedInterfaces) > 0 {
 		preferred := card.SupportedInterfaces[0]
 		if card.URL == "" {
