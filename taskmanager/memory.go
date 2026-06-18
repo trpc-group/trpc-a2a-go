@@ -87,6 +87,7 @@ func WithSubscriberBlockingSend(blockingSend bool) MemoryTaskSubscriberOption {
 type MemoryTaskSubscriber struct {
 	taskID         string
 	eventQueue     chan protocol.StreamingMessageEvent
+	done           chan struct{}
 	lastAccessTime time.Time
 	closed         atomic.Bool
 	mu             sync.RWMutex
@@ -113,6 +114,7 @@ func NewMemoryTaskSubscriber(
 	return &MemoryTaskSubscriber{
 		taskID:         taskID,
 		eventQueue:     eventQueue,
+		done:           make(chan struct{}),
 		lastAccessTime: time.Now(),
 		closed:         atomic.Bool{},
 		opts:           subscriberOpts,
@@ -121,12 +123,14 @@ func NewMemoryTaskSubscriber(
 
 // Close closes the task subscriber
 func (s *MemoryTaskSubscriber) Close() {
+	if !s.closed.CompareAndSwap(false, true) {
+		return
+	}
+	close(s.done)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.closed.Load() {
-		s.closed.Store(true)
-		close(s.eventQueue)
-	}
+	close(s.eventQueue)
 }
 
 // Channel returns the channel of the task subscriber
@@ -160,13 +164,19 @@ func (s *MemoryTaskSubscriber) Send(event protocol.StreamingMessageEvent) error 
 	}
 
 	if s.opts.blockingSend {
-		s.eventQueue <- event
-		return nil
+		select {
+		case s.eventQueue <- event:
+			return nil
+		case <-s.done:
+			return fmt.Errorf("task subscriber is closed")
+		}
 	}
 
 	select {
 	case s.eventQueue <- event:
 		return nil
+	case <-s.done:
+		return fmt.Errorf("task subscriber is closed")
 	default:
 		return fmt.Errorf("event queue is full or closed")
 	}
@@ -219,7 +229,9 @@ type MemoryTaskManager struct {
 
 	// stopCleanup signals the cleanup goroutine to stop
 	stopCleanup chan struct{}
-	closeOnce   sync.Once
+	// cleanupWg tracks the cleanup goroutine so Close can wait for it to exit
+	cleanupWg sync.WaitGroup
+	closeOnce sync.Once
 }
 
 // NewMemoryTaskManager creates a new MemoryTaskManager instance
@@ -249,7 +261,9 @@ func NewMemoryTaskManager(processor MessageProcessor, opts ...MemoryTaskManagerO
 
 	// Start cleanup goroutine if enabled
 	if options.EnableCleanup {
+		manager.cleanupWg.Add(1)
 		go func() {
+			defer manager.cleanupWg.Done()
 			ticker := time.NewTicker(options.CleanupInterval)
 			defer ticker.Stop()
 
@@ -690,24 +704,23 @@ func (m *MemoryTaskManager) notifySubscribers(taskID string, event protocol.Stre
 // cleanupFailedSubscribers cleans up failed or closed subscribers
 func (m *MemoryTaskManager) cleanupFailedSubscribers(taskID string, failedSubscribers []*MemoryTaskSubscriber) {
 	m.taskMu.Lock()
-	defer m.taskMu.Unlock()
 
 	subs, exists := m.Subscribers[taskID]
 	if !exists {
+		m.taskMu.Unlock()
 		return
 	}
 
 	// Filter out failed subscribers
 	filteredSubs := make([]*MemoryTaskSubscriber, 0, len(subs))
-	removedCount := 0
+	removedSubs := make([]*MemoryTaskSubscriber, 0, len(failedSubscribers))
 
 	for _, sub := range subs {
 		shouldRemove := false
 		for _, failedSub := range failedSubscribers {
 			if sub == failedSub {
 				shouldRemove = true
-				removedCount++
-				sub.Close()
+				removedSubs = append(removedSubs, sub)
 				break
 			}
 		}
@@ -716,29 +729,38 @@ func (m *MemoryTaskManager) cleanupFailedSubscribers(taskID string, failedSubscr
 		}
 	}
 
-	if removedCount > 0 {
+	if len(removedSubs) > 0 {
 		m.Subscribers[taskID] = filteredSubs
-		log.Debugf("Removed %d failed subscribers for task %s", removedCount, taskID)
+		log.Debugf("Removed %d failed subscribers for task %s", len(removedSubs), taskID)
 
 		// If there are no subscribers left, delete the entire entry
 		if len(filteredSubs) == 0 {
 			delete(m.Subscribers, taskID)
 		}
 	}
+	m.taskMu.Unlock()
+
+	for _, sub := range removedSubs {
+		sub.Close()
+	}
 }
 
 // cleanSubscribers closes and removes all subscribers for a task.
 func (m *MemoryTaskManager) cleanSubscribers(taskID string) {
 	m.taskMu.Lock()
-	defer m.taskMu.Unlock()
 
-	if subs, exists := m.Subscribers[taskID]; exists {
-		for _, sub := range subs {
-			sub.Close()
-		}
-		delete(m.Subscribers, taskID)
-		log.Debugf("Cleaned subscribers for task %s", taskID)
+	subs, exists := m.Subscribers[taskID]
+	if !exists {
+		m.taskMu.Unlock()
+		return
 	}
+	delete(m.Subscribers, taskID)
+	m.taskMu.Unlock()
+
+	for _, sub := range subs {
+		sub.Close()
+	}
+	log.Debugf("Cleaned subscribers for task %s", taskID)
 }
 
 // addSubscriber adds a subscriber
@@ -799,6 +821,7 @@ func (m *MemoryTaskManager) cleanExpiredTasks(maxAge time.Duration) int {
 
 	now := time.Now()
 	expiredTaskIDs := make([]string, 0)
+	subsToClose := make([]*MemoryTaskSubscriber, 0)
 
 	for taskID, task := range m.Tasks {
 		if !isFinalState(task.Task().Status.State) {
@@ -806,6 +829,12 @@ func (m *MemoryTaskManager) cleanExpiredTasks(maxAge time.Duration) int {
 		}
 		ts, err := time.Parse(time.RFC3339, task.Task().Status.Timestamp)
 		if err != nil {
+			// A terminal task with an unparsable/empty timestamp would never be
+			// cleaned up. This is unreachable via the public API today (all writers
+			// use RFC3339), but log it so a future bad-timestamp path is observable
+			// instead of leaking silently.
+			log.Debugf("Skipping task %s in cleanup: unparsable timestamp %q: %v",
+				taskID, task.Task().Status.Timestamp, err)
 			continue
 		}
 		if now.Sub(ts) > maxAge {
@@ -819,14 +848,16 @@ func (m *MemoryTaskManager) cleanExpiredTasks(maxAge time.Duration) int {
 			delete(m.Tasks, taskID)
 		}
 		if subs, exists := m.Subscribers[taskID]; exists {
-			for _, sub := range subs {
-				sub.Close()
-			}
+			subsToClose = append(subsToClose, subs...)
 			delete(m.Subscribers, taskID)
 		}
 	}
 
 	m.taskMu.Unlock()
+
+	for _, sub := range subsToClose {
+		sub.Close()
+	}
 
 	if len(expiredTaskIDs) > 0 {
 		log.Debugf("Cleaned %d expired tasks", len(expiredTaskIDs))
@@ -842,16 +873,20 @@ func (m *MemoryTaskManager) cleanExpiredTasks(maxAge time.Duration) int {
 }
 
 // Close stops the cleanup goroutine and releases all resources.
-// It is safe to call Close multiple times.
-func (m *MemoryTaskManager) Close() {
+// It cancels any in-flight (non-terminal) tasks and closes their subscribers
+// without emitting a terminal event, so streaming clients observe the channel
+// close directly. It is safe to call Close multiple times; it always returns nil.
+func (m *MemoryTaskManager) Close() error {
 	m.closeOnce.Do(func() {
+		// Signal the cleanup goroutine to stop and wait for it to exit so that no
+		// tick runs concurrently with the teardown below.
 		close(m.stopCleanup)
+		m.cleanupWg.Wait()
 
 		m.taskMu.Lock()
+		subsToClose := make([]*MemoryTaskSubscriber, 0)
 		for _, subs := range m.Subscribers {
-			for _, sub := range subs {
-				sub.Close()
-			}
+			subsToClose = append(subsToClose, subs...)
 		}
 		m.Subscribers = make(map[string][]*MemoryTaskSubscriber)
 
@@ -860,7 +895,14 @@ func (m *MemoryTaskManager) Close() {
 		}
 		m.Tasks = make(map[string]*MemoryCancellableTask)
 		m.taskMu.Unlock()
+
+		// Close subscribers outside taskMu so a stuck blocking send can never
+		// wedge the manager-wide lock.
+		for _, sub := range subsToClose {
+			sub.Close()
+		}
 	})
+	return nil
 }
 
 // GetConversationStats gets conversation statistics
