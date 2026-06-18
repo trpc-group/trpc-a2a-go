@@ -166,6 +166,14 @@ func (s *A2AServer) Stop(ctx context.Context) error {
 	if err := s.httpServer.Shutdown(ctx); err != nil {
 		shutdownErrs = append(shutdownErrs, fmt.Errorf("http server shutdown failed: %w", err))
 	}
+	// Release task manager resources (e.g. stop the in-memory cleanup goroutine or
+	// close the Redis client) once in-flight requests have drained. Done via the
+	// optional io.Closer to avoid widening the TaskManager interface.
+	if closer, ok := s.taskManager.(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			shutdownErrs = append(shutdownErrs, fmt.Errorf("task manager close failed: %w", err))
+		}
+	}
 	if err := s.shutdownTelemetry(ctx); err != nil {
 		shutdownErrs = append(shutdownErrs, fmt.Errorf("telemetry shutdown failed: %w", err))
 	}

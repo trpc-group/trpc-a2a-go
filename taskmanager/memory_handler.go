@@ -75,6 +75,10 @@ func (h *memoryTaskHandler) UpdateTaskState(
 
 	// notify subscribers will lock again
 	h.manager.notifySubscribers(*taskID, streamEvent)
+
+	if finalState {
+		h.manager.cleanSubscribers(*taskID)
+	}
 	return nil
 }
 
