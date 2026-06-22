@@ -29,6 +29,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/sse"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
 
 // Helper to create a default AgentCard for tests.
@@ -99,7 +100,7 @@ func TestA2AServer_HandleAgentCard(t *testing.T) {
 	// The server normalizes the card to a v1.0-conformant supportedInterfaces
 	// list; normalize the expected copy the same way for comparison.
 	agentCard.NormalizeInterfaces()
-	a2aServer, err := NewA2AServer(agentCard, mockTM)
+	a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard))
 	require.NoError(t, err)
 	testServer := httptest.NewServer(http.HandlerFunc(a2aServer.handleAgentCard))
 	defer testServer.Close()
@@ -154,7 +155,7 @@ func TestA2AServer_shutdownTelemetry(t *testing.T) {
 
 func TestA2AServer_Start_ShutdownTelemetryOnListenError(t *testing.T) {
 	provider := &shutdownAwareMeterProvider{MeterProvider: noop.NewMeterProvider()}
-	srv, err := NewA2AServer(defaultAgentCard(), newMockTaskManager())
+	srv, err := NewA2AServer(newMockTaskManager(), WithAgentCard(defaultAgentCard()))
 	require.NoError(t, err)
 	srv.telemetryMeterProvider = provider
 	srv.telemetryOwnsProvider = true
@@ -206,7 +207,7 @@ func TestA2AServer_InitTelemetry_WithInjectedProvider(t *testing.T) {
 func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 	mockTM := newMockTaskManager()
 	agentCard := defaultAgentCard()
-	a2aServer, err := NewA2AServer(agentCard, mockTM)
+	a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard))
 	require.NoError(t, err)
 	testServer := httptest.NewServer(http.HandlerFunc(a2aServer.handleJSONRPC))
 	defer testServer.Close()
@@ -347,7 +348,7 @@ func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 func TestA2ASrv_HandleMessageStream_SSE(t *testing.T) {
 	mockTM := newMockTaskManager()
 	agentCard := defaultAgentCard()
-	a2aServer, err := NewA2AServer(agentCard, mockTM)
+	a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard))
 	require.NoError(t, err)
 	testServer := httptest.NewServer(http.HandlerFunc(a2aServer.handleJSONRPC))
 	defer testServer.Close()
@@ -821,7 +822,7 @@ func TestServer_WithPushNotificationAuthenticator(t *testing.T) {
 
 	// Create a task processor and manager
 	processor := &mockProcessor{}
-	tm, err := taskmanager.NewMemoryTaskManager(processor)
+	tm, err := memory.NewTaskManager(processor)
 	require.NoError(t, err)
 
 	// Create server with authenticator
@@ -831,8 +832,8 @@ func TestServer_WithPushNotificationAuthenticator(t *testing.T) {
 	}
 
 	server, err := NewA2AServer(
-		card,
 		tm,
+		WithAgentCard(card),
 		WithPushNotificationAuthenticator(authenticator),
 	)
 	require.NoError(t, err)
@@ -919,7 +920,7 @@ func TestA2AServer_HandleAgentGetAuthenticatedExtendedCard(t *testing.T) {
 			agentCard := defaultAgentCard()
 			agentCard.SupportsAuthenticatedExtendedCard = tt.supportsExtendedCard
 
-			a2aServer, err := NewA2AServer(agentCard, mockTM)
+			a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard))
 			require.NoError(t, err)
 
 			if tt.authenticatedCardHandler != nil {
@@ -1012,7 +1013,7 @@ func TestA2AServer_ComposeJWKSURL(t *testing.T) {
 			agentCard := defaultAgentCard()
 			agentCard.URL = tt.agentCardURL
 
-			a2aServer, err := NewA2AServer(agentCard, mockTM)
+			a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard))
 			require.NoError(t, err)
 			a2aServer.jwksEndpoint = tt.jwksEndpoint
 
@@ -1046,7 +1047,7 @@ func TestCompatHandler_CoveredByMiddleware(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	srv, err := NewA2AServer(defaultAgentCard(), mockTM,
+	srv, err := NewA2AServer(mockTM, WithAgentCard(defaultAgentCard()),
 		WithMiddleWare(blockMiddleware{}),
 		WithCompatHandler(compat),
 	)
@@ -1084,7 +1085,7 @@ func TestServer_BasePathFromSupportedInterfaces(t *testing.T) {
 		DefaultInputModes:  []string{"text"},
 		DefaultOutputModes: []string{"text"},
 	}
-	srv, err := NewA2AServer(card, newMockTaskManager())
+	srv, err := NewA2AServer(newMockTaskManager(), WithAgentCard(card))
 	require.NoError(t, err)
 	assert.Equal(t, "/agent/api/", srv.jsonRPCEndpoint,
 		"base path should come from SupportedInterfaces[0].URL")

@@ -28,6 +28,9 @@ type SecurityScheme struct {
 	BearerFormat     *string            `json:"bearerFormat,omitempty"`
 	Flows            *OAuthFlows        `json:"flows,omitempty"`
 	OpenIDConnectURL *string            `json:"openIdConnectUrl,omitempty"`
+	// OAuth2MetadataURL is the v1.0 OAuth2 authorization-server metadata URL
+	// (RFC 8414). It applies to the OAuth2 scheme.
+	OAuth2MetadataURL *string `json:"oauth2MetadataUrl,omitempty"`
 }
 
 // SecuritySchemeType represents the type of security scheme.
@@ -94,8 +97,9 @@ type httpAuthWire struct {
 }
 
 type oauth2Wire struct {
-	Description *string     `json:"description,omitempty"`
-	Flows       *OAuthFlows `json:"flows,omitempty"`
+	Description       *string     `json:"description,omitempty"`
+	Flows             *OAuthFlows `json:"flows,omitempty"`
+	OAuth2MetadataURL *string     `json:"oauth2MetadataUrl,omitempty"`
 }
 
 type openIDConnectWire struct {
@@ -150,7 +154,7 @@ func (s SecurityScheme) MarshalJSON() ([]byte, error) {
 	case SecuritySchemeTypeHTTP:
 		w.HTTPAuth = &httpAuthWire{Description: s.Description, Scheme: s.Scheme, BearerFormat: s.BearerFormat}
 	case SecuritySchemeTypeOAuth2:
-		w.OAuth2 = &oauth2Wire{Description: s.Description, Flows: s.Flows}
+		w.OAuth2 = &oauth2Wire{Description: s.Description, Flows: s.Flows, OAuth2MetadataURL: s.OAuth2MetadataURL}
 	case SecuritySchemeTypeOpenIDConnect:
 		w.OpenIDConnect = &openIDConnectWire{Description: s.Description, OpenIDConnectURL: s.OpenIDConnectURL}
 	case SecuritySchemeTypeMutualTLS:
@@ -183,6 +187,7 @@ func (s *SecurityScheme) UnmarshalJSON(data []byte) error {
 		s.Type = SecuritySchemeTypeOAuth2
 		s.Description = w.OAuth2.Description
 		s.Flows = w.OAuth2.Flows
+		s.OAuth2MetadataURL = w.OAuth2.OAuth2MetadataURL
 	case w.OpenIDConnect != nil:
 		s.Type = SecuritySchemeTypeOpenIDConnect
 		s.Description = w.OpenIDConnect.Description

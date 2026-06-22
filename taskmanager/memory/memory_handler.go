@@ -4,7 +4,7 @@
 //
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
-package taskmanager
+package memory
 
 import (
 	"context"
@@ -14,15 +14,16 @@ import (
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
 // =============================================================================
 // MessageHandle Implementation
 // =============================================================================
 
-// memoryTaskHandler implements TaskHandler interface
-type memoryTaskHandler struct {
-	manager                *MemoryTaskManager
+// taskHandler implements taskmanager.TaskHandler interface
+type taskHandler struct {
+	manager                *TaskManager
 	messageID              string
 	metadata               map[string]interface{}
 	ctx                    context.Context
@@ -30,10 +31,10 @@ type memoryTaskHandler struct {
 	subscriberBlockingSend bool
 }
 
-var _ TaskHandler = (*memoryTaskHandler)(nil)
+var _ taskmanager.TaskHandler = (*taskHandler)(nil)
 
 // UpdateTaskState updates task state
-func (h *memoryTaskHandler) UpdateTaskState(
+func (h *taskHandler) UpdateTaskState(
 	taskID *string,
 	state protocol.TaskState,
 	message *protocol.Message,
@@ -47,7 +48,7 @@ func (h *memoryTaskHandler) UpdateTaskState(
 	if !exists {
 		h.manager.taskMu.Unlock()
 		log.Warnf("UpdateTaskState called for non-existent task %s", *taskID)
-		return ErrTaskNotFound(*taskID)
+		return taskmanager.ErrTaskNotFound(*taskID)
 	}
 
 	originalTask := task.Task()
@@ -82,12 +83,12 @@ func (h *memoryTaskHandler) UpdateTaskState(
 }
 
 // SubscribeTask subscribes to the task
-func (h *memoryTaskHandler) SubscribeTask(taskID *string) (TaskSubscriber, error) {
+func (h *taskHandler) SubscribeTask(taskID *string) (taskmanager.TaskSubscriber, error) {
 	if taskID == nil || *taskID == "" {
 		return nil, fmt.Errorf("taskID cannot be nil or empty")
 	}
 	if !h.manager.checkTaskExists(*taskID) {
-		return nil, ErrTaskNotFound(*taskID)
+		return nil, taskmanager.ErrTaskNotFound(*taskID)
 	}
 	ctxID := h.GetContextID()
 	sendHook := h.manager.sendStreamingEventHook(ctxID)
@@ -95,7 +96,7 @@ func (h *memoryTaskHandler) SubscribeTask(taskID *string) (TaskSubscriber, error
 	if bufSize <= 0 {
 		bufSize = defaultSubscriberBufferSize
 	}
-	subscriber := NewMemoryTaskSubscriber(
+	subscriber := NewTaskSubscriber(
 		*taskID,
 		bufSize,
 		WithSubscriberSendHook(sendHook),
@@ -106,7 +107,7 @@ func (h *memoryTaskHandler) SubscribeTask(taskID *string) (TaskSubscriber, error
 }
 
 // AddArtifact adds artifact to specified task
-func (h *memoryTaskHandler) AddArtifact(
+func (h *taskHandler) AddArtifact(
 	taskID *string,
 	artifact protocol.Artifact,
 	isFinal bool,
@@ -120,7 +121,7 @@ func (h *memoryTaskHandler) AddArtifact(
 	task, exists := h.manager.Tasks[*taskID]
 	if !exists {
 		h.manager.taskMu.Unlock()
-		return ErrTaskNotFound(*taskID)
+		return taskmanager.ErrTaskNotFound(*taskID)
 	}
 	task.Task().Artifacts = append(task.Task().Artifacts, artifact)
 	h.manager.taskMu.Unlock()
@@ -142,7 +143,7 @@ func (h *memoryTaskHandler) AddArtifact(
 }
 
 // GetTask gets task
-func (h *memoryTaskHandler) GetTask(taskID *string) (CancellableTask, error) {
+func (h *taskHandler) GetTask(taskID *string) (taskmanager.CancellableTask, error) {
 	if taskID == nil || *taskID == "" {
 		return nil, fmt.Errorf("taskID cannot be nil or empty")
 	}
@@ -152,7 +153,7 @@ func (h *memoryTaskHandler) GetTask(taskID *string) (CancellableTask, error) {
 
 	task, exists := h.manager.Tasks[*taskID]
 	if !exists {
-		return nil, ErrTaskNotFound(*taskID)
+		return nil, taskmanager.ErrTaskNotFound(*taskID)
 	}
 
 	// return task copy to avoid external modification
@@ -166,7 +167,7 @@ func (h *memoryTaskHandler) GetTask(taskID *string) (CancellableTask, error) {
 		copy(taskCopy.History, task.Task().History)
 	}
 
-	return &MemoryCancellableTask{
+	return &CancellableTask{
 		task:       taskCopy,
 		cancelFunc: task.cancelFunc,
 		ctx:        task.ctx,
@@ -174,7 +175,7 @@ func (h *memoryTaskHandler) GetTask(taskID *string) (CancellableTask, error) {
 }
 
 // GetContextID gets context ID
-func (h *memoryTaskHandler) GetContextID() string {
+func (h *taskHandler) GetContextID() string {
 	h.manager.conversationMu.RLock()
 	defer h.manager.conversationMu.RUnlock()
 
@@ -185,7 +186,7 @@ func (h *memoryTaskHandler) GetContextID() string {
 }
 
 // GetMetadata returns the metadata of the current request.
-func (h *memoryTaskHandler) GetMetadata() (map[string]interface{}, error) {
+func (h *taskHandler) GetMetadata() (map[string]interface{}, error) {
 	if h.metadata == nil {
 		return nil, errors.New("metadata is nil")
 	}
@@ -194,7 +195,7 @@ func (h *memoryTaskHandler) GetMetadata() (map[string]interface{}, error) {
 }
 
 // GetMessageHistory gets message history
-func (h *memoryTaskHandler) GetMessageHistory() []protocol.Message {
+func (h *taskHandler) GetMessageHistory() []protocol.Message {
 	h.manager.conversationMu.RLock()
 	defer h.manager.conversationMu.RUnlock()
 
@@ -226,7 +227,7 @@ func (h *memoryTaskHandler) GetMessageHistory() []protocol.Message {
 }
 
 // BuildTask creates a new task and returns task object
-func (h *memoryTaskHandler) BuildTask(specificTaskID *string, contextID *string) (string, error) {
+func (h *taskHandler) BuildTask(specificTaskID *string, contextID *string) (string, error) {
 	h.manager.taskMu.Lock()
 	defer h.manager.taskMu.Unlock()
 
@@ -275,7 +276,7 @@ func (h *memoryTaskHandler) BuildTask(specificTaskID *string, contextID *string)
 }
 
 // CancelTask cancels the task.
-func (h *memoryTaskHandler) CleanTask(taskID *string) error {
+func (h *taskHandler) CleanTask(taskID *string) error {
 	if taskID == nil || *taskID == "" {
 		return fmt.Errorf("taskID cannot be nil or empty")
 	}
@@ -284,7 +285,7 @@ func (h *memoryTaskHandler) CleanTask(taskID *string) error {
 	task, exists := h.manager.Tasks[*taskID]
 	if !exists {
 		h.manager.taskMu.Unlock()
-		return ErrTaskNotFound(*taskID)
+		return taskmanager.ErrTaskNotFound(*taskID)
 	}
 
 	// Cancel the task and remove from Tasks map while holding the lock

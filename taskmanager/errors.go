@@ -33,6 +33,8 @@ const (
 	ErrCodeContentTypeNotSupported                int = -32005 // Incompatible content types
 	ErrCodeInvalidAgentResponse                   int = -32006 // Invalid agent response
 	ErrCodeAuthenticatedExtendedCardNotConfigured int = -32007 // Authenticated extended card not configured
+	ErrCodeExtensionSupportRequired               int = -32008 // A required extension was not opted into by the client
+	ErrCodeVersionNotSupported                    int = -32009 // The requested A2A protocol version is not supported
 )
 
 // ErrCodePushNotificationNotConfigured is deprecated: Use ErrCodePushNotificationNotSupported instead
@@ -54,6 +56,10 @@ var (
 	ErrInvalidAgentResponseSentinel = errors.New("invalid agent response")
 	// ErrAuthenticatedExtendedCardNotConfiguredSentinel is a sentinel error for authenticated extended card not configured
 	ErrAuthenticatedExtendedCardNotConfiguredSentinel = errors.New("authenticated extended card not configured")
+	// ErrExtensionSupportRequiredSentinel is a sentinel error for a required extension not opted into
+	ErrExtensionSupportRequiredSentinel = errors.New("extension support required")
+	// ErrVersionNotSupportedSentinel is a sentinel error for an unsupported A2A protocol version
+	ErrVersionNotSupportedSentinel = errors.New("version not supported")
 )
 
 // A2A specific error functions
@@ -126,4 +132,24 @@ func ErrAuthenticatedExtendedCardNotConfigured() *jsonrpc.Error {
 		Message: "Authenticated extended card not configured",
 		Data:    "This agent does not have an authenticated extended card configured",
 	}).WithWrappedError(ErrAuthenticatedExtendedCardNotConfiguredSentinel)
+}
+
+// ErrExtensionSupportRequired creates a JSON-RPC error for a required extension the client did not opt into.
+// The returned error wraps ErrExtensionSupportRequiredSentinel for use with errors.Is().
+func ErrExtensionSupportRequired(extensionURI string) *jsonrpc.Error {
+	return (&jsonrpc.Error{
+		Code:    ErrCodeExtensionSupportRequired,
+		Message: "Extension support required",
+		Data:    fmt.Sprintf("Required extension '%s' was not opted into by the client", extensionURI),
+	}).WithWrappedError(ErrExtensionSupportRequiredSentinel)
+}
+
+// ErrVersionNotSupported creates a JSON-RPC error for an unsupported A2A protocol version.
+// The returned error wraps ErrVersionNotSupportedSentinel for use with errors.Is().
+func ErrVersionNotSupported(requested string) *jsonrpc.Error {
+	return (&jsonrpc.Error{
+		Code:    ErrCodeVersionNotSupported,
+		Message: "Version not supported",
+		Data:    fmt.Sprintf("Requested A2A protocol version '%s' is not supported by this agent", requested),
+	}).WithWrappedError(ErrVersionNotSupportedSentinel)
 }

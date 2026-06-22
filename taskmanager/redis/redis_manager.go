@@ -117,6 +117,7 @@ func (m *TaskManager) OnSendMessage(
 	// Process configuration.
 	options := m.processConfiguration(request.Configuration)
 	options.Streaming = false // non-streaming processing
+	options.Tenant = request.Tenant
 
 	// Create MessageHandle.
 	handle := &taskHandler{
@@ -169,6 +170,7 @@ func (m *TaskManager) OnSendMessageStream(
 	// Process configuration.
 	options := m.processConfiguration(request.Configuration)
 	options.Streaming = true // streaming mode
+	options.Tenant = request.Tenant
 
 	// Create streaming MessageHandle.
 	handle := &taskHandler{
@@ -412,9 +414,16 @@ func (m *TaskManager) OnResubscribe(
 	params protocol.TaskIDParams,
 ) (<-chan protocol.StreamResponse, error) {
 	// Check if task exists.
-	_, err := m.getTaskInternal(ctx, params.ID)
+	task, err := m.getTaskInternal(ctx, params.ID)
 	if err != nil {
 		return nil, err
+	}
+
+	// v1.0: a subscription is only valid for a non-terminal task; a task already
+	// in a terminal state must be rejected with UnsupportedOperationError.
+	if isFinalState(task.Status.State) {
+		return nil, taskmanager.ErrUnsupportedOperation(
+			fmt.Sprintf("subscribe to task %s in terminal state %s", params.ID, task.Status.State))
 	}
 
 	bufSize := m.options.TaskSubscriberBufSize
@@ -428,6 +437,13 @@ func (m *TaskManager) OnResubscribe(
 		WithSubscriberBlockingSend(m.options.TaskSubscriberBlockingSend),
 		WithSubscriberSendHook(m.sendStreamingEventHook(params.ID)),
 	)
+
+	// v1.0: the first stream event must be the current Task snapshot. getTaskInternal
+	// already returns a fresh copy, so it is safe to hand to the subscriber.
+	if err := subscriber.Send(protocol.StreamResponse{Task: task}); err != nil {
+		subscriber.Close()
+		return nil, err
+	}
 
 	// Add to subscribers list.
 	m.addSubscriber(params.ID, subscriber)

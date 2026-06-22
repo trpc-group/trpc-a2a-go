@@ -258,8 +258,8 @@ func TestPushNotificationAuthentication(t *testing.T) {
 
 	// Create agent server with JWKS endpoint
 	agentServer, err := server.NewA2AServer(
-		agentCard,
 		agentTaskMgr,
+		server.WithAgentCard(agentCard),
 		server.WithJWKSEndpoint(true, "/.well-known/jwks.json"),
 	)
 	require.NoError(t, err, "Failed to create agent server")
@@ -449,8 +449,8 @@ func setupAuthServer(t *testing.T, provider auth.Provider) (taskmanager.TaskMana
 	}
 
 	a2aServer, err := server.NewA2AServer(
-		agentCard,
 		taskMgr,
+		server.WithAgentCard(agentCard),
 		server.WithAuthProvider(provider),
 	)
 	require.NoError(t, err, "Failed to create A2A server")

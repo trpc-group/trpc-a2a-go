@@ -120,6 +120,8 @@ type Task struct {
 	Artifacts []Artifact     `json:"artifacts,omitempty"`
 	History   []Message      `json:"history,omitempty"`
 	Metadata  map[string]any `json:"metadata,omitempty"`
+	// Extensions are the URIs of A2A extensions activated for this task.
+	Extensions []string `json:"extensions,omitempty"`
 }
 
 // TaskStatusUpdateEvent indicates a change in the task's lifecycle state.

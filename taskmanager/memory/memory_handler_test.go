@@ -4,7 +4,7 @@
 //
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
-package taskmanager
+package memory
 
 import (
 	"context"
@@ -15,9 +15,9 @@ import (
 )
 
 // setupTestHandler creates a test handler for use in tests
-func setupTestHandler(t *testing.T) (*memoryTaskHandler, *MemoryTaskManager) {
+func setupTestHandler(t *testing.T) (*taskHandler, *TaskManager) {
 	processor := &MockMessageProcessor{}
-	manager, err := NewMemoryTaskManager(processor)
+	manager, err := NewTaskManager(processor)
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
@@ -32,7 +32,7 @@ func setupTestHandler(t *testing.T) (*memoryTaskHandler, *MemoryTaskManager) {
 
 	manager.storeMessage(message)
 
-	handler := &memoryTaskHandler{
+	handler := &taskHandler{
 		manager:   manager,
 		messageID: message.MessageID,
 		ctx:       ctx,
@@ -214,7 +214,7 @@ func TestMemoryTaskHandler_GetMessageHistory(t *testing.T) {
 	manager.storeMessage(contextMessage)
 
 	// Create handler with context message
-	contextHandler := &memoryTaskHandler{
+	contextHandler := &taskHandler{
 		manager:   manager,
 		messageID: contextMessage.MessageID,
 		ctx:       context.Background(),
@@ -307,7 +307,7 @@ func TestMemoryTaskHandler_GetContextID(t *testing.T) {
 	manager.storeMessage(contextMessage)
 
 	// Create handler with context message
-	contextHandler := &memoryTaskHandler{
+	contextHandler := &taskHandler{
 		manager:   manager,
 		messageID: contextMessage.MessageID,
 		ctx:       context.Background(),
@@ -323,13 +323,13 @@ func TestMemoryTaskHandler_GetContextID(t *testing.T) {
 
 func TestTaskHandlerErrors(t *testing.T) {
 	processor := &MockMessageProcessor{}
-	manager, err := NewMemoryTaskManager(processor)
+	manager, err := NewTaskManager(processor)
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
 
 	ctx := context.Background()
-	handler := &memoryTaskHandler{
+	handler := &taskHandler{
 		manager:   manager,
 		messageID: "non-existent-message",
 		ctx:       ctx,

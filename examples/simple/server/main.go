@@ -22,6 +22,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/redis"
 )
 
@@ -216,7 +217,7 @@ func main() {
 	switch *manager {
 	case "memory":
 		log.Infof("Using memory task manager")
-		taskManager, err = taskmanager.NewMemoryTaskManager(processor)
+		taskManager, err = memory.NewTaskManager(processor)
 	case "redis":
 		log.Infof("Using redis task manager")
 		cli := goredis.NewClient(&goredis.Options{
@@ -232,7 +233,7 @@ func main() {
 	}
 
 	// Create the server.
-	srv, err := server.NewA2AServer(agentCard, taskManager)
+	srv, err := server.NewA2AServer(taskManager, server.WithAgentCard(agentCard))
 	if err != nil {
 		log.Fatalf("Failed to create server: %v", err)
 	}

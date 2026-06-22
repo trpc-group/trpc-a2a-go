@@ -20,6 +20,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
 
 // rootAgentProcessor implements the taskmanager.MessageProcessor interface.
@@ -337,14 +338,14 @@ func main() {
 	}
 
 	// Create task manager with our processor
-	taskManager, err := taskmanager.NewMemoryTaskManager(processor)
+	taskManager, err := memory.NewTaskManager(processor)
 	if err != nil {
 		log.Fatal("Failed to create task manager: %v", err)
 	}
 
 	// Create the A2A server
 	agentCard := getAgentCard()
-	a2aServer, err := server.NewA2AServer(agentCard, taskManager)
+	a2aServer, err := server.NewA2AServer(taskManager, server.WithAgentCard(agentCard))
 	if err != nil {
 		log.Fatal("Failed to create A2A server: %v", err)
 	}

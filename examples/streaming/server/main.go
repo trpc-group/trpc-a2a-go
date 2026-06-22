@@ -26,6 +26,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
 
 // streamingMessageProcessor implements the MessageProcessor interface for streaming responses.
@@ -369,13 +370,13 @@ func main() {
 	processor := &streamingMessageProcessor{}
 
 	// Create the TaskManager, injecting the processor
-	taskManager, err := taskmanager.NewMemoryTaskManager(processor)
+	taskManager, err := memory.NewTaskManager(processor)
 	if err != nil {
 		log.Fatalf("Failed to create task manager: %v", err)
 	}
 
 	// Create the A2A server instance
-	srv, err := server.NewA2AServer(agentCard, taskManager)
+	srv, err := server.NewA2AServer(taskManager, server.WithAgentCard(agentCard))
 	if err != nil {
 		log.Fatalf("Failed to create A2A server: %v", err)
 	}

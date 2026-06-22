@@ -353,7 +353,7 @@ func main() {
 	}
 
 	// Create HTTP server
-	agentServer, err := server.NewA2AServer(agentCard, taskManager)
+	agentServer, err := server.NewA2AServer(taskManager, server.WithAgentCard(agentCard))
 	if err != nil {
 		log.Fatalf("Failed to create A2A server: %v", err)
 	}

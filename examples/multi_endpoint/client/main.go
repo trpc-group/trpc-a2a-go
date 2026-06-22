@@ -1,4 +1,7 @@
-// Package main implements a simple A2A client example.
+// Package main implements a multi-agent A2A client using the v1.0 tenant model.
+//
+// All agents share one endpoint; the client picks an agent by setting the
+// "tenant" field on each request (and on the agent-card lookup via "?tenant=").
 package main
 
 import (
@@ -8,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/client"
@@ -23,37 +27,29 @@ var (
 func main() {
 	flag.Parse()
 
+	baseURL := fmt.Sprintf("http://%s/", *host)
 	fmt.Printf("=== Multi-Agent tRPC Client Demo ===\n")
-	fmt.Printf("Server: http://%s\n", *host)
-	fmt.Printf("Testing both agents...\n\n")
+	fmt.Printf("Server: %s (agents addressed by tenant)\n\n", baseURL)
 
-	// Test both agents
-	agents := []string{"chatAgent", "workerAgent"}
-	for _, agentName := range agents {
-		fmt.Printf("--- Conversation with %s ---\n", agentName)
+	// One client for the shared endpoint; the tenant on each request selects the agent.
+	a2aClient, err := client.NewA2AClient(baseURL, client.WithTimeout(30*time.Second))
+	if err != nil {
+		log.Fatalf("Failed to create A2A client: %v", err)
+	}
 
-		// Create agent URL
-		agentURL := fmt.Sprintf("http://%s/api/v1/agent/%s/", *host, agentName)
+	for _, tenant := range []string{"chatAgent", "workerAgent"} {
+		fmt.Printf("--- Conversation with %s ---\n", tenant)
 
-		// Get agent card first
-		agentCard, err := getAgentCard(agentURL)
+		agentCard, err := getAgentCard(baseURL, tenant)
 		if err != nil {
-			log.Printf("Failed to get agent card for %s: %v", agentName, err)
+			log.Printf("Failed to get agent card for %s: %v", tenant, err)
 			continue
 		}
 		fmt.Printf("Agent: %s - %s\n", agentCard.Name, agentCard.Description)
 
-		// Create A2A client for this agent
-		a2aClient, err := client.NewA2AClient(agentURL, client.WithTimeout(30*time.Second))
+		response, err := sendMessageToTenant(context.Background(), a2aClient, tenant, *message)
 		if err != nil {
-			log.Printf("Failed to create A2A client for %s: %v", agentName, err)
-			continue
-		}
-
-		// Send message using A2A client
-		response, err := sendMessageToAgent(context.Background(), a2aClient, *message)
-		if err != nil {
-			log.Printf("Failed to send message to %s: %v", agentName, err)
+			log.Printf("Failed to send message to %s: %v", tenant, err)
 			continue
 		}
 		fmt.Printf("Response: %s\n\n", response)
@@ -62,12 +58,12 @@ func main() {
 	fmt.Println("=== Demo completed ===")
 }
 
-// getAgentCard retrieves the agent card for the specified agent
-func getAgentCard(agentURL string) (*server.AgentCard, error) {
-	cardURL := fmt.Sprintf("%s.well-known/agent-card.json", agentURL)
+// getAgentCard retrieves a tenant's agent card from the shared endpoint via "?tenant=".
+func getAgentCard(baseURL, tenant string) (*server.AgentCard, error) {
+	cardURL := fmt.Sprintf("%s.well-known/agent-card.json?tenant=%s", baseURL, url.QueryEscape(tenant))
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(cardURL)
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	resp, err := httpClient.Get(cardURL)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -85,18 +81,17 @@ func getAgentCard(agentURL string) (*server.AgentCard, error) {
 	return &agentCard, nil
 }
 
-// sendMessageToAgent sends a message to the specified agent using A2A client
-func sendMessageToAgent(ctx context.Context, a2aClient *client.A2AClient, messageText string) (string, error) {
-
+// sendMessageToTenant sends a message addressed to a specific tenant (agent).
+func sendMessageToTenant(ctx context.Context, a2aClient *client.A2AClient, tenant, messageText string) (string, error) {
 	fmt.Printf("User: %s\n", messageText)
-	// Create the message to send
+
 	userMessage := protocol.NewMessage(
 		protocol.MessageRoleUser,
 		[]*protocol.Part{protocol.NewTextPart(messageText)},
 	)
 
-	// Create message parameters
 	params := protocol.SendMessageParams{
+		Tenant:  tenant, // v1.0: route to the agent registered under this tenant.
 		Message: userMessage,
 		Configuration: &protocol.SendMessageConfiguration{
 			ReturnImmediately:   boolPtr(false), // v1.0: false = wait for completion (was Blocking: true)
@@ -104,13 +99,12 @@ func sendMessageToAgent(ctx context.Context, a2aClient *client.A2AClient, messag
 		},
 	}
 
-	// Send message using A2A client
 	messageResult, err := a2aClient.SendMessage(ctx, params)
 	if err != nil {
 		return "", fmt.Errorf("failed to send message: %w", err)
 	}
 
-	// Extract text from the response (v1.0: SendMessageResponse is a Message/Task union)
+	// v1.0: SendMessageResponse is a Message/Task union.
 	switch {
 	case messageResult.Message != nil:
 		return extractTextFromMessage(messageResult.Message), nil
@@ -125,22 +119,20 @@ func sendMessageToAgent(ctx context.Context, a2aClient *client.A2AClient, messag
 	}
 }
 
-// extractTextFromMessage extracts text content from a message
+// extractTextFromMessage extracts text content from a message.
 func extractTextFromMessage(msg *protocol.Message) string {
 	if msg == nil {
 		return ""
 	}
-
 	for _, part := range msg.Parts {
 		if t := part.TextContent(); t != "" {
 			return t
 		}
 	}
-
 	return "(no text content)"
 }
 
-// boolPtr returns a pointer to a boolean value
+// boolPtr returns a pointer to a boolean value.
 func boolPtr(b bool) *bool {
 	return &b
 }

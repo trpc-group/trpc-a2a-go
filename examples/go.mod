@@ -7,7 +7,6 @@ replace trpc.group/trpc-go/trpc-a2a-go/v2 => ../
 replace trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/redis => ../taskmanager/redis
 
 require (
-	github.com/go-chi/chi/v5 v5.2.2
 	github.com/google/uuid v1.6.0
 	github.com/lestrrat-go/jwx/v2 v2.1.4
 	github.com/redis/go-redis/v9 v9.10.0
