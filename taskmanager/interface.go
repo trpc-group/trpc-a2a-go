@@ -10,7 +10,7 @@ package taskmanager
 import (
 	"context"
 
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 // ProcessOptions contains configuration options for processing messages
@@ -79,10 +79,10 @@ type TaskHandler interface {
 
 // MessageProcessingResult represents the result of processing a message.
 type MessageProcessingResult struct {
-	// Result can be Message or Task
+	// Result can contain Message or Task
 	// When Streaming=false, use this field
 	// The framework will automatically handle whether to wait for the task to complete based on ProcessOptions.Blocking
-	Result protocol.UnaryMessageResult
+	Result *protocol.SendMessageResponse
 
 	// StreamingEvents streaming event tunnel
 	// When Streaming=true, use this field
@@ -94,10 +94,10 @@ type MessageProcessingResult struct {
 type TaskSubscriber interface {
 	// Send sends an event to the task subscriber, could be blocked if the channel is full
 	// If the contextID is not set, it will generate a new contextID automatically
-	Send(event protocol.StreamingMessageEvent) error
+	Send(event protocol.StreamResponse) error
 
 	// Channel returns the channel of the task subscriber
-	Channel() <-chan protocol.StreamingMessageEvent
+	Channel() <-chan protocol.StreamResponse
 
 	// Closed returns true if the task subscriber is closed
 	Closed() bool
@@ -155,16 +155,16 @@ type TaskManager interface {
 	OnSendMessage(
 		ctx context.Context,
 		request protocol.SendMessageParams,
-	) (*protocol.MessageResult, error)
+	) (*protocol.SendMessageResponse, error)
 
 	// OnSendMessageStream handles a request corresponding to the 'message/stream' RPC method.
-	// It creates a new message and returns a channel for receiving MessageEvent updates (streaming).
+	// It creates a new message and returns a channel for receiving StreamResponse updates (streaming).
 	// It initiates asynchronous processing via the MessageProcessor.
 	// The channel will be closed when the message reaches a final state or an error occurs during setup/processing.
 	OnSendMessageStream(
 		ctx context.Context,
 		request protocol.SendMessageParams,
-	) (<-chan protocol.StreamingMessageEvent, error)
+	) (<-chan protocol.StreamResponse, error)
 
 	// OnGetTask handles a request corresponding to the 'tasks/get' RPC method.
 	// It retrieves the current state of an existing task.
@@ -182,24 +182,45 @@ type TaskManager interface {
 		params protocol.TaskIDParams,
 	) (*protocol.Task, error)
 
-	// OnPushNotificationSet handles a request corresponding to the 'tasks/pushNotification/set' RPC method.
+	// OnListTasks handles a request corresponding to the v1.0 'ListTasks' RPC method.
+	// It returns tasks visible to the caller, with optional filtering and pagination.
+	OnListTasks(
+		ctx context.Context,
+		params protocol.ListTasksParams,
+	) (*protocol.ListTasksResult, error)
+
+	// OnPushNotificationSet handles the 'CreateTaskPushNotificationConfig' RPC method.
 	// It configures push notifications for a specific task.
 	OnPushNotificationSet(
 		ctx context.Context,
 		params protocol.TaskPushNotificationConfig,
 	) (*protocol.TaskPushNotificationConfig, error)
 
-	// OnPushNotificationGet handles a request corresponding to the 'tasks/pushNotification/get' RPC method.
+	// OnPushNotificationGet handles the 'GetTaskPushNotificationConfig' RPC method.
 	// It retrieves the current push notification configuration for a task.
 	OnPushNotificationGet(
 		ctx context.Context,
 		params protocol.TaskIDParams,
 	) (*protocol.TaskPushNotificationConfig, error)
 
+	// OnPushNotificationList handles the v1.0 'ListTaskPushNotificationConfigs' RPC method.
+	// It lists the push notification configurations registered for a task.
+	OnPushNotificationList(
+		ctx context.Context,
+		params protocol.ListTaskPushNotificationConfigsParams,
+	) (*protocol.ListTaskPushNotificationConfigsResult, error)
+
+	// OnPushNotificationDelete handles the v1.0 'DeleteTaskPushNotificationConfig' RPC method.
+	// It removes a push notification configuration from a task.
+	OnPushNotificationDelete(
+		ctx context.Context,
+		params protocol.DeleteTaskPushNotificationConfigParams,
+	) error
+
 	// OnResubscribe handles a request corresponding to the 'tasks/resubscribe' RPC method.
 	// It reestablishes an SSE stream for an existing task.
 	OnResubscribe(
 		ctx context.Context,
 		params protocol.TaskIDParams,
-	) (<-chan protocol.StreamingMessageEvent, error)
+	) (<-chan protocol.StreamResponse, error)
 }

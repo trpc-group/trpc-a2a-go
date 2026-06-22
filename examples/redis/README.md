@@ -38,7 +38,7 @@ redis-cli ping
 ### 2. Start the Server
 
 ```bash
-cd taskmanager/redis/example/server
+cd examples/redis/server
 go run main.go
 ```
 
@@ -67,7 +67,7 @@ go run main.go --help
 
 In another terminal:
 ```bash
-cd taskmanager/redis/example/client
+cd examples/redis/client
 go run main.go
 ```
 

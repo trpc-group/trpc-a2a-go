@@ -15,10 +15,10 @@ import (
 	"net/http"
 	"time"
 
-	"trpc.group/trpc-go/trpc-a2a-go/client"
-	"trpc.group/trpc-go/trpc-a2a-go/log"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/server"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/client"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 )
 
 func main() {
@@ -50,7 +50,7 @@ func main() {
 		msgParams := protocol.SendMessageParams{
 			Message: protocol.NewMessage(
 				protocol.MessageRoleUser,
-				[]protocol.Part{protocol.NewTextPart("Process this streaming data chunk by chunk.")},
+				[]*protocol.Part{protocol.NewTextPart("Process this streaming data chunk by chunk.")},
 			),
 		}
 
@@ -65,7 +65,7 @@ func main() {
 		log.Info("Server does not support streaming, using SendMessage...")
 
 		msgParams := protocol.SendMessageParams{
-			Message: protocol.NewMessage(protocol.MessageRoleUser, []protocol.Part{
+			Message: protocol.NewMessage(protocol.MessageRoleUser, []*protocol.Part{
 				protocol.NewTextPart("Process this data."),
 			}),
 		}
@@ -75,16 +75,13 @@ func main() {
 			log.Fatalf("Error sending task: %v.", err)
 		}
 
-		switch result.Result.GetKind() {
-		case protocol.KindMessage:
-			msg := result.Result.(*protocol.Message)
+		if msg := result.Message; msg != nil {
 			text := extractTextFromMessage(msg)
 			log.Infof("Final message: Role=%s, Text=%s", msg.Role, text)
-		case protocol.KindTask:
-			task := result.Result.(*protocol.Task)
+		} else if task := result.Task; task != nil {
 			log.Infof("Final task: ID=%s, State=%s", task.ID, task.Status.State)
-		default:
-			log.Infof("Unexpected result type: %T", result.Result)
+		} else {
+			log.Infof("Unexpected empty result")
 		}
 	}
 }
@@ -139,18 +136,16 @@ func checkStreamingSupport(serverURL string) (bool, error) {
 }
 
 // processStreamEvents handles events received from a streaming task
-func processStreamEvents(ctx context.Context, streamChan <-chan protocol.StreamingMessageEvent) {
+func processStreamEvents(ctx context.Context, streamChan <-chan protocol.StreamResponse) {
 	log.Info("Waiting for streaming updates...")
 
 	for {
 		select {
 		case <-ctx.Done():
-			// Context timed out or was cancelled
 			log.Infof("Streaming context done: %v", ctx.Err())
 			return
 		case event, ok := <-streamChan:
 			if !ok {
-				// Channel closed by the client/server
 				log.Info("Stream closed.")
 				if ctx.Err() != nil {
 					log.Infof("Context error after stream close: %v", ctx.Err())
@@ -158,35 +153,26 @@ func processStreamEvents(ctx context.Context, streamChan <-chan protocol.Streami
 				return
 			}
 
-			// Process the received event
-			switch event.Result.GetKind() {
-			case protocol.KindMessage:
-				msg := event.Result.(*protocol.Message)
+			if msg := event.Message; msg != nil {
 				text := extractTextFromMessage(msg)
 				log.Infof("Received Message - MessageID: %s", msg.MessageID)
 				log.Infof("  Message Text: %s", text)
-			case protocol.KindTaskArtifactUpdate:
-				artifact := event.Result.(*protocol.TaskArtifactUpdateEvent)
-				log.Infof("Received Artifact Update - TaskID: %s, ArtifactID: %s", artifact.TaskID, artifact.Artifact.ArtifactID)
-				for _, part := range artifact.Artifact.Parts {
-					if textPart, ok := part.(*protocol.TextPart); ok {
-						log.Infof("  Artifact Text (Reversed Text): %s", textPart.Text)
+			} else if au := event.ArtifactUpdate; au != nil {
+				log.Infof("Received Artifact Update - TaskID: %s, ArtifactID: %s", au.TaskID, au.Artifact.ArtifactID)
+				for _, part := range au.Artifact.Parts {
+					if t := part.TextContent(); t != "" {
+						log.Infof("  Artifact Text (Reversed Text): %s", t)
 					}
 				}
-
-				// For artifact updates, we note it's the final artifact,
-				// but we don't exit yet - per A2A spec, we should wait for the final status update
-				if artifact.LastChunk != nil && *artifact.LastChunk {
+				if au.LastChunk != nil && *au.LastChunk {
 					log.Info("Received final artifact update, waiting for final status.")
 				}
-			case protocol.KindTask:
-				task := event.Result.(*protocol.Task)
+			} else if task := event.Task; task != nil {
 				log.Infof("Received Task - TaskID: %s, State: %s", task.ID, task.Status.State)
-			case protocol.KindTaskStatusUpdate:
-				statusUpdate := event.Result.(*protocol.TaskStatusUpdateEvent)
-				log.Infof("Received Task Status Update - TaskID: %s, State: %s", statusUpdate.TaskID, statusUpdate.Status.State)
-			default:
-				log.Infof("Received unknown event type: %T %v", event, event)
+			} else if su := event.StatusUpdate; su != nil {
+				log.Infof("Received Task Status Update - TaskID: %s, State: %s", su.TaskID, su.Status.State)
+			} else {
+				log.Infof("Received unknown event: %+v", event)
 			}
 		}
 	}
@@ -195,8 +181,8 @@ func processStreamEvents(ctx context.Context, streamChan <-chan protocol.Streami
 func extractTextFromMessage(msg *protocol.Message) string {
 	var text string
 	for _, part := range msg.Parts {
-		if textPart, ok := part.(protocol.TextPart); ok {
-			text += textPart.Text
+		if t := part.TextContent(); t != "" {
+			text += t
 		}
 	}
 	return text

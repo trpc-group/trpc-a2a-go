@@ -14,10 +14,10 @@ import (
 
 	"go.opentelemetry.io/otel/metric"
 
-	"trpc.group/trpc-go/trpc-a2a-go/auth"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/telemetry"
-	"trpc.group/trpc-go/trpc-a2a-go/telemetry/metrics"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry/metrics"
 )
 
 const (
@@ -65,6 +65,20 @@ func WithCORSEnabled(enabled bool) Option {
 func WithJSONRPCEndpoint(path string) Option {
 	return func(s *A2AServer) {
 		s.jsonRPCEndpoint = path
+	}
+}
+
+// WithCompatHandler installs a fallback handler for JSON-RPC requests whose
+// method name is not a v1.0 method (e.g. the legacy slash-delimited names
+// served by compat/v0). The handler is mounted on the same JSON-RPC endpoint
+// and runs INSIDE the authentication middleware chain, so the legacy protocol
+// path is authenticated exactly like the v1 path.
+//
+// Prefer this over composing compat/v0.NewDualHandler around Server.Handler():
+// the latter dispatches before the middleware and therefore bypasses auth.
+func WithCompatHandler(h http.Handler) Option {
+	return func(s *A2AServer) {
+		s.compatHandler = h
 	}
 }
 

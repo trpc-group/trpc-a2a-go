@@ -22,11 +22,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"trpc.group/trpc-go/trpc-a2a-go/auth"
-	"trpc.group/trpc-go/trpc-a2a-go/client"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/server"
-	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/client"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
 // TestJWTAuthentication tests the JWT authentication mechanism.
@@ -86,11 +86,9 @@ func TestJWTAuthentication(t *testing.T) {
 	})
 
 	require.NoError(t, err, "Authenticated request failed")
-	assert.NotNil(t, messageResult.Result, "Message result should not be nil")
+	require.NotNil(t, messageResult.Message, "Message result should not be nil")
 
-	// Get the processed message to verify it was processed
-	resultMessage, ok := messageResult.Result.(*protocol.Message)
-	require.True(t, ok, "Expected Message result")
+	resultMessage := messageResult.Message
 	processedMessage, exists := taskMgr.(*mockTaskManager).messages[resultMessage.MessageID]
 	require.True(t, exists, "Failed to get processed message")
 	assert.NotNil(t, processedMessage, "Processed message should not be nil")
@@ -140,11 +138,9 @@ func TestAPIKeyAuthentication(t *testing.T) {
 		Message: createTextMessage("Hello from API key test!"),
 	})
 	require.NoError(t, err, "Authenticated request failed")
-	assert.NotNil(t, messageResult.Result, "Message result should not be nil")
+	require.NotNil(t, messageResult.Message, "Message result should not be nil")
 
-	// Get the processed message to verify it was processed
-	resultMessage, ok := messageResult.Result.(*protocol.Message)
-	require.True(t, ok, "Expected Message result")
+	resultMessage := messageResult.Message
 	processedMessage, exists := taskMgr.(*mockTaskManager).messages[resultMessage.MessageID]
 	require.True(t, exists, "Failed to get processed message")
 	assert.NotNil(t, processedMessage, "Processed message should not be nil")
@@ -212,7 +208,7 @@ func TestChainAuthentication(t *testing.T) {
 		Message: createTextMessage("Hello with JWT auth!"),
 	})
 	require.NoError(t, err, "JWT authenticated request failed")
-	assert.NotNil(t, messageResult.Result, "Message result should not be nil")
+	assert.NotNil(t, messageResult.Message, "Message result should not be nil")
 
 	// Test with API key authentication
 	apiKeyTransport := &authRoundTripper{
@@ -232,7 +228,7 @@ func TestChainAuthentication(t *testing.T) {
 		Message: createTextMessage("Hello with API key auth!"),
 	})
 	require.NoError(t, err, "API key authenticated request failed")
-	assert.NotNil(t, messageResult2.Result, "Message result should not be nil")
+	assert.NotNil(t, messageResult2.Message, "Message result should not be nil")
 }
 
 // TestPushNotificationAuthentication tests push notification authentication.
@@ -428,10 +424,9 @@ func (t *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 // createTextMessage creates a simple text message for testing.
 func createTextMessage(text string) protocol.Message {
 	return protocol.Message{
-		Kind:      protocol.KindMessage,
 		MessageID: fmt.Sprintf("msg-%d", time.Now().UnixNano()),
 		Role:      protocol.MessageRoleUser,
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart(text),
 		},
 	}
@@ -449,8 +444,8 @@ func setupAuthServer(t *testing.T, provider auth.Provider) (taskmanager.TaskMana
 		Capabilities: server.AgentCapabilities{
 			Streaming: &[]bool{true}[0],
 		},
-		DefaultInputModes:  []string{protocol.KindText},
-		DefaultOutputModes: []string{protocol.KindText},
+		DefaultInputModes:  []string{"text"},
+		DefaultOutputModes: []string{"text"},
 	}
 
 	a2aServer, err := server.NewA2AServer(
@@ -468,7 +463,7 @@ func setupAuthServer(t *testing.T, provider auth.Provider) (taskmanager.TaskMana
 type mockTaskManager struct {
 	processor   taskmanager.MessageProcessor
 	tasks       map[string]*protocol.Task
-	pushConfigs map[string]protocol.PushNotificationConfig
+	pushConfigs map[string]protocol.TaskPushNotificationConfig
 	messages    map[string]*protocol.Message
 }
 
@@ -479,7 +474,7 @@ func newMockTaskManager(processor taskmanager.MessageProcessor) *mockTaskManager
 	return &mockTaskManager{
 		processor:   processor,
 		tasks:       make(map[string]*protocol.Task),
-		pushConfigs: make(map[string]protocol.PushNotificationConfig),
+		pushConfigs: make(map[string]protocol.TaskPushNotificationConfig),
 		messages:    make(map[string]*protocol.Message),
 	}
 }
@@ -496,41 +491,28 @@ func (m *mockTaskManager) Task(id string) (*protocol.Task, error) {
 // OnSendMessage handles a request corresponding to the 'message/send' RPC method.
 func (m *mockTaskManager) OnSendMessage(
 	ctx context.Context, request protocol.SendMessageParams,
-) (*protocol.MessageResult, error) {
-	// Store the message
+) (*protocol.SendMessageResponse, error) {
 	m.messages[request.Message.MessageID] = &request.Message
 
-	// Create a simple message result
-	return &protocol.MessageResult{
-		Result: &request.Message,
-	}, nil
+	return protocol.NewSendMessageResponseMessage(&request.Message), nil
 }
 
 // OnSendMessageStream handles a request corresponding to the 'message/stream' RPC method.
 func (m *mockTaskManager) OnSendMessageStream(
 	ctx context.Context, request protocol.SendMessageParams,
-) (<-chan protocol.StreamingMessageEvent, error) {
-	// Store the message
+) (<-chan protocol.StreamResponse, error) {
 	m.messages[request.Message.MessageID] = &request.Message
 
-	// Create a channel for events
-	eventCh := make(chan protocol.StreamingMessageEvent, 10)
+	eventCh := make(chan protocol.StreamResponse, 10)
 
-	// For a mock implementation, just send one event with the message and close the channel
 	go func() {
 		defer close(eventCh)
 
-		// Send the message result
-		event := protocol.StreamingMessageEvent{
-			Result: &request.Message,
-		}
+		event := protocol.NewStreamResponseMessage(&request.Message)
 
-		// Try to send the event, but don't block forever
 		select {
 		case eventCh <- event:
-			// Event sent successfully
 		case <-ctx.Done():
-			// Context was canceled
 		}
 	}()
 
@@ -553,7 +535,7 @@ func (m *mockTaskManager) OnPushNotificationSet(
 		return nil, err
 	}
 
-	m.pushConfigs[params.TaskID] = params.PushNotificationConfig
+	m.pushConfigs[params.TaskID] = params
 	return &params, nil
 }
 
@@ -571,42 +553,62 @@ func (m *mockTaskManager) OnPushNotificationGet(
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
 
-	return &protocol.TaskPushNotificationConfig{
-		TaskID:                 params.ID,
-		PushNotificationConfig: config,
-	}, nil
+	config.TaskID = params.ID
+	return &config, nil
+}
+
+// OnListTasks implements the v1.0 ListTasks method.
+func (m *mockTaskManager) OnListTasks(
+	ctx context.Context, params protocol.ListTasksParams,
+) (*protocol.ListTasksResult, error) {
+	return &protocol.ListTasksResult{Tasks: []*protocol.Task{}}, nil
+}
+
+// OnPushNotificationList implements the v1.0 ListTaskPushNotificationConfigs method.
+func (m *mockTaskManager) OnPushNotificationList(
+	ctx context.Context, params protocol.ListTaskPushNotificationConfigsParams,
+) (*protocol.ListTaskPushNotificationConfigsResult, error) {
+	result := &protocol.ListTaskPushNotificationConfigsResult{
+		Configs: []protocol.TaskPushNotificationConfig{},
+	}
+	if config, ok := m.pushConfigs[params.TaskID]; ok {
+		config.TaskID = params.TaskID
+		result.Configs = append(result.Configs, config)
+	}
+	return result, nil
+}
+
+// OnPushNotificationDelete implements the v1.0 DeleteTaskPushNotificationConfig method.
+func (m *mockTaskManager) OnPushNotificationDelete(
+	ctx context.Context, params protocol.DeleteTaskPushNotificationConfigParams,
+) error {
+	delete(m.pushConfigs, params.TaskID)
+	return nil
 }
 
 // OnResubscribe handles resubscribing to a task.
 func (m *mockTaskManager) OnResubscribe(
 	ctx context.Context, params protocol.TaskIDParams,
-) (<-chan protocol.StreamingMessageEvent, error) {
+) (<-chan protocol.StreamResponse, error) {
 	task, err := m.Task(params.ID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create a channel for events
-	eventCh := make(chan protocol.StreamingMessageEvent)
+	eventCh := make(chan protocol.StreamResponse)
 
-	// For a mock implementation, just send one event with the current status and close the channel
 	go func() {
 		defer close(eventCh)
 
-		// Send the current task status
-		final := true
 		event := protocol.TaskStatusUpdateEvent{
 			TaskID: task.ID,
 			Status: task.Status,
-			Final:  final,
+			Final:  true,
 		}
 
-		// Try to send the event, but don't block forever
 		select {
-		case eventCh <- protocol.StreamingMessageEvent{Result: &event}:
-			// Event sent successfully
+		case eventCh <- protocol.NewStreamResponseStatusUpdate(&event):
 		case <-ctx.Done():
-			// Context was canceled
 		}
 	}()
 
@@ -716,20 +718,19 @@ var _ taskmanager.MessageProcessor = (*echoProcessor)(nil)
 func (p *echoProcessor) ProcessMessage(
 	ctx context.Context, msg protocol.Message, opts taskmanager.ProcessOptions, handle taskmanager.TaskHandler,
 ) (*taskmanager.MessageProcessingResult, error) {
-	// Create a response that echoes back the message
-	textPart, ok := msg.Parts[0].(protocol.TextPart)
-	if !ok {
-		return nil, fmt.Errorf("expected TextPart, got %T", msg.Parts[0])
+	text := msg.Parts[0].TextContent()
+	if text == "" {
+		return nil, fmt.Errorf("expected text content, got empty")
 	}
 
 	response := protocol.Message{
 		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
-			protocol.NewTextPart(fmt.Sprintf("Echo: %s", textPart.Text)),
+		Parts: []*protocol.Part{
+			protocol.NewTextPart(fmt.Sprintf("Echo: %s", text)),
 		},
 	}
 
 	return &taskmanager.MessageProcessingResult{
-		Result: &response,
+		Result: protocol.NewSendMessageResponseMessage(&response),
 	}, nil
 }

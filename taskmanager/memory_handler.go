@@ -12,8 +12,8 @@ import (
 	"fmt"
 	"time"
 
-	"trpc.group/trpc-go/trpc-a2a-go/log"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 // =============================================================================
@@ -67,10 +67,9 @@ func (h *memoryTaskHandler) UpdateTaskState(
 		TaskID:    *taskID,
 		ContextID: originalTask.ContextID,
 		Status:    originalTask.Status,
-		Kind:      protocol.KindTaskStatusUpdate,
 		Final:     finalState,
 	}
-	streamEvent := protocol.StreamingMessageEvent{Result: event}
+	streamEvent := protocol.NewStreamResponseStatusUpdate(event)
 	h.manager.taskMu.Unlock()
 
 	// notify subscribers will lock again
@@ -133,11 +132,10 @@ func (h *memoryTaskHandler) AddArtifact(
 		TaskID:    *taskID,
 		ContextID: task.Task().ContextID,
 		Artifact:  artifact,
-		Kind:      protocol.KindTaskArtifactUpdate,
 		LastChunk: &isFinal,
 		Append:    &needMoreData,
 	}
-	streamEvent := protocol.StreamingMessageEvent{Result: event}
+	streamEvent := protocol.NewStreamResponseArtifactUpdate(event)
 	h.manager.notifySubscribers(*taskID, streamEvent)
 
 	return nil
@@ -257,7 +255,6 @@ func (h *memoryTaskHandler) BuildTask(specificTaskID *string, contextID *string)
 	task := protocol.Task{
 		ID:        actualTaskID,
 		ContextID: actualContextID,
-		Kind:      protocol.KindTask,
 		Status: protocol.TaskStatus{
 			State:     protocol.TaskStateSubmitted,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),

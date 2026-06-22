@@ -17,9 +17,9 @@ import (
 	"time"
 
 	"golang.org/x/oauth2/clientcredentials"
-	"trpc.group/trpc-go/trpc-a2a-go/auth"
-	"trpc.group/trpc-go/trpc-a2a-go/client"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/client"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 // config holds the client configuration options.
@@ -117,7 +117,7 @@ func main() {
 
 	// Create a simple task to test authentication
 	textPart := protocol.NewTextPart(config.TaskMessage)
-	message := protocol.NewMessage(protocol.MessageRoleUser, []protocol.Part{textPart})
+	message := protocol.NewMessage(protocol.MessageRoleUser, []*protocol.Part{textPart})
 
 	// Prepare message parameters
 	params := protocol.SendMessageParams{
@@ -150,28 +150,24 @@ func main() {
 	}
 
 	// Handle the response based on its type
-	switch response := result.Result.(type) {
-	case *protocol.Message:
-		fmt.Printf("Message Response: %s\n", response.MessageID)
-		if response.ContextID != nil {
-			fmt.Printf("Context ID: %s\n", *response.ContextID)
+	if msg := result.Message; msg != nil {
+		fmt.Printf("Message Response: %s\n", msg.MessageID)
+		if msg.ContextID != nil {
+			fmt.Printf("Context ID: %s\n", *msg.ContextID)
 		}
-		// Print message parts
-		for _, part := range response.Parts {
-			if textPart, ok := part.(*protocol.TextPart); ok {
-				fmt.Printf("Response: %s\n", textPart.Text)
+		for _, part := range msg.Parts {
+			if text := part.TextContent(); text != "" {
+				fmt.Printf("Response: %s\n", text)
 			}
 		}
-
-	case *protocol.Task:
-		fmt.Printf("Task ID: %s, Status: %s\n", response.ID, response.Status.State)
-		if response.ContextID != "" {
-			fmt.Printf("Context ID: %s\n", response.ContextID)
+	} else if task := result.Task; task != nil {
+		fmt.Printf("Task ID: %s, Status: %s\n", task.ID, task.Status.State)
+		if task.ContextID != "" {
+			fmt.Printf("Context ID: %s\n", task.ContextID)
 		}
 
-		// For demonstration purposes, get the task status
 		taskQuery := protocol.TaskQueryParams{
-			ID: response.ID,
+			ID: task.ID,
 		}
 
 		updatedTask, err := a2aClient.GetTasks(ctx, taskQuery)
@@ -180,9 +176,8 @@ func main() {
 		}
 
 		fmt.Printf("Updated task status: %s\n", updatedTask.Status.State)
-
-	default:
-		fmt.Printf("Unknown response type: %T\n", response)
+	} else {
+		fmt.Println("Unknown response type")
 	}
 }
 

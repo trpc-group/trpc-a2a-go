@@ -8,6 +8,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,16 +22,14 @@ import (
 
 	"go.opentelemetry.io/otel/metric"
 
-	"trpc.group/trpc-go/trpc-a2a-go/auth"
-	"trpc.group/trpc-go/trpc-a2a-go/internal/jsonrpc"
-	"trpc.group/trpc-go/trpc-a2a-go/log"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
-	"trpc.group/trpc-go/trpc-a2a-go/telemetry"
-	"trpc.group/trpc-go/trpc-a2a-go/telemetry/metrics"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry/metrics"
 )
-
-var errUnknownEvent = errors.New("unknown event type")
 
 // A2AServer implements the HTTP server for the A2A protocol.
 // It handles agent card requests and routes JSON-RPC calls to the TaskManager.
@@ -47,6 +46,12 @@ type A2AServer struct {
 	idleTimeout      time.Duration           // HTTP server idle timeout.
 	agentCardHandler http.Handler            // Handler for agent card endpoint.
 	customRouter     HTTPRouter              // Custom router for advanced routing (e.g., Gorilla Mux).
+
+	// compatHandler, when set, handles JSON-RPC requests whose method name is
+	// not a v1.0 method (e.g. the legacy slash-delimited names). It is invoked
+	// on the same endpoint and INSIDE the authentication middleware chain, so
+	// the legacy protocol path is authenticated exactly like the v1 path.
+	compatHandler http.Handler
 
 	// Authentication related fields
 	middleWare   []Middleware                        // Authentication middlewares.
@@ -73,6 +78,9 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 	if taskManager == nil {
 		return nil, errors.New("NewA2AServer requires a non-nil taskManager")
 	}
+	// Ensure the served card carries a v1.0-conformant supportedInterfaces list,
+	// deriving it from the deprecated URL/PreferredTransport fields when needed.
+	agentCard.NormalizeInterfaces()
 	server := &A2AServer{
 		agentCard:        agentCard,
 		taskManager:      taskManager,
@@ -103,7 +111,7 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 		server.agentCardPath == originalAgentCardPath &&
 		server.jwksEndpoint == originalJWKSEndpoint {
 
-		basePath := extractBasePathFromURL(agentCard.URL)
+		basePath := extractBasePathFromURL(agentCard.PrimaryURL())
 		if basePath != "" {
 			// Configure endpoints with the extracted base path.
 			server.jsonRPCEndpoint = basePath + "/"
@@ -257,15 +265,55 @@ func (s *A2AServer) Handler() http.Handler {
 	}
 
 	// Main JSON-RPC endpoint (configurable path) with optional authentication.
+	// When a compat handler is configured, dispatch non-v1 (legacy) methods to
+	// it from within the same handler so the authentication middleware below
+	// covers both protocol generations.
+	var jsonRPCHandler http.Handler = http.HandlerFunc(s.handleJSONRPC)
+	if s.compatHandler != nil {
+		jsonRPCHandler = s.dispatchByProtocol(jsonRPCHandler, s.compatHandler)
+	}
 	if len(s.middleWare) > 0 {
 		// Apply authentication middleware chain to JSON-RPC endpoint.
 		chain := MiddlewareChain(s.middleWare)
-		router.Handle(s.jsonRPCEndpoint, chain.Wrap(http.HandlerFunc(s.handleJSONRPC)))
+		router.Handle(s.jsonRPCEndpoint, chain.Wrap(jsonRPCHandler))
 	} else {
 		// No authentication required.
-		router.Handle(s.jsonRPCEndpoint, http.HandlerFunc(s.handleJSONRPC))
+		router.Handle(s.jsonRPCEndpoint, jsonRPCHandler)
 	}
 	return router
+}
+
+// dispatchByProtocol returns a handler that routes a JSON-RPC POST to the
+// legacy handler when its "method" is a legacy (slash-delimited) name and to
+// the v1 handler otherwise. The v1.0 PascalCase method names never contain a
+// slash, so the two sets are disjoint. Non-POST requests and unreadable
+// bodies fall through to the v1 handler.
+func (s *A2AServer) dispatchByProtocol(v1Handler, legacyHandler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.Body == nil {
+			v1Handler.ServeHTTP(w, r)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if closeErr := r.Body.Close(); closeErr != nil {
+			log.Errorf("Failed to close request body during protocol dispatch: %v", closeErr)
+		}
+		if err != nil {
+			s.writeJSONRPCError(w, nil, jsonrpc.ErrParseError(fmt.Sprintf("failed to read request body: %v", err)))
+			return
+		}
+		// Restore the body for the downstream handler.
+		r.Body = io.NopCloser(bytes.NewReader(body))
+
+		var probe struct {
+			Method string `json:"method"`
+		}
+		if json.Unmarshal(body, &probe) == nil && strings.Contains(probe.Method, "/") {
+			legacyHandler.ServeHTTP(w, r)
+			return
+		}
+		v1Handler.ServeHTTP(w, r)
+	})
 }
 
 // handleAgentCard serves the agent's metadata card as JSON.
@@ -385,10 +433,16 @@ func (s *A2AServer) routeJSONRPCMethod(ctx context.Context, w http.ResponseWrite
 		s.handleTasksPushNotificationGet(ctx, w, request)
 	case protocol.MethodTasksPushNotificationConfigSet: // A2A Spec: tasks/pushNotification/config/set
 		s.handleTasksPushNotificationSet(ctx, w, request)
-	case protocol.MethodTasksGet: // A2A Spec: tasks/get
+	case protocol.MethodTasksGet: // A2A Spec: GetTask
 		s.handleTasksGet(ctx, w, request)
-	case protocol.MethodTasksCancel: // A2A Spec: tasks/cancel
+	case protocol.MethodTasksList: // A2A Spec: ListTasks (v1.0)
+		s.handleTasksList(ctx, w, request)
+	case protocol.MethodTasksCancel: // A2A Spec: CancelTask
 		s.handleTasksCancel(ctx, w, request)
+	case protocol.MethodTasksPushNotificationConfigList: // A2A Spec: ListTaskPushNotificationConfigs (v1.0)
+		s.handleTasksPushNotificationList(ctx, w, request)
+	case protocol.MethodTasksPushNotificationConfigDelete: // A2A Spec: DeleteTaskPushNotificationConfig (v1.0)
+		s.handleTasksPushNotificationDelete(ctx, w, request)
 	case protocol.MethodTasksResubscribe: // A2A Spec: tasks/resubscribe
 		s.handleTasksResubscribe(ctx, w, request)
 	case protocol.MethodAgentAuthenticatedExtendedCard: // A2A Spec: agent/getAuthenticatedExtendedCard
@@ -422,6 +476,63 @@ func (s *A2AServer) handleTasksGet(ctx context.Context, w http.ResponseWriter, r
 		return
 	}
 	s.writeJSONRPCResponse(w, request.ID, task)
+}
+
+// handleTasksList handles the v1.0 ListTasks method.
+func (s *A2AServer) handleTasksList(ctx context.Context, w http.ResponseWriter, request jsonrpc.Request) {
+	var params protocol.ListTasksParams
+	if err := s.unmarshalParams(request.Params, &params); err != nil {
+		s.writeJSONRPCError(w, request.ID, err)
+		return
+	}
+	result, err := s.taskManager.OnListTasks(ctx, params)
+	if err != nil {
+		s.handleTaskManagerError(w, request.ID, err, "OnListTasks", params.ContextID)
+		return
+	}
+	s.writeJSONRPCResponse(w, request.ID, result)
+}
+
+// handleTasksPushNotificationList handles the v1.0 ListTaskPushNotificationConfigs method.
+func (s *A2AServer) handleTasksPushNotificationList(
+	ctx context.Context, w http.ResponseWriter, request jsonrpc.Request,
+) {
+	var params protocol.ListTaskPushNotificationConfigsParams
+	if err := s.unmarshalParams(request.Params, &params); err != nil {
+		s.writeJSONRPCError(w, request.ID, err)
+		return
+	}
+	if params.TaskID == "" {
+		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
+		return
+	}
+	result, err := s.taskManager.OnPushNotificationList(ctx, params)
+	if err != nil {
+		s.handleTaskManagerError(w, request.ID, err, "OnPushNotificationList", params.TaskID)
+		return
+	}
+	s.writeJSONRPCResponse(w, request.ID, result)
+}
+
+// handleTasksPushNotificationDelete handles the v1.0 DeleteTaskPushNotificationConfig method.
+func (s *A2AServer) handleTasksPushNotificationDelete(
+	ctx context.Context, w http.ResponseWriter, request jsonrpc.Request,
+) {
+	var params protocol.DeleteTaskPushNotificationConfigParams
+	if err := s.unmarshalParams(request.Params, &params); err != nil {
+		s.writeJSONRPCError(w, request.ID, err)
+		return
+	}
+	if params.TaskID == "" {
+		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
+		return
+	}
+	if err := s.taskManager.OnPushNotificationDelete(ctx, params); err != nil {
+		s.handleTaskManagerError(w, request.ID, err, "OnPushNotificationDelete", params.TaskID)
+		return
+	}
+	// v1.0 DeleteTaskPushNotificationConfig returns an empty result on success.
+	s.writeJSONRPCResponse(w, request.ID, struct{}{})
 }
 
 // handleTasksCancel handles the tasks_cancel method.
@@ -525,42 +636,18 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
 		return
 	}
-	if params.PushNotificationConfig.URL == "" {
+	if params.URL == "" {
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("push notification URL is required"))
 		return
 	}
-	// Process authentication related fields for push notifications.
+	// Set JWKS endpoint information for push notification authentication.
 	if s.jwksEnabled && s.pushAuth != nil {
-		// Add JWT support by indicating the auth scheme in the config.
-		if params.PushNotificationConfig.Authentication == nil {
-			params.PushNotificationConfig.Authentication = &protocol.AuthenticationInfo{
-				Schemes: []string{"bearer"},
-			}
-		} else {
-			// Ensure "bearer" is in the list of supported schemes.
-			hasBearer := false
-			for _, scheme := range params.PushNotificationConfig.Authentication.Schemes {
-				if scheme == "bearer" {
-					hasBearer = true
-					break
-				}
-			}
-			if !hasBearer {
-				params.PushNotificationConfig.Authentication.Schemes = append(
-					params.PushNotificationConfig.Authentication.Schemes,
-					"bearer",
-				)
-			}
-		}
-		// Set JWKS endpoint information.
-		// This will be used by the client to verify JWTs sent by this server.
 		jwksURL := s.composeJWKSURL()
 		log.Infof("JWKS URL for push notifications: %s", jwksURL)
-		// Store JWKS URL in the params for the task manager to use.
-		if params.PushNotificationConfig.Metadata == nil {
-			params.PushNotificationConfig.Metadata = make(map[string]interface{})
+		if params.Metadata == nil {
+			params.Metadata = make(map[string]interface{})
 		}
-		params.PushNotificationConfig.Metadata["jwksUrl"] = jwksURL
+		params.Metadata["jwksUrl"] = jwksURL
 	}
 
 	// Delegate to the task manager.
@@ -575,16 +662,17 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 
 // composeJWKSURL returns the fully qualified URL to the JWKS endpoint.
 func (s *A2AServer) composeJWKSURL() string {
-	if s.agentCard.URL == "" {
+	cardURL := s.agentCard.PrimaryURL()
+	if cardURL == "" {
 		// This is a fallback, but ideally the agent card should have a proper URL.
 		log.Warn("Agent card URL is empty, using relative JWKS endpoint")
 		return s.jwksEndpoint
 	}
 
 	// Parse the agent card URL to extract the base (scheme + host + port).
-	parsedURL, err := url.Parse(s.agentCard.URL)
+	parsedURL, err := url.Parse(cardURL)
 	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
-		log.Warnf("Failed to parse agent card URL '%s': %v", s.agentCard.URL, err)
+		log.Warnf("Failed to parse agent card URL '%s': %v", cardURL, err)
 		return s.jwksEndpoint
 	}
 
@@ -598,22 +686,32 @@ func (s *A2AServer) handleTasksPushNotificationGet(
 	w http.ResponseWriter,
 	request jsonrpc.Request,
 ) {
-	var params protocol.TaskIDParams
+	var params protocol.GetTaskPushNotificationConfigParams
 	if err := s.unmarshalParams(request.Params, &params); err != nil {
 		s.writeJSONRPCError(w, request.ID, err)
 		return
 	}
 
-	// Validate required fields.
-	if params.ID == "" {
+	// v1.0 addresses the task by "taskId"; older clients put the task ID in
+	// "id". Accept both so the config-id field ("id") is not mistaken for the
+	// task ID.
+	taskID := params.TaskID
+	if taskID == "" {
+		taskID = params.ID
+	}
+	if taskID == "" {
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
 		return
 	}
 
 	// Delegate to the task manager.
-	result, err := s.taskManager.OnPushNotificationGet(ctx, params)
+	result, err := s.taskManager.OnPushNotificationGet(ctx, protocol.TaskIDParams{
+		RPCID:    params.RPCID,
+		ID:       taskID,
+		Metadata: nil,
+	})
 	if err != nil {
-		s.handleTaskManagerError(w, request.ID, err, "OnPushNotificationGet", params.ID)
+		s.handleTaskManagerError(w, request.ID, err, "OnPushNotificationGet", taskID)
 		return
 	}
 
@@ -727,7 +825,7 @@ func handleSSEStream(
 	corsEnabled bool,
 	w http.ResponseWriter,
 	flusher http.Flusher,
-	eventsChan <-chan protocol.StreamingMessageEvent,
+	eventsChan <-chan protocol.StreamResponse,
 	rpcID interface{},
 	tracker *metricsTracker,
 ) {
@@ -763,10 +861,10 @@ func handleSSEStream(
 
 func trackStreamEvents(
 	ctx context.Context,
-	eventsChan <-chan protocol.StreamingMessageEvent,
+	eventsChan <-chan protocol.StreamResponse,
 	tracker *metricsTracker,
-) <-chan protocol.StreamingMessageEvent {
-	tracked := make(chan protocol.StreamingMessageEvent)
+) <-chan protocol.StreamResponse {
+	tracked := make(chan protocol.StreamResponse)
 	go func() {
 		defer close(tracked)
 		for {
@@ -834,8 +932,9 @@ func (s *A2AServer) handleAgentGetAuthenticatedExtendedCard(
 	w http.ResponseWriter,
 	request jsonrpc.Request,
 ) {
-	// Check if the agent supports authenticated extended cards
-	if s.agentCard.SupportsAuthenticatedExtendedCard == nil || !*s.agentCard.SupportsAuthenticatedExtendedCard {
+	// Check if the agent supports authenticated extended cards (v1.0
+	// capabilities.extendedAgentCard or the deprecated top-level flag).
+	if !s.agentCard.ExtendedAgentCardEnabled() {
 		log.Warnf("Authenticated extended card not configured (Request ID: %v)", request.ID)
 		s.writeJSONRPCError(w, request.ID, taskmanager.ErrAuthenticatedExtendedCardNotConfigured())
 		return

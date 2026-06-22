@@ -7,47 +7,44 @@
 // Package protocol defines constants and potentially shared types for the A2A protocol itself.
 package protocol
 
-// Method names for A2A 0.2.2 specification.
+// Method names for the A2A v1.0 specification (PascalCase, per the JSON-RPC binding).
+//
+// NOTE: the Go constant identifiers are kept stable (MethodMessageSend, ...) to
+// minimize churn in server/client code; only the wire values changed to v1.0
+// PascalCase. The legacy slash-delimited names (message/send, ...) live in the
+// compat/v0 package, where they are disjoint from these and can be routed
+// independently on the same endpoint.
 const (
-	// MethodMessageSend corresponds to the 'message/send' RPC method.
-	MethodMessageSend = "message/send"
-	// MethodMessageStream corresponds to the 'message/stream' RPC method.
-	MethodMessageStream = "message/stream"
-	// MethodTasksGet corresponds to the 'tasks/get' RPC method.
-	MethodTasksGet = "tasks/get"
-	// MethodTasksCancel corresponds to the 'tasks/cancel' RPC method.
-	MethodTasksCancel = "tasks/cancel"
-	// MethodTasksPushNotificationConfigSet corresponds to the 'tasks/pushNotificationConfig/set' RPC method.
-	MethodTasksPushNotificationConfigSet = "tasks/pushNotificationConfig/set"
-	// MethodTasksPushNotificationConfigGet corresponds to the 'tasks/pushNotificationConfig/get' RPC method.
-	MethodTasksPushNotificationConfigGet = "tasks/pushNotificationConfig/get"
-	// MethodTasksResubscribe corresponds to the 'tasks/resubscribe' RPC method.
-	MethodTasksResubscribe = "tasks/resubscribe"
-	// MethodAgentAuthenticatedExtendedCard corresponds to the 'agent/getAuthenticatedExtendedCard' JSON-RPC method.
-	MethodAgentAuthenticatedExtendedCard = "agent/getAuthenticatedExtendedCard"
+	MethodMessageSend                    = "SendMessage"
+	MethodMessageStream                  = "SendStreamingMessage"
+	MethodTasksGet                       = "GetTask"
+	MethodTasksCancel                    = "CancelTask"
+	MethodTasksPushNotificationConfigSet = "CreateTaskPushNotificationConfig"
+	MethodTasksPushNotificationConfigGet = "GetTaskPushNotificationConfig"
+	MethodTasksResubscribe               = "SubscribeToTask"
+	MethodAgentAuthenticatedExtendedCard = "GetExtendedAgentCard"
+
+	// New operations introduced in v1.0 (additive; old clients never call these).
+	MethodTasksList                         = "ListTasks"
+	MethodTasksPushNotificationConfigList   = "ListTaskPushNotificationConfigs"
+	MethodTasksPushNotificationConfigDelete = "DeleteTaskPushNotificationConfig"
 )
 
-// A2A SSE Event Types define the standard event type strings used in A2A SSE streams.
+// SSE event type strings used in A2A SSE streams.
 const (
-	EventStatusUpdate   = "task_status_update"
-	EventArtifactUpdate = "task_artifact_update"
+	EventStatusUpdate   = "statusUpdate"
+	EventArtifactUpdate = "artifactUpdate"
 	EventTask           = "task"
 	EventMessage        = "message"
 
-	// EventClose is used internally by this implementation's server to signal stream closure.
-	// Note: This might not be part of the formal A2A spec but is used in server logic.
+	// EventClose is used internally to signal stream closure (not part of the A2A spec).
 	EventClose = "close"
 )
 
-// A2A HTTP Endpoint Paths define the standard paths used in the A2A protocol.
+// HTTP Endpoint Paths.
 const (
-	// AgentCardPath is the current path for the agent metadata JSON endpoint (A2A spec v0.2.5+).
-	AgentCardPath = "/.well-known/agent-card.json"
-	// OldAgentCardPath is the deprecated path for the agent metadata JSON endpoint (A2A spec < v0.2.5).
-	// Kept for backward compatibility. It can be removed in a future version.
-	OldAgentCardPath = "/.well-known/agent.json"
-	// JWKSPath is the path for the JWKS endpoint.
-	JWKSPath = "/.well-known/jwks.json"
-	// DefaultJSONRPCPath is the default path for the JSON-RPC endpoint.
+	AgentCardPath      = "/.well-known/agent-card.json"
+	OldAgentCardPath   = "/.well-known/agent.json"
+	JWKSPath           = "/.well-known/jwks.json"
 	DefaultJSONRPCPath = "/"
 )

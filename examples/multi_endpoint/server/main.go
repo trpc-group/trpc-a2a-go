@@ -11,9 +11,9 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/server"
-	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
 const ctxAgentNameKey = "agentName"
@@ -163,18 +163,14 @@ func (u *multiAgentProecssor) chatAgentProcessMessage(
 ) (*taskmanager.MessageProcessingResult, error) {
 	msg := &protocol.Message{
 		Role:      protocol.MessageRoleAgent,
-		Kind:      protocol.KindMessage,
 		MessageID: protocol.GenerateMessageID(),
-		Parts: []protocol.Part{
-			&protocol.TextPart{
-				Kind: protocol.KindText,
-				Text: "Hello from chat agent!",
-			},
+		Parts: []*protocol.Part{
+			protocol.NewTextPart("Hello from chat agent!"),
 		},
 	}
 
 	return &taskmanager.MessageProcessingResult{
-		Result: msg,
+		Result: protocol.NewSendMessageResponseMessage(msg),
 	}, nil
 }
 
@@ -186,18 +182,14 @@ func (u *multiAgentProecssor) workerAgentProcessMessage(
 ) (*taskmanager.MessageProcessingResult, error) {
 	msg := &protocol.Message{
 		Role:      protocol.MessageRoleAgent,
-		Kind:      protocol.KindMessage,
 		MessageID: protocol.GenerateMessageID(),
-		Parts: []protocol.Part{
-			&protocol.TextPart{
-				Kind: protocol.KindText,
-				Text: "Hello from worker agent!",
-			},
+		Parts: []*protocol.Part{
+			protocol.NewTextPart("Hello from worker agent!"),
 		},
 	}
 
 	return &taskmanager.MessageProcessingResult{
-		Result: msg,
+		Result: protocol.NewSendMessageResponseMessage(msg),
 	}, nil
 }
 

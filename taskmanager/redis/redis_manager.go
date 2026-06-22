@@ -16,9 +16,9 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"trpc.group/trpc-go/trpc-a2a-go/log"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
 const (
@@ -108,7 +108,7 @@ func NewTaskManager(
 func (m *TaskManager) OnSendMessage(
 	ctx context.Context,
 	request protocol.SendMessageParams,
-) (*protocol.MessageResult, error) {
+) (*protocol.SendMessageResponse, error) {
 	log.Debugf("RedisTaskManager: OnSendMessage for message %s", request.Message.MessageID)
 
 	// Process the request message.
@@ -146,29 +146,22 @@ func (m *TaskManager) OnSendMessage(
 		return nil, fmt.Errorf("processor returned nil result for non-streaming request")
 	}
 
-	switch result.Result.(type) {
-	case *protocol.Task:
-	case *protocol.Message:
-	default:
-		return nil, fmt.Errorf("processor returned unsupported result type %T for SendMessage request", result.Result)
-	}
-
-	if message, ok := result.Result.(*protocol.Message); ok {
+	if result.Result.Message != nil {
 		var contextID string
 		if request.Message.ContextID != nil {
 			contextID = *request.Message.ContextID
 		}
-		m.processReplyMessage(&contextID, message)
+		m.processReplyMessage(&contextID, result.Result.Message)
 	}
 
-	return &protocol.MessageResult{Result: result.Result}, nil
+	return result.Result, nil
 }
 
 // OnSendMessageStream handles message/stream requests.
 func (m *TaskManager) OnSendMessageStream(
 	ctx context.Context,
 	request protocol.SendMessageParams,
-) (<-chan protocol.StreamingMessageEvent, error) {
+) (<-chan protocol.StreamResponse, error) {
 	log.Debugf("RedisTaskManager: OnSendMessageStream for message %s", request.Message.MessageID)
 
 	m.processRequestMessage(&request.Message)
@@ -209,10 +202,22 @@ func (m *TaskManager) OnGetTask(
 		return nil, err
 	}
 
-	// If the request contains history length, fill the message history.
-	if params.HistoryLength != nil && *params.HistoryLength > 0 {
-		if task.ContextID != "" {
-			history, err := m.getConversationHistory(ctx, task.ContextID, *params.HistoryLength)
+	// Fill message history per the v1.0 GetTaskRequest semantics:
+	//   - historyLength unset -> no limit (full history)
+	//   - historyLength == 0  -> no messages
+	//   - historyLength > 0   -> the most recent N messages
+	if task.ContextID != "" {
+		length := -1 // sentinel: unset -> unlimited
+		switch {
+		case params.HistoryLength == nil:
+			length = unlimitedHistoryLength
+		case *params.HistoryLength > 0:
+			length = *params.HistoryLength
+		default: // == 0 (or negative): no messages
+			task.History = nil
+		}
+		if length >= 0 {
+			history, err := m.getConversationHistory(ctx, task.ContextID, length)
 			if err != nil {
 				log.Warnf("Failed to retrieve message history for task %s: %v", params.ID, err)
 				// Continue without history rather than failing the whole request.
@@ -323,11 +328,89 @@ func (m *TaskManager) OnPushNotificationGet(
 	return &config, nil
 }
 
+// unlimitedHistoryLength is used to request the full conversation history when
+// a v1.0 request leaves historyLength unset (spec: unset means no limit).
+const unlimitedHistoryLength = 1 << 30
+
+// OnListTasks handles the v1.0 ListTasks request by scanning stored tasks,
+// filtering, and applying offset-based pagination.
+func (m *TaskManager) OnListTasks(
+	ctx context.Context,
+	params protocol.ListTasksParams,
+) (*protocol.ListTasksResult, error) {
+	afterTime, err := taskmanager.ParseListTasksStatusTimestampAfter(params.StatusTimestampAfter)
+	if err != nil {
+		return nil, err
+	}
+
+	// Scan all task keys and collect matching tasks.
+	var filtered []*protocol.Task
+	iter := m.client.Scan(ctx, 0, taskPrefix+"*", 0).Iterator()
+	for iter.Next(ctx) {
+		taskBytes, err := m.client.Get(ctx, iter.Val()).Bytes()
+		if err != nil {
+			continue // Key expired between SCAN and GET.
+		}
+		var task protocol.Task
+		if err := json.Unmarshal(taskBytes, &task); err != nil {
+			log.Errorf("RedisTaskManager: skip malformed task at %s: %v", iter.Val(), err)
+			continue
+		}
+		if taskmanager.TaskMatchesListFilter(&task, params, afterTime) {
+			filtered = append(filtered, &task)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("failed to scan tasks: %w", err)
+	}
+	return taskmanager.PaginateTasks(filtered, params)
+}
+
+// OnPushNotificationList handles the v1.0 ListTaskPushNotificationConfigs request.
+// The Redis manager stores at most one configuration per task, so the result
+// contains zero or one entries.
+func (m *TaskManager) OnPushNotificationList(
+	ctx context.Context,
+	params protocol.ListTaskPushNotificationConfigsParams,
+) (*protocol.ListTaskPushNotificationConfigsResult, error) {
+	// Check if task exists.
+	if _, err := m.getTaskInternal(ctx, params.TaskID); err != nil {
+		return nil, err
+	}
+
+	result := &protocol.ListTaskPushNotificationConfigsResult{
+		Configs: []protocol.TaskPushNotificationConfig{},
+	}
+	configBytes, err := m.client.Get(ctx, pushNotificationPrefix+params.TaskID).Bytes()
+	if err != nil {
+		return result, nil // No config registered.
+	}
+	var config protocol.TaskPushNotificationConfig
+	if err := json.Unmarshal(configBytes, &config); err != nil {
+		return nil, fmt.Errorf("failed to deserialize push notification config: %w", err)
+	}
+	result.Configs = append(result.Configs, config)
+	return result, nil
+}
+
+// OnPushNotificationDelete handles the v1.0 DeleteTaskPushNotificationConfig request.
+// Deleting a non-existent configuration is a no-op.
+func (m *TaskManager) OnPushNotificationDelete(
+	ctx context.Context,
+	params protocol.DeleteTaskPushNotificationConfigParams,
+) error {
+	if err := m.client.Del(ctx, pushNotificationPrefix+params.TaskID).Err(); err != nil {
+		return fmt.Errorf("failed to delete push notification config: %w", err)
+	}
+	log.Debugf("RedisTaskManager: Push notification config deleted for task %s", params.TaskID)
+	return nil
+}
+
 // OnResubscribe handles tasks/resubscribe requests.
 func (m *TaskManager) OnResubscribe(
 	ctx context.Context,
 	params protocol.TaskIDParams,
-) (<-chan protocol.StreamingMessageEvent, error) {
+) (<-chan protocol.StreamResponse, error) {
 	// Check if task exists.
 	_, err := m.getTaskInternal(ctx, params.ID)
 	if err != nil {
@@ -361,7 +444,9 @@ func (m *TaskManager) processConfiguration(
 	config *protocol.SendMessageConfiguration,
 ) taskmanager.ProcessOptions {
 	result := taskmanager.ProcessOptions{
-		Blocking:      false,
+		// v1.0 default: returnImmediately=false means the request blocks until a
+		// terminal/interrupted state, so a missing configuration is blocking.
+		Blocking:      true,
 		HistoryLength: 0,
 	}
 
@@ -369,19 +454,17 @@ func (m *TaskManager) processConfiguration(
 		return result
 	}
 
-	// Process Blocking configuration.
-	if config.Blocking != nil {
-		result.Blocking = *config.Blocking
-	}
+	// Process Blocking configuration (v1: ReturnImmediately with inverted semantics).
+	result.Blocking = config.IsBlocking()
 
 	// Process HistoryLength configuration.
 	if config.HistoryLength != nil && *config.HistoryLength > 0 {
 		result.HistoryLength = *config.HistoryLength
 	}
 
-	// Process PushNotificationConfig.
-	if config.PushNotificationConfig != nil {
-		result.PushNotificationConfig = config.PushNotificationConfig
+	// Process PushNotificationConfig (flat TaskPushNotificationConfig -> details view).
+	if config.PushConfig != nil {
+		result.PushNotificationConfig = config.PushConfig.Details()
 	}
 
 	// Process AcceptedOutputModes configuration.
@@ -423,28 +506,19 @@ func (m *TaskManager) processReplyMessage(ctxID *string, message *protocol.Messa
 
 // sendStreamingEventHook is a hook for sending streaming events
 // used to set contextID for task status update, task artifact update, message and task events
-func (m *TaskManager) sendStreamingEventHook(ctxID string) func(event protocol.StreamingMessageEvent) error {
-	return func(event protocol.StreamingMessageEvent) error {
-		switch event.Result.(type) {
-		case *protocol.TaskStatusUpdateEvent:
-			event := event.Result.(*protocol.TaskStatusUpdateEvent)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
-			}
-		case *protocol.TaskArtifactUpdateEvent:
-			event := event.Result.(*protocol.TaskArtifactUpdateEvent)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
-			}
-		case *protocol.Message:
-			event := event.Result.(*protocol.Message)
-			// store message
-			m.processReplyMessage(&ctxID, event)
-		case *protocol.Task:
-			event := event.Result.(*protocol.Task)
-			if event.ContextID == "" {
-				event.ContextID = ctxID
-			}
+func (m *TaskManager) sendStreamingEventHook(ctxID string) func(event protocol.StreamResponse) error {
+	return func(event protocol.StreamResponse) error {
+		if event.StatusUpdate != nil && event.StatusUpdate.ContextID == "" {
+			event.StatusUpdate.ContextID = ctxID
+		}
+		if event.ArtifactUpdate != nil && event.ArtifactUpdate.ContextID == "" {
+			event.ArtifactUpdate.ContextID = ctxID
+		}
+		if event.Message != nil {
+			m.processReplyMessage(&ctxID, event.Message)
+		}
+		if event.Task != nil && event.Task.ContextID == "" {
+			event.Task.ContextID = ctxID
 		}
 		return nil
 	}
@@ -613,7 +687,7 @@ func (m *TaskManager) cleanSubscribers(taskID string) {
 }
 
 // notifySubscribers notifies all subscribers of a task.
-func (m *TaskManager) notifySubscribers(taskID string, event protocol.StreamingMessageEvent) {
+func (m *TaskManager) notifySubscribers(taskID string, event protocol.StreamResponse) {
 	m.subMu.RLock()
 	subs, exists := m.subscribers[taskID]
 	if !exists || len(subs) == 0 {
@@ -625,7 +699,7 @@ func (m *TaskManager) notifySubscribers(taskID string, event protocol.StreamingM
 	copy(subsCopy, subs)
 	m.subMu.RUnlock()
 
-	log.Debugf("Notifying %d subscribers for task %s (Event Type: %T)", len(subsCopy), taskID, event.Result)
+	log.Debugf("Notifying %d subscribers for task %s", len(subsCopy), taskID)
 
 	var failedSubscribers []*TaskSubscriber
 

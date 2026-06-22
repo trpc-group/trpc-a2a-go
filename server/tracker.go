@@ -14,9 +14,9 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/telemetry"
-	"trpc.group/trpc-go/trpc-a2a-go/telemetry/metrics"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry/metrics"
 )
 
 // metricsTracker holds per-request telemetry state for the server package.
@@ -51,20 +51,20 @@ func newMetricsTracker(
 	}
 }
 
-func (t *metricsTracker) onEvent(event protocol.StreamingMessageEvent) {
+func (t *metricsTracker) onEvent(event protocol.StreamResponse) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	if t.firstTokenRecorded {
 		return
 	}
-	if event.Result != nil && t.policy.IsStreamingFirstToken(event.Result) {
+	if t.policy.IsStreamingFirstToken(&event) {
 		t.firstTokenTime = time.Now()
 		t.firstTokenRecorded = true
 	}
 }
 
-func (t *metricsTracker) observeNonStreamingResult(result *protocol.MessageResult) {
+func (t *metricsTracker) observeNonStreamingResult(result *protocol.SendMessageResponse) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 

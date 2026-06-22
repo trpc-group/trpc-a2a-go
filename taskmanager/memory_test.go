@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 // MockMessageProcessor implements MessageProcessor for testing
@@ -27,21 +27,21 @@ func (m *MockMessageProcessor) ProcessMessage(ctx context.Context, message proto
 	// Default implementation: echo the message
 	response := &protocol.Message{
 		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
+		Parts: []*protocol.Part{
 			protocol.NewTextPart("Echo: " + getTextFromMessage(message)),
 		},
 	}
 
 	return &MessageProcessingResult{
-		Result: response,
+		Result: &protocol.SendMessageResponse{Message: response},
 	}, nil
 }
 
 // Helper function to extract text from message
 func getTextFromMessage(message protocol.Message) string {
 	for _, part := range message.Parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			return textPart.Text
+		if text := part.TextContent(); text != "" {
+			return text
 		}
 	}
 	return ""
@@ -117,7 +117,7 @@ func TestMemoryTaskManager_OnSendMessage(t *testing.T) {
 			request: protocol.SendMessageParams{
 				Message: protocol.Message{
 					Role: protocol.MessageRoleUser,
-					Parts: []protocol.Part{
+					Parts: []*protocol.Part{
 						protocol.NewTextPart("Hello"),
 					},
 				},
@@ -130,7 +130,7 @@ func TestMemoryTaskManager_OnSendMessage(t *testing.T) {
 				Message: protocol.Message{
 					Role:      protocol.MessageRoleUser,
 					ContextID: stringPtr("test-context"),
-					Parts: []protocol.Part{
+					Parts: []*protocol.Part{
 						protocol.NewTextPart("Hello with context"),
 					},
 				},
@@ -160,21 +160,15 @@ func TestMemoryTaskManager_OnSendMessage(t *testing.T) {
 				return
 			}
 
-			// Check that message was stored
-			if result.Result == nil {
-				t.Error("Expected result but got nil")
-				return
-			}
-
-			// Check if result is a message
-			if message, ok := result.Result.(*protocol.Message); ok {
-				if message.MessageID == "" {
+			// Check if result contains a message
+			if result.Message != nil {
+				if result.Message.MessageID == "" {
 					t.Error("Expected message ID to be set")
 				}
 
 				// Check that message is in storage
 				manager.mu.RLock()
-				_, exists := manager.Messages[message.MessageID]
+				_, exists := manager.Messages[result.Message.MessageID]
 				manager.mu.RUnlock()
 
 				if !exists {
@@ -209,7 +203,7 @@ func TestMemoryTaskManager_OnSendMessageStream(t *testing.T) {
 				// Complete task
 				finalMessage := &protocol.Message{
 					Role: protocol.MessageRoleAgent,
-					Parts: []protocol.Part{
+					Parts: []*protocol.Part{
 						protocol.NewTextPart("Streaming completed"),
 					},
 				}
@@ -231,7 +225,7 @@ func TestMemoryTaskManager_OnSendMessageStream(t *testing.T) {
 	request := protocol.SendMessageParams{
 		Message: protocol.Message{
 			Role: protocol.MessageRoleUser,
-			Parts: []protocol.Part{
+			Parts: []*protocol.Part{
 				protocol.NewTextPart("Stream test"),
 			},
 		},
@@ -247,7 +241,7 @@ func TestMemoryTaskManager_OnSendMessageStream(t *testing.T) {
 	}
 
 	// Collect events with shorter timeout
-	var events []protocol.StreamingMessageEvent
+	var events []protocol.StreamResponse
 	timeout := time.After(500 * time.Millisecond)
 	eventCount := 0
 
@@ -283,7 +277,7 @@ CheckEvents:
 	// Should have received some events
 	hasStatusUpdate := false
 	for _, event := range events {
-		if event.Result != nil {
+		if event.StatusUpdate != nil {
 			hasStatusUpdate = true
 			break
 		}
@@ -310,7 +304,7 @@ func TestMemoryTaskManager_OnGetTask(t *testing.T) {
 			}
 
 			return &MessageProcessingResult{
-				Result: task.Task(), // Return protocol.Task, not CancellableTask
+				Result: &protocol.SendMessageResponse{Task: task.Task()},
 			}, nil
 		},
 	}
@@ -325,7 +319,7 @@ func TestMemoryTaskManager_OnGetTask(t *testing.T) {
 	request := protocol.SendMessageParams{
 		Message: protocol.Message{
 			Role: protocol.MessageRoleUser,
-			Parts: []protocol.Part{
+			Parts: []*protocol.Part{
 				protocol.NewTextPart("Test"),
 			},
 		},
@@ -337,10 +331,10 @@ func TestMemoryTaskManager_OnGetTask(t *testing.T) {
 	}
 
 	var existingTaskID string
-	if task, ok := result.Result.(*protocol.Task); ok {
-		existingTaskID = task.ID
+	if result.Task != nil {
+		existingTaskID = result.Task.ID
 	} else {
-		t.Fatalf("Expected task result but got %T", result.Result)
+		t.Fatal("Expected task result but got nil")
 	}
 
 	tests := []struct {
@@ -420,7 +414,7 @@ func TestMemoryTaskManager_OnCancelTask(t *testing.T) {
 			}
 
 			return &MessageProcessingResult{
-				Result: task.Task(),
+				Result: &protocol.SendMessageResponse{Task: task.Task()},
 			}, nil
 		},
 	}
@@ -435,7 +429,7 @@ func TestMemoryTaskManager_OnCancelTask(t *testing.T) {
 	request := protocol.SendMessageParams{
 		Message: protocol.Message{
 			Role: protocol.MessageRoleUser,
-			Parts: []protocol.Part{
+			Parts: []*protocol.Part{
 				protocol.NewTextPart("Test"),
 			},
 		},
@@ -448,10 +442,10 @@ func TestMemoryTaskManager_OnCancelTask(t *testing.T) {
 
 	// Extract task from result
 	var taskID string
-	if task, ok := result.Result.(*protocol.Task); ok {
-		taskID = task.ID
+	if result.Task != nil {
+		taskID = result.Task.ID
 	} else {
-		t.Fatal("Expected task result but got different type")
+		t.Fatal("Expected task result but got nil")
 	}
 
 	// Cancel the task
@@ -497,10 +491,8 @@ func TestMemoryTaskManager_PushNotifications(t *testing.T) {
 			taskID: "test-task-id",
 			config: &protocol.TaskPushNotificationConfig{
 				TaskID: "test-task-id",
-				PushNotificationConfig: protocol.PushNotificationConfig{
-					URL:   "https://example.com/webhook",
-					Token: "Bearer token",
-				},
+				URL:    "https://example.com/webhook",
+				Token:  "Bearer token",
 			},
 			wantErr: false,
 			validate: func(t *testing.T, result interface{}, err error) {
@@ -531,8 +523,8 @@ func TestMemoryTaskManager_PushNotifications(t *testing.T) {
 
 				if getResult, ok := result.(*protocol.TaskPushNotificationConfig); ok {
 					expectedURL := "https://example.com/webhook"
-					if getResult.PushNotificationConfig.URL != expectedURL {
-						t.Errorf("Expected URL %s, got %s", expectedURL, getResult.PushNotificationConfig.URL)
+					if getResult.URL != expectedURL {
+						t.Errorf("Expected URL %s, got %s", expectedURL, getResult.URL)
 					}
 				} else {
 					t.Errorf("Expected TaskPushNotificationConfig, got %T", result)
@@ -558,10 +550,8 @@ func TestMemoryTaskManager_PushNotifications(t *testing.T) {
 	// First set up a push notification for the get test
 	setupConfig := protocol.TaskPushNotificationConfig{
 		TaskID: "test-task-id",
-		PushNotificationConfig: protocol.PushNotificationConfig{
-			URL:   "https://example.com/webhook",
-			Token: "Bearer token",
-		},
+		URL:    "https://example.com/webhook",
+		Token:  "Bearer token",
 	}
 	_, err = manager.OnPushNotificationSet(ctx, setupConfig)
 	if err != nil {
@@ -618,14 +608,12 @@ func TestTaskSubscriber(t *testing.T) {
 			taskID:   "test-task-2",
 			capacity: 5,
 			setup: func(s *MemoryTaskSubscriber) {
-				event := protocol.StreamingMessageEvent{
-					Result: &protocol.Message{
-						Role: protocol.MessageRoleAgent,
-						Parts: []protocol.Part{
-							protocol.NewTextPart("Test event"),
-						},
+				event := protocol.NewStreamResponseMessage(&protocol.Message{
+					Role: protocol.MessageRoleAgent,
+					Parts: []*protocol.Part{
+						protocol.NewTextPart("Test event"),
 					},
-				}
+				})
 				err := s.Send(event)
 				if err != nil {
 					t.Errorf("Unexpected error sending event: %v", err)
@@ -634,8 +622,8 @@ func TestTaskSubscriber(t *testing.T) {
 			validate: func(t *testing.T, s *MemoryTaskSubscriber) {
 				select {
 				case receivedEvent := <-s.eventQueue:
-					if receivedEvent.Result == nil {
-						t.Error("Expected event result but got nil")
+					if receivedEvent.Message == nil {
+						t.Error("Expected event message but got nil")
 					}
 				case <-time.After(100 * time.Millisecond):
 					t.Error("Timeout waiting for event")
@@ -655,9 +643,7 @@ func TestTaskSubscriber(t *testing.T) {
 				}
 
 				// Test sending to closed subscriber
-				event := protocol.StreamingMessageEvent{
-					Result: &protocol.Message{Role: protocol.MessageRoleAgent},
-				}
+				event := protocol.NewStreamResponseMessage(&protocol.Message{Role: protocol.MessageRoleAgent})
 				err := s.Send(event)
 				if err == nil {
 					t.Error("Expected error when sending to closed subscriber")
@@ -683,7 +669,7 @@ func TestMemoryTaskSubscriber_CloseUnblocksBlockingSend(t *testing.T) {
 		WithSubscriberBlockingSend(true),
 	)
 
-	if err := subscriber.Send(protocol.StreamingMessageEvent{}); err != nil {
+	if err := subscriber.Send(protocol.StreamResponse{}); err != nil {
 		t.Fatalf("Failed to fill subscriber channel: %v", err)
 	}
 
@@ -691,7 +677,7 @@ func TestMemoryTaskSubscriber_CloseUnblocksBlockingSend(t *testing.T) {
 	started := make(chan struct{})
 	go func() {
 		close(started)
-		sendErr <- subscriber.Send(protocol.StreamingMessageEvent{})
+		sendErr <- subscriber.Send(protocol.StreamResponse{})
 	}()
 
 	<-started
@@ -752,7 +738,7 @@ func TestMemoryTaskManager_UpdateTaskState_CleansSubscribersOnFinalState(t *test
 	manager.taskMu.RUnlock()
 
 	// Collect events until the channel is closed by the final-state cleanup.
-	var events []protocol.StreamingMessageEvent
+	var events []protocol.StreamResponse
 	consumerDone := make(chan struct{})
 	go func() {
 		defer close(consumerDone)
@@ -778,7 +764,7 @@ func TestMemoryTaskManager_UpdateTaskState_CleansSubscribersOnFinalState(t *test
 	// TaskStatusUpdateEvent has to arrive before the channel close.
 	var gotFinal bool
 	for _, ev := range events {
-		if statusEvt, ok := ev.Result.(*protocol.TaskStatusUpdateEvent); ok &&
+		if statusEvt := ev.StatusUpdate; statusEvt != nil &&
 			statusEvt.Final && statusEvt.Status.State == protocol.TaskStateCompleted {
 			gotFinal = true
 		}
@@ -841,8 +827,7 @@ func TestMemoryTaskManager_cleanExpiredTasks(t *testing.T) {
 
 	// Create a task and move it to a final state with an old timestamp
 	task := protocol.Task{
-		ID:   "expired-task",
-		Kind: protocol.KindTask,
+		ID: "expired-task",
 		Status: protocol.TaskStatus{
 			State:     protocol.TaskStateCompleted,
 			Timestamp: time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339),
@@ -859,8 +844,7 @@ func TestMemoryTaskManager_cleanExpiredTasks(t *testing.T) {
 
 	// Create a non-expired task
 	activeTask := protocol.Task{
-		ID:   "active-task",
-		Kind: protocol.KindTask,
+		ID: "active-task",
 		Status: protocol.TaskStatus{
 			State:     protocol.TaskStateWorking,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -874,8 +858,7 @@ func TestMemoryTaskManager_cleanExpiredTasks(t *testing.T) {
 
 	// Create a recently completed task (should NOT be cleaned)
 	recentTask := protocol.Task{
-		ID:   "recent-task",
-		Kind: protocol.KindTask,
+		ID: "recent-task",
 		Status: protocol.TaskStatus{
 			State:     protocol.TaskStateCompleted,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -937,8 +920,7 @@ func TestMemoryTaskManager_TaskTTLCleanupGoroutine(t *testing.T) {
 	taskID := "auto-expired-task"
 	sub := NewMemoryTaskSubscriber(taskID, 10)
 	task := protocol.Task{
-		ID:   taskID,
-		Kind: protocol.KindTask,
+		ID: taskID,
 		Status: protocol.TaskStatus{
 			State:     protocol.TaskStateCompleted,
 			Timestamp: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
@@ -995,8 +977,7 @@ func TestMemoryTaskManager_Close(t *testing.T) {
 
 	// Add some tasks and subscribers
 	task := protocol.Task{
-		ID:   "close-test-task",
-		Kind: protocol.KindTask,
+		ID: "close-test-task",
 		Status: protocol.TaskStatus{
 			State:     protocol.TaskStateWorking,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -1069,4 +1050,135 @@ func TestWithTaskTTL(t *testing.T) {
 
 func stringPtr(s string) *string {
 	return &s
+}
+
+func intPtr(i int) *int {
+	return &i
+}
+
+func boolPtr(b bool) *bool {
+	return &b
+}
+
+// TestMemoryTaskManager_OnListTasks covers the v1.0 ListTasks filtering and pagination.
+func TestMemoryTaskManager_OnListTasks(t *testing.T) {
+	processor := &MockMessageProcessor{}
+	manager, err := NewMemoryTaskManager(processor)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	seed := []protocol.Task{
+		{ID: "task-a", ContextID: "ctx-1", Status: protocol.TaskStatus{
+			State: protocol.TaskStateCompleted, Timestamp: now.Add(-2 * time.Hour).Format(time.RFC3339)}},
+		{ID: "task-b", ContextID: "ctx-1", Status: protocol.TaskStatus{
+			State: protocol.TaskStateWorking, Timestamp: now.Format(time.RFC3339)}},
+		{ID: "task-c", ContextID: "ctx-2", Status: protocol.TaskStatus{
+			State: protocol.TaskStateWorking, Timestamp: now.Format(time.RFC3339)},
+			Artifacts: []protocol.Artifact{{ArtifactID: "art-1"}}},
+	}
+	manager.taskMu.Lock()
+	for i := range seed {
+		manager.Tasks[seed[i].ID] = NewCancellableTask(seed[i])
+	}
+	manager.taskMu.Unlock()
+
+	// No filter: all tasks, sorted by ID.
+	result, err := manager.OnListTasks(ctx, protocol.ListTasksParams{})
+	if err != nil {
+		t.Fatalf("OnListTasks failed: %v", err)
+	}
+	if result.TotalSize != 3 || len(result.Tasks) != 3 {
+		t.Fatalf("Expected 3 tasks, got total=%d len=%d", result.TotalSize, len(result.Tasks))
+	}
+	if result.Tasks[0].ID != "task-a" || result.Tasks[2].ID != "task-c" {
+		t.Errorf("Expected ID-sorted order, got %s..%s", result.Tasks[0].ID, result.Tasks[2].ID)
+	}
+	// Artifacts stripped by default.
+	if result.Tasks[2].Artifacts != nil {
+		t.Errorf("Expected artifacts stripped by default")
+	}
+
+	// Filter by contextId + status.
+	result, err = manager.OnListTasks(ctx, protocol.ListTasksParams{
+		ContextID: "ctx-1", Status: protocol.TaskStateWorking,
+	})
+	if err != nil {
+		t.Fatalf("OnListTasks with filter failed: %v", err)
+	}
+	if len(result.Tasks) != 1 || result.Tasks[0].ID != "task-b" {
+		t.Fatalf("Expected only task-b, got %+v", result.Tasks)
+	}
+
+	// IncludeArtifacts keeps artifacts.
+	result, err = manager.OnListTasks(ctx, protocol.ListTasksParams{
+		ContextID: "ctx-2", IncludeArtifacts: boolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("OnListTasks failed: %v", err)
+	}
+	if len(result.Tasks) != 1 || len(result.Tasks[0].Artifacts) != 1 {
+		t.Fatalf("Expected task-c with artifact, got %+v", result.Tasks)
+	}
+
+	// Pagination: page size 2 -> next page token "2", second page has 1 task.
+	result, err = manager.OnListTasks(ctx, protocol.ListTasksParams{PageSize: intPtr(2)})
+	if err != nil {
+		t.Fatalf("OnListTasks paged failed: %v", err)
+	}
+	if len(result.Tasks) != 2 || result.NextPageToken != "2" {
+		t.Fatalf("Expected 2 tasks + token \"2\", got len=%d token=%q", len(result.Tasks), result.NextPageToken)
+	}
+	result, err = manager.OnListTasks(ctx, protocol.ListTasksParams{
+		PageSize: intPtr(2), PageToken: result.NextPageToken,
+	})
+	if err != nil {
+		t.Fatalf("OnListTasks page 2 failed: %v", err)
+	}
+	if len(result.Tasks) != 1 || result.NextPageToken != "" {
+		t.Fatalf("Expected final page with 1 task, got len=%d token=%q", len(result.Tasks), result.NextPageToken)
+	}
+}
+
+// TestMemoryTaskManager_PushNotificationListDelete covers the v1.0 list/delete push-config methods.
+func TestMemoryTaskManager_PushNotificationListDelete(t *testing.T) {
+	processor := &MockMessageProcessor{}
+	manager, err := NewMemoryTaskManager(processor)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+	ctx := context.Background()
+
+	if _, err := manager.OnPushNotificationSet(ctx, protocol.TaskPushNotificationConfig{
+		TaskID: "task-1", URL: "https://example.com/webhook",
+	}); err != nil {
+		t.Fatalf("OnPushNotificationSet failed: %v", err)
+	}
+
+	list, err := manager.OnPushNotificationList(ctx, protocol.ListTaskPushNotificationConfigsParams{TaskID: "task-1"})
+	if err != nil {
+		t.Fatalf("OnPushNotificationList failed: %v", err)
+	}
+	if len(list.Configs) != 1 || list.Configs[0].URL != "https://example.com/webhook" {
+		t.Fatalf("Expected one config, got %+v", list.Configs)
+	}
+
+	if err := manager.OnPushNotificationDelete(ctx, protocol.DeleteTaskPushNotificationConfigParams{TaskID: "task-1"}); err != nil {
+		t.Fatalf("OnPushNotificationDelete failed: %v", err)
+	}
+
+	list, err = manager.OnPushNotificationList(ctx, protocol.ListTaskPushNotificationConfigsParams{TaskID: "task-1"})
+	if err != nil {
+		t.Fatalf("OnPushNotificationList after delete failed: %v", err)
+	}
+	if len(list.Configs) != 0 {
+		t.Fatalf("Expected empty config list after delete, got %+v", list.Configs)
+	}
+
+	// Deleting again is a no-op.
+	if err := manager.OnPushNotificationDelete(ctx, protocol.DeleteTaskPushNotificationConfigParams{TaskID: "task-1"}); err != nil {
+		t.Fatalf("Idempotent delete failed: %v", err)
+	}
 }

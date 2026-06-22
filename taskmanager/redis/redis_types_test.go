@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
 func TestRedisCancellableTask(t *testing.T) {
@@ -72,15 +72,13 @@ func TestRedisTaskSubscriber(t *testing.T) {
 	}
 
 	// Test sending events
-	event := protocol.StreamingMessageEvent{
-		Result: &protocol.TaskStatusUpdateEvent{
-			TaskID: taskID,
-			Status: protocol.TaskStatus{
-				State:     protocol.TaskStateSubmitted,
-				Timestamp: time.Now().UTC().Format(time.RFC3339),
-			},
+	event := protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{
+		TaskID: taskID,
+		Status: protocol.TaskStatus{
+			State:     protocol.TaskStateSubmitted,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		},
-	}
+	})
 
 	err := subscriber.Send(event)
 	if err != nil {
@@ -90,8 +88,8 @@ func TestRedisTaskSubscriber(t *testing.T) {
 	// Test receiving events
 	select {
 	case receivedEvent := <-subscriber.Channel():
-		if receivedEvent.Result == nil {
-			t.Error("Expected event result, got nil")
+		if receivedEvent.StatusUpdate == nil {
+			t.Error("Expected status update, got nil")
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Error("Timeout waiting for event")
@@ -117,11 +115,9 @@ func TestRedisTaskSubscriberBufferFull(t *testing.T) {
 	subscriber := NewTaskSubscriber(taskID, bufferSize)
 	defer subscriber.Close()
 
-	event := protocol.StreamingMessageEvent{
-		Result: &protocol.TaskStatusUpdateEvent{
-			TaskID: taskID,
-		},
-	}
+	event := protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{
+		TaskID: taskID,
+	})
 
 	// Fill the buffer
 	for i := 0; i < bufferSize; i++ {

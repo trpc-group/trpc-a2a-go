@@ -36,9 +36,9 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 
-	"trpc.group/trpc-go/trpc-a2a-go/client"
-	"trpc.group/trpc-go/trpc-a2a-go/log"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/client"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 const (
@@ -591,7 +591,7 @@ func sendMessage(ctx context.Context, a2aClient *client.A2AClient, content strin
 	// Create a message with the content
 	message := protocol.NewMessage(
 		protocol.MessageRoleUser,
-		[]protocol.Part{protocol.NewTextPart(content)},
+		[]*protocol.Part{protocol.NewTextPart(content)},
 	)
 
 	// Create send message parameters
@@ -605,18 +605,18 @@ func sendMessage(ctx context.Context, a2aClient *client.A2AClient, content strin
 		return "", fmt.Errorf("failed to send message: %w", err)
 	}
 
-	// Check the result type
-	switch response := result.Result.(type) {
-	case *protocol.Message:
+	// Check the result type (v1.0: SendMessageResponse is a Message/Task union)
+	switch {
+	case result.Message != nil:
 		log.Infof("Received direct message response")
 		return "", nil // No task ID for direct message responses
 
-	case *protocol.Task:
-		log.Infof("Task created: %s (State: %s)", response.ID, response.Status.State)
-		return response.ID, nil
+	case result.Task != nil:
+		log.Infof("Task created: %s (State: %s)", result.Task.ID, result.Task.Status.State)
+		return result.Task.ID, nil
 
 	default:
-		return "", fmt.Errorf("unexpected response type: %T", response)
+		return "", fmt.Errorf("unexpected empty SendMessage response")
 	}
 }
 
@@ -672,9 +672,7 @@ func main() {
 			// Set push notification for the task
 			pushConfig := protocol.TaskPushNotificationConfig{
 				TaskID: taskID,
-				PushNotificationConfig: protocol.PushNotificationConfig{
-					URL: webhookURL,
-				},
+				URL:    webhookURL,
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

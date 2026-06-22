@@ -15,11 +15,11 @@ import (
 
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/llms/googleai"
-	"trpc.group/trpc-go/trpc-a2a-go/client"
-	"trpc.group/trpc-go/trpc-a2a-go/log"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/server"
-	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/client"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
 // rootAgentProcessor implements the taskmanager.MessageProcessor interface.
@@ -48,7 +48,7 @@ func (p *rootAgentProcessor) ProcessMessage(
 		// Return error message directly
 		errorMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(errMsg)},
+			[]*protocol.Part{protocol.NewTextPart(errMsg)},
 		)
 		return &taskmanager.MessageProcessingResult{
 			Result: &errorMessage,
@@ -64,7 +64,7 @@ func (p *rootAgentProcessor) ProcessMessage(
 		errMsg := fmt.Sprintf("Failed to process your request: %v", err)
 		errMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(errMsg)},
+			[]*protocol.Part{protocol.NewTextPart(errMsg)},
 		)
 		return &taskmanager.MessageProcessingResult{
 			Result: &errMessage,
@@ -96,7 +96,7 @@ func (p *rootAgentProcessor) ProcessMessage(
 		errMsg := fmt.Sprintf("Failed to get response from subagent: %v", err)
 		errMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(errMsg)},
+			[]*protocol.Part{protocol.NewTextPart(errMsg)},
 		)
 		return &taskmanager.MessageProcessingResult{
 			Result: &errMessage,
@@ -106,7 +106,7 @@ func (p *rootAgentProcessor) ProcessMessage(
 	// Create response message
 	responseMessage := protocol.NewMessage(
 		protocol.MessageRoleAgent,
-		[]protocol.Part{protocol.NewTextPart(result)},
+		[]*protocol.Part{protocol.NewTextPart(result)},
 	)
 
 	return &taskmanager.MessageProcessingResult{
@@ -174,7 +174,7 @@ func (p *rootAgentProcessor) callCreativeAgent(ctx context.Context, text string)
 	// Create the message to send
 	message := protocol.NewMessage(
 		protocol.MessageRoleUser,
-		[]protocol.Part{protocol.NewTextPart(text)},
+		[]*protocol.Part{protocol.NewTextPart(text)},
 	)
 
 	// Send the message to the creative agent
@@ -186,31 +186,16 @@ func (p *rootAgentProcessor) callCreativeAgent(ctx context.Context, text string)
 		return "", fmt.Errorf("failed to send message to creative agent: %w", err)
 	}
 
-	// Handle the response based on its type
-	switch result.Result.GetKind() {
-	case protocol.KindMessage:
-		msg := result.Result.(*protocol.Message)
-		return extractText(*msg), nil
-	case protocol.KindTask:
-		task := result.Result.(*protocol.Task)
-		if task.Status.Message != nil {
-			return extractText(*task.Status.Message), nil
-		}
-		return "", fmt.Errorf("no response message from creative agent")
-	default:
-		return "", fmt.Errorf("unexpected response type from creative agent: %T", result.Result)
-	}
+	return extractResponseText(result, "creative agent")
 }
 
 // callExchangeAgent forwards a task to the exchange agent.
 func (p *rootAgentProcessor) callExchangeAgent(ctx context.Context, text string) (string, error) {
-	// Create the message to send
 	message := protocol.NewMessage(
 		protocol.MessageRoleUser,
-		[]protocol.Part{protocol.NewTextPart(text)},
+		[]*protocol.Part{protocol.NewTextPart(text)},
 	)
 
-	// Send the message to the exchange agent
 	params := protocol.SendMessageParams{
 		Message: message,
 	}
@@ -219,31 +204,16 @@ func (p *rootAgentProcessor) callExchangeAgent(ctx context.Context, text string)
 		return "", fmt.Errorf("failed to send message to exchange agent: %w", err)
 	}
 
-	// Handle the response based on its type
-	switch result.Result.GetKind() {
-	case protocol.KindMessage:
-		msg := result.Result.(*protocol.Message)
-		return extractText(*msg), nil
-	case protocol.KindTask:
-		task := result.Result.(*protocol.Task)
-		if task.Status.Message != nil {
-			return extractText(*task.Status.Message), nil
-		}
-		return "", fmt.Errorf("no response message from exchange agent")
-	default:
-		return "", fmt.Errorf("unexpected response type from exchange agent: %T", result.Result)
-	}
+	return extractResponseText(result, "exchange agent")
 }
 
 // callReimbursementAgent forwards a task to the reimbursement agent.
 func (p *rootAgentProcessor) callReimbursementAgent(ctx context.Context, text string) (string, error) {
-	// Create the message to send
 	message := protocol.NewMessage(
 		protocol.MessageRoleUser,
-		[]protocol.Part{protocol.NewTextPart(text)},
+		[]*protocol.Part{protocol.NewTextPart(text)},
 	)
 
-	// Send the message to the reimbursement agent
 	params := protocol.SendMessageParams{
 		Message: message,
 	}
@@ -252,28 +222,28 @@ func (p *rootAgentProcessor) callReimbursementAgent(ctx context.Context, text st
 		return "", fmt.Errorf("failed to send message to reimbursement agent: %w", err)
 	}
 
-	// Handle the response based on its type
-	switch result.Result.GetKind() {
-	case protocol.KindMessage:
-		msg := result.Result.(*protocol.Message)
+	return extractResponseText(result, "reimbursement agent")
+}
+
+func extractResponseText(result *protocol.SendMessageResponse, agentName string) (string, error) {
+	if msg := result.Message; msg != nil {
 		return extractText(*msg), nil
-	case protocol.KindTask:
-		task := result.Result.(*protocol.Task)
+	}
+	if task := result.Task; task != nil {
 		if task.Status.Message != nil {
 			return extractText(*task.Status.Message), nil
 		}
-		return "", fmt.Errorf("no response message from reimbursement agent")
-	default:
-		return "", fmt.Errorf("unexpected response type from reimbursement agent: %T", result.Result)
+		return "", fmt.Errorf("no response message from %s", agentName)
 	}
+	return "", fmt.Errorf("unexpected empty response from %s", agentName)
 }
 
 // extractText extracts the text content from a message.
 func extractText(message protocol.Message) string {
 	var result strings.Builder
 	for _, part := range message.Parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			result.WriteString(textPart.Text)
+		if t := part.TextContent(); t != "" {
+			result.WriteString(t)
 		}
 	}
 	return result.String()

@@ -20,12 +20,12 @@ import (
 	"path"
 	"strings"
 
-	"trpc.group/trpc-go/trpc-a2a-go/auth"
-	"trpc.group/trpc-go/trpc-a2a-go/internal/jsonrpc"
-	"trpc.group/trpc-go/trpc-a2a-go/internal/sse"
-	"trpc.group/trpc-go/trpc-a2a-go/log"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/server"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/sse"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 )
 
 const (
@@ -82,7 +82,7 @@ func (c *A2AClient) SendMessage(
 	ctx context.Context,
 	params protocol.SendMessageParams,
 	opts ...RequestOption,
-) (*protocol.MessageResult, error) {
+) (*protocol.SendMessageResponse, error) {
 	request := jsonrpc.NewRequest(protocol.MethodMessageSend, params.RPCID)
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
@@ -109,6 +109,36 @@ func (c *A2AClient) GetTasks(ctx context.Context, params protocol.TaskQueryParam
 		return nil, fmt.Errorf("a2aClient.GetTasks: %w", err)
 	}
 	return task, nil
+}
+
+// ListTasks lists tasks using the v1.0 ListTasks method, with optional
+// filtering and pagination.
+func (c *A2AClient) ListTasks(
+	ctx context.Context,
+	params protocol.ListTasksParams,
+	opts ...RequestOption,
+) (*protocol.ListTasksResult, error) {
+	request := jsonrpc.NewRequest(protocol.MethodTasksList, params.RPCID)
+	paramsBytes, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.ListTasks: failed to marshal params: %w", err)
+	}
+	request.Params = paramsBytes
+	fullResponse, err := c.doRequest(ctx, request, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.ListTasks: %w", err)
+	}
+	if fullResponse.Error != nil {
+		return nil, fullResponse.Error
+	}
+	if len(fullResponse.Result) == 0 {
+		return nil, fmt.Errorf("rpc response missing required 'result' field for id %v", request.ID)
+	}
+	result := &protocol.ListTasksResult{}
+	if err := json.Unmarshal(fullResponse.Result, result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal list tasks result: %w", err)
+	}
+	return result, nil
 }
 
 // CancelTasks cancels an in-progress task using the tasks/cancel method.
@@ -138,7 +168,7 @@ func (c *A2AClient) ResubscribeTask(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 	opts ...RequestOption,
-) (<-chan protocol.StreamingMessageEvent, error) {
+) (<-chan protocol.StreamResponse, error) {
 	// Create the JSON-RPC request.
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
@@ -149,7 +179,7 @@ func (c *A2AClient) ResubscribeTask(
 		return nil, fmt.Errorf("a2aClient.ResubscribeTask: failed to build stream request: %w", err)
 	}
 	// Create the channel to send events back to the caller.
-	eventsChan := make(chan protocol.StreamingMessageEvent, c.channelSize) // Buffered channel.
+	eventsChan := make(chan protocol.StreamResponse, c.channelSize) // Buffered channel.
 	// Start a goroutine to read from the SSE stream.
 	go c.processSSEStream(ctx, resp, params.ID, eventsChan)
 	return eventsChan, nil
@@ -162,7 +192,7 @@ func (c *A2AClient) StreamMessage(
 	ctx context.Context,
 	params protocol.SendMessageParams,
 	opts ...RequestOption,
-) (<-chan protocol.StreamingMessageEvent, error) {
+) (<-chan protocol.StreamResponse, error) {
 	// Create the JSON-RPC request.
 	paramsBytes, err := json.Marshal(params)
 	if err != nil {
@@ -172,7 +202,7 @@ func (c *A2AClient) StreamMessage(
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.StreamMessage: failed to build stream request: %w", err)
 	}
-	eventsChan := make(chan protocol.StreamingMessageEvent, c.channelSize) // Buffered channel.
+	eventsChan := make(chan protocol.StreamResponse, c.channelSize) // Buffered channel.
 	// Start a goroutine to read from the SSE stream.
 	go c.processSSEStream(ctx, resp, params.RPCID, eventsChan)
 	return eventsChan, nil
@@ -247,7 +277,7 @@ func (c *A2AClient) processSSEStream(
 	ctx context.Context,
 	resp *http.Response,
 	reqID string,
-	eventsChan chan<- protocol.StreamingMessageEvent,
+	eventsChan chan<- protocol.StreamResponse,
 ) {
 	// Ensure resources are cleaned up when the goroutine exits.
 	defer resp.Body.Close()
@@ -332,8 +362,8 @@ func (c *A2AClient) processSSEStream(
 	}
 }
 
-func unmarshalSSEEvent(eventBytes []byte, _ string) (protocol.StreamingMessageEvent, error) {
-	var result protocol.StreamingMessageEvent
+func unmarshalSSEEvent(eventBytes []byte, _ string) (protocol.StreamResponse, error) {
+	var result protocol.StreamResponse
 	if err := json.Unmarshal(eventBytes, &result); err != nil {
 		return result, fmt.Errorf("failed to unmarshal event: %w", err)
 	}
@@ -374,7 +404,7 @@ func (c *A2AClient) doRequestAndDecodeMessage(
 	ctx context.Context,
 	request *jsonrpc.Request,
 	opts ...RequestOption,
-) (*protocol.MessageResult, error) {
+) (*protocol.SendMessageResponse, error) {
 	fullResponse, err := c.doRequest(ctx, request, opts...)
 	if err != nil {
 		return nil, err
@@ -385,7 +415,7 @@ func (c *A2AClient) doRequestAndDecodeMessage(
 	if len(fullResponse.Result) == 0 {
 		return nil, fmt.Errorf("rpc response missing required 'result' field for id %v", request.ID)
 	}
-	messageResp := &protocol.MessageResult{}
+	messageResp := &protocol.SendMessageResponse{}
 	if err := json.Unmarshal(fullResponse.Result, messageResp); err != nil {
 		return nil, fmt.Errorf(
 			"failed to unmarshal rpc result: %w. Raw result: %s", err, string(fullResponse.Result),
@@ -553,6 +583,59 @@ func (c *A2AClient) GetPushNotification(
 	}
 
 	return config, nil
+}
+
+// ListPushNotifications lists the push notification configurations of a task
+// using the v1.0 ListTaskPushNotificationConfigs method.
+func (c *A2AClient) ListPushNotifications(
+	ctx context.Context,
+	params protocol.ListTaskPushNotificationConfigsParams,
+	opts ...RequestOption,
+) (*protocol.ListTaskPushNotificationConfigsResult, error) {
+	request := jsonrpc.NewRequest(protocol.MethodTasksPushNotificationConfigList, params.RPCID)
+	paramsBytes, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.ListPushNotifications: failed to marshal params: %w", err)
+	}
+	request.Params = paramsBytes
+	fullResponse, err := c.doRequest(ctx, request, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("a2aClient.ListPushNotifications: %w", err)
+	}
+	if fullResponse.Error != nil {
+		return nil, fullResponse.Error
+	}
+	if len(fullResponse.Result) == 0 {
+		return nil, fmt.Errorf("rpc response missing required 'result' field for id %v", request.ID)
+	}
+	result := &protocol.ListTaskPushNotificationConfigsResult{}
+	if err := json.Unmarshal(fullResponse.Result, result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal push notification config list: %w", err)
+	}
+	return result, nil
+}
+
+// DeletePushNotification removes a push notification configuration from a task
+// using the v1.0 DeleteTaskPushNotificationConfig method.
+func (c *A2AClient) DeletePushNotification(
+	ctx context.Context,
+	params protocol.DeleteTaskPushNotificationConfigParams,
+	opts ...RequestOption,
+) error {
+	request := jsonrpc.NewRequest(protocol.MethodTasksPushNotificationConfigDelete, params.RPCID)
+	paramsBytes, err := json.Marshal(params)
+	if err != nil {
+		return fmt.Errorf("a2aClient.DeletePushNotification: failed to marshal params: %w", err)
+	}
+	request.Params = paramsBytes
+	fullResponse, err := c.doRequest(ctx, request, opts...)
+	if err != nil {
+		return fmt.Errorf("a2aClient.DeletePushNotification: %w", err)
+	}
+	if fullResponse.Error != nil {
+		return fullResponse.Error
+	}
+	return nil
 }
 
 // GetAgentCard retrieves the public agent card from the A2A server.

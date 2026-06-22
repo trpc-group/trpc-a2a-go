@@ -14,9 +14,9 @@ import (
 	"os"
 	"strings"
 
-	"trpc.group/trpc-go/trpc-a2a-go/client"
-	"trpc.group/trpc-go/trpc-a2a-go/log"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/client"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 func main() {
@@ -75,7 +75,7 @@ func sendMessage(client *client.A2AClient, text string) (string, error) {
 	// Create the message to send
 	message := protocol.NewMessage(
 		protocol.MessageRoleUser,
-		[]protocol.Part{protocol.NewTextPart(text)},
+		[]*protocol.Part{protocol.NewTextPart(text)},
 	)
 
 	// Prepare the message parameters
@@ -89,28 +89,24 @@ func sendMessage(client *client.A2AClient, text string) (string, error) {
 		return "", fmt.Errorf("failed to send message: %w", err)
 	}
 
-	// Extract text from the response message
-	switch result.Result.GetKind() {
-	case protocol.KindMessage:
-		msg := result.Result.(*protocol.Message)
+	if msg := result.Message; msg != nil {
 		return extractText(*msg), nil
-	case protocol.KindTask:
-		task := result.Result.(*protocol.Task)
+	}
+	if task := result.Task; task != nil {
 		if task.Status.Message != nil {
 			return extractText(*task.Status.Message), nil
 		}
 		return "", fmt.Errorf("no response message from agent")
-	default:
-		return "", fmt.Errorf("unexpected response type: %T", result.Result)
 	}
+	return "", fmt.Errorf("unexpected empty response")
 }
 
 // extractText extracts the text content from a message.
 func extractText(message protocol.Message) string {
 	var result strings.Builder
 	for _, part := range message.Parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			result.WriteString(textPart.Text)
+		if t := part.TextContent(); t != "" {
+			result.WriteString(t)
 		}
 	}
 	return result.String()

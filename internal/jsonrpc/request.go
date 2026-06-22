@@ -9,7 +9,7 @@ package jsonrpc
 import (
 	"encoding/json"
 
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 // Request represents a JSON-RPC request object.

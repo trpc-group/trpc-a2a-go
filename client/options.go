@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"golang.org/x/oauth2"
-	"trpc.group/trpc-go/trpc-a2a-go/auth"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 )
 
 // Option is a functional option type for configuring the A2AClient.

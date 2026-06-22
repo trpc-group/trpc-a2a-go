@@ -21,10 +21,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"trpc.group/trpc-go/trpc-a2a-go/auth"
-	"trpc.group/trpc-go/trpc-a2a-go/internal/jsonrpc"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
 // Helper functions for testing
@@ -142,7 +142,7 @@ func verifyPushNotificationConfig(t *testing.T, resp *jsonrpc.Response, expected
 	require.NoError(t, err)
 
 	assert.Equal(t, expectedTaskID, config.TaskID)
-	assert.Equal(t, expectedURL, config.PushNotificationConfig.URL)
+	assert.Equal(t, expectedURL, config.URL)
 }
 
 // TestA2AServer_HandlerErrors tests various error conditions in the JSON-RPC handler
@@ -303,18 +303,14 @@ func TestA2AServer_PushNotifications(t *testing.T) {
 		// Configure mock task manager
 		mockTM.pushNotificationSetResponse = &protocol.TaskPushNotificationConfig{
 			TaskID: "test-push-task",
-			PushNotificationConfig: protocol.PushNotificationConfig{
-				URL: "https://example.com/webhook",
-			},
+			URL:    "https://example.com/webhook",
 		}
 		mockTM.pushNotificationSetError = nil
 
 		// Create request
 		params := protocol.TaskPushNotificationConfig{
 			TaskID: "test-push-task",
-			PushNotificationConfig: protocol.PushNotificationConfig{
-				URL: "https://example.com/webhook",
-			},
+			URL:    "https://example.com/webhook",
 		}
 
 		resp := performJSONRPCRequest(
@@ -334,9 +330,7 @@ func TestA2AServer_PushNotifications(t *testing.T) {
 		// Configure mock task manager
 		mockTM.pushNotificationGetResponse = &protocol.TaskPushNotificationConfig{
 			TaskID: "test-push-task",
-			PushNotificationConfig: protocol.PushNotificationConfig{
-				URL: "https://example.com/webhook",
-			},
+			URL:    "https://example.com/webhook",
 		}
 		mockTM.pushNotificationGetError = nil
 
@@ -396,20 +390,17 @@ func TestA2AServer_Resubscribe(t *testing.T) {
 		workingEvent := protocol.TaskStatusUpdateEvent{
 			TaskID:    "resubscribe-task",
 			ContextID: "test-context",
-			Kind:      protocol.KindTaskStatusUpdate,
 			Status:    protocol.TaskStatus{State: protocol.TaskStateWorking},
 		}
-		finalPtr := true
 		completedEvent := protocol.TaskStatusUpdateEvent{
 			TaskID:    "resubscribe-task",
 			ContextID: "test-context",
-			Kind:      protocol.KindTaskStatusUpdate,
 			Status:    protocol.TaskStatus{State: protocol.TaskStateCompleted},
-			Final:     finalPtr,
+			Final:     true,
 		}
-		mockTM.SubscribeEvents = []protocol.StreamingMessageEvent{
-			{Result: &workingEvent},
-			{Result: &completedEvent},
+		mockTM.SubscribeEvents = []protocol.StreamResponse{
+			{StatusUpdate: &workingEvent},
+			{StatusUpdate: &completedEvent},
 		}
 		mockTM.SubscribeError = nil
 
@@ -455,10 +446,12 @@ func TestA2AServer_Resubscribe(t *testing.T) {
 		require.NoError(t, err)
 
 		sseData := buf.String()
-		assert.Contains(t, sseData, "event: task_status_update")
-		assert.Contains(t, sseData, `"state":"working"`)
-		assert.Contains(t, sseData, `"state":"completed"`)
-		assert.Contains(t, sseData, `"final":true`)
+		assert.Contains(t, sseData, "event: statusUpdate")
+		assert.Contains(t, sseData, `"state":"TASK_STATE_WORKING"`)
+		assert.Contains(t, sseData, `"state":"TASK_STATE_COMPLETED"`)
+		// v1.0 wire carries no "final" field; stream termination is signaled by
+		// the SSE stream closing (the COMPLETED status above is the terminal event).
+		assert.NotContains(t, sseData, `"final"`)
 	})
 
 	t.Run("Resubscribe_Error", func(t *testing.T) {
@@ -515,4 +508,55 @@ func TestA2AServer_StartStop(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		t.Fatal("Timed out waiting for server to stop")
 	}
+}
+
+// TestA2AServer_V1Operations covers the v1.0 ListTasks / push-config list+delete
+// dispatch and the GetTaskPushNotificationConfig taskId/id parsing.
+func TestA2AServer_V1Operations(t *testing.T) {
+	mockTM := newMockTaskManager()
+	testServer := newTestServer(t, mockTM)
+	defer testServer.Close()
+
+	t.Run("ListTasks", func(t *testing.T) {
+		resp := performJSONRPCRequest(t, testServer, protocol.MethodTasksList,
+			protocol.ListTasksParams{ContextID: "c1"}, "req-list-1")
+		require.Nil(t, resp.Error)
+		require.NotNil(t, resp.Result)
+	})
+
+	t.Run("ListPushConfigs", func(t *testing.T) {
+		resp := performJSONRPCRequest(t, testServer, protocol.MethodTasksPushNotificationConfigList,
+			protocol.ListTaskPushNotificationConfigsParams{TaskID: "t1"}, "req-listpush-1")
+		require.Nil(t, resp.Error)
+	})
+
+	t.Run("DeletePushConfig", func(t *testing.T) {
+		resp := performJSONRPCRequest(t, testServer, protocol.MethodTasksPushNotificationConfigDelete,
+			protocol.DeleteTaskPushNotificationConfigParams{TaskID: "t1", ID: "cfg-1"}, "req-delpush-1")
+		require.Nil(t, resp.Error)
+	})
+
+	t.Run("ListPushConfigs missing taskId -> invalid params", func(t *testing.T) {
+		resp := performJSONRPCRequest(t, testServer, protocol.MethodTasksPushNotificationConfigList,
+			protocol.ListTaskPushNotificationConfigsParams{}, "req-listpush-2")
+		require.NotNil(t, resp.Error)
+	})
+
+	t.Run("GetPushConfig parses v1 taskId+id", func(t *testing.T) {
+		mockTM.pushNotificationGetResponse = &protocol.TaskPushNotificationConfig{
+			TaskID: "t1", URL: "https://example.com/hook",
+		}
+		// v1.0 shape: the config id goes in "id", the task in "taskId".
+		resp := performJSONRPCRequest(t, testServer, protocol.MethodTasksPushNotificationConfigGet,
+			map[string]string{"taskId": "t1", "id": "cfg-1"}, "req-getpush-1")
+		require.Nil(t, resp.Error, "v1 {taskId,id} shape must be accepted")
+	})
+}
+
+// newTestServer builds an httptest server serving the full A2A router.
+func newTestServer(t *testing.T, tm taskmanager.TaskManager) *httptest.Server {
+	t.Helper()
+	srv, err := NewA2AServer(defaultAgentCard(), tm)
+	require.NoError(t, err)
+	return httptest.NewServer(srv.Handler())
 }

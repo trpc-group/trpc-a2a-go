@@ -15,9 +15,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/server"
-	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
 // simpleProcessor implements the MessageProcessor interface.
@@ -32,18 +32,14 @@ func (p *simpleProcessor) ProcessMessage(
 	// Simply return a text response
 	response := &protocol.Message{
 		Role:      protocol.MessageRoleAgent,
-		Kind:      protocol.KindMessage,
 		MessageID: protocol.GenerateMessageID(),
-		Parts: []protocol.Part{
-			&protocol.TextPart{
-				Kind: protocol.KindText,
-				Text: "Hello from subpath agent!",
-			},
+		Parts: []*protocol.Part{
+			protocol.NewTextPart("Hello from subpath agent!"),
 		},
 	}
 
 	return &taskmanager.MessageProcessingResult{
-		Result: response,
+		Result: protocol.NewSendMessageResponseMessage(response),
 	}, nil
 }
 

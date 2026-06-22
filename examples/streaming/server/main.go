@@ -22,10 +22,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"trpc.group/trpc-go/trpc-a2a-go/log"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/server"
-	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
 // streamingMessageProcessor implements the MessageProcessor interface for streaming responses.
@@ -51,11 +51,11 @@ func (p *streamingMessageProcessor) ProcessMessage(
 		// Return error message directly
 		errorMessage := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(errMsg)},
+			[]*protocol.Part{protocol.NewTextPart(errMsg)},
 		)
 
 		return &taskmanager.MessageProcessingResult{
-			Result: &errorMessage,
+			Result: protocol.NewSendMessageResponseMessage(&errorMessage),
 		}, nil
 	}
 
@@ -85,7 +85,7 @@ func (p *streamingMessageProcessor) ProcessMessage(
 
 		msg := protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart("Starting to process your streaming data...")},
+			[]*protocol.Part{protocol.NewTextPart("Starting to process your streaming data...")},
 		)
 
 		if err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &msg); err != nil {
@@ -112,7 +112,7 @@ func (p *streamingMessageProcessor) ProcessMessage(
 
 			msg := protocol.NewMessage(
 				protocol.MessageRoleAgent,
-				[]protocol.Part{protocol.NewTextPart(progressMsg)},
+				[]*protocol.Part{protocol.NewTextPart(progressMsg)},
 			)
 			if err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &msg); err != nil {
 				log.Errorf("Failed to send working event: %v", err)
@@ -124,7 +124,7 @@ func (p *streamingMessageProcessor) ProcessMessage(
 				ArtifactID:  uuid.New().String(),
 				Name:        stringPtr(fmt.Sprintf("Chunk %d of %d", i+1, totalChunks)),
 				Description: stringPtr("Streaming chunk of processed data"),
-				Parts:       []protocol.Part{protocol.NewTextPart(processedChunk)},
+				Parts:       []*protocol.Part{protocol.NewTextPart(processedChunk)},
 			}
 
 			if err := handle.AddArtifact(&taskID, chunkArtifact, isLastChunk, false); err != nil {
@@ -145,7 +145,7 @@ func (p *streamingMessageProcessor) ProcessMessage(
 
 		msg = protocol.NewMessage(
 			protocol.MessageRoleAgent,
-			[]protocol.Part{protocol.NewTextPart(fmt.Sprintf("Completed processing all %d chunks successfully!", totalChunks))},
+			[]*protocol.Part{protocol.NewTextPart(fmt.Sprintf("Completed processing all %d chunks successfully!", totalChunks))},
 		)
 
 		// Final completion status update
@@ -174,11 +174,11 @@ func (p *streamingMessageProcessor) processNonStreaming(
 	// Return a direct message response
 	responseMessage := protocol.NewMessage(
 		protocol.MessageRoleAgent,
-		[]protocol.Part{protocol.NewTextPart(fmt.Sprintf("Processing complete. Input: %s -> Output: %s", text, processedText))},
+		[]*protocol.Part{protocol.NewTextPart(fmt.Sprintf("Processing complete. Input: %s -> Output: %s", text, processedText))},
 	)
 
 	return &taskmanager.MessageProcessingResult{
-		Result: &responseMessage,
+		Result: protocol.NewSendMessageResponseMessage(&responseMessage),
 	}, nil
 }
 
@@ -186,8 +186,8 @@ func (p *streamingMessageProcessor) processNonStreaming(
 func extractText(message protocol.Message) string {
 	for _, part := range message.Parts {
 		// Type assert to the concrete TextPart type.
-		if p, ok := part.(*protocol.TextPart); ok {
-			return p.Text
+		if t := part.TextContent(); t != "" {
+			return t
 		}
 	}
 	return ""

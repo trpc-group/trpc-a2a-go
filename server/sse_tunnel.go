@@ -2,13 +2,12 @@ package server
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"time"
 
-	"trpc.group/trpc-go/trpc-a2a-go/internal/sse"
-	"trpc.group/trpc-go/trpc-a2a-go/log"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/sse"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 const (
@@ -23,7 +22,7 @@ type sseTunnel struct {
 	rpcID         interface{}
 	batchSize     int
 	flushInterval time.Duration
-	batch         []protocol.StreamingMessageEvent
+	batch         []protocol.StreamResponse
 }
 
 // newSSETunnel creates a new SSE tunnel with default settings
@@ -34,12 +33,12 @@ func newSSETunnel(w http.ResponseWriter, flusher http.Flusher, rpcID interface{}
 		rpcID:         rpcID,
 		batchSize:     defaultSSEBatchSize,
 		flushInterval: defaultSSEFlushInterval,
-		batch:         make([]protocol.StreamingMessageEvent, 0, defaultSSEBatchSize),
+		batch:         make([]protocol.StreamResponse, 0, defaultSSEBatchSize),
 	}
 }
 
 // start runs the SSE tunnel with event batching optimization
-func (t *sseTunnel) start(ctx context.Context, eventsChan <-chan protocol.StreamingMessageEvent, clientClosed <-chan struct{}) {
+func (t *sseTunnel) start(ctx context.Context, eventsChan <-chan protocol.StreamResponse, clientClosed <-chan struct{}) {
 	ticker := time.NewTicker(t.flushInterval)
 	defer ticker.Stop()
 
@@ -92,14 +91,10 @@ func (t *sseTunnel) flushBatch() bool {
 
 	// Process all events in the batch
 	for i := range t.batch {
-		eventType, err := t.getEventType(&t.batch[i])
-		if err != nil {
-			if err == errUnknownEvent {
-				log.Warnf("Unknown event type received for request ID: %s: %T. Skipping.", t.rpcID, t.batch[i])
-				continue
-			}
-			log.Errorf("Error determining event type for request ID: %s: %v", t.rpcID, err)
-			return false
+		eventType := t.batch[i].EventType()
+		if eventType == "" {
+			log.Warnf("Unknown event type received for request ID: %s. Skipping.", t.rpcID)
+			continue
 		}
 
 		// Add to batch events
@@ -121,25 +116,4 @@ func (t *sseTunnel) flushBatch() bool {
 	t.flusher.Flush()
 
 	return true
-}
-
-// getEventType determines the SSE event type from a StreamingMessageEvent
-func (t *sseTunnel) getEventType(event *protocol.StreamingMessageEvent) (string, error) {
-	if event == nil {
-		return "", errors.New("event is nil")
-	}
-	actualEvent := event.Result
-
-	switch actualEvent.(type) {
-	case *protocol.TaskStatusUpdateEvent:
-		return protocol.EventStatusUpdate, nil
-	case *protocol.TaskArtifactUpdateEvent:
-		return protocol.EventArtifactUpdate, nil
-	case *protocol.Message:
-		return protocol.EventMessage, nil
-	case *protocol.Task:
-		return protocol.EventTask, nil
-	default:
-		return "", errUnknownEvent
-	}
 }

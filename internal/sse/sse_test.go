@@ -15,7 +15,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"trpc.group/trpc-go/trpc-a2a-go/internal/jsonrpc"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 )
 
 func TestNewEventReader(t *testing.T) {
