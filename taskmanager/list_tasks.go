@@ -35,7 +35,7 @@ func ParseListTasksStatusTimestampAfter(s string) (time.Time, error) {
 }
 
 // TaskMatchesListFilter reports whether a task passes the ListTasks filters
-// (contextId, status, and the strictly-after status timestamp bound).
+// (contextId, status, and the status timestamp bound).
 func TaskMatchesListFilter(task *protocol.Task, params protocol.ListTasksParams, afterTime time.Time) bool {
 	if params.ContextID != "" && task.ContextID != params.ContextID {
 		return false
@@ -45,7 +45,10 @@ func TaskMatchesListFilter(task *protocol.Task, params protocol.ListTasksParams,
 	}
 	if !afterTime.IsZero() {
 		ts, err := time.Parse(time.RFC3339, task.Status.Timestamp)
-		if err != nil || !ts.After(afterTime) {
+		// v1.0 statusTimestampAfter is inclusive: keep tasks whose status
+		// timestamp is greater than OR EQUAL to the bound (proto: "greater than
+		// or equal to this value").
+		if err != nil || ts.Before(afterTime) {
 			return false
 		}
 	}
