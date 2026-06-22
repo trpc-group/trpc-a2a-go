@@ -29,7 +29,7 @@ const (
 	pushNotificationPrefix = "push:"
 	subscriberPrefix       = "sub:"
 
-	// Default expiration time for Redis keys.
+	// Default expiration time for Redis keys (1 hour).
 	defaultExpiration = 1 * time.Hour
 
 	// Default configuration values.

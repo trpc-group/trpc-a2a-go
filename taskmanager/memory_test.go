@@ -662,6 +662,38 @@ func TestTaskSubscriber(t *testing.T) {
 	}
 }
 
+func TestMemoryTaskSubscriber_CloseUnblocksBlockingSend(t *testing.T) {
+	subscriber := NewMemoryTaskSubscriber(
+		"blocking-send-task",
+		1,
+		WithSubscriberBlockingSend(true),
+	)
+
+	if err := subscriber.Send(protocol.StreamResponse{}); err != nil {
+		t.Fatalf("Failed to fill subscriber channel: %v", err)
+	}
+
+	sendErr := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		sendErr <- subscriber.Send(protocol.StreamResponse{})
+	}()
+
+	<-started
+	time.Sleep(10 * time.Millisecond)
+	subscriber.Close()
+
+	select {
+	case err := <-sendErr:
+		if err == nil {
+			t.Error("Expected blocked send to return an error after Close")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Expected Close to unblock blocking send")
+	}
+}
+
 func TestCancellableTask(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -705,9 +737,13 @@ func TestMemoryTaskManager_UpdateTaskState_CleansSubscribersOnFinalState(t *test
 	}
 	manager.taskMu.RUnlock()
 
-	// Drain events before completing
+	// Collect events until the channel is closed by the final-state cleanup.
+	var events []protocol.StreamResponse
+	consumerDone := make(chan struct{})
 	go func() {
-		for range sub.Channel() {
+		defer close(consumerDone)
+		for ev := range sub.Channel() {
+			events = append(events, ev)
 		}
 	}()
 
@@ -717,6 +753,26 @@ func TestMemoryTaskManager_UpdateTaskState_CleansSubscribersOnFinalState(t *test
 		t.Fatalf("Failed to update state: %v", err)
 	}
 
+	// Reaching a final state must close the subscriber channel (range returns).
+	select {
+	case <-consumerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("subscriber channel was not closed after final state")
+	}
+
+	// deliver-then-close ordering must not drop the terminal event: the final
+	// TaskStatusUpdateEvent has to arrive before the channel close.
+	var gotFinal bool
+	for _, ev := range events {
+		if statusEvt := ev.StatusUpdate; statusEvt != nil &&
+			statusEvt.Final && statusEvt.Status.State == protocol.TaskStateCompleted {
+			gotFinal = true
+		}
+	}
+	if !gotFinal {
+		t.Errorf("Expected a final Completed TaskStatusUpdateEvent before close, got %d events", len(events))
+	}
+
 	// Subscribers should be cleaned up
 	manager.taskMu.RLock()
 	subs := manager.Subscribers[taskID]
@@ -724,6 +780,40 @@ func TestMemoryTaskManager_UpdateTaskState_CleansSubscribersOnFinalState(t *test
 
 	if len(subs) != 0 {
 		t.Errorf("Expected subscribers to be cleaned after final state, got %d", len(subs))
+	}
+}
+
+func TestMemoryTaskManager_cleanupFailedSubscribersClosesRemovedSubscribers(t *testing.T) {
+	processor := &MockMessageProcessor{}
+	manager, err := NewMemoryTaskManager(processor)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+	defer manager.Close()
+
+	taskID := "failed-subscriber-task"
+	failedSub := NewMemoryTaskSubscriber(taskID, 10)
+	activeSub := NewMemoryTaskSubscriber(taskID, 10)
+
+	manager.taskMu.Lock()
+	manager.Subscribers[taskID] = []*MemoryTaskSubscriber{failedSub, activeSub}
+	manager.taskMu.Unlock()
+
+	manager.cleanupFailedSubscribers(taskID, []*MemoryTaskSubscriber{failedSub})
+
+	if !failedSub.Closed() {
+		t.Error("Expected failed subscriber to be closed")
+	}
+	if activeSub.Closed() {
+		t.Error("Expected active subscriber to remain open")
+	}
+
+	manager.taskMu.RLock()
+	subs := manager.Subscribers[taskID]
+	manager.taskMu.RUnlock()
+
+	if len(subs) != 1 || subs[0] != activeSub {
+		t.Fatalf("Expected only active subscriber to remain, got %d subscribers", len(subs))
 	}
 }
 
@@ -815,6 +905,69 @@ func TestMemoryTaskManager_cleanExpiredTasks(t *testing.T) {
 	}
 }
 
+func TestMemoryTaskManager_TaskTTLCleanupGoroutine(t *testing.T) {
+	processor := &MockMessageProcessor{}
+	manager, err := NewMemoryTaskManager(
+		processor,
+		WithConversationTTL(time.Hour, 5*time.Millisecond),
+		WithTaskTTL(time.Nanosecond),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+	defer manager.Close()
+
+	taskID := "auto-expired-task"
+	sub := NewMemoryTaskSubscriber(taskID, 10)
+	task := protocol.Task{
+		ID: taskID,
+		Status: protocol.TaskStatus{
+			State:     protocol.TaskStateCompleted,
+			Timestamp: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+		},
+	}
+
+	manager.taskMu.Lock()
+	manager.Tasks[taskID] = NewCancellableTask(task)
+	manager.Subscribers[taskID] = []*MemoryTaskSubscriber{sub}
+	manager.taskMu.Unlock()
+
+	manager.mu.Lock()
+	manager.PushNotifications[taskID] = protocol.TaskPushNotificationConfig{TaskID: taskID}
+	manager.mu.Unlock()
+
+	deadline := time.After(500 * time.Millisecond)
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		manager.taskMu.RLock()
+		_, taskExists := manager.Tasks[taskID]
+		_, subsExists := manager.Subscribers[taskID]
+		manager.taskMu.RUnlock()
+
+		manager.mu.RLock()
+		_, pushExists := manager.PushNotifications[taskID]
+		manager.mu.RUnlock()
+
+		if !taskExists && !subsExists && !pushExists && sub.Closed() {
+			return
+		}
+
+		select {
+		case <-deadline:
+			t.Fatalf(
+				"Timed out waiting for task TTL cleanup: taskExists=%v subsExists=%v pushExists=%v subClosed=%v",
+				taskExists,
+				subsExists,
+				pushExists,
+				sub.Closed(),
+			)
+		case <-ticker.C:
+		}
+	}
+}
+
 func TestMemoryTaskManager_Close(t *testing.T) {
 	processor := &MockMessageProcessor{}
 	manager, err := NewMemoryTaskManager(processor)
@@ -874,15 +1027,24 @@ func TestWithTaskTTL(t *testing.T) {
 		t.Errorf("Expected default TaskTTL=0 (disabled), got %v", opts.TaskTTL)
 	}
 
-	WithTaskTTL(30 * time.Minute)(opts)
-	if opts.TaskTTL != 30*time.Minute {
-		t.Errorf("Expected TaskTTL=30m, got %v", opts.TaskTTL)
+	// A positive TTL also enables the cleanup goroutine, mirroring WithConversationTTL.
+	fresh := &MemoryTaskManagerOptions{}
+	WithTaskTTL(30 * time.Minute)(fresh)
+	if fresh.TaskTTL != 30*time.Minute {
+		t.Errorf("Expected TaskTTL=30m, got %v", fresh.TaskTTL)
+	}
+	if !fresh.EnableCleanup {
+		t.Error("Expected WithTaskTTL(>0) to enable cleanup")
 	}
 
-	// Zero value explicitly disables task cleanup
-	WithTaskTTL(0)(opts)
-	if opts.TaskTTL != 0 {
-		t.Errorf("Expected TaskTTL=0 after explicit disable, got %v", opts.TaskTTL)
+	// A zero TTL disables task cleanup and must not flip EnableCleanup on.
+	disabled := &MemoryTaskManagerOptions{}
+	WithTaskTTL(0)(disabled)
+	if disabled.TaskTTL != 0 {
+		t.Errorf("Expected TaskTTL=0 after explicit disable, got %v", disabled.TaskTTL)
+	}
+	if disabled.EnableCleanup {
+		t.Error("Expected WithTaskTTL(0) to leave EnableCleanup untouched")
 	}
 }
 

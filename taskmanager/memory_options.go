@@ -78,9 +78,13 @@ func WithConversationTTL(ttl, cleanupInterval time.Duration) MemoryTaskManagerOp
 // WithTaskTTL sets the task TTL for automatic cleanup of tasks in terminal states.
 // When enabled, tasks in terminal states (completed/failed/canceled/rejected) will be
 // automatically removed after the specified duration. A TTL of 0 disables task cleanup.
+// A positive ttl also enables the cleanup goroutine, mirroring WithConversationTTL.
 func WithTaskTTL(ttl time.Duration) MemoryTaskManagerOption {
 	return func(opts *MemoryTaskManagerOptions) {
 		opts.TaskTTL = ttl
+		if ttl > 0 {
+			opts.EnableCleanup = true
+		}
 	}
 }
 
