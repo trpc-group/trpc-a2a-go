@@ -11,7 +11,7 @@ import (
 	"reflect"
 	"testing"
 
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 // setupTestHandler creates a test handler for use in tests

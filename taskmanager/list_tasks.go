@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"time"
 
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 // ListTasksDefaultPageSize is the default ListTasks page size (v1.0 spec: 1-100, default 50).

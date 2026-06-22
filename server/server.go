@@ -22,13 +22,13 @@ import (
 
 	"go.opentelemetry.io/otel/metric"
 
-	"trpc.group/trpc-go/trpc-a2a-go/auth"
-	"trpc.group/trpc-go/trpc-a2a-go/internal/jsonrpc"
-	"trpc.group/trpc-go/trpc-a2a-go/log"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
-	"trpc.group/trpc-go/trpc-a2a-go/telemetry"
-	"trpc.group/trpc-go/trpc-a2a-go/telemetry/metrics"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry/metrics"
 )
 
 // A2AServer implements the HTTP server for the A2A protocol.

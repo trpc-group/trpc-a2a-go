@@ -10,7 +10,7 @@ package taskmanager
 import (
 	"context"
 
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 // ProcessOptions contains configuration options for processing messages

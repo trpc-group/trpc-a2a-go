@@ -9,7 +9,7 @@ package v0
 import (
 	"testing"
 
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 func csTextMsg() Message { return NewMessage(MessageRoleAgent, []Part{NewTextPart("hi")}) }

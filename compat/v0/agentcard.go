@@ -7,7 +7,7 @@
 package v0
 
 import (
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 // FillLegacyCardFields populates the deprecated v0.x AgentCard fields from

@@ -10,8 +10,8 @@ import (
 	"encoding/base64"
 	"fmt"
 
-	"trpc.group/trpc-go/trpc-a2a-go/log"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 // This file implements the bidirectional translation between the frozen v0.2.x

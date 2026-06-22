@@ -14,9 +14,9 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/telemetry"
-	"trpc.group/trpc-go/trpc-a2a-go/telemetry/metrics"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry/metrics"
 )
 
 // metricsTracker holds per-request telemetry state for the server package.

@@ -18,8 +18,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"trpc.group/trpc-go/trpc-a2a-go/internal/sse"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/sse"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 // fakeTaskManager is a minimal v1 TaskManager that records the converted

@@ -1,4 +1,4 @@
-module trpc.group/trpc-go/trpc-a2a-go
+module trpc.group/trpc-go/trpc-a2a-go/v2
 
 go 1.20
 

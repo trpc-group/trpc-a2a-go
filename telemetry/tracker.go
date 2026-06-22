@@ -7,7 +7,7 @@
 // Package telemetry defines telemetry customization contracts shared by A2A components.
 package telemetry
 
-import "trpc.group/trpc-go/trpc-a2a-go/protocol"
+import "trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 
 // FirstTokenPolicy defines TTFT first-token detection for both request modes.
 type FirstTokenPolicy interface {

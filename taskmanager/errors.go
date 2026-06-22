@@ -11,8 +11,8 @@ import (
 	"errors"
 	"fmt"
 
-	"trpc.group/trpc-go/trpc-a2a-go/internal/jsonrpc"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 // JSON-RPC standard error codes

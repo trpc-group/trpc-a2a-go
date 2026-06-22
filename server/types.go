@@ -7,7 +7,7 @@
 // Package server contains the A2A server implementation and related types.
 package server
 
-import "trpc.group/trpc-go/trpc-a2a-go/protocol"
+import "trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 
 // ProtocolVersion is the A2A protocol version implemented by this server.
 const ProtocolVersion = "1.0"

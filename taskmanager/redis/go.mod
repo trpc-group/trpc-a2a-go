@@ -1,12 +1,12 @@
-module trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis
+module trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/redis
 
 go 1.20.0
 
-replace trpc.group/trpc-go/trpc-a2a-go => ../../
+replace trpc.group/trpc-go/trpc-a2a-go/v2 => ../../
 
 require (
 	github.com/redis/go-redis/v9 v9.10.0
-	trpc.group/trpc-go/trpc-a2a-go v0.0.3
+	trpc.group/trpc-go/trpc-a2a-go/v2 v2.0.0
 )
 
 require (

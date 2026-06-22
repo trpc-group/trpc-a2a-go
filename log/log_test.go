@@ -9,7 +9,7 @@ package log_test
 import (
 	"testing"
 
-	"trpc.group/trpc-go/trpc-a2a-go/log"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 )
 
 func TestLog(t *testing.T) {

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 // MockMessageProcessor implements MessageProcessor for testing
