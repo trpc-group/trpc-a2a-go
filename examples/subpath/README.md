@@ -18,8 +18,8 @@ The server will automatically configure endpoints at `/api/v1/agent/*` based on 
 package main
 
 import (
-    "trpc.group/trpc-go/trpc-a2a-go/server"
-    "trpc.group/trpc-go/trpc-a2a-go/taskmanager"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/server"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
 // Create a simple message processor

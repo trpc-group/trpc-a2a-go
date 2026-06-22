@@ -1,6 +1,6 @@
 # tRPC-A2A-Go
 
-[![Go Reference](https://pkg.go.dev/badge/trpc.group/trpc-go/trpc-a2a-go.svg)](https://pkg.go.dev/trpc.group/trpc-go/trpc-a2a-go)
+[![Go Reference](https://pkg.go.dev/badge/trpc.group/trpc-go/trpc-a2a-go/v2.svg)](https://pkg.go.dev/trpc.group/trpc-go/trpc-a2a-go/v2)
 [![Go Report Card](https://goreportcard.com/badge/github.com/trpc-group/trpc-a2a-go)](https://goreportcard.com/report/github.com/trpc-group/trpc-a2a-go)
 [![LICENSE](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/trpc-group/trpc-a2a-go/blob/main/LICENSE)
 [![Releases](https://img.shields.io/github/release/trpc-group/trpc-a2a-go.svg?style=flat-square)](https://github.com/trpc-group/trpc-a2a-go/releases)
@@ -166,8 +166,8 @@ This interface defines how your agent processes incoming messages:
 import (
     "context"
 
-    "trpc.group/trpc-go/trpc-a2a-go/protocol"
-    "trpc.group/trpc-go/trpc-a2a-go/taskmanager"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
 // Implement the MessageProcessor interface
@@ -222,8 +222,8 @@ The agent card describes your agent's capabilities:
 
 ```go
 import (
-    "trpc.group/trpc-go/trpc-a2a-go/server"
-    "trpc.group/trpc-go/trpc-a2a-go/protocol"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/server"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 // Helper function to create string pointers
@@ -269,8 +269,8 @@ Initialize the server with your task processor and agent card:
 import (
     "log"
 
-    "trpc.group/trpc-go/trpc-a2a-go/server"
-    "trpc.group/trpc-go/trpc-a2a-go/taskmanager"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/server"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
 // Create the task processor
@@ -317,8 +317,8 @@ The tRPC-A2A-Go framework supports multiple authentication methods for securing 
 import (
     "time"
     
-    "trpc.group/trpc-go/trpc-a2a-go/auth"
-    "trpc.group/trpc-go/trpc-a2a-go/server"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/auth"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/server"
 )
 
 // Create a JWT authentication provider
@@ -378,7 +378,7 @@ Create authenticated clients using the appropriate options:
 
 ```go
 import (
-    "trpc.group/trpc-go/trpc-a2a-go/client"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/client"
 )
 
 // JWT Authentication
@@ -470,7 +470,7 @@ The server can emit OpenTelemetry metrics for each A2A request lifecycle. This h
 - `a2a.server.time_to_first_token` (`Histogram`, seconds)
 
 Default attributes:
-- `a2a.method` (JSON-RPC method, e.g. `message/send`, `message/stream`)
+- `a2a.method` (JSON-RPC method, e.g. `SendMessage`, `SendStreamingMessage`)
 - `a2a.is_stream` (whether request is streaming)
 - `error.type` (set only when request handling fails)
 
@@ -478,8 +478,8 @@ Default attributes:
 
 ```go
 import (
-    "trpc.group/trpc-go/trpc-a2a-go/server"
-    "trpc.group/trpc-go/trpc-a2a-go/telemetry/metrics"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/server"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/telemetry/metrics"
 )
 
 srv, err := server.NewA2AServer(
@@ -512,7 +512,7 @@ import (
     "context"
 
     "go.opentelemetry.io/otel/metric/noop"
-    "trpc.group/trpc-go/trpc-a2a-go/server"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/server"
 )
 
 provider := noop.NewMeterProvider()
@@ -539,8 +539,8 @@ You can override first-token matching logic for `time_to_first_token` using `Wit
 
 ```go
 import (
-    "trpc.group/trpc-go/trpc-a2a-go/protocol"
-    "trpc.group/trpc-go/trpc-a2a-go/server"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/server"
 )
 
 type customFirstTokenPolicy struct{}
