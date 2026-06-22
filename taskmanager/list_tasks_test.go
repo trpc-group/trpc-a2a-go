@@ -50,7 +50,7 @@ func TestTaskMatchesListFilter(t *testing.T) {
 		{"timestamp equal -> included", ltTask("t", "", protocol.TaskStateWorking, boundStr), protocol.ListTasksParams{}, bound, true},
 		{"timestamp after -> included", ltTask("t", "", protocol.TaskStateWorking, bound.Add(time.Second).Format(time.RFC3339)), protocol.ListTasksParams{}, bound, true},
 		{"timestamp before -> excluded", ltTask("t", "", protocol.TaskStateWorking, bound.Add(-time.Second).Format(time.RFC3339)), protocol.ListTasksParams{}, bound, false},
-		{"unparseable timestamp with bound -> excluded", ltTask("t", "", protocol.TaskStateWorking, "garbage"), protocol.ListTasksParams{}, bound, false},
+		{"unparsable timestamp with bound -> excluded", ltTask("t", "", protocol.TaskStateWorking, "garbage"), protocol.ListTasksParams{}, bound, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
