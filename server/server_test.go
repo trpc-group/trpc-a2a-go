@@ -1048,7 +1048,7 @@ func TestCompatHandler_CoveredByMiddleware(t *testing.T) {
 	})
 
 	srv, err := NewA2AServer(mockTM, WithAgentCard(defaultAgentCard()),
-		WithMiddleWare(blockMiddleware{}),
+		WithMiddleware(blockMiddleware{}),
 		WithCompatHandler(compat),
 	)
 	require.NoError(t, err)

@@ -57,8 +57,6 @@ type A2AServer struct {
 	readTimeout        time.Duration // HTTP server read timeout.
 	writeTimeout       time.Duration // HTTP server write timeout.
 	idleTimeout        time.Duration // HTTP server idle timeout.
-	agentCardHandler   http.Handler  // Handler for agent card endpoint.
-	customRouter       HTTPRouter    // Custom router for advanced routing (e.g., Gorilla Mux).
 
 	// compatHandler, when set, handles JSON-RPC requests whose method name is
 	// not a v1.0 method (e.g. the legacy slash-delimited names). It is invoked
@@ -257,23 +255,11 @@ func (s *A2AServer) shutdownTelemetry(ctx context.Context) error {
 // Handler returns an http.Handler for the server.
 // This can be used to integrate the A2A server into existing HTTP servers.
 func (s *A2AServer) Handler() http.Handler {
-	// If custom router is provided, use it; otherwise, use default router.
-	// Mainly used for provide multi endpoints support.
-	var router HTTPRouter
-	if s.customRouter != nil {
-		router = s.customRouter
-	} else {
-		router = http.NewServeMux()
-	}
+	router := http.NewServeMux()
 
 	// Endpoint for agent metadata (.well-known convention).
-	if s.agentCardHandler != nil {
-		router.Handle(s.agentCardPath, s.agentCardHandler)
-		router.Handle(s.oldAgentCardPath, s.agentCardHandler)
-	} else {
-		router.Handle(s.agentCardPath, http.HandlerFunc(s.handleAgentCard))
-		router.Handle(s.oldAgentCardPath, http.HandlerFunc(s.handleAgentCard))
-	}
+	router.Handle(s.agentCardPath, http.HandlerFunc(s.handleAgentCard))
+	router.Handle(s.oldAgentCardPath, http.HandlerFunc(s.handleAgentCard))
 
 	// JWKS endpoint for JWT authentication if enabled.
 	if s.jwksEnabled && s.pushAuth != nil {
