@@ -104,12 +104,12 @@ func sendMessageToTenant(ctx context.Context, a2aClient *client.A2AClient, tenan
 		return "", fmt.Errorf("failed to send message: %w", err)
 	}
 
-	// v1.0: SendMessageResponse is a Message/Task union.
+	// v1.0: MessageResult is a Message/Task union.
 	switch {
-	case messageResult.Message != nil:
-		return extractTextFromMessage(messageResult.Message), nil
-	case messageResult.Task != nil:
-		task := messageResult.Task
+	case messageResult.GetMessage() != nil:
+		return extractTextFromMessage(messageResult.GetMessage()), nil
+	case messageResult.GetTask() != nil:
+		task := messageResult.GetTask()
 		if task.Status.Message != nil {
 			return extractTextFromMessage(task.Status.Message), nil
 		}

@@ -159,9 +159,9 @@ func TestSendMessageResponseJSON(t *testing.T) {
 		var decoded SendMessageResponse
 		err = json.Unmarshal(data, &decoded)
 		require.NoError(t, err)
-		require.NotNil(t, decoded.Message)
-		assert.Nil(t, decoded.Task)
-		assert.Equal(t, "hello", decoded.Message.Parts[0].TextContent())
+		require.NotNil(t, decoded.GetMessage())
+		assert.Nil(t, decoded.GetTask())
+		assert.Equal(t, "hello", decoded.GetMessage().Parts[0].TextContent())
 	})
 
 	t.Run("with task", func(t *testing.T) {
@@ -173,9 +173,9 @@ func TestSendMessageResponseJSON(t *testing.T) {
 		var decoded SendMessageResponse
 		err = json.Unmarshal(data, &decoded)
 		require.NoError(t, err)
-		assert.Nil(t, decoded.Message)
-		require.NotNil(t, decoded.Task)
-		assert.Equal(t, "t1", decoded.Task.ID)
+		assert.Nil(t, decoded.GetMessage())
+		require.NotNil(t, decoded.GetTask())
+		assert.Equal(t, "t1", decoded.GetTask().ID)
 	})
 }
 
@@ -194,8 +194,8 @@ func TestStreamResponseJSON(t *testing.T) {
 		var decoded StreamResponse
 		err = json.Unmarshal(data, &decoded)
 		require.NoError(t, err)
-		require.NotNil(t, decoded.StatusUpdate)
-		assert.Equal(t, "t1", decoded.StatusUpdate.TaskID)
+		require.NotNil(t, decoded.GetStatusUpdate())
+		assert.Equal(t, "t1", decoded.GetStatusUpdate().TaskID)
 	})
 
 	t.Run("artifactUpdate", func(t *testing.T) {
@@ -211,15 +211,15 @@ func TestStreamResponseJSON(t *testing.T) {
 		var decoded StreamResponse
 		err = json.Unmarshal(data, &decoded)
 		require.NoError(t, err)
-		require.NotNil(t, decoded.ArtifactUpdate)
-		assert.Equal(t, "a1", decoded.ArtifactUpdate.Artifact.ArtifactID)
+		require.NotNil(t, decoded.GetArtifactUpdate())
+		assert.Equal(t, "a1", decoded.GetArtifactUpdate().Artifact.ArtifactID)
 	})
 
 	t.Run("EventType", func(t *testing.T) {
-		assert.Equal(t, EventStatusUpdate, (&StreamResponse{StatusUpdate: &TaskStatusUpdateEvent{}}).EventType())
-		assert.Equal(t, EventArtifactUpdate, (&StreamResponse{ArtifactUpdate: &TaskArtifactUpdateEvent{}}).EventType())
-		assert.Equal(t, EventTask, (&StreamResponse{Task: &Task{}}).EventType())
-		assert.Equal(t, EventMessage, (&StreamResponse{Message: &Message{}}).EventType())
+		assert.Equal(t, EventStatusUpdate, (&StreamResponse{Result: &TaskStatusUpdateEvent{}}).EventType())
+		assert.Equal(t, EventArtifactUpdate, (&StreamResponse{Result: &TaskArtifactUpdateEvent{}}).EventType())
+		assert.Equal(t, EventTask, (&StreamResponse{Result: &Task{}}).EventType())
+		assert.Equal(t, EventMessage, (&StreamResponse{Result: &Message{}}).EventType())
 		assert.Equal(t, "", (&StreamResponse{}).EventType())
 	})
 }

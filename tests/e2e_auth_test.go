@@ -86,9 +86,9 @@ func TestJWTAuthentication(t *testing.T) {
 	})
 
 	require.NoError(t, err, "Authenticated request failed")
-	require.NotNil(t, messageResult.Message, "Message result should not be nil")
+	require.NotNil(t, messageResult.GetMessage(), "Message result should not be nil")
 
-	resultMessage := messageResult.Message
+	resultMessage := messageResult.GetMessage()
 	processedMessage, exists := taskMgr.(*mockTaskManager).messages[resultMessage.MessageID]
 	require.True(t, exists, "Failed to get processed message")
 	assert.NotNil(t, processedMessage, "Processed message should not be nil")
@@ -138,9 +138,9 @@ func TestAPIKeyAuthentication(t *testing.T) {
 		Message: createTextMessage("Hello from API key test!"),
 	})
 	require.NoError(t, err, "Authenticated request failed")
-	require.NotNil(t, messageResult.Message, "Message result should not be nil")
+	require.NotNil(t, messageResult.GetMessage(), "Message result should not be nil")
 
-	resultMessage := messageResult.Message
+	resultMessage := messageResult.GetMessage()
 	processedMessage, exists := taskMgr.(*mockTaskManager).messages[resultMessage.MessageID]
 	require.True(t, exists, "Failed to get processed message")
 	assert.NotNil(t, processedMessage, "Processed message should not be nil")
@@ -208,7 +208,7 @@ func TestChainAuthentication(t *testing.T) {
 		Message: createTextMessage("Hello with JWT auth!"),
 	})
 	require.NoError(t, err, "JWT authenticated request failed")
-	assert.NotNil(t, messageResult.Message, "Message result should not be nil")
+	assert.NotNil(t, messageResult.GetMessage(), "Message result should not be nil")
 
 	// Test with API key authentication
 	apiKeyTransport := &authRoundTripper{
@@ -228,7 +228,7 @@ func TestChainAuthentication(t *testing.T) {
 		Message: createTextMessage("Hello with API key auth!"),
 	})
 	require.NoError(t, err, "API key authenticated request failed")
-	assert.NotNil(t, messageResult2.Message, "Message result should not be nil")
+	assert.NotNil(t, messageResult2.GetMessage(), "Message result should not be nil")
 }
 
 // TestPushNotificationAuthentication tests push notification authentication.

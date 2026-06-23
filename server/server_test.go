@@ -217,7 +217,7 @@ func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 	// --- Test message/send ---
 	t.Run("message/send success", func(t *testing.T) {
 		mockTM.sendMessageResponse = &protocol.SendMessageResponse{
-			Message: &protocol.Message{
+			Result: &protocol.Message{
 				MessageID: "msg-1",
 				Role:      protocol.MessageRoleUser,
 				Parts:     []*protocol.Part{protocol.NewTextPart("Response message")},
@@ -239,11 +239,11 @@ func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 
 		// Remarshal result interface{} to bytes
 		resultBytes, err := json.Marshal(resp.Result)
-		require.NoError(t, err, "Failed to remarshal result for SendMessageResponse unmarshalling")
+		require.NoError(t, err, "Failed to remarshal result for MessageResult unmarshalling")
 		var resultMsg protocol.SendMessageResponse
 		err = json.Unmarshal(resultBytes, &resultMsg)
-		require.NoError(t, err, "Failed to unmarshal SendMessageResponse from remarshalled result")
-		assert.True(t, resultMsg.Message != nil || resultMsg.Task != nil)
+		require.NoError(t, err, "Failed to unmarshal MessageResult from remarshalled result")
+		assert.True(t, resultMsg.GetMessage() != nil || resultMsg.GetTask() != nil)
 	})
 
 	t.Run("message/send error", func(t *testing.T) {
@@ -381,9 +381,9 @@ func TestA2ASrv_HandleMessageStream_SSE(t *testing.T) {
 	}
 	// Configure mock events for message streaming
 	mockTM.sendMessageStreamEvents = []protocol.StreamResponse{
-		{StatusUpdate: &event1},
-		{ArtifactUpdate: &event2},
-		{StatusUpdate: &event3},
+		{Result: &event1},
+		{Result: &event2},
+		{Result: &event3},
 	}
 	mockTM.sendMessageStreamError = nil
 
@@ -453,7 +453,7 @@ func TestA2ASrv_HandleMessageStream_SSE(t *testing.T) {
 
 		var event protocol.StreamResponse
 		if err := json.Unmarshal(eventBytes, &event); err != nil {
-			t.Fatalf("Failed to unmarshal StreamResponse: %v. Data: %s", err, string(eventBytes))
+			t.Fatalf("Failed to unmarshal StreamingMessageEvent: %v. Data: %s", err, string(eventBytes))
 		}
 
 		receivedEvents = append(receivedEvents, event)
@@ -466,8 +466,8 @@ func TestA2ASrv_HandleMessageStream_SSE(t *testing.T) {
 	require.Greater(t, len(receivedEvents), 0, "Should have received at least one event")
 	var lastStatusEvent *protocol.TaskStatusUpdateEvent
 	for i := len(receivedEvents) - 1; i >= 0; i-- {
-		if receivedEvents[i].StatusUpdate != nil {
-			lastStatusEvent = receivedEvents[i].StatusUpdate
+		if receivedEvents[i].GetStatusUpdate() != nil {
+			lastStatusEvent = receivedEvents[i].GetStatusUpdate()
 			break
 		}
 	}
@@ -537,7 +537,7 @@ func (m *mockTaskManager) OnSendMessage(
 	// Default behavior: create a simple message response
 	msg := request.Message
 	return &protocol.SendMessageResponse{
-		Message: &msg,
+		Result: &msg,
 	}, nil
 }
 
@@ -575,7 +575,7 @@ func (m *mockTaskManager) OnSendMessageStream(
 		go func() {
 			defer close(eventCh)
 			event := protocol.StreamResponse{
-				Message: &msg,
+				Result: &msg,
 			}
 			select {
 			case <-ctx.Done():
@@ -739,7 +739,7 @@ func (m *mockTaskManager) OnResubscribe(
 		go func() {
 			defer close(eventCh)
 			streamEvent := protocol.StreamResponse{
-				StatusUpdate: &protocol.TaskStatusUpdateEvent{
+				Result: &protocol.TaskStatusUpdateEvent{
 					TaskID: params.ID,
 					Final:  true,
 					Status: protocol.TaskStatus{
@@ -799,7 +799,7 @@ func (m *mockProcessor) ProcessMessage(
 	// Simple echo processor for testing
 	msg := message
 	return &taskmanager.MessageProcessingResult{
-		Result: &protocol.SendMessageResponse{Message: &msg},
+		Result: &protocol.SendMessageResponse{Result: &msg},
 	}, nil
 }
 

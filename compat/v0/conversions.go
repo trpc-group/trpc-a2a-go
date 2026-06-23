@@ -403,13 +403,13 @@ func FromV1ArtifactUpdate(e *protocol.TaskArtifactUpdateEvent) *TaskArtifactUpda
 func ToV1StreamResponse(ev StreamingMessageEvent) (protocol.StreamResponse, error) {
 	switch v := ev.Result.(type) {
 	case *Message:
-		return protocol.StreamResponse{Message: ToV1Message(v)}, nil
+		return protocol.StreamResponse{Result: ToV1Message(v)}, nil
 	case *Task:
-		return protocol.StreamResponse{Task: ToV1Task(v)}, nil
+		return protocol.StreamResponse{Result: ToV1Task(v)}, nil
 	case *TaskStatusUpdateEvent:
-		return protocol.StreamResponse{StatusUpdate: ToV1StatusUpdate(v)}, nil
+		return protocol.StreamResponse{Result: ToV1StatusUpdate(v)}, nil
 	case *TaskArtifactUpdateEvent:
-		return protocol.StreamResponse{ArtifactUpdate: ToV1ArtifactUpdate(v)}, nil
+		return protocol.StreamResponse{Result: ToV1ArtifactUpdate(v)}, nil
 	default:
 		return protocol.StreamResponse{}, fmt.Errorf("compat/v0: unknown streaming result type %T", ev.Result)
 	}
@@ -418,14 +418,14 @@ func ToV1StreamResponse(ev StreamingMessageEvent) (protocol.StreamResponse, erro
 // FromV1StreamResponse converts a v1 stream response to a legacy streaming event.
 func FromV1StreamResponse(r protocol.StreamResponse) (StreamingMessageEvent, error) {
 	switch {
-	case r.Message != nil:
-		return StreamingMessageEvent{Result: FromV1Message(r.Message)}, nil
-	case r.Task != nil:
-		return StreamingMessageEvent{Result: FromV1Task(r.Task)}, nil
-	case r.StatusUpdate != nil:
-		return StreamingMessageEvent{Result: FromV1StatusUpdate(r.StatusUpdate)}, nil
-	case r.ArtifactUpdate != nil:
-		return StreamingMessageEvent{Result: FromV1ArtifactUpdate(r.ArtifactUpdate)}, nil
+	case r.GetMessage() != nil:
+		return StreamingMessageEvent{Result: FromV1Message(r.GetMessage())}, nil
+	case r.GetTask() != nil:
+		return StreamingMessageEvent{Result: FromV1Task(r.GetTask())}, nil
+	case r.GetStatusUpdate() != nil:
+		return StreamingMessageEvent{Result: FromV1StatusUpdate(r.GetStatusUpdate())}, nil
+	case r.GetArtifactUpdate() != nil:
+		return StreamingMessageEvent{Result: FromV1ArtifactUpdate(r.GetArtifactUpdate())}, nil
 	default:
 		return StreamingMessageEvent{}, fmt.Errorf("compat/v0: empty v1 stream response")
 	}
@@ -438,9 +438,9 @@ func ToV1SendMessageResponse(r *MessageResult) (*protocol.SendMessageResponse, e
 	}
 	switch v := r.Result.(type) {
 	case *Message:
-		return &protocol.SendMessageResponse{Message: ToV1Message(v)}, nil
+		return &protocol.SendMessageResponse{Result: ToV1Message(v)}, nil
 	case *Task:
-		return &protocol.SendMessageResponse{Task: ToV1Task(v)}, nil
+		return &protocol.SendMessageResponse{Result: ToV1Task(v)}, nil
 	default:
 		return nil, fmt.Errorf("compat/v0: unknown unary result type %T", r.Result)
 	}
@@ -452,10 +452,10 @@ func FromV1SendMessageResponse(r *protocol.SendMessageResponse) (*MessageResult,
 		return nil, nil
 	}
 	switch {
-	case r.Message != nil:
-		return &MessageResult{Result: FromV1Message(r.Message)}, nil
-	case r.Task != nil:
-		return &MessageResult{Result: FromV1Task(r.Task)}, nil
+	case r.GetMessage() != nil:
+		return &MessageResult{Result: FromV1Message(r.GetMessage())}, nil
+	case r.GetTask() != nil:
+		return &MessageResult{Result: FromV1Task(r.GetTask())}, nil
 	default:
 		return nil, fmt.Errorf("compat/v0: empty v1 send message response")
 	}

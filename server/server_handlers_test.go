@@ -399,8 +399,8 @@ func TestA2AServer_Resubscribe(t *testing.T) {
 			Final:     true,
 		}
 		mockTM.SubscribeEvents = []protocol.StreamResponse{
-			{StatusUpdate: &workingEvent},
-			{StatusUpdate: &completedEvent},
+			{Result: &workingEvent},
+			{Result: &completedEvent},
 		}
 		mockTM.SubscribeError = nil
 

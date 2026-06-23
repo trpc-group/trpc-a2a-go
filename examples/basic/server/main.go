@@ -82,7 +82,7 @@ func (p *basicMessageProcessor) ProcessMessage(
 			[]*protocol.Part{protocol.NewTextPart(errMsg)},
 		)
 		return &taskmanager.MessageProcessingResult{
-			Result: &protocol.SendMessageResponse{Message: &errorMessage},
+			Result: &protocol.SendMessageResponse{Result: &errorMessage},
 		}, nil
 	}
 
@@ -142,7 +142,7 @@ func (p *basicMessageProcessor) ProcessMessage(
 			[]*protocol.Part{protocol.NewTextPart("Multi-turn interaction started. Please continue the conversation.")},
 		)
 		return &taskmanager.MessageProcessingResult{
-			Result: &protocol.SendMessageResponse{Message: &responseMessage},
+			Result: &protocol.SendMessageResponse{Result: &responseMessage},
 		}, nil
 	}
 
@@ -168,7 +168,7 @@ func (p *basicMessageProcessor) processSimpleCommand(text string) (*taskmanager.
 	)
 
 	return &taskmanager.MessageProcessingResult{
-		Result: &protocol.SendMessageResponse{Message: &responseMessage},
+		Result: &protocol.SendMessageResponse{Result: &responseMessage},
 	}, nil
 }
 
@@ -195,7 +195,7 @@ func (p *basicMessageProcessor) processMultiTurnSession(
 		[]*protocol.Part{protocol.NewTextPart("Processing your multi-turn request...")},
 	)
 	return &taskmanager.MessageProcessingResult{
-		Result: &protocol.SendMessageResponse{Message: &responseMessage},
+		Result: &protocol.SendMessageResponse{Result: &responseMessage},
 	}, nil
 }
 
@@ -431,7 +431,7 @@ func (p *pushNotificationSender) OnSendMessage(
 ) (*protocol.SendMessageResponse, error) {
 	result, err := p.TaskManager.OnSendMessage(ctx, params)
 	if err == nil && result != nil {
-		if task := result.Task; task != nil {
+		if task := result.GetTask(); task != nil {
 			go p.maybeSendStatusPushNotification(ctx, task.ID, task.Status.State)
 		}
 	}
@@ -455,7 +455,7 @@ func (p *pushNotificationSender) OnSendMessageStream(
 		for event := range eventChan {
 			wrappedChan <- event
 
-			if statusEvent := event.StatusUpdate; statusEvent != nil {
+			if statusEvent := event.GetStatusUpdate(); statusEvent != nil {
 				go p.maybeSendStatusPushNotification(ctx, statusEvent.TaskID, statusEvent.Status.State)
 			}
 		}

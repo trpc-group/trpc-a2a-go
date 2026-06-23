@@ -164,7 +164,7 @@ type TaskManager interface {
 	) (*protocol.SendMessageResponse, error)
 
 	// OnSendMessageStream handles a request corresponding to the 'message/stream' RPC method.
-	// It creates a new message and returns a channel for receiving StreamResponse updates (streaming).
+	// It creates a new message and returns a channel for receiving StreamingMessageEvent updates (streaming).
 	// It initiates asynchronous processing via the MessageProcessor.
 	// The channel will be closed when the message reaches a final state or an error occurs during setup/processing.
 	OnSendMessageStream(

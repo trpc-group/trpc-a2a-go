@@ -27,9 +27,9 @@ func (defaultFirstTokenPolicy) IsStreamingFirstToken(event *protocol.StreamRespo
 		return false
 	}
 	switch {
-	case event.StatusUpdate != nil:
-		return event.StatusUpdate.Status.State == protocol.TaskStateWorking && event.StatusUpdate.Status.Message != nil
-	case event.ArtifactUpdate != nil:
+	case event.GetStatusUpdate() != nil:
+		return event.GetStatusUpdate().Status.State == protocol.TaskStateWorking && event.GetStatusUpdate().Status.Message != nil
+	case event.GetArtifactUpdate() != nil:
 		return true
 	default:
 		return false

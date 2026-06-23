@@ -354,7 +354,7 @@ func (p *echoMessageProcessor) ProcessMessage(
 	)
 
 	return &taskmanager.MessageProcessingResult{
-		Result: &protocol.SendMessageResponse{Message: &responseMsg},
+		Result: &protocol.SendMessageResponse{Result: &responseMsg},
 	}, nil
 }
 

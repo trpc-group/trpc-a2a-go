@@ -357,7 +357,7 @@ func collectAllStreamingEvents(eventChan <-chan protocol.StreamResponse) []proto
 			}
 			events = append(events, event)
 
-			if event.StatusUpdate != nil && event.StatusUpdate.IsFinal() {
+			if event.GetStatusUpdate() != nil && event.GetStatusUpdate().IsFinal() {
 				time.Sleep(50 * time.Millisecond)
 				select {
 				case lastEvent, ok := <-eventChan:
@@ -476,7 +476,7 @@ func checkStreamingEvents(t *testing.T, events []protocol.StreamResponse) {
 	hasCompletedStatus := false
 
 	for _, event := range events {
-		if su := event.StatusUpdate; su != nil {
+		if su := event.GetStatusUpdate(); su != nil {
 			if su.Status.State == protocol.TaskStateWorking {
 				hasWorkingStatus = true
 				require.NotNil(t, su.Status.Message, "Working status should have a message")
@@ -492,7 +492,7 @@ func checkStreamingEvents(t *testing.T, events []protocol.StreamResponse) {
 				require.Contains(t, text, "!dlrow olleH", "Completed status should contain reversed text")
 			}
 		}
-		if au := event.ArtifactUpdate; au != nil {
+		if au := event.GetArtifactUpdate(); au != nil {
 			hasArtifact = true
 			require.NotNil(t, au.Artifact.Name, "Artifact should have a name")
 			require.Equal(t, "Processed Text", *au.Artifact.Name, "Artifact name should match")
@@ -541,8 +541,8 @@ func TestE2E_MessageAPI_NonStreaming(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify the result contains a task
-	require.NotNil(t, result.Task, "Result should contain a task")
-	task := result.Task
+	require.NotNil(t, result.GetTask(), "Result should contain a task")
+	task := result.GetTask()
 
 	// Wait a bit for the task to complete
 	time.Sleep(500 * time.Millisecond)

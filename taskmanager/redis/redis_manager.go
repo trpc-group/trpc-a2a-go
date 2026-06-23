@@ -147,12 +147,12 @@ func (m *TaskManager) OnSendMessage(
 		return nil, fmt.Errorf("processor returned nil result for non-streaming request")
 	}
 
-	if result.Result.Message != nil {
+	if result.Result.GetMessage() != nil {
 		var contextID string
 		if request.Message.ContextID != nil {
 			contextID = *request.Message.ContextID
 		}
-		m.processReplyMessage(&contextID, result.Result.Message)
+		m.processReplyMessage(&contextID, result.Result.GetMessage())
 	}
 
 	return result.Result, nil
@@ -440,7 +440,7 @@ func (m *TaskManager) OnResubscribe(
 
 	// v1.0: the first stream event must be the current Task snapshot. getTaskInternal
 	// already returns a fresh copy, so it is safe to hand to the subscriber.
-	if err := subscriber.Send(protocol.StreamResponse{Task: task}); err != nil {
+	if err := subscriber.Send(protocol.StreamResponse{Result: task}); err != nil {
 		subscriber.Close()
 		return nil, err
 	}
@@ -524,17 +524,17 @@ func (m *TaskManager) processReplyMessage(ctxID *string, message *protocol.Messa
 // used to set contextID for task status update, task artifact update, message and task events
 func (m *TaskManager) sendStreamingEventHook(ctxID string) func(event protocol.StreamResponse) error {
 	return func(event protocol.StreamResponse) error {
-		if event.StatusUpdate != nil && event.StatusUpdate.ContextID == "" {
-			event.StatusUpdate.ContextID = ctxID
+		if event.GetStatusUpdate() != nil && event.GetStatusUpdate().ContextID == "" {
+			event.GetStatusUpdate().ContextID = ctxID
 		}
-		if event.ArtifactUpdate != nil && event.ArtifactUpdate.ContextID == "" {
-			event.ArtifactUpdate.ContextID = ctxID
+		if event.GetArtifactUpdate() != nil && event.GetArtifactUpdate().ContextID == "" {
+			event.GetArtifactUpdate().ContextID = ctxID
 		}
-		if event.Message != nil {
-			m.processReplyMessage(&ctxID, event.Message)
+		if event.GetMessage() != nil {
+			m.processReplyMessage(&ctxID, event.GetMessage())
 		}
-		if event.Task != nil && event.Task.ContextID == "" {
-			event.Task.ContextID = ctxID
+		if event.GetTask() != nil && event.GetTask().ContextID == "" {
+			event.GetTask().ContextID = ctxID
 		}
 		return nil
 	}

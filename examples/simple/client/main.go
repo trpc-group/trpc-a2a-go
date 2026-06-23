@@ -119,10 +119,10 @@ func handleStandardMode(ctx context.Context, a2aClient *client.A2AClient, params
 	// Display the result.
 	log.Infof("Message sent successfully")
 
-	if msg := messageResult.Message; msg != nil {
+	if msg := messageResult.GetMessage(); msg != nil {
 		log.Infof("Received message response:")
 		printMessage(*msg)
-	} else if task := messageResult.Task; task != nil {
+	} else if task := messageResult.GetTask(); task != nil {
 		log.Infof("Received task response - ID: %s, State: %s", task.ID, task.Status.State)
 
 		if task.Status.State != protocol.TaskStateCompleted &&
@@ -154,20 +154,20 @@ func handleStandardMode(ctx context.Context, a2aClient *client.A2AClient, params
 
 // getEventDescription returns a human-readable description of the streaming event
 func getEventDescription(event protocol.StreamResponse) string {
-	if msg := event.Message; msg != nil {
+	if msg := event.GetMessage(); msg != nil {
 		ctxID := "unknown"
 		if msg.ContextID != nil {
 			ctxID = *msg.ContextID
 		}
 		return fmt.Sprintf("Message from %s, ContextID: %v", msg.Role, ctxID)
 	}
-	if task := event.Task; task != nil {
+	if task := event.GetTask(); task != nil {
 		return fmt.Sprintf("Task %s - State: %s, ContextID: %v", task.ID, task.Status.State, task.ContextID)
 	}
-	if su := event.StatusUpdate; su != nil {
+	if su := event.GetStatusUpdate(); su != nil {
 		return fmt.Sprintf("Status Update - Task: %s, State: %s, ContextID: %v", su.TaskID, su.Status.State, su.ContextID)
 	}
-	if au := event.ArtifactUpdate; au != nil {
+	if au := event.GetArtifactUpdate(); au != nil {
 		artifactName := "Unnamed"
 		if au.Artifact.Name != nil {
 			artifactName = *au.Artifact.Name
@@ -179,14 +179,14 @@ func getEventDescription(event protocol.StreamResponse) string {
 
 // extractFinalResult extracts the final text result from streaming events
 func extractFinalResult(event protocol.StreamResponse) string {
-	if msg := event.Message; msg != nil {
+	if msg := event.GetMessage(); msg != nil {
 		for _, part := range msg.Parts {
 			if t := part.TextContent(); t != "" {
 				return t
 			}
 		}
 	}
-	if task := event.Task; task != nil {
+	if task := event.GetTask(); task != nil {
 		if task.Status.Message != nil {
 			for _, part := range task.Status.Message.Parts {
 				if t := part.TextContent(); t != "" {
@@ -195,7 +195,7 @@ func extractFinalResult(event protocol.StreamResponse) string {
 			}
 		}
 	}
-	if au := event.ArtifactUpdate; au != nil {
+	if au := event.GetArtifactUpdate(); au != nil {
 		for _, part := range au.Artifact.Parts {
 			if t := part.TextContent(); t != "" {
 				return t

@@ -348,7 +348,7 @@ type optionsTestTaskManager struct{}
 
 func (m *optionsTestTaskManager) OnSendMessage(ctx context.Context, params protocol.SendMessageParams) (*protocol.SendMessageResponse, error) {
 	return &protocol.SendMessageResponse{
-		Message: &protocol.Message{
+		Result: &protocol.Message{
 			MessageID: "test-message-id",
 			Role:      protocol.MessageRoleAgent,
 			Parts:     []*protocol.Part{protocol.NewTextPart("test response")},

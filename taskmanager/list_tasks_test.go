@@ -61,7 +61,7 @@ func TestTaskMatchesListFilter(t *testing.T) {
 	}
 }
 
-func ltIntPtr(i int) *int   { return &i }
+func ltIntPtr(i int) *int    { return &i }
 func ltBoolPtr(b bool) *bool { return &b }
 
 func ltSampleTasks() []*protocol.Task {

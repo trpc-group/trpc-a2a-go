@@ -330,8 +330,8 @@ func (m *TaskManager) OnSendMessage(
 		return nil, fmt.Errorf("processor returned nil result for non-streaming request")
 	}
 
-	if result.Result.Message != nil {
-		m.processReplyMessage(request.Message.ContextID, result.Result.Message)
+	if result.Result.GetMessage() != nil {
+		m.processReplyMessage(request.Message.ContextID, result.Result.GetMessage())
 	}
 
 	return result.Result, nil
@@ -556,7 +556,7 @@ func (m *TaskManager) OnResubscribe(
 	// before publishing the subscriber so it always precedes live updates (we
 	// hold taskMu, so notifySubscribers cannot interleave).
 	snapshot := *task.Task()
-	if err := subscriber.Send(protocol.StreamResponse{Task: &snapshot}); err != nil {
+	if err := subscriber.Send(protocol.StreamResponse{Result: &snapshot}); err != nil {
 		subscriber.Close()
 		return nil, err
 	}
@@ -697,17 +697,17 @@ func (m *TaskManager) processRequestMessage(message *protocol.Message) {
 // sendStreamingEventHook is a hook for sending streaming events
 func (m *TaskManager) sendStreamingEventHook(ctxID string) func(event protocol.StreamResponse) error {
 	return func(event protocol.StreamResponse) error {
-		if event.StatusUpdate != nil && event.StatusUpdate.ContextID == "" {
-			event.StatusUpdate.ContextID = ctxID
+		if event.GetStatusUpdate() != nil && event.GetStatusUpdate().ContextID == "" {
+			event.GetStatusUpdate().ContextID = ctxID
 		}
-		if event.ArtifactUpdate != nil && event.ArtifactUpdate.ContextID == "" {
-			event.ArtifactUpdate.ContextID = ctxID
+		if event.GetArtifactUpdate() != nil && event.GetArtifactUpdate().ContextID == "" {
+			event.GetArtifactUpdate().ContextID = ctxID
 		}
-		if event.Message != nil {
-			m.processReplyMessage(&ctxID, event.Message)
+		if event.GetMessage() != nil {
+			m.processReplyMessage(&ctxID, event.GetMessage())
 		}
-		if event.Task != nil && event.Task.ContextID == "" {
-			event.Task.ContextID = ctxID
+		if event.GetTask() != nil && event.GetTask().ContextID == "" {
+			event.GetTask().ContextID = ctxID
 		}
 		return nil
 	}

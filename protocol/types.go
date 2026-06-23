@@ -325,11 +325,32 @@ type GetTaskPushNotificationConfigParams struct {
 // SendMessageResponse — the result of message/send (discriminated union)
 // ---------------------------------------------------------------------------
 
-// SendMessageResponse wraps the result of message/send.
-// Exactly one of Message or Task must be non-nil.
+// SendMessageResult is the sealed Message-or-Task union returned by message/send.
+// Exactly one concrete type (*Message or *Task) inhabits it, enforced by the type
+// system — unlike a struct with two optional pointers where both/neither is
+// representable. Mirrors the v0 SendMessageResult and the official SDK's
+// SendMessageResult.
+type SendMessageResult interface{ isSendMessageResult() }
+
+func (*Message) isSendMessageResult() {}
+func (*Task) isSendMessageResult()    {}
+
+// SendMessageResponse wraps a SendMessageResult. The wrapper hosts the
+// discriminating JSON (Go cannot unmarshal directly into an interface field).
 type SendMessageResponse struct {
-	Message *Message
-	Task    *Task
+	Result SendMessageResult
+}
+
+// GetMessage returns the *Message when the result is a message, else nil.
+func (r *SendMessageResponse) GetMessage() *Message {
+	m, _ := r.Result.(*Message)
+	return m
+}
+
+// GetTask returns the *Task when the result is a task, else nil.
+func (r *SendMessageResponse) GetTask() *Task {
+	t, _ := r.Result.(*Task)
+	return t
 }
 
 type sendMessageResponseWire struct {
@@ -339,10 +360,14 @@ type sendMessageResponseWire struct {
 
 // MarshalJSON implements json.Marshaler.
 func (r SendMessageResponse) MarshalJSON() ([]byte, error) {
-	return json.Marshal(sendMessageResponseWire{
-		Message: r.Message,
-		Task:    r.Task,
-	})
+	var w sendMessageResponseWire
+	switch v := r.Result.(type) {
+	case *Message:
+		w.Message = v
+	case *Task:
+		w.Task = v
+	}
+	return json.Marshal(w)
 }
 
 // UnmarshalJSON implements json.Unmarshaler.
@@ -351,18 +376,14 @@ func (r *SendMessageResponse) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &w); err != nil {
 		return err
 	}
-	count := 0
-	if w.Message != nil {
-		count++
+	switch {
+	case w.Message != nil && w.Task == nil:
+		r.Result = w.Message
+	case w.Task != nil && w.Message == nil:
+		r.Result = w.Task
+	default:
+		return fmt.Errorf("send message response must have exactly one of message/task")
 	}
-	if w.Task != nil {
-		count++
-	}
-	if count != 1 {
-		return fmt.Errorf("send message response must have exactly one of message/task, got %d", count)
-	}
-	r.Message = w.Message
-	r.Task = w.Task
 	return nil
 }
 
@@ -370,13 +391,44 @@ func (r *SendMessageResponse) UnmarshalJSON(data []byte) error {
 // StreamResponse — a single event in message/stream SSE (discriminated union)
 // ---------------------------------------------------------------------------
 
-// StreamResponse wraps a single streaming event.
-// Exactly one field must be non-nil.
+// StreamEvent is the sealed union of events delivered in a message/stream SSE:
+// a status update, an artifact update, a full Task, or a Message. Exactly one
+// concrete type inhabits it. Mirrors the v0 StreamEvent.
+type StreamEvent interface{ isStreamEvent() }
+
+func (*TaskStatusUpdateEvent) isStreamEvent()   {}
+func (*TaskArtifactUpdateEvent) isStreamEvent() {}
+func (*Task) isStreamEvent()                    {}
+func (*Message) isStreamEvent()                 {}
+
+// StreamResponse wraps a single StreamEvent. The wrapper hosts the discriminating
+// JSON (Go cannot unmarshal directly into an interface field).
 type StreamResponse struct {
-	StatusUpdate   *TaskStatusUpdateEvent
-	ArtifactUpdate *TaskArtifactUpdateEvent
-	Task           *Task
-	Message        *Message
+	Result StreamEvent
+}
+
+// GetStatusUpdate returns the *TaskStatusUpdateEvent, or nil if not that type.
+func (r *StreamResponse) GetStatusUpdate() *TaskStatusUpdateEvent {
+	e, _ := r.Result.(*TaskStatusUpdateEvent)
+	return e
+}
+
+// GetArtifactUpdate returns the *TaskArtifactUpdateEvent, or nil if not that type.
+func (r *StreamResponse) GetArtifactUpdate() *TaskArtifactUpdateEvent {
+	e, _ := r.Result.(*TaskArtifactUpdateEvent)
+	return e
+}
+
+// GetTask returns the *Task, or nil if not that type.
+func (r *StreamResponse) GetTask() *Task {
+	t, _ := r.Result.(*Task)
+	return t
+}
+
+// GetMessage returns the *Message, or nil if not that type.
+func (r *StreamResponse) GetMessage() *Message {
+	m, _ := r.Result.(*Message)
+	return m
 }
 
 type streamResponseWire struct {
@@ -388,12 +440,18 @@ type streamResponseWire struct {
 
 // MarshalJSON implements json.Marshaler.
 func (r StreamResponse) MarshalJSON() ([]byte, error) {
-	return json.Marshal(streamResponseWire{
-		StatusUpdate:   r.StatusUpdate,
-		ArtifactUpdate: r.ArtifactUpdate,
-		Task:           r.Task,
-		Message:        r.Message,
-	})
+	var w streamResponseWire
+	switch v := r.Result.(type) {
+	case *TaskStatusUpdateEvent:
+		w.StatusUpdate = v
+	case *TaskArtifactUpdateEvent:
+		w.ArtifactUpdate = v
+	case *Task:
+		w.Task = v
+	case *Message:
+		w.Message = v
+	}
+	return json.Marshal(w)
 }
 
 // UnmarshalJSON implements json.Unmarshaler.
@@ -405,36 +463,36 @@ func (r *StreamResponse) UnmarshalJSON(data []byte) error {
 	count := 0
 	if w.StatusUpdate != nil {
 		count++
+		r.Result = w.StatusUpdate
 	}
 	if w.ArtifactUpdate != nil {
 		count++
+		r.Result = w.ArtifactUpdate
 	}
 	if w.Task != nil {
 		count++
+		r.Result = w.Task
 	}
 	if w.Message != nil {
 		count++
+		r.Result = w.Message
 	}
 	if count != 1 {
 		return fmt.Errorf("stream response must have exactly one of statusUpdate/artifactUpdate/task/message, got %d", count)
 	}
-	r.StatusUpdate = w.StatusUpdate
-	r.ArtifactUpdate = w.ArtifactUpdate
-	r.Task = w.Task
-	r.Message = w.Message
 	return nil
 }
 
 // EventType returns the SSE event type string for this response.
 func (r *StreamResponse) EventType() string {
-	switch {
-	case r.StatusUpdate != nil:
+	switch r.Result.(type) {
+	case *TaskStatusUpdateEvent:
 		return EventStatusUpdate
-	case r.ArtifactUpdate != nil:
+	case *TaskArtifactUpdateEvent:
 		return EventArtifactUpdate
-	case r.Task != nil:
+	case *Task:
 		return EventTask
-	case r.Message != nil:
+	case *Message:
 		return EventMessage
 	default:
 		return ""
@@ -443,11 +501,11 @@ func (r *StreamResponse) EventType() string {
 
 // IsFinal returns true if this is a terminal event in the stream.
 func (r *StreamResponse) IsFinal() bool {
-	switch {
-	case r.StatusUpdate != nil:
-		return r.StatusUpdate.IsFinal()
-	case r.ArtifactUpdate != nil:
-		return r.ArtifactUpdate.IsFinal()
+	switch e := r.Result.(type) {
+	case *TaskStatusUpdateEvent:
+		return e.IsFinal()
+	case *TaskArtifactUpdateEvent:
+		return e.IsFinal()
 	default:
 		return false
 	}
@@ -527,12 +585,12 @@ func NewTaskArtifactUpdateEvent(taskID, contextID string, artifact Artifact, las
 
 // NewSendMessageResponseMessage wraps a Message as a SendMessageResponse.
 func NewSendMessageResponseMessage(m *Message) *SendMessageResponse {
-	return &SendMessageResponse{Message: m}
+	return &SendMessageResponse{Result: m}
 }
 
 // NewSendMessageResponseTask wraps a Task as a SendMessageResponse.
 func NewSendMessageResponseTask(t *Task) *SendMessageResponse {
-	return &SendMessageResponse{Task: t}
+	return &SendMessageResponse{Result: t}
 }
 
 // ---------------------------------------------------------------------------
@@ -541,20 +599,20 @@ func NewSendMessageResponseTask(t *Task) *SendMessageResponse {
 
 // NewStreamResponseStatusUpdate wraps a TaskStatusUpdateEvent.
 func NewStreamResponseStatusUpdate(e *TaskStatusUpdateEvent) StreamResponse {
-	return StreamResponse{StatusUpdate: e}
+	return StreamResponse{Result: e}
 }
 
 // NewStreamResponseArtifactUpdate wraps a TaskArtifactUpdateEvent.
 func NewStreamResponseArtifactUpdate(e *TaskArtifactUpdateEvent) StreamResponse {
-	return StreamResponse{ArtifactUpdate: e}
+	return StreamResponse{Result: e}
 }
 
 // NewStreamResponseTask wraps a Task.
 func NewStreamResponseTask(t *Task) StreamResponse {
-	return StreamResponse{Task: t}
+	return StreamResponse{Result: t}
 }
 
 // NewStreamResponseMessage wraps a Message.
 func NewStreamResponseMessage(m *Message) StreamResponse {
-	return StreamResponse{Message: m}
+	return StreamResponse{Result: m}
 }

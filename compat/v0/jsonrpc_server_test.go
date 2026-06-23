@@ -182,11 +182,11 @@ func TestHandler_TasksGet_LegacyWire(t *testing.T) {
 func TestHandler_Streaming_LegacyWire(t *testing.T) {
 	fake := &fakeTaskManager{
 		streamEvents: []protocol.StreamResponse{
-			{StatusUpdate: &protocol.TaskStatusUpdateEvent{
+			{Result: &protocol.TaskStatusUpdateEvent{
 				TaskID: "task-1", ContextID: "ctx-1",
 				Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
 			}},
-			{StatusUpdate: &protocol.TaskStatusUpdateEvent{
+			{Result: &protocol.TaskStatusUpdateEvent{
 				TaskID: "task-1", ContextID: "ctx-1",
 				Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
 			}},

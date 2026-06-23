@@ -35,7 +35,7 @@ func (m *MockMessageProcessor) ProcessMessage(ctx context.Context, message proto
 	}
 
 	return &taskmanager.MessageProcessingResult{
-		Result: &protocol.SendMessageResponse{Message: response},
+		Result: &protocol.SendMessageResponse{Result: response},
 	}, nil
 }
 
@@ -163,14 +163,14 @@ func TestTaskManager_OnSendMessage(t *testing.T) {
 			}
 
 			// Check if result contains a message
-			if result.Message != nil {
-				if result.Message.MessageID == "" {
+			if result.GetMessage() != nil {
+				if result.GetMessage().MessageID == "" {
 					t.Error("Expected message ID to be set")
 				}
 
 				// Check that message is in storage
 				manager.mu.RLock()
-				_, exists := manager.Messages[result.Message.MessageID]
+				_, exists := manager.Messages[result.GetMessage().MessageID]
 				manager.mu.RUnlock()
 
 				if !exists {
@@ -279,7 +279,7 @@ CheckEvents:
 	// Should have received some events
 	hasStatusUpdate := false
 	for _, event := range events {
-		if event.StatusUpdate != nil {
+		if event.GetStatusUpdate() != nil {
 			hasStatusUpdate = true
 			break
 		}
@@ -306,7 +306,7 @@ func TestTaskManager_OnGetTask(t *testing.T) {
 			}
 
 			return &taskmanager.MessageProcessingResult{
-				Result: &protocol.SendMessageResponse{Task: task.Task()},
+				Result: &protocol.SendMessageResponse{Result: task.Task()},
 			}, nil
 		},
 	}
@@ -333,8 +333,8 @@ func TestTaskManager_OnGetTask(t *testing.T) {
 	}
 
 	var existingTaskID string
-	if result.Task != nil {
-		existingTaskID = result.Task.ID
+	if result.GetTask() != nil {
+		existingTaskID = result.GetTask().ID
 	} else {
 		t.Fatal("Expected task result but got nil")
 	}
@@ -416,7 +416,7 @@ func TestTaskManager_OnCancelTask(t *testing.T) {
 			}
 
 			return &taskmanager.MessageProcessingResult{
-				Result: &protocol.SendMessageResponse{Task: task.Task()},
+				Result: &protocol.SendMessageResponse{Result: task.Task()},
 			}, nil
 		},
 	}
@@ -444,8 +444,8 @@ func TestTaskManager_OnCancelTask(t *testing.T) {
 
 	// Extract task from result
 	var taskID string
-	if result.Task != nil {
-		taskID = result.Task.ID
+	if result.GetTask() != nil {
+		taskID = result.GetTask().ID
 	} else {
 		t.Fatal("Expected task result but got nil")
 	}
@@ -624,7 +624,7 @@ func TestTaskSubscriber(t *testing.T) {
 			validate: func(t *testing.T, s *TaskSubscriber) {
 				select {
 				case receivedEvent := <-s.eventQueue:
-					if receivedEvent.Message == nil {
+					if receivedEvent.GetMessage() == nil {
 						t.Error("Expected event message but got nil")
 					}
 				case <-time.After(100 * time.Millisecond):
@@ -766,8 +766,8 @@ func TestTaskManager_UpdateTaskState_CleansSubscribersOnFinalState(t *testing.T)
 	// TaskStatusUpdateEvent has to arrive before the channel close.
 	var gotFinal bool
 	for _, ev := range events {
-		if ev.StatusUpdate != nil &&
-			ev.StatusUpdate.Final && ev.StatusUpdate.Status.State == protocol.TaskStateCompleted {
+		if ev.GetStatusUpdate() != nil &&
+			ev.GetStatusUpdate().Final && ev.GetStatusUpdate().Status.State == protocol.TaskStateCompleted {
 			gotFinal = true
 		}
 	}
@@ -1215,11 +1215,11 @@ func TestTaskManager_OnResubscribe_NonTerminalEmitsSnapshot(t *testing.T) {
 		if !ok {
 			t.Fatal("subscriber channel closed before snapshot")
 		}
-		if ev.Task == nil {
+		if ev.GetTask() == nil {
 			t.Fatalf("Expected first event to be a Task snapshot, got %+v", ev)
 		}
-		if ev.Task.ID != task.ID || ev.Task.Status.State != protocol.TaskStateWorking {
-			t.Errorf("Snapshot mismatch: got id=%s state=%s", ev.Task.ID, ev.Task.Status.State)
+		if ev.GetTask().ID != task.ID || ev.GetTask().Status.State != protocol.TaskStateWorking {
+			t.Errorf("Snapshot mismatch: got id=%s state=%s", ev.GetTask().ID, ev.GetTask().Status.State)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for the Task snapshot event")

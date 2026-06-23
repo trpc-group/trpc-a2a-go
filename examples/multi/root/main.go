@@ -227,10 +227,10 @@ func (p *rootAgentProcessor) callReimbursementAgent(ctx context.Context, text st
 }
 
 func extractResponseText(result *protocol.SendMessageResponse, agentName string) (string, error) {
-	if msg := result.Message; msg != nil {
+	if msg := result.GetMessage(); msg != nil {
 		return extractText(*msg), nil
 	}
-	if task := result.Task; task != nil {
+	if task := result.GetTask(); task != nil {
 		if task.Status.Message != nil {
 			return extractText(*task.Status.Message), nil
 		}
