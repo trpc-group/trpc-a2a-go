@@ -117,19 +117,6 @@ func TestWithFirstTokenPolicy(t *testing.T) {
 	assert.Equal(t, policy, serverOptions.firstTokenPolicy)
 }
 
-func TestWithFirstTokenMatcher(t *testing.T) {
-	serverOptions := &A2AServer{}
-	matcher := func(event *protocol.StreamResponse, isStreaming bool) bool {
-		return isStreaming && event == nil
-	}
-
-	WithFirstTokenMatcher(matcher)(serverOptions)
-
-	require.NotNil(t, serverOptions.firstTokenPolicy)
-	assert.True(t, serverOptions.firstTokenPolicy.IsStreamingFirstToken(nil))
-	assert.True(t, serverOptions.firstTokenPolicy.IsNonStreamingFirstToken(nil))
-}
-
 func TestWithTelemetryMeterProvider(t *testing.T) {
 	provider := noop.NewMeterProvider()
 
@@ -287,7 +274,7 @@ func TestNewA2AServerWithAgentCardURL(t *testing.T) {
 			}
 
 			// Create the server
-			server, err := NewA2AServer(agentCard, taskMgr)
+			server, err := NewA2AServer(taskMgr, WithAgentCard(agentCard))
 			require.NoError(t, err)
 
 			// Verify all paths are correctly configured
@@ -361,7 +348,7 @@ type optionsTestTaskManager struct{}
 
 func (m *optionsTestTaskManager) OnSendMessage(ctx context.Context, params protocol.SendMessageParams) (*protocol.SendMessageResponse, error) {
 	return &protocol.SendMessageResponse{
-		Message: &protocol.Message{
+		Result: &protocol.Message{
 			MessageID: "test-message-id",
 			Role:      protocol.MessageRoleAgent,
 			Parts:     []*protocol.Part{protocol.NewTextPart("test response")},
@@ -566,7 +553,7 @@ func TestWithBasePathPriority(t *testing.T) {
 			if tt.basePath != "" {
 				opts = append(opts, WithBasePath(tt.basePath))
 			}
-			server, err := NewA2AServer(agentCard, taskMgr, opts...)
+			server, err := NewA2AServer(taskMgr, append([]Option{WithAgentCard(agentCard)}, opts...)...)
 			require.NoError(t, err)
 
 			// Verify all paths are correctly configured

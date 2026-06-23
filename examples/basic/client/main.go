@@ -628,10 +628,10 @@ func handleStandardInteraction(
 	fmt.Println(strings.Repeat("-", 10))
 
 	var taskID string
-	if response := result.Message; response != nil {
+	if response := result.GetMessage(); response != nil {
 		fmt.Println("  Message Response:")
 		printMessage(*response)
-	} else if response := result.Task; response != nil {
+	} else if response := result.GetTask(); response != nil {
 		taskID = response.ID
 		fmt.Printf("  Task %s State: %s (%s)\n", response.ID, response.Status.State, formatTimestamp(response.Status.Timestamp))
 
@@ -699,16 +699,16 @@ func processStreamResponse(
 				return taskID
 			}
 
-			if e := event.Message; e != nil {
+			if e := event.GetMessage(); e != nil {
 				fmt.Println("  [Message Response:]")
 				printMessage(*e)
-			} else if e := event.Task; e != nil {
+			} else if e := event.GetTask(); e != nil {
 				taskID = e.ID
 				fmt.Printf("  [Task %s State: %s (%s)]\n", e.ID, e.Status.State, formatTimestamp(e.Status.Timestamp))
 				if e.Status.Message != nil {
 					printMessage(*e.Status.Message)
 				}
-			} else if e := event.StatusUpdate; e != nil {
+			} else if e := event.GetStatusUpdate(); e != nil {
 				taskID = e.TaskID
 				fmt.Printf("  [Status Update: %s (%s)]\n", e.Status.State, formatTimestamp(e.Status.Timestamp))
 				if e.Status.Message != nil {
@@ -730,7 +730,7 @@ func processStreamResponse(
 					}
 					return taskID
 				}
-			} else if e := event.ArtifactUpdate; e != nil {
+			} else if e := event.GetArtifactUpdate(); e != nil {
 				taskID = e.TaskID
 				name := getArtifactName(e.Artifact)
 

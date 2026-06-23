@@ -27,6 +27,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
 
 const (
@@ -194,7 +195,7 @@ type pushNotificationTaskManager struct {
 func (m *pushNotificationTaskManager) sendPushNotification(ctx context.Context, taskID, status string) {
 	log.Infof("Sending push notification for task: %s with status: %s", taskID, status)
 	// Get push config from task manager
-	ptm, ok := m.TaskManager.(*taskmanager.MemoryTaskManager)
+	ptm, ok := m.TaskManager.(*memory.TaskManager)
 	if !ok {
 		log.Errorf("failed to cast task manager to memory task manager")
 		return
@@ -261,7 +262,7 @@ func main() {
 		notifyHost: *notifyHost,
 	}
 	// Create task manager
-	tm, err := taskmanager.NewMemoryTaskManager(processor)
+	tm, err := memory.NewTaskManager(processor)
 	if err != nil {
 		log.Fatalf("failed to create task manager: %v", err)
 	}
@@ -280,9 +281,8 @@ func main() {
 
 	// Create server with the authenticator
 	a2aServer, err := server.NewA2AServer(
-		agentCard,
 		customTM,
-		options...,
+		append([]server.Option{server.WithAgentCard(agentCard)}, options...)...,
 	)
 	if err != nil {
 		log.Fatalf("failed to create A2A server: %v", err)

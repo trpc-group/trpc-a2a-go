@@ -26,6 +26,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
 
 // config holds server configuration
@@ -87,7 +88,7 @@ func main() {
 	processor := &echoMessageProcessor{}
 
 	// Create a real task manager with our processor
-	taskManager, err := taskmanager.NewMemoryTaskManager(processor)
+	taskManager, err := memory.NewTaskManager(processor)
 	if err != nil {
 		log.Fatalf("Failed to create task manager: %v", err)
 	}
@@ -183,8 +184,8 @@ func main() {
 
 	// Create the server with authentication
 	a2aServer, err := server.NewA2AServer(
-		agentCard,
 		taskManager,
+		server.WithAgentCard(agentCard),
 		server.WithAuthProvider(chainProvider),
 		server.WithAuthenticatedExtendedCardHandler(
 			func(ctx context.Context, baseCard server.AgentCard) (server.AgentCard, error) {
@@ -353,7 +354,7 @@ func (p *echoMessageProcessor) ProcessMessage(
 	)
 
 	return &taskmanager.MessageProcessingResult{
-		Result: &protocol.SendMessageResponse{Message: &responseMsg},
+		Result: &protocol.SendMessageResponse{Result: &responseMsg},
 	}, nil
 }
 

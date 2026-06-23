@@ -22,6 +22,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
 
 // stringPtr is a helper to get a pointer to a string.
@@ -172,80 +173,80 @@ func (p *testProcessor) processTask(
 
 // testBasicTaskManager is a simple TaskManager for basic tests.
 type testBasicTaskManager struct {
-	*taskmanager.MemoryTaskManager
+	*memory.TaskManager
 }
 
 // newTestBasicTaskManager creates an instance for testing.
 func newTestBasicTaskManager(t *testing.T) *testBasicTaskManager {
 	processor := &testProcessor{}
-	memTm, err := taskmanager.NewMemoryTaskManager(processor)
-	require.NoError(t, err, "Failed to create MemoryTaskManager for testBasicTaskManager")
+	memTm, err := memory.NewTaskManager(processor)
+	require.NoError(t, err, "Failed to create TaskManager for testBasicTaskManager")
 	return &testBasicTaskManager{
-		MemoryTaskManager: memTm,
+		TaskManager: memTm,
 	}
 }
 
-// OnSendMessage delegates to the composed MemoryTaskManager.
+// OnSendMessage delegates to the composed TaskManager.
 func (m *testBasicTaskManager) OnSendMessage(
 	ctx context.Context,
 	params protocol.SendMessageParams,
 ) (*protocol.SendMessageResponse, error) {
 	log.Printf("[Test TM Wrapper] OnSendMessage called for %s, delegating to base.", params.Message.MessageID)
-	return m.MemoryTaskManager.OnSendMessage(ctx, params)
+	return m.TaskManager.OnSendMessage(ctx, params)
 }
 
-// OnSendMessageStream delegates to the composed MemoryTaskManager.
+// OnSendMessageStream delegates to the composed TaskManager.
 func (m *testBasicTaskManager) OnSendMessageStream(
 	ctx context.Context,
 	params protocol.SendMessageParams,
 ) (<-chan protocol.StreamResponse, error) {
 	log.Printf("[Test TM Wrapper] OnSendMessageStream called for %s, delegating to base.", params.Message.MessageID)
-	return m.MemoryTaskManager.OnSendMessageStream(ctx, params)
+	return m.TaskManager.OnSendMessageStream(ctx, params)
 }
 
-// OnResubscribe delegates to the composed MemoryTaskManager.
+// OnResubscribe delegates to the composed TaskManager.
 func (m *testBasicTaskManager) OnResubscribe(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (<-chan protocol.StreamResponse, error) {
 	log.Printf("[Test TM Wrapper] OnResubscribe called for %s, delegating to base.", params.ID)
-	return m.MemoryTaskManager.OnResubscribe(ctx, params)
+	return m.TaskManager.OnResubscribe(ctx, params)
 }
 
-// OnPushNotificationSet delegates to the composed MemoryTaskManager.
+// OnPushNotificationSet delegates to the composed TaskManager.
 func (m *testBasicTaskManager) OnPushNotificationSet(
 	ctx context.Context,
 	params protocol.TaskPushNotificationConfig,
 ) (*protocol.TaskPushNotificationConfig, error) {
 	log.Printf("[Test TM Wrapper] OnPushNotificationSet called for %s, delegating to base.", params.TaskID)
-	return m.MemoryTaskManager.OnPushNotificationSet(ctx, params)
+	return m.TaskManager.OnPushNotificationSet(ctx, params)
 }
 
-// OnPushNotificationGet delegates to the composed MemoryTaskManager.
+// OnPushNotificationGet delegates to the composed TaskManager.
 func (m *testBasicTaskManager) OnPushNotificationGet(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (*protocol.TaskPushNotificationConfig, error) {
 	log.Printf("[Test TM Wrapper] OnPushNotificationGet called for %s, delegating to base.", params.ID)
-	return m.MemoryTaskManager.OnPushNotificationGet(ctx, params)
+	return m.TaskManager.OnPushNotificationGet(ctx, params)
 }
 
-// OnGetTask delegates to the composed MemoryTaskManager.
+// OnGetTask delegates to the composed TaskManager.
 func (m *testBasicTaskManager) OnGetTask(
 	ctx context.Context,
 	params protocol.TaskQueryParams,
 ) (*protocol.Task, error) {
 	log.Printf("[Test TM Wrapper] OnGetTask called for %s, delegating to base.", params.ID)
-	return m.MemoryTaskManager.OnGetTask(ctx, params)
+	return m.TaskManager.OnGetTask(ctx, params)
 }
 
-// OnCancelTask delegates to the composed MemoryTaskManager.
+// OnCancelTask delegates to the composed TaskManager.
 func (m *testBasicTaskManager) OnCancelTask(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (*protocol.Task, error) {
 	log.Printf("[Test TM Wrapper] OnCancelTask called for %s, delegating to base.", params.ID)
-	return m.MemoryTaskManager.OnCancelTask(ctx, params)
+	return m.TaskManager.OnCancelTask(ctx, params)
 }
 
 // testHelper contains common utilities and setup for e2e tests.
@@ -264,7 +265,7 @@ func newTestHelper(t *testing.T, processor taskmanager.MessageProcessor) *testHe
 	// Create task manager
 	var tm taskmanager.TaskManager
 	if processor != nil {
-		memTm, err := taskmanager.NewMemoryTaskManager(processor)
+		memTm, err := memory.NewTaskManager(processor)
 		require.NoError(t, err)
 		tm = memTm
 	} else {
@@ -274,7 +275,7 @@ func newTestHelper(t *testing.T, processor taskmanager.MessageProcessor) *testHe
 	// Create server
 	port := getFreePort(t)
 	agentCard := createDefaultTestAgentCard()
-	a2aServer, err := server.NewA2AServer(agentCard, tm)
+	a2aServer, err := server.NewA2AServer(tm, server.WithAgentCard(agentCard))
 	require.NoError(t, err)
 
 	// Start server in goroutine
@@ -356,7 +357,7 @@ func collectAllStreamingEvents(eventChan <-chan protocol.StreamResponse) []proto
 			}
 			events = append(events, event)
 
-			if event.StatusUpdate != nil && event.StatusUpdate.IsFinal() {
+			if event.GetStatusUpdate() != nil && event.GetStatusUpdate().IsFinal() {
 				time.Sleep(50 * time.Millisecond)
 				select {
 				case lastEvent, ok := <-eventChan:
@@ -475,7 +476,7 @@ func checkStreamingEvents(t *testing.T, events []protocol.StreamResponse) {
 	hasCompletedStatus := false
 
 	for _, event := range events {
-		if su := event.StatusUpdate; su != nil {
+		if su := event.GetStatusUpdate(); su != nil {
 			if su.Status.State == protocol.TaskStateWorking {
 				hasWorkingStatus = true
 				require.NotNil(t, su.Status.Message, "Working status should have a message")
@@ -491,7 +492,7 @@ func checkStreamingEvents(t *testing.T, events []protocol.StreamResponse) {
 				require.Contains(t, text, "!dlrow olleH", "Completed status should contain reversed text")
 			}
 		}
-		if au := event.ArtifactUpdate; au != nil {
+		if au := event.GetArtifactUpdate(); au != nil {
 			hasArtifact = true
 			require.NotNil(t, au.Artifact.Name, "Artifact should have a name")
 			require.Equal(t, "Processed Text", *au.Artifact.Name, "Artifact name should match")
@@ -540,8 +541,8 @@ func TestE2E_MessageAPI_NonStreaming(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify the result contains a task
-	require.NotNil(t, result.Task, "Result should contain a task")
-	task := result.Task
+	require.NotNil(t, result.GetTask(), "Result should contain a task")
+	task := result.GetTask()
 
 	// Wait a bit for the task to complete
 	time.Sleep(500 * time.Millisecond)

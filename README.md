@@ -283,7 +283,7 @@ if err != nil {
 }
 
 // Create the server
-srv, err := server.NewA2AServer(agentCard, taskManager)
+srv, err := server.NewA2AServer(taskManager, server.WithAgentCard(agentCard))
 if err != nil {
     log.Fatalf("Failed to create server: %v", err)
 }
@@ -353,8 +353,8 @@ chainProvider := auth.NewChainAuthProvider(
 
 // Create the server with authentication
 srv, err := server.NewA2AServer(
-    agentCard,
     taskManager,
+    server.WithAgentCard(agentCard),
     server.WithAuthProvider(chainProvider),
 )
 ```
@@ -425,8 +425,8 @@ http.HandleFunc("/.well-known/jwks.json", notifAuth.HandleJWKS)
 
 // Enable JWKS endpoint when creating the server
 srv, err := server.NewA2AServer(
-    agentCard,
     taskManager,
+    server.WithAgentCard(agentCard),
     server.WithJWKSEndpoint(true, "/.well-known/jwks.json"),
 )
 ```
@@ -483,8 +483,8 @@ import (
 )
 
 srv, err := server.NewA2AServer(
-    agentCard,
     taskManager,
+    server.WithAgentCard(agentCard),
     server.WithTelemetryMeterProviderOptions(
         metrics.WithProtocol("grpc"),            // "grpc" (default) or "http"
         metrics.WithEndpoint("localhost:4317"), // OTLP collector endpoint
@@ -518,8 +518,8 @@ import (
 provider := noop.NewMeterProvider()
 
 srv, err := server.NewA2AServer(
-    agentCard,
     taskManager,
+    server.WithAgentCard(agentCard),
     server.WithTelemetryMeterProvider(provider),
 )
 if err != nil {
@@ -555,8 +555,8 @@ func (customFirstTokenPolicy) IsNonStreamingFirstToken(_ *protocol.MessageResult
 }
 
 srv, err := server.NewA2AServer(
-    agentCard,
     taskManager,
+    server.WithAgentCard(agentCard),
     server.WithFirstTokenPolicy(customFirstTokenPolicy{}),
 )
 if err != nil {

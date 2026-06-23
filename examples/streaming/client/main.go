@@ -75,10 +75,10 @@ func main() {
 			log.Fatalf("Error sending task: %v.", err)
 		}
 
-		if msg := result.Message; msg != nil {
+		if msg := result.GetMessage(); msg != nil {
 			text := extractTextFromMessage(msg)
 			log.Infof("Final message: Role=%s, Text=%s", msg.Role, text)
-		} else if task := result.Task; task != nil {
+		} else if task := result.GetTask(); task != nil {
 			log.Infof("Final task: ID=%s, State=%s", task.ID, task.Status.State)
 		} else {
 			log.Infof("Unexpected empty result")
@@ -153,11 +153,11 @@ func processStreamEvents(ctx context.Context, streamChan <-chan protocol.StreamR
 				return
 			}
 
-			if msg := event.Message; msg != nil {
+			if msg := event.GetMessage(); msg != nil {
 				text := extractTextFromMessage(msg)
 				log.Infof("Received Message - MessageID: %s", msg.MessageID)
 				log.Infof("  Message Text: %s", text)
-			} else if au := event.ArtifactUpdate; au != nil {
+			} else if au := event.GetArtifactUpdate(); au != nil {
 				log.Infof("Received Artifact Update - TaskID: %s, ArtifactID: %s", au.TaskID, au.Artifact.ArtifactID)
 				for _, part := range au.Artifact.Parts {
 					if t := part.TextContent(); t != "" {
@@ -167,9 +167,9 @@ func processStreamEvents(ctx context.Context, streamChan <-chan protocol.StreamR
 				if au.LastChunk != nil && *au.LastChunk {
 					log.Info("Received final artifact update, waiting for final status.")
 				}
-			} else if task := event.Task; task != nil {
+			} else if task := event.GetTask(); task != nil {
 				log.Infof("Received Task - TaskID: %s, State: %s", task.ID, task.Status.State)
-			} else if su := event.StatusUpdate; su != nil {
+			} else if su := event.GetStatusUpdate(); su != nil {
 				log.Infof("Received Task Status Update - TaskID: %s, State: %s", su.TaskID, su.Status.State)
 			} else {
 				log.Infof("Received unknown event: %+v", event)

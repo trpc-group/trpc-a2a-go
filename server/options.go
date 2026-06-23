@@ -65,6 +65,7 @@ func WithCORSEnabled(enabled bool) Option {
 func WithJSONRPCEndpoint(path string) Option {
 	return func(s *A2AServer) {
 		s.jsonRPCEndpoint = path
+		s.pathsExplicitlySet = true
 	}
 }
 
@@ -79,6 +80,53 @@ func WithJSONRPCEndpoint(path string) Option {
 func WithCompatHandler(h http.Handler) Option {
 	return func(s *A2AServer) {
 		s.compatHandler = h
+	}
+}
+
+// WithAgentCard sets the server's default agent card. For a single-agent server
+// this is the card served at /.well-known/agent-card.json, and its URL also
+// supplies the base path when no path option is set. For a multi-tenant server
+// (WithTenantCard / WithTenantCardProvider) it is optional and, when given,
+// becomes the default "directory" card served when no "?tenant=" is present.
+//
+// At least one of WithAgentCard, WithTenantCard or WithTenantCardProvider must be
+// supplied to NewA2AServer.
+func WithAgentCard(card AgentCard) Option {
+	return func(s *A2AServer) {
+		// Ensure the served card carries a v1.0-conformant supportedInterfaces list,
+		// deriving it from the deprecated URL/PreferredTransport fields when needed.
+		card.NormalizeInterfaces()
+		s.agentCard = card
+		s.agentCardSet = true
+	}
+}
+
+// WithTenantCard registers an AgentCard for a specific tenant, making the server
+// multi-tenant: one process can host several agents distinguished by the v1.0
+// tenant field (carried in the request body). The processor dispatches on
+// ProcessOptions.Tenant, and the agent-card endpoint serves the matching card for
+// "?tenant=<tenant>". This replaces the legacy URL-path template + placeholder
+// card + custom AgentCardHandler mechanism. Call once per tenant.
+func WithTenantCard(tenant string, card AgentCard) Option {
+	return func(s *A2AServer) {
+		if s.tenantCards == nil {
+			s.tenantCards = make(map[string]AgentCard)
+		}
+		card.NormalizeInterfaces()
+		// Stamp the tenant onto the card's interfaces so clients see who to address.
+		for i := range card.SupportedInterfaces {
+			card.SupportedInterfaces[i].Tenant = tenant
+		}
+		s.tenantCards[tenant] = card
+	}
+}
+
+// WithTenantCardProvider resolves a tenant's AgentCard dynamically (e.g. from a
+// database) for when the set of tenants is not known at startup. It is consulted
+// after the static WithTenantCard registry; return an error for an unknown tenant.
+func WithTenantCardProvider(provider func(ctx context.Context, tenant string) (AgentCard, error)) Option {
+	return func(s *A2AServer) {
+		s.tenantCardProvider = provider
 	}
 }
 
@@ -120,6 +168,7 @@ func WithJWKSEndpoint(enabled bool, path string) Option {
 		s.jwksEnabled = enabled
 		if path != "" {
 			s.jwksEndpoint = path
+			s.pathsExplicitlySet = true
 		}
 	}
 }
@@ -170,6 +219,7 @@ func WithBasePath(basePath string) Option {
 		basePath = strings.TrimSuffix(basePath, "/")
 
 		// Set all endpoint paths with the base path prefix.
+		s.pathsExplicitlySet = true
 		s.jsonRPCEndpoint = basePath + "/"
 		s.agentCardPath = basePath + protocol.AgentCardPath
 		s.oldAgentCardPath = basePath + protocol.OldAgentCardPath
@@ -215,15 +265,6 @@ func WithAuthenticatedExtendedCardHandler(handler func(ctx context.Context, base
 func WithFirstTokenPolicy(policy telemetry.FirstTokenPolicy) Option {
 	return func(s *A2AServer) {
 		s.firstTokenPolicy = policy
-	}
-}
-
-// WithFirstTokenMatcher sets custom TTFT detection logic for streaming responses.
-//
-// Deprecated: use WithFirstTokenPolicy.
-func WithFirstTokenMatcher(matcher telemetry.FirstTokenMatcher) Option {
-	return func(s *A2AServer) {
-		s.firstTokenPolicy = telemetry.NewFirstTokenPolicyFromMatcher(matcher)
 	}
 }
 

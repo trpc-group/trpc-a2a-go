@@ -34,18 +34,31 @@ import (
 // A2AServer implements the HTTP server for the A2A protocol.
 // It handles agent card requests and routes JSON-RPC calls to the TaskManager.
 type A2AServer struct {
-	agentCard        AgentCard               // Metadata for this agent.
+	agentCard        AgentCard               // Default (single-agent) card; optional when multi-tenant.
+	agentCardSet     bool                    // Whether a default card was provided (WithAgentCard).
 	taskManager      taskmanager.TaskManager // Handles task logic.
 	httpServer       *http.Server            // Underlying HTTP server.
 	corsEnabled      bool                    // Flag to enable/disable CORS headers.
 	jsonRPCEndpoint  string                  // Path for the JSON-RPC endpoint.
 	agentCardPath    string                  // Path for the agent card endpoint.
 	oldAgentCardPath string                  // Path for the old agent card endpoint.
-	readTimeout      time.Duration           // HTTP server read timeout.
-	writeTimeout     time.Duration           // HTTP server write timeout.
-	idleTimeout      time.Duration           // HTTP server idle timeout.
-	agentCardHandler http.Handler            // Handler for agent card endpoint.
-	customRouter     HTTPRouter              // Custom router for advanced routing (e.g., Gorilla Mux).
+	// pathsExplicitlySet records whether serving paths were configured via an
+	// option (WithBasePath / WithJSONRPCEndpoint / WithJWKSEndpoint). When false,
+	// the base path is derived from the agent card URL. This replaces a fragile
+	// "did the paths change from their defaults?" heuristic.
+	pathsExplicitlySet bool
+	// tenantCards is the static tenant -> AgentCard registry (WithTenantCards).
+	// tenantCardProvider resolves a tenant's card dynamically (WithTenantCardProvider).
+	// When either is set the server is multi-tenant: it routes by params.Tenant
+	// (carried in the request body) and serves per-tenant cards, instead of the
+	// legacy URL-path / placeholder-card mechanism.
+	tenantCards        map[string]AgentCard
+	tenantCardProvider func(ctx context.Context, tenant string) (AgentCard, error)
+	readTimeout        time.Duration // HTTP server read timeout.
+	writeTimeout       time.Duration // HTTP server write timeout.
+	idleTimeout        time.Duration // HTTP server idle timeout.
+	agentCardHandler   http.Handler  // Handler for agent card endpoint.
+	customRouter       HTTPRouter    // Custom router for advanced routing (e.g., Gorilla Mux).
 
 	// compatHandler, when set, handles JSON-RPC requests whose method name is
 	// not a v1.0 method (e.g. the legacy slash-delimited names). It is invoked
@@ -71,18 +84,19 @@ type A2AServer struct {
 	telemetryOwnsProvider  bool
 }
 
-// NewA2AServer creates a new A2AServer instance with the given agent card
-// and task manager implementation.
-// Exported function.
-func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts ...Option) (*A2AServer, error) {
+// NewA2AServer creates a new A2AServer instance with the given task manager.
+//
+// The agent card is configured via options rather than a positional argument:
+// use WithAgentCard for a single-agent server, or WithTenantCard /
+// WithTenantCardProvider for a multi-tenant server (one process hosting several
+// agents, distinguished by the v1.0 tenant field). At least one of these must be
+// provided. WithAgentCard is also accepted alongside the tenant options, where it
+// becomes the default ("directory") card served when no "?tenant=" is given.
+func NewA2AServer(taskManager taskmanager.TaskManager, opts ...Option) (*A2AServer, error) {
 	if taskManager == nil {
 		return nil, errors.New("NewA2AServer requires a non-nil taskManager")
 	}
-	// Ensure the served card carries a v1.0-conformant supportedInterfaces list,
-	// deriving it from the deprecated URL/PreferredTransport fields when needed.
-	agentCard.NormalizeInterfaces()
 	server := &A2AServer{
-		agentCard:        agentCard,
 		taskManager:      taskManager,
 		corsEnabled:      true, // Enable CORS by default for easier development.
 		jsonRPCEndpoint:  protocol.DefaultJSONRPCPath,
@@ -95,25 +109,26 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 		jwksEndpoint:     protocol.JWKSPath,
 	}
 
-	// Store the original paths before applying options.
-	originalJSONRPCEndpoint := server.jsonRPCEndpoint
-	originalAgentCardPath := server.agentCardPath
-	originalJWKSEndpoint := server.jwksEndpoint
-
-	// Apply options first (WithBasePath has higher priority).
+	// Apply options. WithAgentCard sets the default card; path-setting options
+	// (WithBasePath / WithJSONRPCEndpoint / WithJWKSEndpoint) set pathsExplicitlySet.
 	for _, opt := range opts {
 		opt(server)
 	}
 
-	// If paths haven't been changed by options (e.g., WithBasePath),
-	// then extract base path from agent card URL as fallback.
-	if server.jsonRPCEndpoint == originalJSONRPCEndpoint &&
-		server.agentCardPath == originalAgentCardPath &&
-		server.jwksEndpoint == originalJWKSEndpoint {
+	// Require at least one card source so discovery and routing have something to serve.
+	if !server.agentCardSet && len(server.tenantCards) == 0 && server.tenantCardProvider == nil {
+		return nil, errors.New(
+			"NewA2AServer requires an agent card: use WithAgentCard, WithTenantCard, or WithTenantCardProvider")
+	}
 
-		basePath := extractBasePathFromURL(agentCard.PrimaryURL())
-		if basePath != "" {
-			// Configure endpoints with the extracted base path.
+	// When the serving paths were not set explicitly, derive a base path from the
+	// default agent card URL (the common "direct serve under a subpath" case, where
+	// the advertised URL path == the serving path). Use WithBasePath to override
+	// this when they differ (e.g. behind a reverse proxy that rewrites the path).
+	// A pure multi-tenant server (no default card) defaults to the root paths;
+	// tenant cards share that single endpoint and use WithBasePath when needed.
+	if !server.pathsExplicitlySet && server.agentCardSet {
+		if basePath := extractBasePathFromURL(server.agentCard.PrimaryURL()); basePath != "" {
 			server.jsonRPCEndpoint = basePath + "/"
 			server.agentCardPath = basePath + protocol.AgentCardPath
 			server.jwksEndpoint = basePath + protocol.JWKSPath
@@ -131,6 +146,7 @@ func NewA2AServer(agentCard AgentCard, taskManager taskmanager.TaskManager, opts
 			}
 		}
 	}
+
 	return server, nil
 }
 
@@ -264,22 +280,19 @@ func (s *A2AServer) Handler() http.Handler {
 		router.Handle(s.jwksEndpoint, http.HandlerFunc(s.pushAuth.HandleJWKS))
 	}
 
-	// Main JSON-RPC endpoint (configurable path) with optional authentication.
-	// When a compat handler is configured, dispatch non-v1 (legacy) methods to
-	// it from within the same handler so the authentication middleware below
-	// covers both protocol generations.
+	// Default JSON-RPC transport (configurable path). When a compat handler is
+	// configured, dispatch non-v1 (legacy) methods to it from within the same
+	// handler so the authentication middleware below covers both generations.
 	var jsonRPCHandler http.Handler = http.HandlerFunc(s.handleJSONRPC)
 	if s.compatHandler != nil {
 		jsonRPCHandler = s.dispatchByProtocol(jsonRPCHandler, s.compatHandler)
 	}
+
+	// Mount the JSON-RPC endpoint inside the authentication middleware chain.
 	if len(s.middleWare) > 0 {
-		// Apply authentication middleware chain to JSON-RPC endpoint.
-		chain := MiddlewareChain(s.middleWare)
-		router.Handle(s.jsonRPCEndpoint, chain.Wrap(jsonRPCHandler))
-	} else {
-		// No authentication required.
-		router.Handle(s.jsonRPCEndpoint, jsonRPCHandler)
+		jsonRPCHandler = MiddlewareChain(s.middleWare).Wrap(jsonRPCHandler)
 	}
+	router.Handle(s.jsonRPCEndpoint, jsonRPCHandler)
 	return router
 }
 
@@ -326,12 +339,50 @@ func (s *A2AServer) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		return
 	}
+	// Multi-tenant: serve the card for "?tenant=<tenant>"; empty -> default card.
+	card, ok := s.resolveAgentCard(r.Context(), r.URL.Query().Get("tenant"))
+	if !ok {
+		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(s.agentCard); err != nil {
+	if err := json.NewEncoder(w).Encode(card); err != nil {
 		log.Errorf("Failed to encode agent card: %v", err)
 		// Avoid writing JSON-RPC error here; it's a standard HTTP endpoint.
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 	}
+}
+
+// resolveAgentCard returns the AgentCard for the given tenant (from "?tenant=").
+// An empty tenant yields the default card. On a multi-tenant server (WithTenantCard
+// / WithTenantCardProvider) an unknown tenant yields ok=false (404).
+func (s *A2AServer) resolveAgentCard(ctx context.Context, tenant string) (AgentCard, bool) {
+	if tenant == "" {
+		// No default card configured (pure multi-tenant): nothing to serve without a tenant.
+		if !s.agentCardSet {
+			return AgentCard{}, false
+		}
+		return s.agentCard, true
+	}
+	if c, ok := s.tenantCards[tenant]; ok {
+		return c, true
+	}
+	if s.tenantCardProvider != nil {
+		c, err := s.tenantCardProvider(ctx, tenant)
+		if err != nil {
+			return AgentCard{}, false
+		}
+		return c, true
+	}
+	if len(s.tenantCards) > 0 {
+		// Multi-tenant server, but no such tenant.
+		return AgentCard{}, false
+	}
+	// Single-agent server: ignore an unexpected tenant param, serve the default.
+	if !s.agentCardSet {
+		return AgentCard{}, false
+	}
+	return s.agentCard, true
 }
 
 // handleJSONRPC is the main handler for all JSON-RPC 2.0 requests.
@@ -603,7 +654,17 @@ func (s *A2AServer) writeJSONRPCError(w http.ResponseWriter, id interface{}, err
 		httpStatus = http.StatusNotFound
 	case jsonrpc.CodeInvalidParams:
 		httpStatus = http.StatusBadRequest
-		// Add other mappings for custom server errors (-32000 to -32099) if desired.
+	case taskmanager.ErrCodeTaskNotFound:
+		httpStatus = http.StatusNotFound
+	case taskmanager.ErrCodeTaskNotCancelable,
+		taskmanager.ErrCodePushNotificationNotSupported,
+		taskmanager.ErrCodeUnsupportedOperation,
+		taskmanager.ErrCodeContentTypeNotSupported,
+		taskmanager.ErrCodeAuthenticatedExtendedCardNotConfigured,
+		taskmanager.ErrCodeExtensionSupportRequired,
+		taskmanager.ErrCodeVersionNotSupported:
+		httpStatus = http.StatusBadRequest
+		// ErrCodeInvalidAgentResponse and other internal errors keep the 500 default.
 	}
 	w.WriteHeader(httpStatus)
 	if encodeErr := json.NewEncoder(w).Encode(response); encodeErr != nil {
@@ -631,7 +692,6 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 		s.writeJSONRPCError(w, request.ID, err)
 		return
 	}
-	// Validate required fields.
 	if params.TaskID == "" {
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
 		return
@@ -640,23 +700,18 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("push notification URL is required"))
 		return
 	}
-	// Set JWKS endpoint information for push notification authentication.
+	// Inject the JWKS URL so the agent can publish the key used to sign push notifications.
 	if s.jwksEnabled && s.pushAuth != nil {
-		jwksURL := s.composeJWKSURL()
-		log.Infof("JWKS URL for push notifications: %s", jwksURL)
 		if params.Metadata == nil {
 			params.Metadata = make(map[string]interface{})
 		}
-		params.Metadata["jwksUrl"] = jwksURL
+		params.Metadata["jwksUrl"] = s.composeJWKSURL()
 	}
-
-	// Delegate to the task manager.
 	result, err := s.taskManager.OnPushNotificationSet(ctx, params)
 	if err != nil {
 		s.handleTaskManagerError(w, request.ID, err, "OnPushNotificationSet", params.TaskID)
 		return
 	}
-
 	s.writeJSONRPCResponse(w, request.ID, result)
 }
 
@@ -699,12 +754,11 @@ func (s *A2AServer) handleTasksPushNotificationGet(
 	if taskID == "" {
 		taskID = params.ID
 	}
+
 	if taskID == "" {
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
 		return
 	}
-
-	// Delegate to the task manager.
 	result, err := s.taskManager.OnPushNotificationGet(ctx, protocol.TaskIDParams{
 		RPCID:    params.RPCID,
 		ID:       taskID,
@@ -805,11 +859,10 @@ func (s *A2AServer) handleMessageStream(ctx context.Context, w http.ResponseWrit
 	// Get the event channel from the task manager.
 	eventsChan, err := s.taskManager.OnSendMessageStream(ctx, params)
 	if err != nil {
-		log.Errorf("Error calling OnSendMessageStream for message %s: %v", params.RPCID, err)
 		tracker.setError("subscribe_failed")
 		tracker.record(ctx)
-		s.writeJSONRPCError(w, request.ID,
-			jsonrpc.ErrInternalError(fmt.Sprintf("failed to subscribe to message events: %v", err)))
+		// Preserves a core *jsonrpc.Error (e.g. invalid params) and wraps the rest.
+		s.handleTaskManagerError(w, request.ID, err, "OnSendMessageStream", params.RPCID)
 		return
 	}
 
@@ -932,29 +985,22 @@ func (s *A2AServer) handleAgentGetAuthenticatedExtendedCard(
 	w http.ResponseWriter,
 	request jsonrpc.Request,
 ) {
-	// Check if the agent supports authenticated extended cards (v1.0
-	// capabilities.extendedAgentCard or the deprecated top-level flag).
 	if !s.agentCard.ExtendedAgentCardEnabled() {
-		log.Warnf("Authenticated extended card not configured (Request ID: %v)", request.ID)
-		s.writeJSONRPCError(w, request.ID, taskmanager.ErrAuthenticatedExtendedCardNotConfigured())
+		rpcErr := taskmanager.ErrAuthenticatedExtendedCardNotConfigured()
+		log.Warnf("Authenticated extended card unavailable (Request ID: %v): %v", request.ID, rpcErr)
+		s.writeJSONRPCError(w, request.ID, rpcErr)
 		return
 	}
-
-	baseCard := s.agentCard
-
-	// Apply dynamic modifications if a card modifier is configured
-	var cardToServe AgentCard
+	cardToServe := s.agentCard
 	if s.authenticatedCardHandler != nil {
-		modifiedCard, err := s.authenticatedCardHandler(ctx, baseCard)
+		var err error
+		cardToServe, err = s.authenticatedCardHandler(ctx, s.agentCard)
 		if err != nil {
 			log.Errorf("Error applying authenticated card handler: %v", err)
 			s.writeJSONRPCError(w, request.ID,
 				jsonrpc.ErrInternalError(fmt.Sprintf("failed to handle extended card: %v", err)))
 			return
 		}
-		cardToServe = modifiedCard
-	} else {
-		cardToServe = baseCard
 	}
 
 	log.Debugf("Serving authenticated extended card (Request ID: %v)", request.ID)

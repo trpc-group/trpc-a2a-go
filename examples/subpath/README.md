@@ -56,7 +56,7 @@ func main() {
     taskManager, _ := taskmanager.NewMemoryTaskManager(&simpleProcessor{})
 
     // 3. Create server (path automatically configured)
-    a2aServer, _ := server.NewA2AServer(agentCard, taskManager)
+    a2aServer, _ := server.NewA2AServer(taskManager, server.WithAgentCard(agentCard))
 
     // 4. Start server
     a2aServer.Start(":8080")
@@ -80,8 +80,8 @@ agentCard := server.AgentCard{
 }
 
 a2aServer, _ := server.NewA2AServer(
-    agentCard, 
     taskManager,
+    server.WithAgentCard(agentCard),
     server.WithBasePath("/internal/api"), // ← Internal routing path
 )
 ```

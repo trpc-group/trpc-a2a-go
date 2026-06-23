@@ -605,15 +605,15 @@ func sendMessage(ctx context.Context, a2aClient *client.A2AClient, content strin
 		return "", fmt.Errorf("failed to send message: %w", err)
 	}
 
-	// Check the result type (v1.0: SendMessageResponse is a Message/Task union)
+	// Check the result type (v1.0: MessageResult is a Message/Task union)
 	switch {
-	case result.Message != nil:
+	case result.GetMessage() != nil:
 		log.Infof("Received direct message response")
 		return "", nil // No task ID for direct message responses
 
-	case result.Task != nil:
-		log.Infof("Task created: %s (State: %s)", result.Task.ID, result.Task.Status.State)
-		return result.Task.ID, nil
+	case result.GetTask() != nil:
+		log.Infof("Task created: %s (State: %s)", result.GetTask().ID, result.GetTask().Status.State)
+		return result.GetTask().ID, nil
 
 	default:
 		return "", fmt.Errorf("unexpected empty SendMessage response")

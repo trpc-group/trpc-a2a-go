@@ -33,6 +33,12 @@ type ProcessOptions struct {
 	// If true, the user should return event streams through the StreamingEvents channel
 	// If false, the user should return a single result through Result
 	Streaming bool
+
+	// Tenant is the A2A v1.0 tenant the request is addressed to (from
+	// params.Tenant). It lets one process host multiple agents: the processor
+	// dispatches on it instead of relying on URL-path routing. Empty for
+	// single-agent / v0 requests.
+	Tenant string
 }
 
 // CancellableTask is a task that can be cancelled
@@ -158,7 +164,7 @@ type TaskManager interface {
 	) (*protocol.SendMessageResponse, error)
 
 	// OnSendMessageStream handles a request corresponding to the 'message/stream' RPC method.
-	// It creates a new message and returns a channel for receiving StreamResponse updates (streaming).
+	// It creates a new message and returns a channel for receiving StreamingMessageEvent updates (streaming).
 	// It initiates asynchronous processing via the MessageProcessor.
 	// The channel will be closed when the message reaches a final state or an error occurs during setup/processing.
 	OnSendMessageStream(

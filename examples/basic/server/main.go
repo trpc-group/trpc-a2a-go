@@ -25,6 +25,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
 
 // Command modes for the text processor
@@ -81,7 +82,7 @@ func (p *basicMessageProcessor) ProcessMessage(
 			[]*protocol.Part{protocol.NewTextPart(errMsg)},
 		)
 		return &taskmanager.MessageProcessingResult{
-			Result: &protocol.SendMessageResponse{Message: &errorMessage},
+			Result: &protocol.SendMessageResponse{Result: &errorMessage},
 		}, nil
 	}
 
@@ -141,7 +142,7 @@ func (p *basicMessageProcessor) ProcessMessage(
 			[]*protocol.Part{protocol.NewTextPart("Multi-turn interaction started. Please continue the conversation.")},
 		)
 		return &taskmanager.MessageProcessingResult{
-			Result: &protocol.SendMessageResponse{Message: &responseMessage},
+			Result: &protocol.SendMessageResponse{Result: &responseMessage},
 		}, nil
 	}
 
@@ -167,7 +168,7 @@ func (p *basicMessageProcessor) processSimpleCommand(text string) (*taskmanager.
 	)
 
 	return &taskmanager.MessageProcessingResult{
-		Result: &protocol.SendMessageResponse{Message: &responseMessage},
+		Result: &protocol.SendMessageResponse{Result: &responseMessage},
 	}, nil
 }
 
@@ -194,7 +195,7 @@ func (p *basicMessageProcessor) processMultiTurnSession(
 		[]*protocol.Part{protocol.NewTextPart("Processing your multi-turn request...")},
 	)
 	return &taskmanager.MessageProcessingResult{
-		Result: &protocol.SendMessageResponse{Message: &responseMessage},
+		Result: &protocol.SendMessageResponse{Result: &responseMessage},
 	}, nil
 }
 
@@ -353,7 +354,7 @@ func main() {
 	}
 
 	// Create the base TaskManager with built-in push notification storage support
-	baseTaskManager, err := taskmanager.NewMemoryTaskManager(processor)
+	baseTaskManager, err := memory.NewTaskManager(processor)
 	if err != nil {
 		log.Fatalf("Failed to create task manager: %v", err)
 	}
@@ -362,7 +363,7 @@ func main() {
 	taskManager := newPushNotificationSender(baseTaskManager)
 
 	// Create the A2A server instance using the factory from server package
-	srv, err := server.NewA2AServer(agentCard, taskManager, server.WithCORSEnabled(!noCORS))
+	srv, err := server.NewA2AServer(taskManager, server.WithAgentCard(agentCard), server.WithCORSEnabled(!noCORS))
 	if err != nil {
 		log.Fatalf("Failed to create A2A server: %v", err)
 	}
@@ -430,7 +431,7 @@ func (p *pushNotificationSender) OnSendMessage(
 ) (*protocol.SendMessageResponse, error) {
 	result, err := p.TaskManager.OnSendMessage(ctx, params)
 	if err == nil && result != nil {
-		if task := result.Task; task != nil {
+		if task := result.GetTask(); task != nil {
 			go p.maybeSendStatusPushNotification(ctx, task.ID, task.Status.State)
 		}
 	}
@@ -454,7 +455,7 @@ func (p *pushNotificationSender) OnSendMessageStream(
 		for event := range eventChan {
 			wrappedChan <- event
 
-			if statusEvent := event.StatusUpdate; statusEvent != nil {
+			if statusEvent := event.GetStatusUpdate(); statusEvent != nil {
 				go p.maybeSendStatusPushNotification(ctx, statusEvent.TaskID, statusEvent.Status.State)
 			}
 		}

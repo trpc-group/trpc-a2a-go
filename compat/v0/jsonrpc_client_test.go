@@ -52,9 +52,9 @@ func TestClientServerLoopback(t *testing.T) {
 		assert.Equal(t, "ping", fake.gotSendParams.Message.Parts[0].TextContent())
 
 		// And the caller gets v1 types back.
-		require.NotNil(t, resp.Message)
-		assert.Equal(t, protocol.MessageRoleAgent, resp.Message.Role)
-		assert.Equal(t, "pong", resp.Message.Parts[0].TextContent())
+		require.NotNil(t, resp.GetMessage())
+		assert.Equal(t, protocol.MessageRoleAgent, resp.GetMessage().Role)
+		assert.Equal(t, "pong", resp.GetMessage().Parts[0].TextContent())
 	})
 
 	t.Run("GetTasks", func(t *testing.T) {
@@ -82,11 +82,11 @@ func TestClientServerLoopback(t *testing.T) {
 
 	t.Run("StreamMessage", func(t *testing.T) {
 		fake.streamEvents = []protocol.StreamResponse{
-			{StatusUpdate: &protocol.TaskStatusUpdateEvent{
+			{Result: &protocol.TaskStatusUpdateEvent{
 				TaskID: "task-1", ContextID: "ctx-1",
 				Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
 			}},
-			{StatusUpdate: &protocol.TaskStatusUpdateEvent{
+			{Result: &protocol.TaskStatusUpdateEvent{
 				TaskID: "task-1", ContextID: "ctx-1",
 				Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
 			}},
@@ -104,8 +104,8 @@ func TestClientServerLoopback(t *testing.T) {
 			received = append(received, ev)
 		}
 		require.Len(t, received, 2)
-		assert.Equal(t, protocol.TaskStateWorking, received[0].StatusUpdate.Status.State)
-		assert.Equal(t, protocol.TaskStateCompleted, received[1].StatusUpdate.Status.State)
+		assert.Equal(t, protocol.TaskStateWorking, received[0].GetStatusUpdate().Status.State)
+		assert.Equal(t, protocol.TaskStateCompleted, received[1].GetStatusUpdate().Status.State)
 		assert.True(t, received[1].IsFinal())
 	})
 }
@@ -122,7 +122,7 @@ func TestClientServerLoopback_MoreMethods(t *testing.T) {
 			TaskID: "task-1", URL: "https://example.com/hook",
 		},
 		streamEvents: []protocol.StreamResponse{
-			{StatusUpdate: &protocol.TaskStatusUpdateEvent{
+			{Result: &protocol.TaskStatusUpdateEvent{
 				TaskID: "task-1", Status: protocol.TaskStatus{State: protocol.TaskStateCompleted}}},
 		},
 	}

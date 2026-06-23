@@ -18,6 +18,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
 
 // simpleProcessor implements the MessageProcessor interface.
@@ -53,12 +54,12 @@ func main() {
 	}
 
 	// Create task manager with simple processor
-	taskManager, err := taskmanager.NewMemoryTaskManager(&simpleProcessor{})
+	taskManager, err := memory.NewTaskManager(&simpleProcessor{})
 	if err != nil {
 		log.Fatalf("Failed to create task manager: %v", err)
 	}
 
-	a2aServer, err := server.NewA2AServer(agentCard, taskManager)
+	a2aServer, err := server.NewA2AServer(taskManager, server.WithAgentCard(agentCard))
 	if err != nil {
 		log.Fatalf("Failed to create server: %v", err)
 	}

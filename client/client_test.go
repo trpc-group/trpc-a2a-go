@@ -43,20 +43,20 @@ func TestA2AClient_ResubscribeTask(t *testing.T) {
 	t.Run("ResubscribeTask Success", func(t *testing.T) {
 		// Prepare mock SSE stream data.
 		sseEvent1Data, _ := json.Marshal(protocol.StreamResponse{
-			StatusUpdate: &protocol.TaskStatusUpdateEvent{
+			Result: &protocol.TaskStatusUpdateEvent{
 				TaskID: taskID,
 				Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
 				Final:  false,
 			},
 		})
 		sseEvent2Data, _ := json.Marshal(protocol.StreamResponse{
-			ArtifactUpdate: &protocol.TaskArtifactUpdateEvent{
+			Result: &protocol.TaskArtifactUpdateEvent{
 				TaskID:   taskID,
 				Artifact: protocol.Artifact{ArtifactID: "0", Parts: []*protocol.Part{protocol.NewTextPart("SSE data")}},
 			},
 		})
 		sseEvent3Data, _ := json.Marshal(protocol.StreamResponse{
-			StatusUpdate: &protocol.TaskStatusUpdateEvent{
+			Result: &protocol.TaskStatusUpdateEvent{
 				TaskID: taskID,
 				Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
 				Final:  true,
@@ -116,16 +116,16 @@ func TestA2AClient_ResubscribeTask(t *testing.T) {
 
 		// Assert the content and order of received events.
 		require.Len(t, receivedEvents, 3, "Should receive exactly 3 events")
-		assert.NotNil(t, receivedEvents[0].StatusUpdate, "First event should be StatusUpdate")
-		assert.NotNil(t, receivedEvents[1].ArtifactUpdate, "Second event should be ArtifactUpdate")
-		assert.NotNil(t, receivedEvents[2].StatusUpdate, "Third event should be StatusUpdate")
+		assert.NotNil(t, receivedEvents[0].GetStatusUpdate(), "First event should be StatusUpdate")
+		assert.NotNil(t, receivedEvents[1].GetArtifactUpdate(), "Second event should be ArtifactUpdate")
+		assert.NotNil(t, receivedEvents[2].GetStatusUpdate(), "Third event should be StatusUpdate")
 		assert.Equal(t, protocol.TaskStateWorking,
-			receivedEvents[0].StatusUpdate.Status.State, "First event state mismatch")
-		assert.False(t, receivedEvents[0].StatusUpdate.IsFinal(), "First event should not be final")
-		assert.False(t, receivedEvents[1].ArtifactUpdate.IsFinal(), "Second event should not be final")
+			receivedEvents[0].GetStatusUpdate().Status.State, "First event state mismatch")
+		assert.False(t, receivedEvents[0].GetStatusUpdate().IsFinal(), "First event should not be final")
+		assert.False(t, receivedEvents[1].GetArtifactUpdate().IsFinal(), "Second event should not be final")
 		assert.Equal(t, protocol.TaskStateCompleted,
-			receivedEvents[2].StatusUpdate.Status.State, "Third event state mismatch")
-		assert.True(t, receivedEvents[2].StatusUpdate.IsFinal(), "Last event should be final")
+			receivedEvents[2].GetStatusUpdate().Status.State, "Third event state mismatch")
+		assert.True(t, receivedEvents[2].GetStatusUpdate().IsFinal(), "Last event should be final")
 	})
 
 	t.Run("ResubscribeTask HTTP Error", func(t *testing.T) {

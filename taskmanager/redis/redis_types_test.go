@@ -88,7 +88,7 @@ func TestRedisTaskSubscriber(t *testing.T) {
 	// Test receiving events
 	select {
 	case receivedEvent := <-subscriber.Channel():
-		if receivedEvent.StatusUpdate == nil {
+		if receivedEvent.GetStatusUpdate() == nil {
 			t.Error("Expected status update, got nil")
 		}
 	case <-time.After(100 * time.Millisecond):

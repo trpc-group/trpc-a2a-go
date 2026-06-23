@@ -150,7 +150,7 @@ func main() {
 	}
 
 	// Handle the response based on its type
-	if msg := result.Message; msg != nil {
+	if msg := result.GetMessage(); msg != nil {
 		fmt.Printf("Message Response: %s\n", msg.MessageID)
 		if msg.ContextID != nil {
 			fmt.Printf("Context ID: %s\n", *msg.ContextID)
@@ -160,7 +160,7 @@ func main() {
 				fmt.Printf("Response: %s\n", text)
 			}
 		}
-	} else if task := result.Task; task != nil {
+	} else if task := result.GetTask(); task != nil {
 		fmt.Printf("Task ID: %s, Status: %s\n", task.ID, task.Status.State)
 		if task.ContextID != "" {
 			fmt.Printf("Context ID: %s\n", task.ContextID)

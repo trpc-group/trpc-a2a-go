@@ -205,7 +205,7 @@ func TestRequestOptions_CustomHeaders(t *testing.T) {
 		var resultBytes []byte
 		switch req.Method {
 		case protocol.MethodMessageSend:
-			resultBytes, _ = json.Marshal(protocol.SendMessageResponse{Task: &task})
+			resultBytes, _ = json.Marshal(protocol.SendMessageResponse{Result: &task})
 		default:
 			resultBytes, _ = json.Marshal(task)
 		}

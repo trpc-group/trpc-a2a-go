@@ -163,7 +163,7 @@ func runNonStreamingDemo(ctx context.Context, client *client.A2AClient, inputTex
 
 	fmt.Printf("%s Processing time: %v\n", prefixSuccess, duration)
 
-	if response := result.Message; response != nil {
+	if response := result.GetMessage(); response != nil {
 		for i, part := range response.Parts {
 			if t := part.TextContent(); t != "" {
 				fmt.Printf("%s %d: '%s'\n", prefixResult, i+1, t)
@@ -271,10 +271,10 @@ func (p *streamEventProcessor) handleStreamEvent(event protocol.StreamResponse) 
 		fmt.Printf("\r")
 	}
 
-	if event.StatusUpdate != nil {
-		p.handleTaskStatusEvent(event.StatusUpdate)
-	} else if event.ArtifactUpdate != nil {
-		p.handleTaskArtifactEvent(event.ArtifactUpdate)
+	if event.GetStatusUpdate() != nil {
+		p.handleTaskStatusEvent(event.GetStatusUpdate())
+	} else if event.GetArtifactUpdate() != nil {
+		p.handleTaskArtifactEvent(event.GetArtifactUpdate())
 	} else {
 		fmt.Printf("%s Unknown event\n", prefixUnknown)
 	}

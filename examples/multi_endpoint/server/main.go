@@ -1,202 +1,107 @@
-// Package main is the entry point for the A2A server.
+// Package main is the entry point for a multi-agent A2A server.
+//
+// It hosts several agents in ONE process using the A2A v1.0 tenant model: all
+// agents share a single endpoint, and the request's "tenant" field (carried in
+// the JSON body) selects which agent handles it. The agent-card endpoint serves
+// the right card for "?tenant=<tenant>". This replaces the older approach of
+// distinguishing agents by URL path (which needed a placeholder card, a custom
+// AgentCardHandler, a {agentName} path template and a chi router).
 package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 
-	"github.com/go-chi/chi/v5"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
-
-const ctxAgentNameKey = "agentName"
 
 var host = flag.String("host", "localhost:8080", "host")
 
 func main() {
 	flag.Parse()
-	// Create chi router
-	router := chi.NewMux()
 
-	processor := &multiAgentProecssor{}
-
-	taskManager, err := taskmanager.NewMemoryTaskManager(processor)
+	taskManager, err := memory.NewTaskManager(&multiAgentProcessor{})
 	if err != nil {
 		log.Fatalf("Failed to create task manager: %v", err)
 	}
 
-	agentCard := server.AgentCard{
-		Name:        "MultiAgent",
-		Description: "This agent card will not be used while AgentCardHandler is provided",
-	}
+	baseURL := fmt.Sprintf("http://%s/", *host)
 
-	a2aServer, err := server.NewA2AServer(
-		agentCard,
-		taskManager,
-		server.WithMiddleWare(&middleWare{}),
-		server.WithHTTPRouter(router),
-		server.WithAgentCardHandler(&multiAgentCardHandler{}),
-		server.WithBasePath("/api/v1/agent/{agentName}/"),
+	// No default ("directory") card is needed: each agent's real card is
+	// registered per tenant with WithTenantCard, and the server is addressed by
+	// the v1.0 tenant field. For a set of agents not known at startup, use
+	// server.WithTenantCardProvider instead. (WithAgentCard would add an optional
+	// default card served when no "?tenant=" is given.)
+	a2aServer, err := server.NewA2AServer(taskManager,
+		server.WithTenantCard("chatAgent", agentCardFor("ChatAgent", "I am a chatbot", "chat", baseURL)),
+		server.WithTenantCard("workerAgent", agentCardFor("WorkerAgent", "I am a worker", "worker", baseURL)),
 	)
 	if err != nil {
 		log.Fatalf("Failed to create A2A server: %v", err)
 	}
 
-	fmt.Println("Starting A2A server listening on", *host)
-	fmt.Println("Chat agent card url :", fmt.Sprintf("http://%s/api/v1/agent/chatAgent/.well-known/agent-card.json:", *host))
-	fmt.Println("Chat agent interfaces:", fmt.Sprintf("http://%s/api/v1/agent/chatAgent/", *host))
-	fmt.Println("Worker agent card url:", fmt.Sprintf("http://%s/api/v1/agent/workerAgent/.well-known/agent-card.json", *host))
-	fmt.Println("Worker agent interfaces:", fmt.Sprintf("http://%s/api/v1/agent/workerAgent/", *host))
+	fmt.Println("Starting A2A server on", *host)
+	fmt.Printf("  Per-tenant card: http://%s/.well-known/agent-card.json?tenant=chatAgent|workerAgent\n", *host)
+	fmt.Printf("  JSON-RPC: http://%s/  (set the \"tenant\" field in the request to pick an agent)\n", *host)
 
 	if err := a2aServer.Start(*host); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
-
 }
 
-type middleWare struct{}
-
-func (m *middleWare) Wrap(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		ctx = context.WithValue(ctx, ctxAgentNameKey, chi.URLParam(r, "agentName"))
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-type multiAgentCardHandler struct{}
-
-func (h *multiAgentCardHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Get agent name from url param, because middleware not task effect on agent card handler
-	agentName := chi.URLParam(r, "agentName")
-	var agentCard server.AgentCard
-	switch agentName {
-	case "chatAgent":
-		agentCard = server.AgentCard{
-			Name:        "ChatAgent",
-			Description: "I am a chatbot",
-			URL:         fmt.Sprintf("http://%s/api/v1/agent/chatAgent/", *host),
-			Skills: []server.AgentSkill{
-				{
-					Name:        "chat",
-					Description: stringPtr("I am a chatbot"),
-					InputModes:  []string{"text"},
-					OutputModes: []string{"text"},
-					Tags:        []string{"chat"},
-					Examples:    []string{"Hello"},
-				},
-			},
-			Capabilities: server.AgentCapabilities{
-				Streaming: boolPtr(false),
-			},
-			DefaultInputModes:  []string{"text"},
-			DefaultOutputModes: []string{"text"},
-		}
-	case "workerAgent":
-		agentCard = server.AgentCard{
-			Name:        "WorkerAgent",
-			Description: "I am a worker",
-			URL:         fmt.Sprintf("http://%s/api/v1/agent/workerAgent/", *host),
-			Skills: []server.AgentSkill{
-				{
-					Name:        "worker",
-					Description: stringPtr("I am a worker"),
-					InputModes:  []string{"text"},
-					OutputModes: []string{"text"},
-					Tags:        []string{"worker"},
-					Examples:    []string{"Hello"},
-				},
-			},
-			Capabilities: server.AgentCapabilities{
-				Streaming: boolPtr(false),
-			},
-			DefaultInputModes:  []string{"text"},
-			DefaultOutputModes: []string{"text"},
-		}
-	default:
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(agentCard); err != nil {
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+// agentCardFor builds a simple single-skill card sharing the common endpoint.
+func agentCardFor(name, desc, skill, url string) server.AgentCard {
+	return server.AgentCard{
+		Name:        name,
+		Description: desc,
+		URL:         url,
+		Skills: []server.AgentSkill{{
+			Name:        skill,
+			Description: stringPtr(desc),
+			InputModes:  []string{"text"},
+			OutputModes: []string{"text"},
+			Tags:        []string{skill},
+			Examples:    []string{"Hello"},
+		}},
+		Capabilities:       server.AgentCapabilities{Streaming: boolPtr(false)},
+		DefaultInputModes:  []string{"text"},
+		DefaultOutputModes: []string{"text"},
 	}
 }
 
-type multiAgentProecssor struct {
-}
+// multiAgentProcessor dispatches on the v1.0 tenant carried in the request body
+// (taskmanager.ProcessOptions.Tenant) — no ctx-key, no URL parsing.
+type multiAgentProcessor struct{}
 
-func (u *multiAgentProecssor) ProcessMessage(
-	ctx context.Context,
-	message protocol.Message,
+func (p *multiAgentProcessor) ProcessMessage(
+	_ context.Context,
+	_ protocol.Message,
 	options taskmanager.ProcessOptions,
-	taskHandler taskmanager.TaskHandler,
+	_ taskmanager.TaskHandler,
 ) (*taskmanager.MessageProcessingResult, error) {
-	agentName := ctx.Value(ctxAgentNameKey)
-	if agentName == nil {
-		return nil, errors.New("agent name not found")
-	}
-
-	switch agentName.(string) {
+	switch options.Tenant {
 	case "chatAgent":
-		return u.chatAgentProcessMessage(ctx, message, options, taskHandler)
+		return reply("Hello from chat agent!"), nil
 	case "workerAgent":
-		return u.workerAgentProcessMessage(ctx, message, options, taskHandler)
+		return reply("Hello from worker agent!"), nil
 	default:
-		return nil, errors.New("unknown agent name")
+		return nil, fmt.Errorf("no such tenant %q (use chatAgent or workerAgent)", options.Tenant)
 	}
 }
 
-func (u *multiAgentProecssor) chatAgentProcessMessage(
-	ctx context.Context,
-	message protocol.Message,
-	options taskmanager.ProcessOptions,
-	taskHandler taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
+func reply(text string) *taskmanager.MessageProcessingResult {
 	msg := &protocol.Message{
 		Role:      protocol.MessageRoleAgent,
 		MessageID: protocol.GenerateMessageID(),
-		Parts: []*protocol.Part{
-			protocol.NewTextPart("Hello from chat agent!"),
-		},
+		Parts:     []*protocol.Part{protocol.NewTextPart(text)},
 	}
-
-	return &taskmanager.MessageProcessingResult{
-		Result: protocol.NewSendMessageResponseMessage(msg),
-	}, nil
+	return &taskmanager.MessageProcessingResult{Result: protocol.NewSendMessageResponseMessage(msg)}
 }
 
-func (u *multiAgentProecssor) workerAgentProcessMessage(
-	ctx context.Context,
-	message protocol.Message,
-	options taskmanager.ProcessOptions,
-	taskHandler taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
-	msg := &protocol.Message{
-		Role:      protocol.MessageRoleAgent,
-		MessageID: protocol.GenerateMessageID(),
-		Parts: []*protocol.Part{
-			protocol.NewTextPart("Hello from worker agent!"),
-		},
-	}
-
-	return &taskmanager.MessageProcessingResult{
-		Result: protocol.NewSendMessageResponseMessage(msg),
-	}, nil
-}
-
-func stringPtr(s string) *string {
-	return &s
-}
-
-func boolPtr(b bool) *bool {
-	return &b
-}
+func stringPtr(s string) *string { return &s }
+func boolPtr(b bool) *bool       { return &b }

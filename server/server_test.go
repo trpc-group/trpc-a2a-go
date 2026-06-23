@@ -29,6 +29,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/sse"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
 
 // Helper to create a default AgentCard for tests.
@@ -99,7 +100,7 @@ func TestA2AServer_HandleAgentCard(t *testing.T) {
 	// The server normalizes the card to a v1.0-conformant supportedInterfaces
 	// list; normalize the expected copy the same way for comparison.
 	agentCard.NormalizeInterfaces()
-	a2aServer, err := NewA2AServer(agentCard, mockTM)
+	a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard))
 	require.NoError(t, err)
 	testServer := httptest.NewServer(http.HandlerFunc(a2aServer.handleAgentCard))
 	defer testServer.Close()
@@ -154,7 +155,7 @@ func TestA2AServer_shutdownTelemetry(t *testing.T) {
 
 func TestA2AServer_Start_ShutdownTelemetryOnListenError(t *testing.T) {
 	provider := &shutdownAwareMeterProvider{MeterProvider: noop.NewMeterProvider()}
-	srv, err := NewA2AServer(defaultAgentCard(), newMockTaskManager())
+	srv, err := NewA2AServer(newMockTaskManager(), WithAgentCard(defaultAgentCard()))
 	require.NoError(t, err)
 	srv.telemetryMeterProvider = provider
 	srv.telemetryOwnsProvider = true
@@ -206,7 +207,7 @@ func TestA2AServer_InitTelemetry_WithInjectedProvider(t *testing.T) {
 func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 	mockTM := newMockTaskManager()
 	agentCard := defaultAgentCard()
-	a2aServer, err := NewA2AServer(agentCard, mockTM)
+	a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard))
 	require.NoError(t, err)
 	testServer := httptest.NewServer(http.HandlerFunc(a2aServer.handleJSONRPC))
 	defer testServer.Close()
@@ -216,7 +217,7 @@ func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 	// --- Test message/send ---
 	t.Run("message/send success", func(t *testing.T) {
 		mockTM.sendMessageResponse = &protocol.SendMessageResponse{
-			Message: &protocol.Message{
+			Result: &protocol.Message{
 				MessageID: "msg-1",
 				Role:      protocol.MessageRoleUser,
 				Parts:     []*protocol.Part{protocol.NewTextPart("Response message")},
@@ -238,11 +239,11 @@ func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 
 		// Remarshal result interface{} to bytes
 		resultBytes, err := json.Marshal(resp.Result)
-		require.NoError(t, err, "Failed to remarshal result for SendMessageResponse unmarshalling")
+		require.NoError(t, err, "Failed to remarshal result for MessageResult unmarshalling")
 		var resultMsg protocol.SendMessageResponse
 		err = json.Unmarshal(resultBytes, &resultMsg)
-		require.NoError(t, err, "Failed to unmarshal SendMessageResponse from remarshalled result")
-		assert.True(t, resultMsg.Message != nil || resultMsg.Task != nil)
+		require.NoError(t, err, "Failed to unmarshal MessageResult from remarshalled result")
+		assert.True(t, resultMsg.GetMessage() != nil || resultMsg.GetTask() != nil)
 	})
 
 	t.Run("message/send error", func(t *testing.T) {
@@ -347,7 +348,7 @@ func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 func TestA2ASrv_HandleMessageStream_SSE(t *testing.T) {
 	mockTM := newMockTaskManager()
 	agentCard := defaultAgentCard()
-	a2aServer, err := NewA2AServer(agentCard, mockTM)
+	a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard))
 	require.NoError(t, err)
 	testServer := httptest.NewServer(http.HandlerFunc(a2aServer.handleJSONRPC))
 	defer testServer.Close()
@@ -380,9 +381,9 @@ func TestA2ASrv_HandleMessageStream_SSE(t *testing.T) {
 	}
 	// Configure mock events for message streaming
 	mockTM.sendMessageStreamEvents = []protocol.StreamResponse{
-		{StatusUpdate: &event1},
-		{ArtifactUpdate: &event2},
-		{StatusUpdate: &event3},
+		{Result: &event1},
+		{Result: &event2},
+		{Result: &event3},
 	}
 	mockTM.sendMessageStreamError = nil
 
@@ -452,7 +453,7 @@ func TestA2ASrv_HandleMessageStream_SSE(t *testing.T) {
 
 		var event protocol.StreamResponse
 		if err := json.Unmarshal(eventBytes, &event); err != nil {
-			t.Fatalf("Failed to unmarshal StreamResponse: %v. Data: %s", err, string(eventBytes))
+			t.Fatalf("Failed to unmarshal StreamingMessageEvent: %v. Data: %s", err, string(eventBytes))
 		}
 
 		receivedEvents = append(receivedEvents, event)
@@ -465,8 +466,8 @@ func TestA2ASrv_HandleMessageStream_SSE(t *testing.T) {
 	require.Greater(t, len(receivedEvents), 0, "Should have received at least one event")
 	var lastStatusEvent *protocol.TaskStatusUpdateEvent
 	for i := len(receivedEvents) - 1; i >= 0; i-- {
-		if receivedEvents[i].StatusUpdate != nil {
-			lastStatusEvent = receivedEvents[i].StatusUpdate
+		if receivedEvents[i].GetStatusUpdate() != nil {
+			lastStatusEvent = receivedEvents[i].GetStatusUpdate()
 			break
 		}
 	}
@@ -536,7 +537,7 @@ func (m *mockTaskManager) OnSendMessage(
 	// Default behavior: create a simple message response
 	msg := request.Message
 	return &protocol.SendMessageResponse{
-		Message: &msg,
+		Result: &msg,
 	}, nil
 }
 
@@ -574,7 +575,7 @@ func (m *mockTaskManager) OnSendMessageStream(
 		go func() {
 			defer close(eventCh)
 			event := protocol.StreamResponse{
-				Message: &msg,
+				Result: &msg,
 			}
 			select {
 			case <-ctx.Done():
@@ -738,7 +739,7 @@ func (m *mockTaskManager) OnResubscribe(
 		go func() {
 			defer close(eventCh)
 			streamEvent := protocol.StreamResponse{
-				StatusUpdate: &protocol.TaskStatusUpdateEvent{
+				Result: &protocol.TaskStatusUpdateEvent{
 					TaskID: params.ID,
 					Final:  true,
 					Status: protocol.TaskStatus{
@@ -798,7 +799,7 @@ func (m *mockProcessor) ProcessMessage(
 	// Simple echo processor for testing
 	msg := message
 	return &taskmanager.MessageProcessingResult{
-		Result: &protocol.SendMessageResponse{Message: &msg},
+		Result: &protocol.SendMessageResponse{Result: &msg},
 	}, nil
 }
 
@@ -821,7 +822,7 @@ func TestServer_WithPushNotificationAuthenticator(t *testing.T) {
 
 	// Create a task processor and manager
 	processor := &mockProcessor{}
-	tm, err := taskmanager.NewMemoryTaskManager(processor)
+	tm, err := memory.NewTaskManager(processor)
 	require.NoError(t, err)
 
 	// Create server with authenticator
@@ -831,8 +832,8 @@ func TestServer_WithPushNotificationAuthenticator(t *testing.T) {
 	}
 
 	server, err := NewA2AServer(
-		card,
 		tm,
+		WithAgentCard(card),
 		WithPushNotificationAuthenticator(authenticator),
 	)
 	require.NoError(t, err)
@@ -919,7 +920,7 @@ func TestA2AServer_HandleAgentGetAuthenticatedExtendedCard(t *testing.T) {
 			agentCard := defaultAgentCard()
 			agentCard.SupportsAuthenticatedExtendedCard = tt.supportsExtendedCard
 
-			a2aServer, err := NewA2AServer(agentCard, mockTM)
+			a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard))
 			require.NoError(t, err)
 
 			if tt.authenticatedCardHandler != nil {
@@ -1012,7 +1013,7 @@ func TestA2AServer_ComposeJWKSURL(t *testing.T) {
 			agentCard := defaultAgentCard()
 			agentCard.URL = tt.agentCardURL
 
-			a2aServer, err := NewA2AServer(agentCard, mockTM)
+			a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard))
 			require.NoError(t, err)
 			a2aServer.jwksEndpoint = tt.jwksEndpoint
 
@@ -1046,7 +1047,7 @@ func TestCompatHandler_CoveredByMiddleware(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	srv, err := NewA2AServer(defaultAgentCard(), mockTM,
+	srv, err := NewA2AServer(mockTM, WithAgentCard(defaultAgentCard()),
 		WithMiddleWare(blockMiddleware{}),
 		WithCompatHandler(compat),
 	)
@@ -1084,7 +1085,7 @@ func TestServer_BasePathFromSupportedInterfaces(t *testing.T) {
 		DefaultInputModes:  []string{"text"},
 		DefaultOutputModes: []string{"text"},
 	}
-	srv, err := NewA2AServer(card, newMockTaskManager())
+	srv, err := NewA2AServer(newMockTaskManager(), WithAgentCard(card))
 	require.NoError(t, err)
 	assert.Equal(t, "/agent/api/", srv.jsonRPCEndpoint,
 		"base path should come from SupportedInterfaces[0].URL")

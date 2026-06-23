@@ -231,6 +231,7 @@ func (c *A2AClient) sendA2AStreamRequest(ctx context.Context, id, method string,
 	// Set headers, including Accept for event stream.
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("Accept", "text/event-stream") // Crucial for SSE.
+	req.Header.Set("A2A-Version", protocol.ProtocolVersionV1)
 	if c.userAgent != "" {
 		req.Header.Set("User-Agent", c.userAgent)
 	}
@@ -456,6 +457,7 @@ func (c *A2AClient) doRequest(ctx context.Context, request *jsonrpc.Request, opt
 	// Set required headers.
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("A2A-Version", protocol.ProtocolVersionV1)
 	if c.userAgent != "" {
 		req.Header.Set("User-Agent", c.userAgent)
 	}

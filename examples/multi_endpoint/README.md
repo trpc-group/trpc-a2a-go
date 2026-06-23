@@ -1,218 +1,147 @@
-# Multi-Agent Server Example
+# Multi-Agent Server Example (tenant-native)
 
-This example demonstrates how to run **multiple agents in a single process** using different URL paths to define separate endpoints for each agent.
+This example runs **multiple agents in a single process** using the A2A **v1.0
+tenant** model: all agents share **one** endpoint, and each request names the
+agent it wants via the `tenant` field in the request body. The agent-card
+endpoint serves the right card for `?tenant=<tenant>`.
+
+This replaces the older v0.x approach that distinguished agents by **URL path**
+(`/api/v1/agent/{agentName}/`), which required a placeholder card, a custom
+`AgentCardHandler`, a `{agentName}` path template, request middleware and a chi
+router. None of that is needed anymore.
 
 ## Architecture Overview
 
-**Single Process, Multiple Agents**: This implementation runs all agents within one server process, using URL path routing to distinguish between different agents. Each agent gets its own endpoint path but shares the same server resources.
-
 ```
 Single Server Process (localhost:8080)
-├── /api/v1/agent/chatAgent/     → Chat Agent
-└── /api/v1/agent/workerAgent/   → Worker Agent  
+└── /                          → JSON-RPC for every agent
+    └── request.tenant selects the agent ("chatAgent" | "workerAgent")
+    /.well-known/agent-card.json?tenant=chatAgent   → Chat Agent card
+    /.well-known/agent-card.json?tenant=workerAgent → Worker Agent card
+    /.well-known/agent-card.json                    → 404 (no default card here;
+                                                       add one with WithAgentCard)
 ```
 
-## Key Features
+## Key Points
 
-- **Single Process Architecture**: All agents run in one server process
-- **Path-Based Routing**: Each agent has a unique URL path endpoint
-- **Dynamic Agent Discovery**: URL path parameter `{agentName}` determines which agent handles the request
-- **Shared Resources**: All agents share the same server process, memory, and resources
-- **Unified Protocol**: All agents follow the same A2A protocol interface
+- **One endpoint, many agents**: routing is by the `tenant` field, not the URL.
+- **Static or dynamic registry**: register known agents with
+  `server.WithTenantCard(tenant, card)`; for tenants not known at startup use
+  `server.WithTenantCardProvider(func(ctx, tenant) (AgentCard, error))`.
+- **Processor dispatch**: the processor switches on `options.Tenant`.
+- **No router/middleware/placeholder card** needed.
 
 ## Available Agents
 
-### Chat Agent (`chatAgent`)
-- **Function**: Provides chat conversation capabilities
-- **Description**: "I am a chatbot"
-- **Endpoints**: 
-  - Agent Card: `GET /api/v1/agent/chatAgent/.well-known/agent-card.json`
-  - JSON-RPC: `POST /api/v1/agent/chatAgent/`
-
-### Worker Agent (`workerAgent`)
-- **Function**: Provides worker task processing
-- **Description**: "I am a worker"
-- **Endpoints**:
-  - Agent Card: `GET /api/v1/agent/workerAgent/.well-known/agent-card.json`
-  - JSON-RPC: `POST /api/v1/agent/workerAgent/`
+| Tenant        | Card name   | Reply                      |
+|---------------|-------------|----------------------------|
+| `chatAgent`   | ChatAgent   | `Hello from chat agent!`   |
+| `workerAgent` | WorkerAgent | `Hello from worker agent!` |
 
 ## Running the Example
 
 ### 1. Start the Server
 ```bash
-cd examples/multiagent/server
+cd examples/multi_endpoint/server
 go run main.go
 ```
 
-The server will start on `localhost:8080` and display available endpoints:
+The server starts on `localhost:8080`:
 ```
-Starting A2A server listening on localhost:8080
-Chat agent card url : http://localhost:8080/api/v1/agent/chatAgent/.well-known/agent-card.json:
-Chat agent interfaces: http://localhost:8080/api/v1/agent/chatAgent/
-Worker agent card url: http://localhost:8080/api/v1/agent/workerAgent/.well-known/agent-card.json
-Worker agent interfaces: http://localhost:8080/api/v1/agent/workerAgent/
+Starting A2A server on localhost:8080
+  Per-tenant card: http://localhost:8080/.well-known/agent-card.json?tenant=chatAgent|workerAgent
+  JSON-RPC: http://localhost:8080/  (set the "tenant" field in the request to pick an agent)
 ```
 
 ### 2. Run the Test Client
-In another terminal:
 ```bash
-cd examples/multiagent/client
-go run main.go
-```
-
-Or with custom message:
-```bash
-go run main.go -message="How are you today?"
+cd examples/multi_endpoint/client
+go run main.go            # or: go run main.go -message="How are you today?"
 ```
 
 ### 3. Manual Testing
 
-#### Get Agent Cards
 ```bash
-# Chat Agent
-curl http://localhost:8080/api/v1/agent/chatAgent/.well-known/agent-card.json
+# Per-tenant agent card
+curl "http://localhost:8080/.well-known/agent-card.json?tenant=chatAgent"
+curl "http://localhost:8080/.well-known/agent-card.json?tenant=workerAgent"
 
-# Worker Agent
-curl http://localhost:8080/api/v1/agent/workerAgent/.well-known/agent-card.json
-```
-
-#### Send Messages to Agents
-```bash
-# Send message to Chat Agent
-curl -X POST http://localhost:8080/api/v1/agent/chatAgent/ \
+# Send a message — "tenant" in params selects the agent
+curl -X POST http://localhost:8080/ \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"message/send","params":{"message":{"role":"user","kind":"message","messageId":"test-123","parts":[{"kind":"text","text":"Hello!"}]}},"id":1}'
-
-# Send message to Worker Agent
-curl -X POST http://localhost:8080/api/v1/agent/workerAgent/ \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"message/send","params":{"message":{"role":"user","kind":"message","messageId":"test-456","parts":[{"kind":"text","text":"What can you do?"}]}},"id":1}'
+  -d '{"jsonrpc":"2.0","method":"SendMessage","id":1,"params":{
+        "tenant":"chatAgent",
+        "message":{"role":"ROLE_USER","messageId":"test-123",
+                   "content":[{"text":"Hello!"}]}}}'
 ```
 
 ## Core Implementation
 
-### 1. HTTPRouter Interface
+### 1. Register a card per tenant
 ```go
-type HTTPRouter interface {
-    Handle(pattern string, handler http.Handler)
-    ServeHTTP(w http.ResponseWriter, r *http.Request)
-}
+a2aServer, _ := server.NewA2AServer(taskManager,
+    server.WithTenantCard("chatAgent", chatCard),
+    server.WithTenantCard("workerAgent", workerCard),
+)
 ```
+The agent card is no longer a required positional argument: a multi-tenant server
+needs no default card. Add an optional default ("directory") card served when no
+`?tenant=` is given with `server.WithAgentCard(card)`.
 
-### 2. Using Chi Router with Path Parameters
+For a dynamic set of agents instead of (or alongside) the static registry:
 ```go
-// Create Chi router
-router := chi.NewMux()
-
-// Register routes with path parameters using Chi's Route method
-router.Route("/api/v1/agent/{agentName}", func(r chi.Router) {
-    // Create A2A server for this route group
-    a2aServer, err := server.NewA2AServer(
-        agentCard,
-        taskManager,
-        server.WithMiddleWare(&middleWare{}),
-        server.WithHTTPRouter(r),
-        server.WithAgentCardHandler(&multiAgentCardHandler{}),
-    )
-    if err != nil {
-        log.Fatalf("Failed to create A2A server: %v", err)
-    }
-    
-    // Mount the A2A server handler to the subrouter
-    r.Mount("/", a2aServer.Handler())
+server.WithTenantCardProvider(func(ctx context.Context, tenant string) (server.AgentCard, error) {
+    return loadCardFromDB(ctx, tenant) // return an error for an unknown tenant
 })
 ```
 
-### 3. Middleware for Agent Name Extraction
+### 2. Dispatch on the tenant in the processor
 ```go
-type middleWare struct{}
-
-func (m *middleWare) Wrap(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        ctx := r.Context()
-        ctx = context.WithValue(ctx, ctxAgentNameKey, chi.URLParam(r, "agentName"))
-        next.ServeHTTP(w, r.WithContext(ctx))
-    })
-}
-```
-
-### 4. Dynamic Agent Card Handler
-```go
-type multiAgentCardHandler struct{}
-
-func (h *multiAgentCardHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-    agentName := chi.URLParam(r, "agentName")
-    var agentCard server.AgentCard
-    
-    switch agentName {
+func (p *multiAgentProcessor) ProcessMessage(
+    _ context.Context, _ protocol.Message,
+    options taskmanager.ProcessOptions, _ taskmanager.TaskHandler,
+) (*taskmanager.MessageProcessingResult, error) {
+    switch options.Tenant {
     case "chatAgent":
-        agentCard = server.AgentCard{
-            Name:        "ChatAgent",
-            Description: "I am a chatbot",
-            // ... other fields
-        }
+        return reply("Hello from chat agent!"), nil
     case "workerAgent":
-        agentCard = server.AgentCard{
-            Name:        "WorkerAgent",
-            Description: "I am a worker",
-            // ... other fields
-        }
+        return reply("Hello from worker agent!"), nil
     default:
-        w.WriteHeader(http.StatusNotFound)
-        return
+        return nil, fmt.Errorf("no such tenant %q", options.Tenant)
     }
-    
-    w.Header().Set("Content-Type", "application/json; charset=utf-8")
-    json.NewEncoder(w).Encode(agentCard)
 }
 ```
 
-## Extension Example
-
-You can easily add more agents by extending the switch cases in the handlers:
-
+### 3. Client sends the tenant
 ```go
-// Add a new agent in multiAgentCardHandler
-case "calculatorAgent":
-    agentCard = server.AgentCard{
-        Name:        "CalculatorAgent",
-        Description: "I can perform mathematical calculations",
-        URL:         fmt.Sprintf("http://%s/api/v1/agent/calculatorAgent/", *host),
-        Skills: []server.AgentSkill{
-            {
-                Name:        "calculate",
-                Description: stringPtr("Perform mathematical operations"),
-                InputModes:  []string{"text"},
-                OutputModes: []string{"text"},
-                Tags:        []string{"math", "calculator"},
-                Examples:    []string{"2 + 2", "10 * 5"},
-            },
-        },
-        // ... other fields
-    }
-
-// Add corresponding case in multiAgentProcessor
-case "calculatorAgent":
-    return u.calculatorAgentProcessMessage(ctx, message, options, taskHandler)
+params := protocol.SendMessageParams{
+    Tenant:  "chatAgent", // route to the agent registered under this tenant
+    Message: userMessage,
+}
+resp, _ := a2aClient.SendMessage(ctx, params)
 ```
 
-## Client Usage
+## Adding an Agent
 
-The client automatically tests both agents and displays their responses:
+1. `server.WithTenantCard("calculatorAgent", calcCard)` (or return it from the provider).
+2. Add a `case "calculatorAgent":` to the processor.
 
-```bash
+That's it — no new route, middleware, or card handler.
+
+## Expected Client Output
+
+```
 === Multi-Agent tRPC Client Demo ===
-Server: http://localhost:8080
-Testing both agents...
+Server: http://localhost:8080/ (agents addressed by tenant)
 
 --- Conversation with chatAgent ---
 Agent: ChatAgent - I am a chatbot
-User: Hello, how are you?
+User: Hello!
 Response: Hello from chat agent!
 
 --- Conversation with workerAgent ---
 Agent: WorkerAgent - I am a worker
-User: Hello, how are you?
+User: Hello!
 Response: Hello from worker agent!
 
 === Demo completed ===

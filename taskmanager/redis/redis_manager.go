@@ -117,6 +117,7 @@ func (m *TaskManager) OnSendMessage(
 	// Process configuration.
 	options := m.processConfiguration(request.Configuration)
 	options.Streaming = false // non-streaming processing
+	options.Tenant = request.Tenant
 
 	// Create MessageHandle.
 	handle := &taskHandler{
@@ -146,12 +147,12 @@ func (m *TaskManager) OnSendMessage(
 		return nil, fmt.Errorf("processor returned nil result for non-streaming request")
 	}
 
-	if result.Result.Message != nil {
+	if result.Result.GetMessage() != nil {
 		var contextID string
 		if request.Message.ContextID != nil {
 			contextID = *request.Message.ContextID
 		}
-		m.processReplyMessage(&contextID, result.Result.Message)
+		m.processReplyMessage(&contextID, result.Result.GetMessage())
 	}
 
 	return result.Result, nil
@@ -169,6 +170,7 @@ func (m *TaskManager) OnSendMessageStream(
 	// Process configuration.
 	options := m.processConfiguration(request.Configuration)
 	options.Streaming = true // streaming mode
+	options.Tenant = request.Tenant
 
 	// Create streaming MessageHandle.
 	handle := &taskHandler{
@@ -412,9 +414,16 @@ func (m *TaskManager) OnResubscribe(
 	params protocol.TaskIDParams,
 ) (<-chan protocol.StreamResponse, error) {
 	// Check if task exists.
-	_, err := m.getTaskInternal(ctx, params.ID)
+	task, err := m.getTaskInternal(ctx, params.ID)
 	if err != nil {
 		return nil, err
+	}
+
+	// v1.0: a subscription is only valid for a non-terminal task; a task already
+	// in a terminal state must be rejected with UnsupportedOperationError.
+	if isFinalState(task.Status.State) {
+		return nil, taskmanager.ErrUnsupportedOperation(
+			fmt.Sprintf("subscribe to task %s in terminal state %s", params.ID, task.Status.State))
 	}
 
 	bufSize := m.options.TaskSubscriberBufSize
@@ -428,6 +437,13 @@ func (m *TaskManager) OnResubscribe(
 		WithSubscriberBlockingSend(m.options.TaskSubscriberBlockingSend),
 		WithSubscriberSendHook(m.sendStreamingEventHook(params.ID)),
 	)
+
+	// v1.0: the first stream event must be the current Task snapshot. getTaskInternal
+	// already returns a fresh copy, so it is safe to hand to the subscriber.
+	if err := subscriber.Send(protocol.StreamResponse{Result: task}); err != nil {
+		subscriber.Close()
+		return nil, err
+	}
 
 	// Add to subscribers list.
 	m.addSubscriber(params.ID, subscriber)
@@ -508,17 +524,17 @@ func (m *TaskManager) processReplyMessage(ctxID *string, message *protocol.Messa
 // used to set contextID for task status update, task artifact update, message and task events
 func (m *TaskManager) sendStreamingEventHook(ctxID string) func(event protocol.StreamResponse) error {
 	return func(event protocol.StreamResponse) error {
-		if event.StatusUpdate != nil && event.StatusUpdate.ContextID == "" {
-			event.StatusUpdate.ContextID = ctxID
+		if event.GetStatusUpdate() != nil && event.GetStatusUpdate().ContextID == "" {
+			event.GetStatusUpdate().ContextID = ctxID
 		}
-		if event.ArtifactUpdate != nil && event.ArtifactUpdate.ContextID == "" {
-			event.ArtifactUpdate.ContextID = ctxID
+		if event.GetArtifactUpdate() != nil && event.GetArtifactUpdate().ContextID == "" {
+			event.GetArtifactUpdate().ContextID = ctxID
 		}
-		if event.Message != nil {
-			m.processReplyMessage(&ctxID, event.Message)
+		if event.GetMessage() != nil {
+			m.processReplyMessage(&ctxID, event.GetMessage())
 		}
-		if event.Task != nil && event.Task.ContextID == "" {
-			event.Task.ContextID = ctxID
+		if event.GetTask() != nil && event.GetTask().ContextID == "" {
+			event.GetTask().ContextID = ctxID
 		}
 		return nil
 	}

@@ -55,16 +55,16 @@ func TestToV1StreamResponse_AllBranches(t *testing.T) {
 	statusEvt := NewTaskStatusUpdateEvent("t", "c", TaskStatus{State: TaskStateWorking}, false)
 	artEvt := &TaskArtifactUpdateEvent{TaskID: "t", Artifact: csArtifact()}
 
-	if r, err := ToV1StreamResponse(StreamingMessageEvent{Result: &msg}); err != nil || r.Message == nil {
+	if r, err := ToV1StreamResponse(StreamingMessageEvent{Result: &msg}); err != nil || r.GetMessage() == nil {
 		t.Errorf("message branch: r=%+v err=%v", r, err)
 	}
-	if r, err := ToV1StreamResponse(StreamingMessageEvent{Result: task}); err != nil || r.Task == nil {
+	if r, err := ToV1StreamResponse(StreamingMessageEvent{Result: task}); err != nil || r.GetTask() == nil {
 		t.Errorf("task branch: r=%+v err=%v", r, err)
 	}
-	if r, err := ToV1StreamResponse(StreamingMessageEvent{Result: &statusEvt}); err != nil || r.StatusUpdate == nil {
+	if r, err := ToV1StreamResponse(StreamingMessageEvent{Result: &statusEvt}); err != nil || r.GetStatusUpdate() == nil {
 		t.Errorf("status-update branch: r=%+v err=%v", r, err)
 	}
-	if r, err := ToV1StreamResponse(StreamingMessageEvent{Result: artEvt}); err != nil || r.ArtifactUpdate == nil {
+	if r, err := ToV1StreamResponse(StreamingMessageEvent{Result: artEvt}); err != nil || r.GetArtifactUpdate() == nil {
 		t.Errorf("artifact-update branch: r=%+v err=%v", r, err)
 	}
 	// nil/unknown Result -> error.
@@ -84,10 +84,10 @@ func TestFromV1StreamResponse_AllBranches(t *testing.T) {
 		in   protocol.StreamResponse
 		want interface{} // expected concrete legacy type
 	}{
-		{"message", protocol.StreamResponse{Message: ToV1Message(&msg)}, &Message{}},
-		{"task", protocol.StreamResponse{Task: ToV1Task(task)}, &Task{}},
-		{"status", protocol.StreamResponse{StatusUpdate: ToV1StatusUpdate(&statusEvt)}, &TaskStatusUpdateEvent{}},
-		{"artifact", protocol.StreamResponse{ArtifactUpdate: ToV1ArtifactUpdate(artEvt)}, &TaskArtifactUpdateEvent{}},
+		{"message", protocol.StreamResponse{Result: ToV1Message(&msg)}, &Message{}},
+		{"task", protocol.StreamResponse{Result: ToV1Task(task)}, &Task{}},
+		{"status", protocol.StreamResponse{Result: ToV1StatusUpdate(&statusEvt)}, &TaskStatusUpdateEvent{}},
+		{"artifact", protocol.StreamResponse{Result: ToV1ArtifactUpdate(artEvt)}, &TaskArtifactUpdateEvent{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -116,7 +116,7 @@ func TestFromV1StreamResponse_AllBranches(t *testing.T) {
 		})
 	}
 	if _, err := FromV1StreamResponse(protocol.StreamResponse{}); err == nil {
-		t.Error("empty v1 StreamResponse should error")
+		t.Error("empty v1 StreamingMessageEvent should error")
 	}
 }
 
@@ -127,10 +127,10 @@ func TestSendMessageResponseConversion(t *testing.T) {
 	if r, err := ToV1SendMessageResponse(nil); err != nil || r != nil {
 		t.Errorf("ToV1SendMessageResponse(nil) = (%v,%v)", r, err)
 	}
-	if r, err := ToV1SendMessageResponse(&MessageResult{Result: &msg}); err != nil || r.Message == nil {
+	if r, err := ToV1SendMessageResponse(&MessageResult{Result: &msg}); err != nil || r.GetMessage() == nil {
 		t.Errorf("message branch: r=%+v err=%v", r, err)
 	}
-	if r, err := ToV1SendMessageResponse(&MessageResult{Result: task}); err != nil || r.Task == nil {
+	if r, err := ToV1SendMessageResponse(&MessageResult{Result: task}); err != nil || r.GetTask() == nil {
 		t.Errorf("task branch: r=%+v err=%v", r, err)
 	}
 	if _, err := ToV1SendMessageResponse(&MessageResult{}); err == nil {
@@ -140,17 +140,17 @@ func TestSendMessageResponseConversion(t *testing.T) {
 	if r, err := FromV1SendMessageResponse(nil); err != nil || r != nil {
 		t.Errorf("FromV1SendMessageResponse(nil) = (%v,%v)", r, err)
 	}
-	if r, err := FromV1SendMessageResponse(&protocol.SendMessageResponse{Message: ToV1Message(&msg)}); err != nil {
+	if r, err := FromV1SendMessageResponse(&protocol.SendMessageResponse{Result: ToV1Message(&msg)}); err != nil {
 		t.Errorf("message branch err: %v", err)
 	} else if _, ok := r.Result.(*Message); !ok {
 		t.Errorf("got %T, want *Message", r.Result)
 	}
-	if r, err := FromV1SendMessageResponse(&protocol.SendMessageResponse{Task: ToV1Task(task)}); err != nil {
+	if r, err := FromV1SendMessageResponse(&protocol.SendMessageResponse{Result: ToV1Task(task)}); err != nil {
 		t.Errorf("task branch err: %v", err)
 	} else if _, ok := r.Result.(*Task); !ok {
 		t.Errorf("got %T, want *Task", r.Result)
 	}
 	if _, err := FromV1SendMessageResponse(&protocol.SendMessageResponse{}); err == nil {
-		t.Error("empty v1 SendMessageResponse should error")
+		t.Error("empty v1 MessageResult should error")
 	}
 }

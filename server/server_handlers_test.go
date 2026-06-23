@@ -36,7 +36,7 @@ func stringPtr(s string) *string {
 // Returns the test server and the A2A server for use in tests.
 func setupTestServer(t *testing.T, tm taskmanager.TaskManager, opts ...Option) (*httptest.Server, *A2AServer) {
 	agentCard := defaultAgentCard()
-	a2aServer, err := NewA2AServer(agentCard, tm, opts...)
+	a2aServer, err := NewA2AServer(tm, append([]Option{WithAgentCard(agentCard)}, opts...)...)
 	require.NoError(t, err)
 	testServer := httptest.NewServer(http.HandlerFunc(a2aServer.handleJSONRPC))
 	t.Cleanup(func() {
@@ -209,7 +209,7 @@ func TestA2AServer_AuthMiddleware(t *testing.T) {
 	authProvider := auth.NewAPIKeyAuthProvider(keyMap, "X-API-Key")
 
 	// Create server with authentication
-	a2aServer, err := NewA2AServer(agentCard, mockTM, WithAuthProvider(authProvider))
+	a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard), WithAuthProvider(authProvider))
 	require.NoError(t, err)
 
 	// Create test server with the full handler
@@ -269,7 +269,7 @@ func TestA2AServer_PushNotifications(t *testing.T) {
 	agentCard := defaultAgentCard()
 
 	// Create server with JWKS enabled - fix function name
-	a2aServer, err := NewA2AServer(agentCard, mockTM, WithJWKSEndpoint(true, ""))
+	a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard), WithJWKSEndpoint(true, ""))
 	require.NoError(t, err)
 
 	// Create test server with the full handler
@@ -378,7 +378,7 @@ func TestA2AServer_PushNotifications(t *testing.T) {
 func TestA2AServer_Resubscribe(t *testing.T) {
 	mockTM := newMockTaskManager()
 	agentCard := defaultAgentCard()
-	a2aServer, err := NewA2AServer(agentCard, mockTM)
+	a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard))
 	require.NoError(t, err)
 
 	// Create test server
@@ -399,8 +399,8 @@ func TestA2AServer_Resubscribe(t *testing.T) {
 			Final:     true,
 		}
 		mockTM.SubscribeEvents = []protocol.StreamResponse{
-			{StatusUpdate: &workingEvent},
-			{StatusUpdate: &completedEvent},
+			{Result: &workingEvent},
+			{Result: &completedEvent},
 		}
 		mockTM.SubscribeError = nil
 
@@ -481,7 +481,7 @@ func TestA2AServer_Resubscribe(t *testing.T) {
 func TestA2AServer_StartStop(t *testing.T) {
 	mockTM := newMockTaskManager()
 	agentCard := defaultAgentCard()
-	a2aServer, err := NewA2AServer(agentCard, mockTM)
+	a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard))
 	require.NoError(t, err)
 
 	// Start the server in a goroutine
@@ -556,7 +556,7 @@ func TestA2AServer_V1Operations(t *testing.T) {
 // newTestServer builds an httptest server serving the full A2A router.
 func newTestServer(t *testing.T, tm taskmanager.TaskManager) *httptest.Server {
 	t.Helper()
-	srv, err := NewA2AServer(defaultAgentCard(), tm)
+	srv, err := NewA2AServer(tm, WithAgentCard(defaultAgentCard()))
 	require.NoError(t, err)
 	return httptest.NewServer(srv.Handler())
 }
