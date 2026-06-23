@@ -42,7 +42,7 @@ Single Server Process (localhost:8080)
 
 ### 1. Start the Server
 ```bash
-cd examples/multi_endpoint/server
+cd examples/tenant/server
 go run main.go
 ```
 
@@ -55,7 +55,7 @@ Starting A2A server on localhost:8080
 
 ### 2. Run the Test Client
 ```bash
-cd examples/multi_endpoint/client
+cd examples/tenant/client
 go run main.go            # or: go run main.go -message="How are you today?"
 ```
 
