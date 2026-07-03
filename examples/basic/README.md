@@ -5,6 +5,12 @@ This example demonstrates a basic implementation of the Agent-to-Agent (A2A) pro
 1. A versatile text processing agent server that supports multiple operations
 2. A feature-rich CLI client that demonstrates all the core A2A protocol APIs
 
+The server is written in the `taskmanager.TaskHandle` style: the minimal-edit
+port of a v0.x TaskHandler processor, with a fully synchronous body and one
+code path serving both `message/send` and `message/stream` (see "Migrating
+from v0.x" in the repository README). For the native channel style, see
+`examples/simple-v2`.
+
 ## Server Features
 
 The server is a text processing agent capable of:
@@ -110,7 +116,7 @@ The server understands the following text processing commands:
 This example demonstrates the following A2A protocol features:
 
 - Agent discovery via Agent Cards (/.well-known/agent-card.json)
-- Task creation using tasks/send and tasks/sendSubscribe
+- Task creation using message/send and message/stream
 - Task state retrieval using tasks/get
 - Task cancellation using tasks/cancel
 - Streaming updates for long-running tasks

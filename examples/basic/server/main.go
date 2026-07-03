@@ -5,6 +5,11 @@
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
 // Package main implements a basic A2A agent example.
+//
+// It is the minimal-edit port of the former v0.x TaskHandler-style processor:
+// the body stays synchronous and keeps the old verbs via taskmanager.TaskHandle.
+// One code path serves message/send and message/stream alike — the framework
+// derives the unary result or the live stream from the emitted events.
 package main
 
 import (
@@ -49,154 +54,141 @@ type multiTurnSession struct {
 
 // basicMessageProcessor implements the taskmanager.MessageProcessor interface
 type basicMessageProcessor struct {
-	// Flag to determine if we should use streaming mode
-	useStreaming bool
-
-	// Added for multi-turn session handling - now keyed by contextID instead of taskID
+	// Multi-turn session state, keyed by conversation contextID.
 	multiTurnSessions map[string]multiTurnSession
 }
 
-// ProcessMessage implements the taskmanager.MessageProcessor interface
+// ProcessMessage implements the taskmanager.MessageProcessor interface. The
+// body is fully synchronous: emits made before Events() never block, so the
+// old v0.x writing style works as-is.
 func (p *basicMessageProcessor) ProcessMessage(
 	ctx context.Context,
-	message protocol.Message,
-	options taskmanager.ProcessOptions,
-	handle taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
-	log.Infof("Processing basic message with ID: %s", message.MessageID)
+	ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+	log.Infof("Processing basic message with ID: %s", ec.Message.MessageID)
 
-	// Initialize multi-turn sessions map if not already initialized
-	if p.multiTurnSessions == nil {
-		p.multiTurnSessions = make(map[string]multiTurnSession)
-	}
+	handle := taskmanager.NewTaskHandle(ctx, ec)
+	defer handle.Close()
 
 	// Extract text from the incoming message
-	text := extractText(message)
+	text := extractText(ec.Message)
 	if text == "" {
-		errMsg := "input message must contain text"
-		log.Errorf("Message processing failed: %s", errMsg)
-
-		// Return error message directly
-		errorMessage := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart(errMsg)},
-		)
-		return &taskmanager.MessageProcessingResult{
-			Result: &protocol.SendMessageResponse{Result: &errorMessage},
-		}, nil
+		// A pure message reply: no task comes into existence this round.
+		handle.Reply(taskmanager.ReplyText("input message must contain text"))
+		return handle.Events(), nil
 	}
 
-	// Get context ID for session management
+	// The conversation context ID drives session management (the framework
+	// generates one when the request carries none).
 	contextID := handle.GetContextID()
-	if contextID == "" {
-		// No context ID available, treat as simple command processing
-		return p.processSimpleCommand(text)
+
+	// Continue an in-flight multi-turn session for this conversation.
+	if session, exists := p.multiTurnSessions[contextID]; exists && !session.complete {
+		p.continueMultiTurnSession(handle, text, contextID, session)
+		return handle.Events(), nil
 	}
 
-	if options.Streaming {
-		// Streaming mode - use task-based processing with full features
-		taskID, err := handle.BuildTask(nil, &contextID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build task: %w", err)
-		}
-
-		log.Infof("Created streaming task %s for processing", taskID)
-
-		// Subscribe to the task for streaming events
-		subscriber, err := handle.SubscribeTask(&taskID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to subscribe to task: %w", err)
-		}
-
-		// Process asynchronously with full multi-turn support
-		go p.processMessageAsync(ctx, text, contextID, taskID, handle)
-
-		return &taskmanager.MessageProcessingResult{
-			StreamingEvents: subscriber,
-		}, nil
-	}
-	// Non-streaming mode - check for multi-turn interactions
-	session, exists := p.multiTurnSessions[contextID]
-
-	if exists && !session.complete {
-		// Continue existing multi-turn session
-		return p.processMultiTurnSession(ctx, text, contextID, handle, session, options)
-	}
-
-	// New interaction - check if it requires multi-turn handling
 	parts := strings.SplitN(text, " ", 2)
 	command := strings.ToLower(parts[0])
-
-	if command == modeMultiStep || command == modeInputExample {
-		// Create task for multi-turn interaction even in non-streaming mode
-		taskID, err := handle.BuildTask(nil, &contextID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build task: %w", err)
-		}
-
-		go p.processMessageAsync(ctx, text, contextID, taskID, handle)
-
-		// Return a message indicating async processing
-		responseMessage := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart("Multi-turn interaction started. Please continue the conversation.")},
-		)
-		return &taskmanager.MessageProcessingResult{
-			Result: &protocol.SendMessageResponse{Result: &responseMessage},
-		}, nil
-	}
-
-	// Simple command processing
-	return p.processSimpleCommand(text)
-}
-
-// processSimpleCommand handles direct command processing without tasks
-func (p *basicMessageProcessor) processSimpleCommand(text string) (*taskmanager.MessageProcessingResult, error) {
-	parts := strings.SplitN(text, " ", 2)
-	command := strings.ToLower(parts[0])
-
 	var content string
 	if len(parts) > 1 {
 		content = parts[1]
 	}
 
-	// Process the content based on command
-	result := p.processTextWithMode(content, command)
-	responseMessage := protocol.NewMessage(
-		protocol.MessageRoleAgent,
-		[]*protocol.Part{protocol.NewTextPart(result)},
-	)
-
-	return &taskmanager.MessageProcessingResult{
-		Result: &protocol.SendMessageResponse{Result: &responseMessage},
-	}, nil
+	switch command {
+	case modeMultiStep:
+		// Suspend the task awaiting the processing mode: the follow-up
+		// message arrives as a new round with ExecContext.Task set.
+		p.multiTurnSessions[contextID] = multiTurnSession{stage: 1}
+		handle.UpdateTaskState(protocol.TaskStateInputRequired, taskmanager.ReplyText(
+			"This is a multi-step interaction. Please select a processing mode:\n"+
+				"- reverse: Reverses the text\n"+
+				"- uppercase: Converts text to uppercase\n"+
+				"- lowercase: Converts text to lowercase\n"+
+				"- count: Counts words and characters"))
+	case modeInputExample:
+		p.multiTurnSessions[contextID] = multiTurnSession{stage: 2, mode: modeReverse}
+		handle.UpdateTaskState(protocol.TaskStateInputRequired,
+			taskmanager.ReplyText("Please provide more information to continue:"))
+	case modeHelp:
+		// Plain answers need no task either.
+		handle.Reply(taskmanager.ReplyText(p.processTextWithMode(content, command)))
+	default:
+		p.processCommand(handle, contextID, command, content)
+	}
+	return handle.Events(), nil
 }
 
-// processMultiTurnSession handles continuing a multi-turn session in non-streaming mode
-func (p *basicMessageProcessor) processMultiTurnSession(
-	ctx context.Context,
+// processCommand runs one text command as a working -> artifact -> completed
+// task round.
+func (p *basicMessageProcessor) processCommand(
+	handle *taskmanager.TaskHandle,
+	contextID string,
+	command string,
+	content string,
+) {
+	handle.UpdateTaskState(protocol.TaskStateWorking, nil)
+
+	// Simulate processing delay for demonstration
+	time.Sleep(500 * time.Millisecond)
+
+	result := p.processTextWithMode(content, command)
+	handle.AddArtifact(protocol.Artifact{
+		ArtifactID:  "processed-text-" + handle.TaskID(),
+		Name:        stringPtr("Processed Text"),
+		Description: stringPtr(fmt.Sprintf("Text processed with mode: %s", command)),
+		Parts:       []*protocol.Part{protocol.NewTextPart(result)},
+		Metadata: map[string]interface{}{
+			"operation":    command,
+			"originalText": content,
+			"processedAt":  time.Now().UTC().Format(time.RFC3339),
+			"contextID":    contextID,
+		},
+	}, true)
+	handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText(result))
+}
+
+// continueMultiTurnSession processes the next step of a multi-turn interaction.
+func (p *basicMessageProcessor) continueMultiTurnSession(
+	handle *taskmanager.TaskHandle,
 	text string,
 	contextID string,
-	handle taskmanager.TaskHandler,
 	session multiTurnSession,
-	options taskmanager.ProcessOptions,
-) (*taskmanager.MessageProcessingResult, error) {
-	// Create task for multi-turn processing
-	taskID, err := handle.BuildTask(nil, &contextID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build task: %w", err)
+) {
+	switch session.stage {
+	case 1:
+		// First response received - this is the mode
+		session.mode = strings.ToLower(strings.TrimSpace(text))
+		session.stage = 2
+		p.multiTurnSessions[contextID] = session
+
+		// Ask for the text to process
+		handle.UpdateTaskState(protocol.TaskStateInputRequired,
+			taskmanager.ReplyText("Please enter the text you want to process:"))
+	case 2:
+		// Second response received - this is the text to process
+		session.text = text
+		session.stage = 3
+		session.complete = true
+		p.multiTurnSessions[contextID] = session
+
+		// Process the text based on the selected mode
+		result := p.processTextWithMode(session.text, session.mode)
+		handle.AddArtifact(protocol.Artifact{
+			ArtifactID:  "processed-text-" + handle.TaskID(),
+			Name:        stringPtr("Processed Text"),
+			Description: stringPtr(fmt.Sprintf("Text processed with mode: %s", session.mode)),
+			Parts:       []*protocol.Part{protocol.NewTextPart(result)},
+			Metadata: map[string]interface{}{
+				"operation":    session.mode,
+				"originalText": session.text,
+				"processedAt":  time.Now().UTC().Format(time.RFC3339),
+				"sessionStage": session.stage,
+				"contextID":    contextID,
+			},
+		}, true)
+		handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText(result))
 	}
-
-	go p.handleMultiTurnSessionAsync(ctx, taskID, text, contextID, handle, session)
-
-	// Return message indicating processing
-	responseMessage := protocol.NewMessage(
-		protocol.MessageRoleAgent,
-		[]*protocol.Part{protocol.NewTextPart("Processing your multi-turn request...")},
-	)
-	return &taskmanager.MessageProcessingResult{
-		Result: &protocol.SendMessageResponse{Result: &responseMessage},
-	}, nil
 }
 
 // processTextWithMode processes text with the specified mode
@@ -349,7 +341,6 @@ func main() {
 
 	// Create the MessageProcessor (agent logic)
 	processor := &basicMessageProcessor{
-		useStreaming:      !forceNoStream,
 		multiTurnSessions: make(map[string]multiTurnSession),
 	}
 
@@ -548,226 +539,4 @@ func (p *pushNotificationSender) sendPushNotification(
 	}
 
 	log.Infof("Push notification sent successfully to %s", config.URL)
-}
-
-// processMessageAsync handles message processing asynchronously with full task management
-func (p *basicMessageProcessor) processMessageAsync(
-	ctx context.Context,
-	text string,
-	contextID string,
-	taskID string,
-	handle taskmanager.TaskHandler,
-) {
-	// Update task to working state
-	err := handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, nil)
-	if err != nil {
-		log.Errorf("Failed to update task state: %v", err)
-		return
-	}
-
-	// Check for continuation of a multi-turn session using contextID
-	session, exists := p.multiTurnSessions[contextID]
-
-	if exists && !session.complete {
-		p.handleMultiTurnSessionAsync(ctx, taskID, text, contextID, handle, session)
-		return
-	}
-
-	// New interaction - determine mode and process accordingly
-	p.handleNewInteractionAsync(ctx, taskID, text, contextID, handle)
-}
-
-// handleMultiTurnSessionAsync processes the next step in a multi-turn interaction
-func (p *basicMessageProcessor) handleMultiTurnSessionAsync(
-	ctx context.Context,
-	taskID string,
-	text string,
-	contextID string,
-	handle taskmanager.TaskHandler,
-	session multiTurnSession,
-) {
-	// Update session with new input
-	switch session.stage {
-	case 1:
-		// First response received - this is the mode
-		session.mode = strings.ToLower(strings.TrimSpace(text))
-		session.stage = 2
-
-		// Ask for the text to process
-		msg := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart("Please enter the text you want to process:")},
-		)
-
-		// Update task to input-required state
-		err := handle.UpdateTaskState(&taskID, protocol.TaskStateInputRequired, &msg)
-		if err != nil {
-			log.Errorf("Failed to update task status: %v", err)
-			return
-		}
-
-		// Store updated session using contextID
-		p.multiTurnSessions[contextID] = session
-
-	case 2:
-		// Second response received - this is the text to process
-		session.text = text
-		session.stage = 3
-		session.complete = true
-
-		// Process the text based on the selected mode
-		result := p.processTextWithMode(session.text, session.mode)
-
-		// Create the completed message
-		finalMsg := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart(result)},
-		)
-
-		artifact := protocol.Artifact{
-			ArtifactID:  "processed-text-" + taskID,
-			Name:        stringPtr("Processed Text"),
-			Description: stringPtr(fmt.Sprintf("Text processed with mode: %s", session.mode)),
-			Parts:       []*protocol.Part{protocol.NewTextPart(result)},
-			Metadata: map[string]interface{}{
-				"operation":    session.mode,
-				"originalText": session.text,
-				"processedAt":  time.Now().UTC().Format(time.RFC3339),
-				"sessionStage": session.stage,
-				"contextID":    contextID,
-			},
-		}
-
-		// Add artifact to task
-		if err := handle.AddArtifact(&taskID, artifact, true, false); err != nil {
-			log.Errorf("Failed to add artifact: %v", err)
-		}
-
-		// Update task to completed state
-		err := handle.UpdateTaskState(&taskID, protocol.TaskStateCompleted, &finalMsg)
-		if err != nil {
-			log.Errorf("Failed to complete task: %v", err)
-		}
-
-		// Update session in map
-		p.multiTurnSessions[contextID] = session
-	}
-}
-
-// handleNewInteractionAsync processes a new interaction
-func (p *basicMessageProcessor) handleNewInteractionAsync(
-	ctx context.Context,
-	taskID string,
-	text string,
-	contextID string,
-	handle taskmanager.TaskHandler,
-) {
-	// Check for cancellation via context
-	if err := ctx.Err(); err != nil {
-		log.Errorf("Task %s cancelled during processing: %v", taskID, err)
-		_ = handle.UpdateTaskState(&taskID, protocol.TaskStateCanceled, nil)
-		return
-	}
-
-	// Parse the first word as the command
-	parts := strings.SplitN(text, " ", 2)
-	command := strings.ToLower(parts[0])
-
-	// Handle multi-step mode
-	if command == modeMultiStep {
-		session := multiTurnSession{
-			stage:    1,
-			complete: false,
-		}
-
-		// Store the session using contextID
-		p.multiTurnSessions[contextID] = session
-
-		// Ask for the processing mode
-		msg := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart(
-				"This is a multi-step interaction. Please select a processing mode:\n" +
-					"- reverse: Reverses the text\n" +
-					"- uppercase: Converts text to uppercase\n" +
-					"- lowercase: Converts text to lowercase\n" +
-					"- count: Counts words and characters")},
-		)
-
-		// Update task to input-required state
-		err := handle.UpdateTaskState(&taskID, protocol.TaskStateInputRequired, &msg)
-		if err != nil {
-			log.Errorf("Failed to update task status: %v", err)
-		}
-		return
-	}
-
-	// Handle example input-required state
-	if command == modeInputExample {
-		msg := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart("Please provide more information to continue:")},
-		)
-
-		// Update task to input-required state
-		err := handle.UpdateTaskState(&taskID, protocol.TaskStateInputRequired, &msg)
-		if err != nil {
-			log.Errorf("Failed to update task status: %v", err)
-		}
-
-		// Create a session for the follow-up
-		session := multiTurnSession{
-			stage:    2,           // Skip to stage 2 (text input)
-			mode:     modeReverse, // Default to reverse mode
-			complete: false,
-		}
-		p.multiTurnSessions[contextID] = session
-		return
-	}
-
-	// For direct processing (non-multi-turn), extract the rest as content
-	var content string
-	if len(parts) > 1 {
-		content = parts[1]
-	} else {
-		content = "" // No content provided, command only
-	}
-
-	// Simulate processing delay for demonstration
-	time.Sleep(500 * time.Millisecond)
-
-	// Process the content based on command
-	result := p.processTextWithMode(content, command)
-
-	// Create artifact with the processed result
-	artifact := protocol.Artifact{
-		ArtifactID:  "processed-text-" + taskID,
-		Name:        stringPtr("Processed Text"),
-		Description: stringPtr(fmt.Sprintf("Text processed with mode: %s", command)),
-		Parts:       []*protocol.Part{protocol.NewTextPart(result)},
-		Metadata: map[string]interface{}{
-			"operation":    command,
-			"originalText": content,
-			"processedAt":  time.Now().UTC().Format(time.RFC3339),
-			"directMode":   true,
-			"contextID":    contextID,
-		},
-	}
-
-	// Add artifact to task
-	if err := handle.AddArtifact(&taskID, artifact, true, false); err != nil {
-		log.Errorf("Failed to add artifact: %v", err)
-	}
-
-	// Create final message
-	finalMsg := protocol.NewMessage(
-		protocol.MessageRoleAgent,
-		[]*protocol.Part{protocol.NewTextPart(result)},
-	)
-
-	// Update task to completed state
-	err := handle.UpdateTaskState(&taskID, protocol.TaskStateCompleted, &finalMsg)
-	if err != nil {
-		log.Errorf("Failed to complete task: %v", err)
-	}
 }

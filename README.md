@@ -26,6 +26,7 @@ tRPC AI ecosystem
   - [Basic Example](#3-basic-example-examplesbasic)
   - [Authentication Examples](#4-authentication-examples-examplesauth)
 - [Creating Your Own Agent](#creating-your-own-agent)
+- [Migrating from v0.x](#migrating-from-v0x)
 - [Authentication](#authentication)
 - [Session Management](#session-management)
 - [Telemetry Metrics](#telemetry-metrics)
@@ -308,6 +309,73 @@ if err := srv.Start(":8080"); err != nil {
     log.Fatalf("Server start failed: %v", err)
 }
 ```
+
+## Migrating from v0.x
+
+The v1.0 (`/v2`) release replaces the multi-outcome `MessageProcessor` +
+`TaskHandler` callback with the single event-stream contract shown above. The
+familiar names survive: you still implement `MessageProcessor.ProcessMessage`,
+and the former `TaskHandler` verbs live on as the `TaskHandle` compatibility
+layer, so a v0.x processor body ports with minimal edits — including fully
+synchronous bodies, which were the common v0.x style:
+
+```go
+func (p *myProcessor) ProcessMessage(
+    ctx context.Context,
+    ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+    handle := taskmanager.NewTaskHandle(ctx, ec)
+    defer handle.Close()
+
+    // The v0.x body, minus the taskID arguments. Emits made before
+    // handle.Events() never block, so no goroutine is required.
+    handle.UpdateTaskState(protocol.TaskStateWorking, nil)
+    result := doWork(ec.Message)
+    handle.AddArtifact(result.Artifact, true)
+    handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("done"))
+
+    return handle.Events(), nil
+}
+```
+
+Two reference examples: [examples/basic](examples/basic) is the minimal-edit
+`TaskHandle` port of a v0.x processor; [examples/simple-v2](examples/simple-v2)
+is the native channel style recommended for new code.
+
+### API mapping
+
+| v0.x | v1.0 |
+| --- | --- |
+| `ProcessMessage(ctx, message, options, handler)` | `ProcessMessage(ctx, execContext)` — the message, options and reads are all on `ExecContext` |
+| `MessageProcessingResult{Result: &message}` | emit the message: `handle.Reply(&msg)` / `out <- &msg` |
+| `MessageProcessingResult{StreamingEvents: subscriber}` | the returned channel is the stream |
+| `ProcessOptions.Streaming` / `.Blocking` | gone — one processor serves `message/send` and `message/stream`; the framework derives each result |
+| `ProcessOptions.HistoryLength` | gone — the framework applies it to responses |
+| `ProcessOptions.PushNotificationConfig` | `ExecContext.PushConfig` |
+| `ProcessOptions.AcceptedOutputModes` / `.Tenant` | `ExecContext.AcceptedOutputModes` / `.Tenant` |
+| `TaskHandler.BuildTask` | gone — tasks are created lazily on the first task event; the ID is `ExecContext.TaskID` / `TaskHandle.TaskID()` |
+| `TaskHandler.UpdateTaskState(taskID, state, msg)` | `TaskHandle.UpdateTaskState(state, msg)` or `out <- taskmanager.NewStatusUpdate(state, msg)` |
+| `TaskHandler.AddArtifact(taskID, artifact, isFinal, needMoreData)` | `TaskHandle.AddArtifact(artifact, lastChunk)` — `needMoreData` had no v1.0 wire meaning and is dropped |
+| `TaskHandler.SubscribeTask` / `.CleanTask` | removed — the framework owns fan-out and task lifecycle |
+| `TaskHandler.GetContextID/GetMessageHistory/GetTask` | same names on `TaskHandle` (fields on `ExecContext`) |
+| `TaskHandler.GetMetadata` | removed (it always returned an error in v0.x); message metadata is `ExecContext.Message.Metadata` |
+| `taskmanager.TaskSubscriber` / `CancellableTask` | removed with the callback design |
+| redis `NewTaskSubscriber` / `WithSubscriberSendHook` / `WithSubscriberBlockingSend` | removed — cross-replica streaming is out of scope for the built-in managers |
+
+### Behavior changes to check
+
+These compile fine but behave differently from v0.x:
+
+- `message/send` no longer always materializes a task: a pure message reply
+  leaves no task behind, and `tasks/get` for that round's ID returns not-found.
+- A round that produces no event at all is treated as a processor bug:
+  `message/send` fails with `-32603`.
+- Closing the event channel while the task is `submitted`/`working` marks it
+  `FAILED` — end a round deliberately, in a terminal or
+  `input-required`/`auth-required` state.
+- `tasks/cancel` returns the snapshot taken when cancellation was requested
+  (possibly still `working`); the terminal `CANCELED` state is persisted when
+  the processor's round winds down.
 
 ## Authentication
 

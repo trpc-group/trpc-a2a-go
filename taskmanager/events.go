@@ -16,6 +16,10 @@ import (
 // stamps them from the ExecContext (see the MessageProcessor contract).
 
 // NewStatusUpdate builds a status event for the current round's task.
+// message may be nil. The state drives the round's lifecycle: completed/
+// failed/canceled/rejected are terminal, and input-required/auth-required
+// suspend the task awaiting a follow-up message (the framework calls
+// ProcessMessage again with ExecContext.Task set).
 func NewStatusUpdate(state protocol.TaskState, message *protocol.Message) *protocol.TaskStatusUpdateEvent {
 	return &protocol.TaskStatusUpdateEvent{
 		Status: protocol.TaskStatus{State: state, Message: message},
@@ -30,31 +34,6 @@ func Working(message *protocol.Message) *protocol.TaskStatusUpdateEvent {
 // Completed builds a TASK_STATE_COMPLETED (terminal) status event. message may be nil.
 func Completed(message *protocol.Message) *protocol.TaskStatusUpdateEvent {
 	return NewStatusUpdate(protocol.TaskStateCompleted, message)
-}
-
-// Failed builds a TASK_STATE_FAILED (terminal) status event. message may be nil.
-func Failed(message *protocol.Message) *protocol.TaskStatusUpdateEvent {
-	return NewStatusUpdate(protocol.TaskStateFailed, message)
-}
-
-// InputRequired builds a TASK_STATE_INPUT_REQUIRED status event: the task
-// suspends awaiting a follow-up message (the framework calls ProcessMessage
-// again with ExecContext.Task set).
-func InputRequired(message *protocol.Message) *protocol.TaskStatusUpdateEvent {
-	return NewStatusUpdate(protocol.TaskStateInputRequired, message)
-}
-
-// AuthRequired builds a TASK_STATE_AUTH_REQUIRED status event: the task
-// suspends awaiting a follow-up message (the framework calls ProcessMessage
-// again with ExecContext.Task set).
-func AuthRequired(message *protocol.Message) *protocol.TaskStatusUpdateEvent {
-	return NewStatusUpdate(protocol.TaskStateAuthRequired, message)
-}
-
-// Canceled builds a TASK_STATE_CANCELED (terminal) status event, for a
-// MessageProcessor that concludes cancellation itself. message may be nil.
-func Canceled(message *protocol.Message) *protocol.TaskStatusUpdateEvent {
-	return NewStatusUpdate(protocol.TaskStateCanceled, message)
 }
 
 // NewArtifactUpdate builds an artifact event for the current round's task.
