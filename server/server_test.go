@@ -787,20 +787,19 @@ func (m *mockTaskManager) ProcessTask(
 	return task, nil
 }
 
-// mockProcessor is a mock implementation of taskmanager.MessageProcessor
-type mockProcessor struct{}
+// mockExecutor is a mock implementation of taskmanager.MessageProcessor
+type mockExecutor struct{}
 
-func (m *mockProcessor) ProcessMessage(
+func (m *mockExecutor) ProcessMessage(
 	ctx context.Context,
-	message protocol.Message,
-	options taskmanager.ProcessOptions,
-	handle taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
+	ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
 	// Simple echo processor for testing
-	msg := message
-	return &taskmanager.MessageProcessingResult{
-		Result: &protocol.SendMessageResponse{Result: &msg},
-	}, nil
+	msg := ec.Message
+	out := make(chan protocol.StreamEvent, 1)
+	out <- &msg
+	close(out)
+	return out, nil
 }
 
 type shutdownAwareMeterProvider struct {
@@ -821,7 +820,7 @@ func TestServer_WithPushNotificationAuthenticator(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create a task processor and manager
-	processor := &mockProcessor{}
+	processor := &mockExecutor{}
 	tm, err := memory.NewTaskManager(processor)
 	require.NoError(t, err)
 

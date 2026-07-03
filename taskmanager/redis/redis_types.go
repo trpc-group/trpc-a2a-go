@@ -8,108 +8,60 @@
 package redis
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
-// CancellableTask implements the CancellableTask interface for Redis storage.
-type CancellableTask struct {
-	task       *protocol.Task
-	cancelFunc context.CancelFunc
+// taskSubscriber is an in-process event channel attached to a task. It is
+// internal machinery: the MessageProcessor contract exposes only event channels, so
+// subscribers are created by the manager for resubscribe and for the
+// message/stream request pipe. Cross-replica streaming is out of scope; the
+// subscriber map lives in this process only.
+type taskSubscriber struct {
+	taskID     string
+	eventQueue chan protocol.StreamResponse
+	// done is closed before the event channel so a blocking Send unblocks the
+	// instant Close runs, even while the write lock is held.
+	done   chan struct{}
+	closed atomic.Bool
+	// mu serializes Send against Close so an event is never sent on a closed channel.
 	mu         sync.RWMutex
-}
-
-// NewRedisCancellableTask creates a new Redis-based cancellable task.
-func NewRedisCancellableTask(task *protocol.Task, cancelFunc context.CancelFunc) *CancellableTask {
-	return &CancellableTask{
-		task:       task,
-		cancelFunc: cancelFunc,
-	}
-}
-
-// Task returns the protocol task.
-func (t *CancellableTask) Task() *protocol.Task {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.task
-}
-
-// Cancel cancels the task by calling the cancel function.
-func (t *CancellableTask) Cancel() {
-	if t.cancelFunc != nil {
-		t.cancelFunc()
-	}
-}
-
-// TaskSubscriberOpts is the options for the TaskSubscriber
-type TaskSubscriberOpts struct {
-	sendHook     func(event protocol.StreamResponse) error
+	lastAccess time.Time
+	// blockingSend selects backpressure over drop: a full buffer blocks the
+	// sender instead of returning an error.
 	blockingSend bool
 }
 
-// TaskSubscriberOption is the option for the TaskSubscriber
-type TaskSubscriberOption func(s *TaskSubscriberOpts)
-
-// WithSubscriberSendHook sets the send hook for the task subscriber
-func WithSubscriberSendHook(hook func(event protocol.StreamResponse) error) TaskSubscriberOption {
-	return func(s *TaskSubscriberOpts) {
-		s.sendHook = hook
-	}
-}
-
-// WithSubscriberBlockingSend sets the blocking send flag for the task subscriber
-func WithSubscriberBlockingSend(blockingSend bool) TaskSubscriberOption {
-	return func(s *TaskSubscriberOpts) {
-		s.blockingSend = blockingSend
-	}
-}
-
-// TaskSubscriber implements the TaskSubscriber interface for Redis storage.
-type TaskSubscriber struct {
-	taskID     string
-	eventQueue chan protocol.StreamResponse
-	closed     atomic.Bool
-	mu         sync.RWMutex
-	lastAccess time.Time
-	opts       TaskSubscriberOpts
-}
-
-// NewTaskSubscriber creates a new Redis-based task subscriber.
-func NewTaskSubscriber(taskID string, bufferSize int, opts ...TaskSubscriberOption) *TaskSubscriber {
-	subscriberOpts := TaskSubscriberOpts{
-		sendHook:     nil,
-		blockingSend: false,
-	}
-	for _, opt := range opts {
-		opt(&subscriberOpts)
-	}
-
+// newTaskSubscriber creates a subscriber with the given buffer size (the
+// manager default applies when size <= 0).
+func newTaskSubscriber(taskID string, bufferSize int, blockingSend bool) *taskSubscriber {
 	if bufferSize <= 0 {
 		bufferSize = defaultTaskSubscriberBufferSize
 	}
-
-	return &TaskSubscriber{
-		taskID:     taskID,
-		eventQueue: make(chan protocol.StreamResponse, bufferSize),
-		lastAccess: time.Now(),
-		opts:       subscriberOpts,
+	return &taskSubscriber{
+		taskID:       taskID,
+		eventQueue:   make(chan protocol.StreamResponse, bufferSize),
+		done:         make(chan struct{}),
+		lastAccess:   time.Now(),
+		blockingSend: blockingSend,
 	}
 }
 
-// Send sends an event to the subscriber's event queue.
-func (s *TaskSubscriber) Send(event protocol.StreamResponse) error {
+// Send delivers an event to the subscriber's channel. With blockingSend the
+// call waits for buffer space; otherwise a full buffer is an error and the
+// event is dropped for this subscriber (storage already has it). A concurrent
+// Close always releases a blocked Send through done.
+func (s *taskSubscriber) Send(event protocol.StreamResponse) error {
 	if s.Closed() {
 		return fmt.Errorf("task subscriber for task %s is closed", s.taskID)
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	if s.Closed() {
 		return fmt.Errorf("task subscriber for task %s is closed", s.taskID)
@@ -117,59 +69,45 @@ func (s *TaskSubscriber) Send(event protocol.StreamResponse) error {
 
 	s.lastAccess = time.Now()
 
-	if s.opts.sendHook != nil {
-		err := s.opts.sendHook(event)
-		if err != nil {
-			return err
+	if s.blockingSend {
+		select {
+		case s.eventQueue <- event:
+			return nil
+		case <-s.done:
+			return fmt.Errorf("task subscriber for task %s is closed", s.taskID)
 		}
-	}
-
-	if s.opts.blockingSend {
-		s.eventQueue <- event
-		return nil
 	}
 
 	select {
 	case s.eventQueue <- event:
 		return nil
+	case <-s.done:
+		return fmt.Errorf("task subscriber for task %s is closed", s.taskID)
 	default:
 		return fmt.Errorf("event queue is full for task %s", s.taskID)
 	}
 }
 
-// Channel returns the event channel for receiving streaming events.
-func (s *TaskSubscriber) Channel() <-chan protocol.StreamResponse {
+// Channel returns the receive side handed to the client.
+func (s *taskSubscriber) Channel() <-chan protocol.StreamResponse {
 	return s.eventQueue
 }
 
 // Closed returns true if the subscriber is closed.
-func (s *TaskSubscriber) Closed() bool {
+func (s *taskSubscriber) Closed() bool {
 	return s.closed.Load()
 }
 
-// Close closes the subscriber and its event channel.
-func (s *TaskSubscriber) Close() {
+// Close closes the subscriber and its event channel. It is safe to call
+// multiple times and unblocks any in-flight blocking Send (done is closed
+// before the write lock is taken).
+func (s *taskSubscriber) Close() {
+	if !s.closed.CompareAndSwap(false, true) {
+		return
+	}
+	close(s.done)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if !s.closed.Load() {
-		s.closed.Store(true)
-		close(s.eventQueue)
-	}
+	close(s.eventQueue)
 }
-
-// GetTaskID returns the task ID this subscriber is associated with.
-func (s *TaskSubscriber) GetTaskID() string {
-	return s.taskID
-}
-
-// GetLastAccessTime returns the last access time of the subscriber.
-func (s *TaskSubscriber) GetLastAccessTime() time.Time {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.lastAccess
-}
-
-// Ensure our types implement the required interfaces
-var _ taskmanager.CancellableTask = (*CancellableTask)(nil)
-var _ taskmanager.TaskSubscriber = (*TaskSubscriber)(nil)

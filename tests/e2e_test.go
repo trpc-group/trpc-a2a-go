@@ -44,131 +44,105 @@ func testReverseString(s string) string {
 	return string(runes)
 }
 
-// testProcessor implements taskmanager.MessageProcessor for streaming E2E tests.
-// It reverses the input text and sends it back chunk by chunk via status updates
-// and a final artifact.
-type testProcessor struct{}
+// testExecutor implements taskmanager.MessageProcessor for streaming E2E tests.
+// It reverses the input text and reports it back chunk by chunk via status
+// updates and a final artifact; the framework serves both message/send and
+// message/stream from the same event stream.
+type testExecutor struct {
+	// gate, when non-nil, blocks the processor after it emits the first Working
+	// chunk until the channel is closed. Tests that must attach a second stream
+	// (resubscribe) before the task terminates use it to remove the timing
+	// race; nil keeps the default fast behavior.
+	gate <-chan struct{}
+}
 
-var _ taskmanager.MessageProcessor = (*testProcessor)(nil)
+var _ taskmanager.MessageProcessor = (*testExecutor)(nil)
 
-// ProcessMessage implements taskmanager.MessageProcessor for streaming.
-func (p *testProcessor) ProcessMessage(
+// ProcessMessage implements taskmanager.MessageProcessor.
+func (p *testExecutor) ProcessMessage(
 	ctx context.Context,
-	message protocol.Message,
-	options taskmanager.ProcessOptions,
-	handle taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
+	ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
 	// Extract input text from the message
-	inputText := getTextPartContent(message.Parts)
+	inputText := getTextPartContent(ec.Message.Parts)
 	if inputText == "" {
 		return nil, fmt.Errorf("no text content found in message")
 	}
 
-	// Create a task
-	taskID, err := handle.BuildTask(message.TaskID, message.ContextID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build task: %w", err)
-	}
+	taskID := ec.TaskID
+	gate := p.gate
+	out := make(chan protocol.StreamEvent, 8)
+	go func() {
+		defer close(out)
 
-	if options.Streaming {
-		// For streaming requests, process in background and return StreamingEvents
-		subscriber, err := handle.SubscribeTask(stringPtr(taskID))
-		if err != nil {
-			return nil, fmt.Errorf("failed to subscribe to task: %w", err)
-		}
+		reversedText := testReverseString(inputText)
+		log.Printf("[testExecutor] Input: '%s', Reversed: '%s'", inputText, reversedText)
 
-		// Process task in background
-		go func() {
-			if err := p.processTask(taskID, message, inputText, subscriber, handle); err != nil {
-				log.Printf("[testStreamingProcessor] Error processing task: %v", err)
+		// Send intermediate 'Working' status updates (chunked)
+		chunkSize := 3
+		for i := 0; i < len(reversedText); i += chunkSize {
+			time.Sleep(20 * time.Millisecond) // Simulate work per chunk
+			end := i + chunkSize
+			if end > len(reversedText) {
+				end = len(reversedText)
 			}
-		}()
-
-		return &taskmanager.MessageProcessingResult{
-			StreamingEvents: subscriber,
-		}, nil
-	}
-	// For non-streaming requests, process synchronously and return Result
-	// Process the task synchronously without auto-cleanup
-	if err := p.processTask(taskID, message, inputText, nil, handle); err != nil {
-		return nil, fmt.Errorf("failed to process task: %w", err)
-	}
-
-	// Get the final task state
-	finalTask, err := handle.GetTask(stringPtr(taskID))
-	if err != nil {
-		return nil, fmt.Errorf("failed to get final task: %w", err)
-	}
-
-	return &taskmanager.MessageProcessingResult{
-		Result: protocol.NewSendMessageResponseTask(finalTask.Task()),
-	}, nil
-}
-
-func (p *testProcessor) processTask(
-	taskID string,
-	message protocol.Message,
-	inputText string,
-	subscriber taskmanager.TaskSubscriber,
-	handle taskmanager.TaskHandler,
-) error {
-	reversedText := testReverseString(inputText)
-	log.Printf("[testStreamingProcessor] Input: '%s', Reversed: '%s'", inputText, reversedText)
-
-	// Send intermediate 'Working' status updates (chunked)
-	chunkSize := 3
-	for i := 0; i < len(reversedText); i += chunkSize {
-		time.Sleep(20 * time.Millisecond) // Simulate work per chunk
-		end := i + chunkSize
-		if end > len(reversedText) {
-			end = len(reversedText)
+			chunk := reversedText[i:end]
+			out <- &protocol.TaskStatusUpdateEvent{
+				Status: protocol.TaskStatus{
+					State: protocol.TaskStateWorking,
+					Message: &protocol.Message{
+						Role: protocol.MessageRoleAgent,
+						Parts: []*protocol.Part{
+							protocol.NewTextPart(fmt.Sprintf("Processing chunk: %s", chunk)),
+						},
+					},
+				},
+			}
+			if i == 0 && gate != nil {
+				// Hold after the FIRST chunk (which the test reads to learn the
+				// task ID) so a resubscriber attaches while the task is still
+				// non-terminal — removes the ~60ms race. Escape on ctx cancel so
+				// a test that fails before releasing the gate can still tear the
+				// processor down (cleanup's manager.Close cancels this ctx)
+				// instead of leaking this goroutine.
+				select {
+				case <-gate:
+				case <-ctx.Done():
+					return
+				}
+			}
 		}
-		chunk := reversedText[i:end]
-		statusMsg := &protocol.Message{
-			Role: protocol.MessageRoleAgent,
-			Parts: []*protocol.Part{
-				protocol.NewTextPart(fmt.Sprintf("Processing chunk: %s", chunk)),
+
+		// Send the final artifact containing the full reversed text
+		out <- &protocol.TaskArtifactUpdateEvent{
+			Artifact: protocol.Artifact{
+				Name:        stringPtr("Processed Text"),
+				Description: stringPtr("The reversed input text."),
+				Parts: []*protocol.Part{
+					protocol.NewTextPart(reversedText),
+				},
+			},
+			LastChunk: boolPtr(true),
+		}
+
+		// Send final 'Completed' status
+		out <- &protocol.TaskStatusUpdateEvent{
+			Status: protocol.TaskStatus{
+				State: protocol.TaskStateCompleted,
+				Message: &protocol.Message{
+					Role: protocol.MessageRoleAgent,
+					Parts: []*protocol.Part{
+						protocol.NewTextPart(
+							fmt.Sprintf("Task %s completed successfully. Result: %s", taskID, reversedText),
+						),
+					},
+				},
 			},
 		}
 
-		// Will notify the subscriber automatically
-		if err := handle.UpdateTaskState(stringPtr(taskID), protocol.TaskStateWorking, statusMsg); err != nil {
-			log.Printf("[testStreamingProcessor] Error sending working status chunk: %v", err)
-			return err
-		}
-	}
-
-	// Send the final artifact containing the full reversed text
-	finalArtifact := protocol.Artifact{
-		Name:        stringPtr("Processed Text"),
-		Description: stringPtr("The reversed input text."),
-		Parts: []*protocol.Part{
-			protocol.NewTextPart(reversedText),
-		},
-	}
-
-	if err := handle.AddArtifact(stringPtr(taskID), finalArtifact, true, false); err != nil {
-		log.Printf("[testStreamingProcessor] Error sending artifact: %v", err)
-		return err
-	}
-
-	// Send final 'Completed' status
-	completionMsg := &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []*protocol.Part{
-			protocol.NewTextPart(
-				fmt.Sprintf("Task %s completed successfully. Result: %s", taskID, reversedText),
-			),
-		},
-	}
-
-	if err := handle.UpdateTaskState(stringPtr(taskID), protocol.TaskStateCompleted, completionMsg); err != nil {
-		log.Printf("[testStreamingProcessor] Error sending completed status: %v", err)
-		return err
-	}
-
-	log.Printf("[testStreamingProcessor] Finished processing task %s", taskID)
-	return nil
+		log.Printf("[testExecutor] Finished processing task %s", taskID)
+	}()
+	return out, nil
 }
 
 // testBasicTaskManager is a simple TaskManager for basic tests.
@@ -178,7 +152,7 @@ type testBasicTaskManager struct {
 
 // newTestBasicTaskManager creates an instance for testing.
 func newTestBasicTaskManager(t *testing.T) *testBasicTaskManager {
-	processor := &testProcessor{}
+	processor := &testExecutor{}
 	memTm, err := memory.NewTaskManager(processor)
 	require.NoError(t, err, "Failed to create TaskManager for testBasicTaskManager")
 	return &testBasicTaskManager{
@@ -389,15 +363,15 @@ func getTextPartContent(parts []*protocol.Part) string {
 
 // TestE2E_MessageAPI_Streaming tests the streaming functionality using the new message API.
 func TestE2E_MessageAPI_Streaming(t *testing.T) {
-	helper := newTestHelper(t, &testProcessor{})
+	helper := newTestHelper(t, &testExecutor{})
 	defer helper.cleanup()
 
 	// Test data
 	inputText := "Hello world!"
 
-	// Generate context ID and task ID
+	// Generate the context ID; the server assigns the task ID (v1.0: a taskId
+	// on a message refers to an existing task).
 	contextID := protocol.GenerateContextID()
-	taskID := protocol.GenerateMessageID()
 
 	// Create message using the NewMessageWithContext constructor
 	message := protocol.NewMessageWithContext(
@@ -405,7 +379,7 @@ func TestE2E_MessageAPI_Streaming(t *testing.T) {
 		[]*protocol.Part{
 			protocol.NewTextPart(inputText),
 		},
-		&taskID,
+		nil,
 		&contextID,
 	)
 
@@ -425,15 +399,18 @@ func TestE2E_MessageAPI_Streaming(t *testing.T) {
 
 // TestE2E_MessageAPI_Resubscribe tests the streaming functionality with interrupted using the new message API.
 func TestE2E_MessageAPI_Resubscribe(t *testing.T) {
-	helper := newTestHelper(t, &testProcessor{})
+	// Gate the executor after its first chunk so the resubscribe reliably
+	// attaches while the task is still non-terminal (no timing race).
+	gate := make(chan struct{})
+	helper := newTestHelper(t, &testExecutor{gate: gate})
 	defer helper.cleanup()
 
 	// Test data
 	inputText := "Hello world!"
 
-	// Generate context ID and task ID
+	// Generate the context ID; the server assigns the task ID (v1.0: a taskId
+	// on a message refers to an existing task).
 	contextID := protocol.GenerateContextID()
-	taskID := protocol.GenerateTaskID()
 
 	// Create message using the NewMessageWithContext constructor
 	message := protocol.NewMessageWithContext(
@@ -441,18 +418,27 @@ func TestE2E_MessageAPI_Resubscribe(t *testing.T) {
 		[]*protocol.Part{
 			protocol.NewTextPart(inputText),
 		},
-		&taskID,
+		nil,
 		&contextID,
 	)
 
-	// Send streaming message using the new API, without subscribing events
-	_, err := helper.client.StreamMessage(
+	// Send streaming message using the new API; read only the first event to
+	// learn the server-assigned task ID (the rest keeps flowing to this pipe's
+	// buffer while we resubscribe on a second stream).
+	firstChan, err := helper.client.StreamMessage(
 		context.Background(),
 		protocol.SendMessageParams{
 			Message: message,
 		},
 	)
 	require.NoError(t, err)
+
+	first, ok := <-firstChan
+	require.True(t, ok, "Should have received a first stream event")
+	firstStatus := first.GetStatusUpdate()
+	require.NotNil(t, firstStatus, "First event should be a status update")
+	taskID := firstStatus.TaskID
+	require.NotEmpty(t, taskID, "Server should have assigned a task ID")
 
 	// Resubscribe to streaming message events using the new API
 	eventChan, err := helper.client.ResubscribeTask(
@@ -462,6 +448,9 @@ func TestE2E_MessageAPI_Resubscribe(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
+
+	// The resubscriber is now attached: let the executor finish.
+	close(gate)
 
 	// Collect all events
 	events := collectAllStreamingEvents(eventChan)
@@ -511,15 +500,15 @@ func checkStreamingEvents(t *testing.T, events []protocol.StreamResponse) {
 
 // TestE2E_MessageAPI_NonStreaming tests the non-streaming functionality using the new message API.
 func TestE2E_MessageAPI_NonStreaming(t *testing.T) {
-	helper := newTestHelper(t, &testProcessor{})
+	helper := newTestHelper(t, &testExecutor{})
 	defer helper.cleanup()
 
 	// Test data
 	inputText := "Hello world!"
 
-	// Generate context ID and task ID
+	// Generate the context ID; the server assigns the task ID (v1.0: a taskId
+	// on a message refers to an existing task).
 	contextID := protocol.GenerateContextID()
-	taskID := protocol.GenerateMessageID()
 
 	// Create message using the NewMessageWithContext constructor
 	message := protocol.NewMessageWithContext(
@@ -527,7 +516,7 @@ func TestE2E_MessageAPI_NonStreaming(t *testing.T) {
 		[]*protocol.Part{
 			protocol.NewTextPart(inputText),
 		},
-		&taskID,
+		nil,
 		&contextID,
 	)
 
@@ -540,14 +529,14 @@ func TestE2E_MessageAPI_NonStreaming(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Verify the result contains a task
+	// A blocking message/send returns only after the round ends: the result is
+	// already the terminal task snapshot (§3.1), no wait needed.
 	require.NotNil(t, result.GetTask(), "Result should contain a task")
 	task := result.GetTask()
+	require.Equal(t, protocol.TaskStateCompleted, task.Status.State,
+		"Blocking send must return the terminal task")
 
-	// Wait a bit for the task to complete
-	time.Sleep(500 * time.Millisecond)
-
-	// Get the final task state
+	// GetTasks must agree with the returned snapshot (store consistency).
 	finalTask, err := helper.client.GetTasks(
 		context.Background(),
 		protocol.TaskQueryParams{ID: task.ID},
@@ -568,4 +557,98 @@ func TestE2E_MessageAPI_NonStreaming(t *testing.T) {
 	reversedText := getTextPartContent(artifact.Parts)
 	expectedText := testReverseString(inputText)
 	require.Equal(t, expectedText, reversedText, "Artifact should contain reversed text")
+}
+
+// blockingStreamExecutor emits many events on a small blocking-send pipe, so a
+// vanished stream consumer would wedge the drain engine unless the server
+// keeps draining the abandoned pipe to closure.
+type blockingStreamExecutor struct{}
+
+func (p *blockingStreamExecutor) ProcessMessage(
+	ctx context.Context,
+	ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+	out := make(chan protocol.StreamEvent, 1)
+	go func() {
+		defer close(out)
+		for i := 0; i < 20; i++ {
+			out <- &protocol.TaskStatusUpdateEvent{
+				Status: protocol.TaskStatus{
+					State: protocol.TaskStateWorking,
+					Message: &protocol.Message{
+						Role:  protocol.MessageRoleAgent,
+						Parts: []*protocol.Part{protocol.NewTextPart(fmt.Sprintf("chunk %d", i))},
+					},
+				},
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		out <- &protocol.TaskStatusUpdateEvent{
+			Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
+		}
+	}()
+	return out, nil
+}
+
+// TestE2E_StreamDisconnect_BlockingSendDoesNotWedge proves the server drains an
+// abandoned SSE pipe to closure: with a blocking-send manager, a client that
+// disconnects mid-stream must not wedge the execution — the task still reaches
+// COMPLETED and is retrievable.
+func TestE2E_StreamDisconnect_BlockingSendDoesNotWedge(t *testing.T) {
+	tm, err := memory.NewTaskManager(
+		&blockingStreamExecutor{},
+		memory.WithTaskSubscriberBlockingSend(true),
+		memory.WithTaskSubscriberBufferSize(1),
+	)
+	require.NoError(t, err)
+
+	port := getFreePort(t)
+	addr := fmt.Sprintf("localhost:%d", port)
+	serverURL := fmt.Sprintf("http://%s", addr)
+	a2aServer, err := server.NewA2AServer(tm, server.WithAgentCard(createDefaultTestAgentCard()))
+	require.NoError(t, err)
+	go func() {
+		if err := a2aServer.Start(addr); err != nil && err != http.ErrServerClosed {
+			log.Printf("Server error: %v", err)
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		a2aServer.Stop(ctx)
+	}()
+
+	a2aClient, err := client.NewA2AClient(serverURL)
+	require.NoError(t, err)
+
+	// Open the stream with a cancelable context, read the first event to learn
+	// the task ID, then disconnect by canceling — the pipe is abandoned mid-run.
+	streamCtx, cancelStream := context.WithCancel(context.Background())
+	eventChan, err := a2aClient.StreamMessage(streamCtx, protocol.SendMessageParams{
+		Message: protocol.NewMessage(
+			protocol.MessageRoleUser,
+			[]*protocol.Part{protocol.NewTextPart("go")},
+		),
+	})
+	require.NoError(t, err)
+
+	first, ok := <-eventChan
+	require.True(t, ok, "should receive a first event")
+	taskID := first.GetStatusUpdate().TaskID
+	require.NotEmpty(t, taskID)
+	cancelStream() // client disconnects here; buffer(1) will fill server-side
+
+	// The engine must finish despite the vanished consumer: poll until COMPLETED.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		task, err := a2aClient.GetTasks(context.Background(), protocol.TaskQueryParams{ID: taskID})
+		if err == nil && task.Status.State == protocol.TaskStateCompleted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("task did not complete after disconnect (engine wedged): err=%v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }

@@ -4,7 +4,8 @@
 //
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
-// Package taskmanager provides configuration options for TaskManager.
+// This file provides configuration options for the in-memory TaskManager.
+
 package memory
 
 import (

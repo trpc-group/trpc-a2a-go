@@ -98,7 +98,7 @@ func WithAgentCard(card AgentCard) Option {
 // WithTenantCard registers an AgentCard for a specific tenant, making the server
 // multi-tenant: one process can host several agents distinguished by the v1.0
 // tenant field (carried in the request body). The processor dispatches on
-// ProcessOptions.Tenant, and the agent-card endpoint serves the matching card for
+// ExecContext.Tenant, and the agent-card endpoint serves the matching card for
 // "?tenant=<tenant>". This replaces the legacy URL-path template + placeholder
 // card + custom AgentCardHandler mechanism. Call once per tenant.
 func WithTenantCard(tenant string, card AgentCard) Option {

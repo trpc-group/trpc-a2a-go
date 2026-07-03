@@ -16,39 +16,6 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
-// MockMessageProcessor implements taskmanager.MessageProcessor for testing
-type MockMessageProcessor struct {
-	ProcessMessageFunc func(ctx context.Context, message protocol.Message, options taskmanager.ProcessOptions, handle taskmanager.TaskHandler) (*taskmanager.MessageProcessingResult, error)
-}
-
-func (m *MockMessageProcessor) ProcessMessage(ctx context.Context, message protocol.Message, options taskmanager.ProcessOptions, handle taskmanager.TaskHandler) (*taskmanager.MessageProcessingResult, error) {
-	if m.ProcessMessageFunc != nil {
-		return m.ProcessMessageFunc(ctx, message, options, handle)
-	}
-
-	// Default implementation: echo the message
-	response := &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []*protocol.Part{
-			protocol.NewTextPart("Echo: " + getTextFromMessage(message)),
-		},
-	}
-
-	return &taskmanager.MessageProcessingResult{
-		Result: &protocol.SendMessageResponse{Result: response},
-	}, nil
-}
-
-// Helper function to extract text from message
-func getTextFromMessage(message protocol.Message) string {
-	for _, part := range message.Parts {
-		if text := part.TextContent(); text != "" {
-			return text
-		}
-	}
-	return ""
-}
-
 func TestNewTaskManager(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -58,13 +25,19 @@ func TestNewTaskManager(t *testing.T) {
 	}{
 		{
 			name:      "valid processor",
-			processor: &MockMessageProcessor{},
+			processor: echoExecutor(),
 			wantErr:   false,
 		},
 		{
 			name:      "nil processor",
 			processor: nil,
 			wantErr:   true,
+		},
+		{
+			name:      "with options",
+			processor: echoExecutor(),
+			options:   []TaskManagerOption{WithMaxHistoryLength(50)},
+			wantErr:   false,
 		},
 	}
 
@@ -83,14 +56,15 @@ func TestNewTaskManager(t *testing.T) {
 				t.Errorf("Unexpected error: %v", err)
 				return
 			}
+			defer manager.Close()
 
 			if manager == nil {
 				t.Error("Expected manager but got nil")
 				return
 			}
 
-			if manager.Processor != tt.processor {
-				t.Error("Processor not set correctly")
+			if manager.processor == nil {
+				t.Error("MessageProcessor not set correctly")
 			}
 
 			if len(tt.options) > 0 && manager.options.MaxHistoryLength != 50 {
@@ -101,30 +75,16 @@ func TestNewTaskManager(t *testing.T) {
 }
 
 func TestTaskManager_OnSendMessage(t *testing.T) {
-	processor := &MockMessageProcessor{}
-	manager, err := NewTaskManager(processor)
-	if err != nil {
-		t.Fatalf("Failed to create manager: %v", err)
-	}
-
+	manager := newTestManager(t, echoExecutor())
 	ctx := context.Background()
 
 	tests := []struct {
 		name    string
 		request protocol.SendMessageParams
-		wantErr bool
 	}{
 		{
-			name: "valid message",
-			request: protocol.SendMessageParams{
-				Message: protocol.Message{
-					Role: protocol.MessageRoleUser,
-					Parts: []*protocol.Part{
-						protocol.NewTextPart("Hello"),
-					},
-				},
-			},
-			wantErr: false,
+			name:    "valid message",
+			request: userParams("Hello"),
 		},
 		{
 			name: "message with context",
@@ -137,21 +97,12 @@ func TestTaskManager_OnSendMessage(t *testing.T) {
 					},
 				},
 			},
-			wantErr: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result, err := manager.OnSendMessage(ctx, tt.request)
-
-			if tt.wantErr {
-				if err == nil {
-					t.Error("Expected error but got none")
-				}
-				return
-			}
-
 			if err != nil {
 				t.Errorf("Unexpected error: %v", err)
 				return
@@ -162,195 +113,44 @@ func TestTaskManager_OnSendMessage(t *testing.T) {
 				return
 			}
 
-			// Check if result contains a message
-			if result.GetMessage() != nil {
-				if result.GetMessage().MessageID == "" {
-					t.Error("Expected message ID to be set")
-				}
+			message := result.GetMessage()
+			if message == nil {
+				t.Fatalf("Expected a Message result, got %+v", result)
+			}
+			if message.MessageID == "" {
+				t.Error("Expected message ID to be set")
+			}
 
-				// Check that message is in storage
-				manager.mu.RLock()
-				_, exists := manager.Messages[result.GetMessage().MessageID]
-				manager.mu.RUnlock()
-
-				if !exists {
-					t.Error("Message not found in storage")
-				}
+			// Check that the reply message is in storage
+			manager.conversationMu.RLock()
+			_, exists := manager.messages[message.MessageID]
+			manager.conversationMu.RUnlock()
+			if !exists {
+				t.Error("Message not found in storage")
 			}
 		})
 	}
 }
 
-func TestTaskManager_OnSendMessageStream(t *testing.T) {
-	processor := &MockMessageProcessor{
-		ProcessMessageFunc: func(ctx context.Context, message protocol.Message, options taskmanager.ProcessOptions, handle taskmanager.TaskHandler) (*taskmanager.MessageProcessingResult, error) {
-			// Create a task for streaming
-			taskID, err := handle.BuildTask(nil, message.ContextID)
-			if err != nil {
-				return nil, err
-			}
-
-			subscriber, err := handle.SubscribeTask(&taskID)
-			if err != nil {
-				return nil, err
-			}
-
-			// Simulate async processing
-			go func() {
-				defer subscriber.Close()
-
-				// Send initial status update
-				handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, nil)
-
-				// Complete task
-				finalMessage := &protocol.Message{
-					Role: protocol.MessageRoleAgent,
-					Parts: []*protocol.Part{
-						protocol.NewTextPart("Streaming completed"),
-					},
-				}
-				handle.UpdateTaskState(&taskID, protocol.TaskStateCompleted, finalMessage)
-			}()
-
-			return &taskmanager.MessageProcessingResult{
-				StreamingEvents: subscriber,
-			}, nil
-		},
-	}
-
-	manager, err := NewTaskManager(processor)
-	if err != nil {
-		t.Fatalf("Failed to create manager: %v", err)
-	}
-
-	ctx := context.Background()
-	request := protocol.SendMessageParams{
-		Message: protocol.Message{
-			Role: protocol.MessageRoleUser,
-			Parts: []*protocol.Part{
-				protocol.NewTextPart("Stream test"),
-			},
-		},
-	}
-
-	eventChan, err := manager.OnSendMessageStream(ctx, request)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-
-	if eventChan == nil {
-		t.Fatal("Expected event channel but got nil")
-	}
-
-	// Collect events with shorter timeout
-	var events []protocol.StreamResponse
-	timeout := time.After(500 * time.Millisecond)
-	eventCount := 0
-
-	for {
-		select {
-		case event, ok := <-eventChan:
-			if !ok {
-				// Channel closed, test completed
-				goto CheckEvents
-			}
-			events = append(events, event)
-			eventCount++
-
-			// Stop after receiving some events to avoid infinite loop
-			if eventCount >= 10 {
-				goto CheckEvents
-			}
-
-		case <-timeout:
-			// Don't fail on timeout, just check what we got
-			goto CheckEvents
-		}
-	}
-
-CheckEvents:
-	if len(events) == 0 {
-		t.Error("Expected at least one event")
-		return
-	}
-
-	t.Logf("Received %d events", len(events))
-
-	// Should have received some events
-	hasStatusUpdate := false
-	for _, event := range events {
-		if event.GetStatusUpdate() != nil {
-			hasStatusUpdate = true
-			break
-		}
-	}
-
-	if !hasStatusUpdate {
-		t.Error("Expected at least one status update event")
-	}
-}
-
 func TestTaskManager_OnGetTask(t *testing.T) {
-	processor := &MockMessageProcessor{
-		ProcessMessageFunc: func(ctx context.Context, message protocol.Message, options taskmanager.ProcessOptions, handle taskmanager.TaskHandler) (*taskmanager.MessageProcessingResult, error) {
-			// Create a task for testing
-			taskID, err := handle.BuildTask(nil, message.ContextID)
-			if err != nil {
-				return nil, err
-			}
-
-			// Get the actual task object
-			task, err := handle.GetTask(&taskID)
-			if err != nil {
-				return nil, err
-			}
-
-			return &taskmanager.MessageProcessingResult{
-				Result: &protocol.SendMessageResponse{Result: task.Task()},
-			}, nil
-		},
-	}
-	manager, err := NewTaskManager(processor)
-	if err != nil {
-		t.Fatalf("Failed to create manager: %v", err)
-	}
-
+	manager := newTestManager(t, echoExecutor())
 	ctx := context.Background()
 
-	// First create a task by sending a message
-	request := protocol.SendMessageParams{
-		Message: protocol.Message{
-			Role: protocol.MessageRoleUser,
-			Parts: []*protocol.Part{
-				protocol.NewTextPart("Test"),
-			},
-		},
-	}
-
-	result, err := manager.OnSendMessage(ctx, request)
-	if err != nil {
-		t.Fatalf("Failed to send message: %v", err)
-	}
-
-	var existingTaskID string
-	if result.GetTask() != nil {
-		existingTaskID = result.GetTask().ID
-	} else {
-		t.Fatal("Expected task result but got nil")
-	}
+	existingTaskID := "existing-task"
+	seedTask(manager, protocol.Task{
+		ID:        existingTaskID,
+		ContextID: "ctx-existing",
+		Status:    protocol.TaskStatus{State: protocol.TaskStateWorking},
+	})
 
 	tests := []struct {
 		name     string
 		params   protocol.TaskQueryParams
-		wantErr  bool
 		validate func(*testing.T, *protocol.Task, error)
 	}{
 		{
-			name: "get existing task",
-			params: protocol.TaskQueryParams{
-				ID: existingTaskID,
-			},
-			wantErr: false,
+			name:   "get existing task",
+			params: protocol.TaskQueryParams{ID: existingTaskID},
 			validate: func(t *testing.T, task *protocol.Task, err error) {
 				if err != nil {
 					t.Errorf("Unexpected error: %v", err)
@@ -364,14 +164,11 @@ func TestTaskManager_OnGetTask(t *testing.T) {
 			},
 		},
 		{
-			name: "get non-existent task",
-			params: protocol.TaskQueryParams{
-				ID: "non-existent-task",
-			},
-			wantErr: true,
+			name:   "get non-existent task",
+			params: protocol.TaskQueryParams{ID: "non-existent-task"},
 			validate: func(t *testing.T, task *protocol.Task, err error) {
-				if err == nil {
-					t.Error("Expected error for non-existent task")
+				if !errors.Is(err, taskmanager.ErrTaskNotFoundSentinel) {
+					t.Errorf("Expected TaskNotFound for non-existent task, got %v", err)
 				}
 				if task != nil {
 					t.Error("Expected nil task for error case")
@@ -379,11 +176,8 @@ func TestTaskManager_OnGetTask(t *testing.T) {
 			},
 		},
 		{
-			name: "empty task ID",
-			params: protocol.TaskQueryParams{
-				ID: "",
-			},
-			wantErr: true,
+			name:   "empty task ID",
+			params: protocol.TaskQueryParams{ID: ""},
 			validate: func(t *testing.T, task *protocol.Task, err error) {
 				if err == nil {
 					t.Error("Expected error for empty task ID")
@@ -400,82 +194,8 @@ func TestTaskManager_OnGetTask(t *testing.T) {
 	}
 }
 
-func TestTaskManager_OnCancelTask(t *testing.T) {
-	processor := &MockMessageProcessor{
-		ProcessMessageFunc: func(ctx context.Context, message protocol.Message, options taskmanager.ProcessOptions, handle taskmanager.TaskHandler) (*taskmanager.MessageProcessingResult, error) {
-			// Create a task for testing cancellation
-			taskID, err := handle.BuildTask(nil, message.ContextID)
-			if err != nil {
-				return nil, err
-			}
-
-			// Get the actual task object
-			task, err := handle.GetTask(&taskID)
-			if err != nil {
-				return nil, err
-			}
-
-			return &taskmanager.MessageProcessingResult{
-				Result: &protocol.SendMessageResponse{Result: task.Task()},
-			}, nil
-		},
-	}
-	manager, err := NewTaskManager(processor)
-	if err != nil {
-		t.Fatalf("Failed to create manager: %v", err)
-	}
-
-	ctx := context.Background()
-
-	// Create a task first
-	request := protocol.SendMessageParams{
-		Message: protocol.Message{
-			Role: protocol.MessageRoleUser,
-			Parts: []*protocol.Part{
-				protocol.NewTextPart("Test"),
-			},
-		},
-	}
-
-	result, err := manager.OnSendMessage(ctx, request)
-	if err != nil {
-		t.Fatalf("Failed to send message: %v", err)
-	}
-
-	// Extract task from result
-	var taskID string
-	if result.GetTask() != nil {
-		taskID = result.GetTask().ID
-	} else {
-		t.Fatal("Expected task result but got nil")
-	}
-
-	// Cancel the task
-	cancelParams := protocol.TaskIDParams{
-		ID: taskID,
-	}
-
-	canceledTask, err := manager.OnCancelTask(ctx, cancelParams)
-	if err != nil {
-		t.Errorf("Unexpected error: %v", err)
-	}
-
-	if canceledTask == nil {
-		t.Error("Expected canceled task but got nil")
-	}
-
-	if canceledTask.Status.State != protocol.TaskStateCanceled {
-		t.Errorf("Expected task state to be canceled, got %s", canceledTask.Status.State)
-	}
-}
-
 func TestTaskManager_PushNotifications(t *testing.T) {
-	processor := &MockMessageProcessor{}
-	manager, err := NewTaskManager(processor)
-	if err != nil {
-		t.Fatalf("Failed to create manager: %v", err)
-	}
-
+	manager := newTestManager(t, echoExecutor())
 	ctx := context.Background()
 
 	tests := []struct {
@@ -484,7 +204,6 @@ func TestTaskManager_PushNotifications(t *testing.T) {
 		taskID    string
 		config    *protocol.TaskPushNotificationConfig
 		getParams *protocol.TaskIDParams
-		wantErr   bool
 		validate  func(*testing.T, interface{}, error)
 	}{
 		{
@@ -496,7 +215,6 @@ func TestTaskManager_PushNotifications(t *testing.T) {
 				URL:    "https://example.com/webhook",
 				Token:  "Bearer token",
 			},
-			wantErr: false,
 			validate: func(t *testing.T, result interface{}, err error) {
 				if err != nil {
 					t.Errorf("Unexpected error: %v", err)
@@ -513,7 +231,6 @@ func TestTaskManager_PushNotifications(t *testing.T) {
 			getParams: &protocol.TaskIDParams{
 				ID: "test-task-id",
 			},
-			wantErr: false,
 			validate: func(t *testing.T, result interface{}, err error) {
 				if err != nil {
 					t.Errorf("Unexpected error: %v", err)
@@ -540,7 +257,6 @@ func TestTaskManager_PushNotifications(t *testing.T) {
 			getParams: &protocol.TaskIDParams{
 				ID: "non-existent-task",
 			},
-			wantErr: true,
 			validate: func(t *testing.T, result interface{}, err error) {
 				if err == nil {
 					t.Error("Expected error for non-existent task")
@@ -555,8 +271,7 @@ func TestTaskManager_PushNotifications(t *testing.T) {
 		URL:    "https://example.com/webhook",
 		Token:  "Bearer token",
 	}
-	_, err = manager.OnPushNotificationSet(ctx, setupConfig)
-	if err != nil {
+	if _, err := manager.OnPushNotificationSet(ctx, setupConfig); err != nil {
 		t.Fatalf("Failed to set up push notification: %v", err)
 	}
 
@@ -588,15 +303,15 @@ func TestTaskSubscriber(t *testing.T) {
 		name     string
 		taskID   string
 		capacity int
-		setup    func(*TaskSubscriber)             // Setup function to perform actions
-		validate func(*testing.T, *TaskSubscriber) // Validation function
+		setup    func(*taskSubscriber)             // Setup function to perform actions
+		validate func(*testing.T, *taskSubscriber) // Validation function
 	}{
 		{
 			name:     "create subscriber",
 			taskID:   "test-task",
 			capacity: 5,
-			setup:    func(s *TaskSubscriber) {},
-			validate: func(t *testing.T, s *TaskSubscriber) {
+			setup:    func(s *taskSubscriber) {},
+			validate: func(t *testing.T, s *taskSubscriber) {
 				if s.taskID != "test-task" {
 					t.Errorf("Expected task ID %s, got %s", "test-task", s.taskID)
 				}
@@ -609,21 +324,15 @@ func TestTaskSubscriber(t *testing.T) {
 			name:     "send and receive event",
 			taskID:   "test-task-2",
 			capacity: 5,
-			setup: func(s *TaskSubscriber) {
-				event := protocol.NewStreamResponseMessage(&protocol.Message{
-					Role: protocol.MessageRoleAgent,
-					Parts: []*protocol.Part{
-						protocol.NewTextPart("Test event"),
-					},
-				})
-				err := s.Send(event)
-				if err != nil {
+			setup: func(s *taskSubscriber) {
+				event := protocol.NewStreamResponseMessage(agentReply("Test event"))
+				if err := s.Send(event); err != nil {
 					t.Errorf("Unexpected error sending event: %v", err)
 				}
 			},
-			validate: func(t *testing.T, s *TaskSubscriber) {
+			validate: func(t *testing.T, s *taskSubscriber) {
 				select {
-				case receivedEvent := <-s.eventQueue:
+				case receivedEvent := <-s.Channel():
 					if receivedEvent.GetMessage() == nil {
 						t.Error("Expected event message but got nil")
 					}
@@ -636,18 +345,17 @@ func TestTaskSubscriber(t *testing.T) {
 			name:     "close subscriber",
 			taskID:   "test-task-3",
 			capacity: 5,
-			setup: func(s *TaskSubscriber) {
+			setup: func(s *taskSubscriber) {
 				s.Close()
 			},
-			validate: func(t *testing.T, s *TaskSubscriber) {
+			validate: func(t *testing.T, s *taskSubscriber) {
 				if !s.Closed() {
 					t.Error("Expected subscriber to be closed")
 				}
 
 				// Test sending to closed subscriber
 				event := protocol.NewStreamResponseMessage(&protocol.Message{Role: protocol.MessageRoleAgent})
-				err := s.Send(event)
-				if err == nil {
+				if err := s.Send(event); err == nil {
 					t.Error("Expected error when sending to closed subscriber")
 				}
 			},
@@ -656,7 +364,7 @@ func TestTaskSubscriber(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			subscriber := NewTaskSubscriber(tt.taskID, tt.capacity)
+			subscriber := newTaskSubscriber(tt.taskID, tt.capacity, false)
 
 			tt.setup(subscriber)
 			tt.validate(t, subscriber)
@@ -665,11 +373,7 @@ func TestTaskSubscriber(t *testing.T) {
 }
 
 func TestTaskSubscriber_CloseUnblocksBlockingSend(t *testing.T) {
-	subscriber := NewTaskSubscriber(
-		"blocking-send-task",
-		1,
-		WithSubscriberBlockingSend(true),
-	)
+	subscriber := newTaskSubscriber("blocking-send-task", 1, true)
 
 	if err := subscriber.Send(protocol.StreamResponse{}); err != nil {
 		t.Fatalf("Failed to fill subscriber channel: %v", err)
@@ -696,112 +400,18 @@ func TestTaskSubscriber_CloseUnblocksBlockingSend(t *testing.T) {
 	}
 }
 
-func TestCancellableTask(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	task := &CancellableTask{
-		task: protocol.Task{
-			ID:     "test-task",
-			Status: protocol.TaskStatus{State: protocol.TaskStateSubmitted},
-		},
-		cancelFunc: cancel,
-		ctx:        ctx,
-	}
-
-	// Test cancellation
-	task.Cancel()
-
-	select {
-	case <-ctx.Done():
-		// Expected
-	case <-time.After(100 * time.Millisecond):
-		t.Error("Expected context to be canceled")
-	}
-}
-
-func TestTaskManager_UpdateTaskState_CleansSubscribersOnFinalState(t *testing.T) {
-	handler, manager := setupTestHandler(t)
-
-	taskID, err := handler.BuildTask(nil, nil)
-	if err != nil {
-		t.Fatalf("Failed to create task: %v", err)
-	}
-
-	sub, err := handler.SubscribeTask(&taskID)
-	if err != nil {
-		t.Fatalf("Failed to subscribe: %v", err)
-	}
-
-	// Verify subscriber exists
-	manager.taskMu.RLock()
-	if len(manager.Subscribers[taskID]) != 1 {
-		t.Fatalf("Expected 1 subscriber, got %d", len(manager.Subscribers[taskID]))
-	}
-	manager.taskMu.RUnlock()
-
-	// Collect events until the channel is closed by the final-state cleanup.
-	var events []protocol.StreamResponse
-	consumerDone := make(chan struct{})
-	go func() {
-		defer close(consumerDone)
-		for ev := range sub.Channel() {
-			events = append(events, ev)
-		}
-	}()
-
-	// Transition to final state
-	err = handler.UpdateTaskState(&taskID, protocol.TaskStateCompleted, nil)
-	if err != nil {
-		t.Fatalf("Failed to update state: %v", err)
-	}
-
-	// Reaching a final state must close the subscriber channel (range returns).
-	select {
-	case <-consumerDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("subscriber channel was not closed after final state")
-	}
-
-	// deliver-then-close ordering must not drop the terminal event: the final
-	// TaskStatusUpdateEvent has to arrive before the channel close.
-	var gotFinal bool
-	for _, ev := range events {
-		if ev.GetStatusUpdate() != nil &&
-			ev.GetStatusUpdate().Final && ev.GetStatusUpdate().Status.State == protocol.TaskStateCompleted {
-			gotFinal = true
-		}
-	}
-	if !gotFinal {
-		t.Errorf("Expected a final Completed TaskStatusUpdateEvent before close, got %d events", len(events))
-	}
-
-	// Subscribers should be cleaned up
-	manager.taskMu.RLock()
-	subs := manager.Subscribers[taskID]
-	manager.taskMu.RUnlock()
-
-	if len(subs) != 0 {
-		t.Errorf("Expected subscribers to be cleaned after final state, got %d", len(subs))
-	}
-}
-
 func TestTaskManager_cleanupFailedSubscribersClosesRemovedSubscribers(t *testing.T) {
-	processor := &MockMessageProcessor{}
-	manager, err := NewTaskManager(processor)
-	if err != nil {
-		t.Fatalf("Failed to create manager: %v", err)
-	}
-	defer manager.Close()
+	manager := newTestManager(t, echoExecutor())
 
 	taskID := "failed-subscriber-task"
-	failedSub := NewTaskSubscriber(taskID, 10)
-	activeSub := NewTaskSubscriber(taskID, 10)
+	failedSub := newTaskSubscriber(taskID, 10, false)
+	activeSub := newTaskSubscriber(taskID, 10, false)
 
 	manager.taskMu.Lock()
-	manager.Subscribers[taskID] = []*TaskSubscriber{failedSub, activeSub}
+	manager.subscribers[taskID] = []*taskSubscriber{failedSub, activeSub}
 	manager.taskMu.Unlock()
 
-	manager.cleanupFailedSubscribers(taskID, []*TaskSubscriber{failedSub})
+	manager.cleanupFailedSubscribers(taskID, []*taskSubscriber{failedSub})
 
 	if !failedSub.Closed() {
 		t.Error("Expected failed subscriber to be closed")
@@ -811,7 +421,7 @@ func TestTaskManager_cleanupFailedSubscribersClosesRemovedSubscribers(t *testing
 	}
 
 	manager.taskMu.RLock()
-	subs := manager.Subscribers[taskID]
+	subs := manager.subscribers[taskID]
 	manager.taskMu.RUnlock()
 
 	if len(subs) != 1 || subs[0] != activeSub {
@@ -820,57 +430,39 @@ func TestTaskManager_cleanupFailedSubscribersClosesRemovedSubscribers(t *testing
 }
 
 func TestTaskManager_cleanExpiredTasks(t *testing.T) {
-	processor := &MockMessageProcessor{}
-	manager, err := NewTaskManager(processor)
-	if err != nil {
-		t.Fatalf("Failed to create manager: %v", err)
-	}
-	defer manager.Close()
+	manager := newTestManager(t, echoExecutor())
 
-	// Create a task and move it to a final state with an old timestamp
-	task := protocol.Task{
+	// Create a task in a final state with an old timestamp
+	seedTask(manager, protocol.Task{
 		ID: "expired-task",
 		Status: protocol.TaskStatus{
 			State:     protocol.TaskStateCompleted,
 			Timestamp: time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339),
 		},
-	}
-	cancellableTask := NewCancellableTask(task)
-
+	})
 	manager.taskMu.Lock()
-	manager.Tasks["expired-task"] = cancellableTask
-	manager.Subscribers["expired-task"] = []*TaskSubscriber{
-		NewTaskSubscriber("expired-task", 10),
+	manager.subscribers["expired-task"] = []*taskSubscriber{
+		newTaskSubscriber("expired-task", 10, false),
 	}
 	manager.taskMu.Unlock()
 
 	// Create a non-expired task
-	activeTask := protocol.Task{
+	seedTask(manager, protocol.Task{
 		ID: "active-task",
 		Status: protocol.TaskStatus{
 			State:     protocol.TaskStateWorking,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		},
-	}
-	activeCancellable := NewCancellableTask(activeTask)
-
-	manager.taskMu.Lock()
-	manager.Tasks["active-task"] = activeCancellable
-	manager.taskMu.Unlock()
+	})
 
 	// Create a recently completed task (should NOT be cleaned)
-	recentTask := protocol.Task{
+	seedTask(manager, protocol.Task{
 		ID: "recent-task",
 		Status: protocol.TaskStatus{
 			State:     protocol.TaskStateCompleted,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		},
-	}
-	recentCancellable := NewCancellableTask(recentTask)
-
-	manager.taskMu.Lock()
-	manager.Tasks["recent-task"] = recentCancellable
-	manager.taskMu.Unlock()
+	})
 
 	// TTL=0 should skip cleanup entirely
 	skipped := manager.cleanExpiredTasks(0)
@@ -878,7 +470,7 @@ func TestTaskManager_cleanExpiredTasks(t *testing.T) {
 		t.Errorf("Expected 0 cleaned tasks with TTL=0, got %d", skipped)
 	}
 	manager.taskMu.RLock()
-	if _, exists := manager.Tasks["expired-task"]; !exists {
+	if _, exists := manager.tasks["expired-task"]; !exists {
 		t.Error("Expired task should still exist when TTL=0")
 	}
 	manager.taskMu.RUnlock()
@@ -893,49 +485,44 @@ func TestTaskManager_cleanExpiredTasks(t *testing.T) {
 	manager.taskMu.RLock()
 	defer manager.taskMu.RUnlock()
 
-	if _, exists := manager.Tasks["expired-task"]; exists {
+	if _, exists := manager.tasks["expired-task"]; exists {
 		t.Error("Expected expired task to be removed")
 	}
-	if _, exists := manager.Subscribers["expired-task"]; exists {
+	if _, exists := manager.subscribers["expired-task"]; exists {
 		t.Error("Expected expired task subscribers to be removed")
 	}
-	if _, exists := manager.Tasks["active-task"]; !exists {
+	if _, exists := manager.tasks["active-task"]; !exists {
 		t.Error("Active task should not be removed")
 	}
-	if _, exists := manager.Tasks["recent-task"]; !exists {
+	if _, exists := manager.tasks["recent-task"]; !exists {
 		t.Error("Recently completed task should not be removed")
 	}
 }
 
 func TestTaskManager_TaskTTLCleanupGoroutine(t *testing.T) {
-	processor := &MockMessageProcessor{}
-	manager, err := NewTaskManager(
-		processor,
+	manager := newTestManager(
+		t,
+		echoExecutor(),
 		WithConversationTTL(time.Hour, 5*time.Millisecond),
 		WithTaskTTL(time.Nanosecond),
 	)
-	if err != nil {
-		t.Fatalf("Failed to create manager: %v", err)
-	}
-	defer manager.Close()
 
 	taskID := "auto-expired-task"
-	sub := NewTaskSubscriber(taskID, 10)
-	task := protocol.Task{
+	sub := newTaskSubscriber(taskID, 10, false)
+	seedTask(manager, protocol.Task{
 		ID: taskID,
 		Status: protocol.TaskStatus{
 			State:     protocol.TaskStateCompleted,
 			Timestamp: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
 		},
-	}
+	})
 
 	manager.taskMu.Lock()
-	manager.Tasks[taskID] = NewCancellableTask(task)
-	manager.Subscribers[taskID] = []*TaskSubscriber{sub}
+	manager.subscribers[taskID] = []*taskSubscriber{sub}
 	manager.taskMu.Unlock()
 
 	manager.mu.Lock()
-	manager.PushNotifications[taskID] = protocol.TaskPushNotificationConfig{TaskID: taskID}
+	manager.pushNotifications[taskID] = protocol.TaskPushNotificationConfig{TaskID: taskID}
 	manager.mu.Unlock()
 
 	deadline := time.After(500 * time.Millisecond)
@@ -944,12 +531,12 @@ func TestTaskManager_TaskTTLCleanupGoroutine(t *testing.T) {
 
 	for {
 		manager.taskMu.RLock()
-		_, taskExists := manager.Tasks[taskID]
-		_, subsExists := manager.Subscribers[taskID]
+		_, taskExists := manager.tasks[taskID]
+		_, subsExists := manager.subscribers[taskID]
 		manager.taskMu.RUnlock()
 
 		manager.mu.RLock()
-		_, pushExists := manager.PushNotifications[taskID]
+		_, pushExists := manager.pushNotifications[taskID]
 		manager.mu.RUnlock()
 
 		if !taskExists && !subsExists && !pushExists && sub.Closed() {
@@ -971,26 +558,23 @@ func TestTaskManager_TaskTTLCleanupGoroutine(t *testing.T) {
 }
 
 func TestTaskManager_Close(t *testing.T) {
-	processor := &MockMessageProcessor{}
-	manager, err := NewTaskManager(processor)
+	manager, err := NewTaskManager(echoExecutor())
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
 
 	// Add some tasks and subscribers
-	task := protocol.Task{
+	seedTask(manager, protocol.Task{
 		ID: "close-test-task",
 		Status: protocol.TaskStatus{
 			State:     protocol.TaskStateWorking,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		},
-	}
-	cancellableTask := NewCancellableTask(task)
-	sub := NewTaskSubscriber("close-test-task", 10)
+	})
+	sub := newTaskSubscriber("close-test-task", 10, false)
 
 	manager.taskMu.Lock()
-	manager.Tasks["close-test-task"] = cancellableTask
-	manager.Subscribers["close-test-task"] = []*TaskSubscriber{sub}
+	manager.subscribers["close-test-task"] = []*taskSubscriber{sub}
 	manager.taskMu.Unlock()
 
 	manager.Close()
@@ -1002,17 +586,16 @@ func TestTaskManager_Close(t *testing.T) {
 	manager.taskMu.RLock()
 	defer manager.taskMu.RUnlock()
 
-	if len(manager.Tasks) != 0 {
-		t.Errorf("Expected all tasks to be cleaned, got %d", len(manager.Tasks))
+	if len(manager.tasks) != 0 {
+		t.Errorf("Expected all tasks to be cleaned, got %d", len(manager.tasks))
 	}
-	if len(manager.Subscribers) != 0 {
-		t.Errorf("Expected all subscribers to be cleaned, got %d", len(manager.Subscribers))
+	if len(manager.subscribers) != 0 {
+		t.Errorf("Expected all subscribers to be cleaned, got %d", len(manager.subscribers))
 	}
 }
 
 func TestTaskManager_Close_Idempotent(t *testing.T) {
-	processor := &MockMessageProcessor{}
-	manager, err := NewTaskManager(processor)
+	manager, err := NewTaskManager(echoExecutor())
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
@@ -1064,11 +647,7 @@ func boolPtr(b bool) *bool {
 
 // TestTaskManager_OnListTasks covers the v1.0 ListTasks filtering and pagination.
 func TestTaskManager_OnListTasks(t *testing.T) {
-	processor := &MockMessageProcessor{}
-	manager, err := NewTaskManager(processor)
-	if err != nil {
-		t.Fatalf("Failed to create manager: %v", err)
-	}
+	manager := newTestManager(t, echoExecutor())
 	ctx := context.Background()
 
 	now := time.Now().UTC()
@@ -1081,11 +660,9 @@ func TestTaskManager_OnListTasks(t *testing.T) {
 			State: protocol.TaskStateWorking, Timestamp: now.Format(time.RFC3339)},
 			Artifacts: []protocol.Artifact{{ArtifactID: "art-1"}}},
 	}
-	manager.taskMu.Lock()
 	for i := range seed {
-		manager.Tasks[seed[i].ID] = NewCancellableTask(seed[i])
+		seedTask(manager, seed[i])
 	}
-	manager.taskMu.Unlock()
 
 	// No filter: all tasks, sorted by ID.
 	result, err := manager.OnListTasks(ctx, protocol.ListTasksParams{})
@@ -1146,11 +723,7 @@ func TestTaskManager_OnListTasks(t *testing.T) {
 
 // TestTaskManager_PushNotificationListDelete covers the v1.0 list/delete push-config methods.
 func TestTaskManager_PushNotificationListDelete(t *testing.T) {
-	processor := &MockMessageProcessor{}
-	manager, err := NewTaskManager(processor)
-	if err != nil {
-		t.Fatalf("Failed to create manager: %v", err)
-	}
+	manager := newTestManager(t, echoExecutor())
 	ctx := context.Background()
 
 	if _, err := manager.OnPushNotificationSet(ctx, protocol.TaskPushNotificationConfig{
@@ -1189,11 +762,7 @@ func TestTaskManager_PushNotificationListDelete(t *testing.T) {
 // requirement that subscribing to a live task delivers the current Task snapshot
 // as the first stream event.
 func TestTaskManager_OnResubscribe_NonTerminalEmitsSnapshot(t *testing.T) {
-	manager, err := NewTaskManager(&MockMessageProcessor{})
-	if err != nil {
-		t.Fatalf("Failed to create manager: %v", err)
-	}
-	defer manager.Close()
+	manager := newTestManager(t, echoExecutor())
 	ctx := context.Background()
 
 	task := protocol.Task{
@@ -1201,9 +770,7 @@ func TestTaskManager_OnResubscribe_NonTerminalEmitsSnapshot(t *testing.T) {
 		ContextID: "ctx-1",
 		Status:    protocol.TaskStatus{State: protocol.TaskStateWorking, Timestamp: time.Now().UTC().Format(time.RFC3339)},
 	}
-	manager.taskMu.Lock()
-	manager.Tasks[task.ID] = NewCancellableTask(task)
-	manager.taskMu.Unlock()
+	seedTask(manager, task)
 
 	ch, err := manager.OnResubscribe(ctx, protocol.TaskIDParams{ID: task.ID})
 	if err != nil {
@@ -1229,11 +796,7 @@ func TestTaskManager_OnResubscribe_NonTerminalEmitsSnapshot(t *testing.T) {
 // TestTaskManager_OnResubscribe_TerminalRejected verifies the v1.0
 // requirement that subscribing to a terminal task returns UnsupportedOperationError.
 func TestTaskManager_OnResubscribe_TerminalRejected(t *testing.T) {
-	manager, err := NewTaskManager(&MockMessageProcessor{})
-	if err != nil {
-		t.Fatalf("Failed to create manager: %v", err)
-	}
-	defer manager.Close()
+	manager := newTestManager(t, echoExecutor())
 	ctx := context.Background()
 
 	for _, state := range []protocol.TaskState{
@@ -1244,9 +807,7 @@ func TestTaskManager_OnResubscribe_TerminalRejected(t *testing.T) {
 			ID:     "terminal-" + string(state),
 			Status: protocol.TaskStatus{State: state, Timestamp: time.Now().UTC().Format(time.RFC3339)},
 		}
-		manager.taskMu.Lock()
-		manager.Tasks[task.ID] = NewCancellableTask(task)
-		manager.taskMu.Unlock()
+		seedTask(manager, task)
 
 		ch, err := manager.OnResubscribe(ctx, protocol.TaskIDParams{ID: task.ID})
 		if err == nil {

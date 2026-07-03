@@ -170,38 +170,51 @@ import (
     "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
-// Implement the MessageProcessor interface
+// Implement the MessageProcessor interface: process one message and report
+// progress by sending events on the returned channel. The framework owns the
+// task lifecycle (lazy creation, persistence, subscriber fan-out) and derives
+// both the message/send result and the message/stream feed from these events —
+// there is no streaming/non-streaming branch in your code.
 type myMessageProcessor struct {
     // Add your custom fields here
 }
 
 func (p *myMessageProcessor) ProcessMessage(
     ctx context.Context,
-    message protocol.Message,
-    options taskmanager.ProcessOptions,
-    handle taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
-    // Extract text from the incoming message
-    text := extractTextFromMessage(message)
-    
-    // Process the text (example: reverse it)
-    result := reverseString(text)
-    
-    // Return a simple response message
-    responseMessage := protocol.NewMessage(
-        protocol.MessageRoleAgent,
-        []protocol.Part{protocol.NewTextPart("Processed: " + result)},
-    )
-    
-    return &taskmanager.MessageProcessingResult{
-        Result: &responseMessage,
-    }, nil
+    ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+    out := make(chan protocol.StreamEvent, 4)
+    go func() {
+        defer close(out)
+
+        text := extractTextFromMessage(ec.Message)
+        if text == "" {
+            // A pure-message reply: no task comes into existence this round.
+            out <- taskmanager.ReplyText("input message must contain text.")
+            return
+        }
+
+        // Event IDs may be left empty — the framework stamps them from the
+        // ExecContext and creates the task on this first task event.
+        out <- taskmanager.Working(nil)
+
+        result := reverseString(text)
+        out <- taskmanager.NewArtifactUpdate(*protocol.NewArtifactWithID(
+            stringPtr("Reversed Text"), nil,
+            []*protocol.Part{protocol.NewTextPart(result)},
+        ), true)
+
+        // A terminal status ends the round; the message/send caller receives
+        // this final task snapshot (with its artifacts).
+        out <- taskmanager.Completed(taskmanager.ReplyText("Processed: " + result))
+    }()
+    return out, nil
 }
 
 func extractTextFromMessage(message protocol.Message) string {
     for _, part := range message.Parts {
-        if textPart, ok := part.(*protocol.TextPart); ok {
-            return textPart.Text
+        if text := part.TextContent(); text != "" {
+            return text
         }
     }
     return ""
@@ -270,14 +283,15 @@ import (
     "log"
 
     "trpc.group/trpc-go/trpc-a2a-go/v2/server"
-    "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
 
 // Create the task processor
 processor := &myMessageProcessor{}
 
-// Create task manager, inject processor
-taskManager, err := taskmanager.NewMemoryTaskManager(processor)
+// Create task manager, inject processor. For persistent storage, swap in
+// redis.NewTaskManager(processor, redisClient) — the same MessageProcessor.
+taskManager, err := memory.NewTaskManager(processor)
 if err != nil {
     log.Fatalf("Failed to create task manager: %v", err)
 }

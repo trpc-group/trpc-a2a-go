@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/metric"
@@ -38,6 +39,7 @@ type A2AServer struct {
 	agentCardSet     bool                    // Whether a default card was provided (WithAgentCard).
 	taskManager      taskmanager.TaskManager // Handles task logic.
 	httpServer       *http.Server            // Underlying HTTP server.
+	httpServerMu     sync.Mutex              // Guards httpServer: Start writes it, Stop reads it.
 	corsEnabled      bool                    // Flag to enable/disable CORS headers.
 	jsonRPCEndpoint  string                  // Path for the JSON-RPC endpoint.
 	agentCardPath    string                  // Path for the agent card endpoint.
@@ -154,17 +156,23 @@ func (s *A2AServer) Start(address string) error {
 	if err := s.InitTelemetry(context.Background()); err != nil {
 		return fmt.Errorf("initialize telemetry: %w", err)
 	}
-	s.httpServer = &http.Server{
+	httpServer := &http.Server{
 		Addr:         address,
 		Handler:      s.Handler(),
 		ReadTimeout:  s.readTimeout,
 		WriteTimeout: s.writeTimeout,
 		IdleTimeout:  s.idleTimeout,
 	}
+	// Publish under the lock before ListenAndServe blocks, so a concurrent
+	// Stop() always observes a fully constructed server (Start typically runs
+	// in its own goroutine).
+	s.httpServerMu.Lock()
+	s.httpServer = httpServer
+	s.httpServerMu.Unlock()
 
 	log.Infof("Starting A2A server listening on %s...", address)
 	// ListenAndServe blocks. It returns http.ErrServerClosed on graceful shutdown.
-	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		if shutdownErr := s.shutdownTelemetry(context.Background()); shutdownErr != nil {
 			return errors.Join(
 				fmt.Errorf("http server ListenAndServe error: %w", err),
@@ -180,12 +188,15 @@ func (s *A2AServer) Start(address string) error {
 // Stop gracefully shuts down the running HTTP server.
 // It waits for active connections to finish within the provided context's deadline.
 func (s *A2AServer) Stop(ctx context.Context) error {
-	if s.httpServer == nil {
+	s.httpServerMu.Lock()
+	httpServer := s.httpServer
+	s.httpServerMu.Unlock()
+	if httpServer == nil {
 		return errors.New("A2A server not running")
 	}
 	log.Info("Attempting graceful shutdown of A2A server...")
 	var shutdownErrs []error
-	if err := s.httpServer.Shutdown(ctx); err != nil {
+	if err := httpServer.Shutdown(ctx); err != nil {
 		shutdownErrs = append(shutdownErrs, fmt.Errorf("http server shutdown failed: %w", err))
 	}
 	// Release task manager resources (e.g. stop the in-memory cleanup goroutine or
@@ -910,6 +921,10 @@ func trackStreamEvents(
 			select {
 			case <-ctx.Done():
 				tracker.setError("client_disconnected")
+				// Abandoning the source pipe would wedge a blocking-send engine;
+				// keep draining it to closure (the downstream tunnel drains the
+				// wrapper channel, not this source).
+				drainToClose(eventsChan)
 				return
 			case event, ok := <-eventsChan:
 				if !ok {
@@ -919,6 +934,7 @@ func trackStreamEvents(
 				select {
 				case <-ctx.Done():
 					tracker.setError("client_disconnected")
+					drainToClose(eventsChan)
 					return
 				case tracked <- event:
 				}

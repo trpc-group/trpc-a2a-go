@@ -60,7 +60,8 @@ func (t *sseTunnel) start(ctx context.Context, eventsChan <-chan protocol.Stream
 			if len(t.batch) >= t.batchSize {
 				ticker.Reset(t.flushInterval)
 				if !t.flushBatch() {
-					return // Error occurred, exit
+					drainToClose(eventsChan) // Write error: abandon delivery, keep draining.
+					return
 				}
 			}
 
@@ -68,16 +69,31 @@ func (t *sseTunnel) start(ctx context.Context, eventsChan <-chan protocol.Stream
 			// Periodic flush for any accumulated events
 			if len(t.batch) > 0 {
 				if !t.flushBatch() {
-					return // Error occurred, exit
+					drainToClose(eventsChan) // Write error: abandon delivery, keep draining.
+					return
 				}
 			}
 
 		case <-clientClosed:
 			// Client disconnected
 			log.Infof("SSE client disconnected for request ID: %s. Closing stream.", t.rpcID)
+			drainToClose(eventsChan)
 			return
 		}
 	}
+}
+
+// drainToClose keeps consuming the task-manager event channel until it closes,
+// discarding the events. The taskmanager pipe must always be drained to
+// closure: with a blocking-send manager the drain engine blocks on a full
+// pipe, so abandoning it on a client disconnect or write error would wedge the
+// execution forever. The goroutine ends when the engine closes the channel at
+// end of round, so it never leaks.
+func drainToClose(eventsChan <-chan protocol.StreamResponse) {
+	go func() {
+		for range eventsChan {
+		}
+	}()
 }
 
 // flushBatch sends all events in the current batch as a single write operation

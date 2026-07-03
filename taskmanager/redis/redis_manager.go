@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
@@ -27,7 +28,6 @@ const (
 	conversationPrefix     = "conv:"
 	taskPrefix             = "task:"
 	pushNotificationPrefix = "push:"
-	subscriberPrefix       = "sub:"
 
 	// Default expiration time for Redis keys (1 hour).
 	defaultExpiration = 1 * time.Hour
@@ -38,11 +38,13 @@ const (
 )
 
 // TaskManager provides a concrete, Redis-based implementation of the
-// TaskManager interface. It persists messages, conversations, and tasks in Redis.
-// It requires a MessageProcessor to handle the actual agent logic.
+// TaskManager interface. It persists messages, conversations, and tasks in
+// Redis and delegates the agent logic to an injected Processor: the MessageProcessor
+// reports progress on an event channel and the manager owns the task
+// lifecycle (lazy creation, persistence, subscriber fan-out).
 // It is safe for concurrent use.
 type TaskManager struct {
-	// processor is the user-provided message processor.
+	// processor is the user-provided agent logic.
 	processor taskmanager.MessageProcessor
 	// client is the Redis client.
 	client redis.UniversalClient
@@ -52,12 +54,13 @@ type TaskManager struct {
 	// subMu is a mutex for the subscribers map.
 	subMu sync.RWMutex
 	// subscribers is a map of task IDs to subscriber channels.
-	subscribers map[string][]*TaskSubscriber
+	subscribers map[string][]*taskSubscriber
 
-	// cancelMu is a mutex for the cancels map.
+	// cancelMu is a mutex for the executions map.
 	cancelMu sync.RWMutex
-	// cancels is a map of task IDs to cancellation functions.
-	cancels map[string]context.CancelFunc
+	// executions maps task IDs to live execution handles so OnCancelTask can
+	// cancel the MessageProcessor's context.
+	executions map[string]*liveExecution
 
 	// options
 	options *TaskManagerOptions
@@ -65,8 +68,8 @@ type TaskManager struct {
 
 // NewTaskManager creates a new Redis-based TaskManager with the provided options.
 func NewTaskManager(
-	client redis.UniversalClient,
 	processor taskmanager.MessageProcessor,
+	client redis.UniversalClient,
 	opts ...TaskManagerOption,
 ) (*TaskManager, error) {
 	if processor == nil {
@@ -89,109 +92,75 @@ func NewTaskManager(
 		opt(options)
 	}
 
-	// Use expiration time from options
-	expiration := options.ExpireTime
-
 	manager := &TaskManager{
 		processor:   processor,
 		client:      client,
-		expiration:  expiration,
-		subscribers: make(map[string][]*TaskSubscriber),
-		cancels:     make(map[string]context.CancelFunc),
+		expiration:  options.ExpireTime,
+		subscribers: make(map[string][]*taskSubscriber),
+		executions:  make(map[string]*liveExecution),
 		options:     options,
 	}
 
 	return manager, nil
 }
 
-// OnSendMessage handles the message/send request.
+// OnSendMessage handles the message/send request. It invokes the MessageProcessor
+// and derives the result from the emitted events: the final task snapshot
+// when task events were emitted, otherwise the last Message. The default is
+// blocking (returnImmediately=false); with returnImmediately=true it returns
+// on the first decisive event while the execution continues in background.
 func (m *TaskManager) OnSendMessage(
 	ctx context.Context,
 	request protocol.SendMessageParams,
 ) (*protocol.SendMessageResponse, error) {
 	log.Debugf("RedisTaskManager: OnSendMessage for message %s", request.Message.MessageID)
 
-	// Process the request message.
-	m.processRequestMessage(&request.Message)
-
-	// Process configuration.
-	options := m.processConfiguration(request.Configuration)
-	options.Streaming = false // non-streaming processing
-	options.Tenant = request.Tenant
-
-	// Create MessageHandle.
-	handle := &taskHandler{
-		manager:                m,
-		messageID:              request.Message.MessageID,
-		ctx:                    ctx,
-		subscriberBufSize:      m.options.TaskSubscriberBufSize,
-		subscriberBlockingSend: m.options.TaskSubscriberBlockingSend,
-	}
-
-	// Call the user's message processor.
-	result, err := m.processor.ProcessMessage(ctx, request.Message, options, handle)
+	ex, err := m.prepareExecution(ctx, &request, false)
 	if err != nil {
-		return nil, fmt.Errorf("message processing failed: %w", err)
+		return nil, err
 	}
 
-	if result == nil {
-		return nil, fmt.Errorf("processor returned nil result")
-	}
-
-	// Check if the user returned StreamingEvents for non-streaming request.
-	if result.StreamingEvents != nil {
-		log.Infof("User returned StreamingEvents for non-streaming request, ignoring")
-	}
-
-	if result.Result == nil {
-		return nil, fmt.Errorf("processor returned nil result for non-streaming request")
-	}
-
-	if result.Result.GetMessage() != nil {
-		var contextID string
-		if request.Message.ContextID != nil {
-			contextID = *request.Message.ContextID
+	historyLength := historyLengthFromConfig(request.Configuration)
+	if !request.Configuration.IsBlocking() {
+		// returnImmediately=true: answer with the first decisive event (first
+		// persisted task snapshot or first Message); execution continues in
+		// background and results stay retrievable via GetTask/subscriptions.
+		select {
+		case out := <-ex.decisive:
+			return m.buildSendResponse(out.task, out.message, historyLength)
+		case <-ex.done:
+			// The stream closed before any decisive event: same derivation as
+			// blocking.
+			return m.buildSendResponse(ex.finalTask, ex.lastMessage, historyLength)
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
-		m.processReplyMessage(&contextID, result.Result.GetMessage())
 	}
 
-	return result.Result, nil
+	select {
+	case <-ex.done:
+		return m.buildSendResponse(ex.finalTask, ex.lastMessage, historyLength)
+	case <-ctx.Done():
+		// The request died first. The execution is detached: it keeps running
+		// and its results stay retrievable via GetTask/resubscribe.
+		return nil, ctx.Err()
+	}
 }
 
-// OnSendMessageStream handles message/stream requests.
+// OnSendMessageStream handles message/stream requests. Every event emitted
+// by the MessageProcessor is persisted and then forwarded, in order, on the returned
+// channel; the channel is closed when the round ends.
 func (m *TaskManager) OnSendMessageStream(
 	ctx context.Context,
 	request protocol.SendMessageParams,
 ) (<-chan protocol.StreamResponse, error) {
 	log.Debugf("RedisTaskManager: OnSendMessageStream for message %s", request.Message.MessageID)
 
-	m.processRequestMessage(&request.Message)
-
-	// Process configuration.
-	options := m.processConfiguration(request.Configuration)
-	options.Streaming = true // streaming mode
-	options.Tenant = request.Tenant
-
-	// Create streaming MessageHandle.
-	handle := &taskHandler{
-		manager:                m,
-		messageID:              request.Message.MessageID,
-		ctx:                    ctx,
-		subscriberBufSize:      m.options.TaskSubscriberBufSize,
-		subscriberBlockingSend: m.options.TaskSubscriberBlockingSend,
-	}
-
-	// Call user's message processor.
-	result, err := m.processor.ProcessMessage(ctx, request.Message, options, handle)
+	ex, err := m.prepareExecution(ctx, &request, true)
 	if err != nil {
-		return nil, fmt.Errorf("message processing failed: %w", err)
+		return nil, err
 	}
-
-	if result == nil || result.StreamingEvents == nil {
-		return nil, fmt.Errorf("processor returned nil result")
-	}
-
-	return result.StreamingEvents.Channel(), nil
+	return ex.pipe.Channel(), nil
 }
 
 // OnGetTask handles the tasks/get request.
@@ -208,71 +177,121 @@ func (m *TaskManager) OnGetTask(
 	//   - historyLength unset -> no limit (full history)
 	//   - historyLength == 0  -> no messages
 	//   - historyLength > 0   -> the most recent N messages
-	if task.ContextID != "" {
-		length := -1 // sentinel: unset -> unlimited
-		switch {
-		case params.HistoryLength == nil:
-			length = unlimitedHistoryLength
-		case *params.HistoryLength > 0:
-			length = *params.HistoryLength
-		default: // == 0 (or negative): no messages
-			task.History = nil
-		}
-		if length >= 0 {
-			history, err := m.getConversationHistory(ctx, task.ContextID, length)
-			if err != nil {
-				log.Warnf("Failed to retrieve message history for task %s: %v", params.ID, err)
-				// Continue without history rather than failing the whole request.
-			} else {
-				task.History = history
-			}
-		}
-	}
+	m.fillTaskHistory(ctx, task, params.HistoryLength)
 
 	return task, nil
 }
 
-// OnCancelTask handles the tasks/cancel request.
+// fillTaskHistory shapes a response task's History per the v1.0 historyLength
+// semantics: unset means the full conversation history, 0 (or negative) means
+// none, N means the most recent N messages.
+func (m *TaskManager) fillTaskHistory(ctx context.Context, task *protocol.Task, historyLength *int) {
+	if task.ContextID == "" {
+		return
+	}
+	length := unlimitedHistoryLength
+	switch {
+	case historyLength == nil:
+	case *historyLength > 0:
+		length = *historyLength
+	default: // == 0 (or negative): no messages
+		task.History = nil
+		return
+	}
+	history, err := m.getConversationHistory(ctx, task.ContextID, length)
+	if err != nil {
+		log.Warnf("Failed to retrieve message history for task %s: %v", task.ID, err)
+		// Continue without history rather than failing the whole request.
+		return
+	}
+	task.History = history
+}
+
+// historyLengthFromConfig extracts the response historyLength, nil-safe.
+func historyLengthFromConfig(config *protocol.SendMessageConfiguration) *int {
+	if config == nil {
+		return nil
+	}
+	return config.HistoryLength
+}
+
+// buildSendResponse derives the unary result: the task snapshot when a task
+// exists (history shaped per the request's historyLength), otherwise the last
+// message; an execution that produced neither is an MessageProcessor bug.
+func (m *TaskManager) buildSendResponse(
+	task *protocol.Task,
+	message *protocol.Message,
+	historyLength *int,
+) (*protocol.SendMessageResponse, error) {
+	if task != nil {
+		m.fillTaskHistory(context.Background(), task, historyLength)
+		return protocol.NewSendMessageResponseTask(task), nil
+	}
+	if message != nil {
+		return protocol.NewSendMessageResponseMessage(message), nil
+	}
+	return nil, jsonrpc.ErrInternalError("processor produced no result")
+}
+
+// OnCancelTask handles the tasks/cancel request. For a live execution it
+// cancels the MessageProcessor's context and returns the currently stored snapshot;
+// the engine persists the terminal state when the MessageProcessor winds down (the
+// MessageProcessor's own terminal event wins if it arrives). Without a live
+// execution a non-terminal task is marked CANCELED directly.
 func (m *TaskManager) OnCancelTask(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (*protocol.Task, error) {
+	m.cancelMu.RLock()
+	live, exists := m.executions[params.ID]
+	m.cancelMu.RUnlock()
+
+	if exists {
+		// A stored terminal state is immutable even while the round is still
+		// draining: canceling it must fail like the no-live path does.
+		task, err := m.getTaskInternal(ctx, params.ID)
+		if err == nil && isFinalState(task.Status.State) {
+			return nil, taskmanager.ErrTaskNotCancelable(params.ID, task.Status.State)
+		}
+		// Flag before canceling so the engine's close rule sees the request even
+		// when the MessageProcessor reacts by closing the channel immediately.
+		live.requestCancel()
+		if err != nil {
+			// Execution registered but no task materialized yet (lazy creation).
+			return nil, err
+		}
+		return task, nil
+	}
+
 	task, err := m.getTaskInternal(ctx, params.ID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Check if task is already in a final state.
+	// A task already in a terminal state cannot be canceled.
 	if isFinalState(task.Status.State) {
 		return nil, taskmanager.ErrTaskNotCancelable(params.ID, task.Status.State)
 	}
 
-	var cancelFound bool
-	m.cancelMu.Lock()
-	cancel, exists := m.cancels[params.ID]
-	if exists {
-		cancel() // Call the cancel function.
-		cancelFound = true
-		// Don't delete the context here - let the processor goroutine clean up.
+	// No live execution: persist CANCELED, then broadcast it (persist before
+	// broadcast) and close the task's subscribers.
+	event := &protocol.TaskStatusUpdateEvent{
+		TaskID:    task.ID,
+		ContextID: task.ContextID,
+		Status: protocol.TaskStatus{
+			State:     protocol.TaskStateCanceled,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		},
+		Final: true,
 	}
-	m.cancelMu.Unlock()
-
-	// If no cancellation function was found, log a warning.
-	if !cancelFound {
-		log.Warnf("Warning: No cancellation function found for task %s", params.ID)
-	}
-
-	// Update task state to Cancelled.
-	task.Status.State = protocol.TaskStateCanceled
-	task.Status.Timestamp = time.Now().UTC().Format(time.RFC3339)
-
-	// Store updated task.
-	if err := m.storeTask(ctx, task); err != nil {
+	task.Status = event.Status
+	// Persist with a background context (like every engine write): the CANCELED
+	// state must land even if the cancel request's own context is already done.
+	if err := m.storeTask(context.Background(), task); err != nil {
 		log.Errorf("Error storing cancelled task %s: %v", params.ID, err)
 		return nil, err
 	}
-
-	// Clean up subscribers.
+	m.notifySubscribers(params.ID, protocol.NewStreamResponseStatusUpdate(event))
 	m.cleanSubscribers(params.ID)
 
 	return task, nil
@@ -413,7 +432,13 @@ func (m *TaskManager) OnResubscribe(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (<-chan protocol.StreamResponse, error) {
-	// Check if task exists.
+	// Read the snapshot and register the subscriber under subMu: an engine
+	// broadcast serializes with this section, so every update either precedes
+	// the snapshot (already persisted, hence included) or is delivered to the
+	// subscriber after the first frame — no gap, snapshot always first.
+	m.subMu.Lock()
+	defer m.subMu.Unlock()
+
 	task, err := m.getTaskInternal(ctx, params.ID)
 	if err != nil {
 		return nil, err
@@ -426,27 +451,19 @@ func (m *TaskManager) OnResubscribe(
 			fmt.Sprintf("subscribe to task %s in terminal state %s", params.ID, task.Status.State))
 	}
 
-	bufSize := m.options.TaskSubscriberBufSize
-	if bufSize <= 0 {
-		bufSize = defaultTaskSubscriberBufferSize
-	}
-
-	subscriber := NewTaskSubscriber(
+	subscriber := newTaskSubscriber(
 		params.ID,
-		bufSize,
-		WithSubscriberBlockingSend(m.options.TaskSubscriberBlockingSend),
-		WithSubscriberSendHook(m.sendStreamingEventHook(params.ID)),
+		m.options.TaskSubscriberBufSize,
+		m.options.TaskSubscriberBlockingSend,
 	)
 
-	// v1.0: the first stream event must be the current Task snapshot. getTaskInternal
-	// already returns a fresh copy, so it is safe to hand to the subscriber.
-	if err := subscriber.Send(protocol.StreamResponse{Result: task}); err != nil {
+	// v1.0: the first stream event must be the current Task snapshot.
+	// getTaskInternal returns a fresh copy, safe to hand to the subscriber.
+	if err := subscriber.Send(protocol.NewStreamResponseTask(task)); err != nil {
 		subscriber.Close()
 		return nil, err
 	}
-
-	// Add to subscribers list.
-	m.addSubscriber(params.ID, subscriber)
+	m.subscribers[params.ID] = append(m.subscribers[params.ID], subscriber)
 
 	return subscriber.Channel(), nil
 }
@@ -454,56 +471,6 @@ func (m *TaskManager) OnResubscribe(
 // =============================================================================
 // Internal helper methods
 // =============================================================================
-
-// processConfiguration processes and normalizes configuration.
-func (m *TaskManager) processConfiguration(
-	config *protocol.SendMessageConfiguration,
-) taskmanager.ProcessOptions {
-	result := taskmanager.ProcessOptions{
-		// v1.0 default: returnImmediately=false means the request blocks until a
-		// terminal/interrupted state, so a missing configuration is blocking.
-		Blocking:      true,
-		HistoryLength: 0,
-	}
-
-	if config == nil {
-		return result
-	}
-
-	// Process Blocking configuration (v1: ReturnImmediately with inverted semantics).
-	result.Blocking = config.IsBlocking()
-
-	// Process HistoryLength configuration.
-	if config.HistoryLength != nil && *config.HistoryLength > 0 {
-		result.HistoryLength = *config.HistoryLength
-	}
-
-	// Process PushNotificationConfig (flat TaskPushNotificationConfig -> details view).
-	if config.PushConfig != nil {
-		result.PushNotificationConfig = config.PushConfig.Details()
-	}
-
-	// Process AcceptedOutputModes configuration.
-	if config.AcceptedOutputModes != nil {
-		result.AcceptedOutputModes = config.AcceptedOutputModes
-	}
-
-	return result
-}
-
-// processRequestMessage processes and stores the request message.
-func (m *TaskManager) processRequestMessage(message *protocol.Message) {
-	if message.MessageID == "" {
-		message.MessageID = protocol.GenerateMessageID()
-	}
-
-	if message.ContextID == nil {
-		contextID := protocol.GenerateContextID()
-		message.ContextID = &contextID
-	}
-
-	m.storeMessage(context.Background(), *message)
-}
 
 // processReplyMessage processes and stores the reply message.
 func (m *TaskManager) processReplyMessage(ctxID *string, message *protocol.Message) {
@@ -518,26 +485,6 @@ func (m *TaskManager) processReplyMessage(ctxID *string, message *protocol.Messa
 	}
 
 	m.storeMessage(context.Background(), *message)
-}
-
-// sendStreamingEventHook is a hook for sending streaming events
-// used to set contextID for task status update, task artifact update, message and task events
-func (m *TaskManager) sendStreamingEventHook(ctxID string) func(event protocol.StreamResponse) error {
-	return func(event protocol.StreamResponse) error {
-		if event.GetStatusUpdate() != nil && event.GetStatusUpdate().ContextID == "" {
-			event.GetStatusUpdate().ContextID = ctxID
-		}
-		if event.GetArtifactUpdate() != nil && event.GetArtifactUpdate().ContextID == "" {
-			event.GetArtifactUpdate().ContextID = ctxID
-		}
-		if event.GetMessage() != nil {
-			m.processReplyMessage(&ctxID, event.GetMessage())
-		}
-		if event.GetTask() != nil && event.GetTask().ContextID == "" {
-			event.GetTask().ContextID = ctxID
-		}
-		return nil
-	}
 }
 
 // storeMessage stores a message in Redis and updates conversation history.
@@ -659,15 +606,6 @@ func (m *TaskManager) storeTask(ctx context.Context, task *protocol.Task) error 
 	return nil
 }
 
-// deleteTask deletes a task from Redis.
-func (m *TaskManager) deleteTask(ctx context.Context, taskID string) error {
-	taskKey := taskPrefix + taskID
-	if err := m.client.Del(ctx, taskKey).Err(); err != nil {
-		return fmt.Errorf("failed to delete task: %w", err)
-	}
-	return nil
-}
-
 // isFinalState checks if a TaskState represents a terminal state.
 func isFinalState(state protocol.TaskState) bool {
 	return state == protocol.TaskStateCompleted ||
@@ -676,30 +614,55 @@ func isFinalState(state protocol.TaskState) bool {
 		state == protocol.TaskStateRejected
 }
 
-// addSubscriber adds a subscriber to the list.
-func (m *TaskManager) addSubscriber(taskID string, sub *TaskSubscriber) {
-	m.subMu.Lock()
-	defer m.subMu.Unlock()
-
-	if _, exists := m.subscribers[taskID]; !exists {
-		m.subscribers[taskID] = make([]*TaskSubscriber, 0)
-	}
-	m.subscribers[taskID] = append(m.subscribers[taskID], sub)
-	log.Debugf("Added subscriber for task %s", taskID)
+// isSuspendedState reports whether the state suspends the task awaiting a
+// follow-up message (§3.4): the round has stopped working, but the task lives
+// on for a continuation.
+func isSuspendedState(state protocol.TaskState) bool {
+	return state == protocol.TaskStateInputRequired ||
+		state == protocol.TaskStateAuthRequired
 }
 
-// cleanSubscribers cleans up all subscribers for a task.
+// registerExecution publishes the cancel handle of a starting run, or rejects
+// the round: a task admits at most one live run — concurrent rounds would
+// interleave their writes and close rules (and orphan cancel handles).
+func (m *TaskManager) registerExecution(taskID string, live *liveExecution) error {
+	m.cancelMu.Lock()
+	defer m.cancelMu.Unlock()
+	if _, exists := m.executions[taskID]; exists {
+		return jsonrpc.ErrInvalidParams(
+			fmt.Sprintf("task %s already has an active execution", taskID))
+	}
+	m.executions[taskID] = live
+	return nil
+}
+
+// deregisterExecution removes the handle at engine end. It only removes its
+// own entry so a follow-up round on the same task is never evicted.
+func (m *TaskManager) deregisterExecution(taskID string, live *liveExecution) {
+	m.cancelMu.Lock()
+	defer m.cancelMu.Unlock()
+	if current, ok := m.executions[taskID]; ok && current == live {
+		delete(m.executions, taskID)
+	}
+}
+
+// cleanSubscribers closes and removes all subscribers for a task. Subscribers
+// are closed outside subMu so a stuck blocking send can never wedge the
+// manager-wide lock.
 func (m *TaskManager) cleanSubscribers(taskID string) {
 	m.subMu.Lock()
-	defer m.subMu.Unlock()
-
-	if subs, exists := m.subscribers[taskID]; exists {
-		for _, sub := range subs {
-			sub.Close()
-		}
-		delete(m.subscribers, taskID)
-		log.Debugf("Cleaned subscribers for task %s", taskID)
+	subs, exists := m.subscribers[taskID]
+	if !exists {
+		m.subMu.Unlock()
+		return
 	}
+	delete(m.subscribers, taskID)
+	m.subMu.Unlock()
+
+	for _, sub := range subs {
+		sub.Close()
+	}
+	log.Debugf("Cleaned subscribers for task %s", taskID)
 }
 
 // notifySubscribers notifies all subscribers of a task.
@@ -711,13 +674,13 @@ func (m *TaskManager) notifySubscribers(taskID string, event protocol.StreamResp
 		return
 	}
 
-	subsCopy := make([]*TaskSubscriber, len(subs))
+	subsCopy := make([]*taskSubscriber, len(subs))
 	copy(subsCopy, subs)
 	m.subMu.RUnlock()
 
 	log.Debugf("Notifying %d subscribers for task %s", len(subsCopy), taskID)
 
-	var failedSubscribers []*TaskSubscriber
+	var failedSubscribers []*taskSubscriber
 
 	for _, sub := range subsCopy {
 		if sub.Closed() {
@@ -739,26 +702,29 @@ func (m *TaskManager) notifySubscribers(taskID string, event protocol.StreamResp
 	}
 }
 
-// cleanupFailedSubscribers cleans up failed or closed subscribers.
-func (m *TaskManager) cleanupFailedSubscribers(taskID string, failedSubscribers []*TaskSubscriber) {
+// cleanupFailedSubscribers removes failed or closed subscribers from the map
+// and closes them. Removed subscribers are closed outside subMu so a stuck
+// blocking send can never wedge the manager-wide lock; an evicted subscriber
+// must be closed or its consumer's range loop never ends.
+func (m *TaskManager) cleanupFailedSubscribers(taskID string, failedSubscribers []*taskSubscriber) {
 	m.subMu.Lock()
-	defer m.subMu.Unlock()
 
 	subs, exists := m.subscribers[taskID]
 	if !exists {
+		m.subMu.Unlock()
 		return
 	}
 
 	// Filter out failed subscribers.
-	filteredSubs := make([]*TaskSubscriber, 0, len(subs))
-	removedCount := 0
+	filteredSubs := make([]*taskSubscriber, 0, len(subs))
+	removedSubs := make([]*taskSubscriber, 0, len(failedSubscribers))
 
 	for _, sub := range subs {
 		shouldRemove := false
 		for _, failedSub := range failedSubscribers {
 			if sub == failedSub {
 				shouldRemove = true
-				removedCount++
+				removedSubs = append(removedSubs, sub)
 				break
 			}
 		}
@@ -767,36 +733,46 @@ func (m *TaskManager) cleanupFailedSubscribers(taskID string, failedSubscribers 
 		}
 	}
 
-	if removedCount > 0 {
+	if len(removedSubs) > 0 {
 		m.subscribers[taskID] = filteredSubs
-		log.Debugf("Removed %d failed subscribers for task %s", removedCount, taskID)
+		log.Debugf("Removed %d failed subscribers for task %s", len(removedSubs), taskID)
 
 		// If there are no subscribers left, delete the entire entry.
 		if len(filteredSubs) == 0 {
 			delete(m.subscribers, taskID)
 		}
 	}
+	m.subMu.Unlock()
+
+	for _, sub := range removedSubs {
+		sub.Close()
+	}
 }
 
 // Close closes the Redis client and cleans up resources.
 func (m *TaskManager) Close() error {
-	// Cancel all active contexts.
+	// Cancel every live MessageProcessor run; the detached engines wind down when
+	// the Executors close their channels.
 	m.cancelMu.Lock()
-	for _, cancel := range m.cancels {
-		cancel()
+	for _, live := range m.executions {
+		live.cancel()
 	}
-	m.cancels = make(map[string]context.CancelFunc)
+	m.executions = make(map[string]*liveExecution)
 	m.cancelMu.Unlock()
 
-	// Close all subscriber channels.
+	// Collect subscribers under subMu, then close them outside the lock so a
+	// stuck blocking send can never wedge the manager-wide lock.
 	m.subMu.Lock()
+	subsToClose := make([]*taskSubscriber, 0)
 	for _, subscribers := range m.subscribers {
-		for _, sub := range subscribers {
-			sub.Close()
-		}
+		subsToClose = append(subsToClose, subscribers...)
 	}
-	m.subscribers = make(map[string][]*TaskSubscriber)
+	m.subscribers = make(map[string][]*taskSubscriber)
 	m.subMu.Unlock()
+
+	for _, sub := range subsToClose {
+		sub.Close()
+	}
 
 	// Close the Redis client.
 	return m.client.Close()

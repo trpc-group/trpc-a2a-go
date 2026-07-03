@@ -434,8 +434,8 @@ func createTextMessage(text string) protocol.Message {
 
 // setupAuthServer creates and starts a test server with the provided auth provider.
 func setupAuthServer(t *testing.T, provider auth.Provider) (taskmanager.TaskManager, *httptest.Server) {
-	taskProcessor := &echoProcessor{}
-	taskMgr := newMockTaskManager(taskProcessor)
+	taskExecutor := &echoExecutor{}
+	taskMgr := newMockTaskManager(taskExecutor)
 
 	agentCard := server.AgentCard{
 		Name:    "Auth Test Server",
@@ -709,16 +709,16 @@ func (h *mockTaskHandle) AddResponse(response protocol.Message) error {
 	return nil
 }
 
-// echoProcessor is a simple task processor that echoes messages.
-type echoProcessor struct{}
+// echoExecutor is a simple processor that echoes messages.
+type echoExecutor struct{}
 
-var _ taskmanager.MessageProcessor = (*echoProcessor)(nil)
+var _ taskmanager.MessageProcessor = (*echoExecutor)(nil)
 
-// ProcessMessage simply echoes the received message.
-func (p *echoProcessor) ProcessMessage(
-	ctx context.Context, msg protocol.Message, opts taskmanager.ProcessOptions, handle taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
-	text := msg.Parts[0].TextContent()
+// ProcessMessage simply echoes the received message as a pure-message reply.
+func (p *echoExecutor) ProcessMessage(
+	ctx context.Context, ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+	text := ec.Message.Parts[0].TextContent()
 	if text == "" {
 		return nil, fmt.Errorf("expected text content, got empty")
 	}
@@ -730,7 +730,8 @@ func (p *echoProcessor) ProcessMessage(
 		},
 	}
 
-	return &taskmanager.MessageProcessingResult{
-		Result: protocol.NewSendMessageResponseMessage(&response),
-	}, nil
+	out := make(chan protocol.StreamEvent, 1)
+	out <- &response
+	close(out)
+	return out, nil
 }

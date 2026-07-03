@@ -219,9 +219,9 @@ type AuthenticationInfo struct {
 }
 
 // PushNotificationConfig holds the delivery details for task push notifications.
-// It is the internal "details" view used by SendMessageConfiguration and
-// ProcessOptions; the same fields are carried directly on
-// TaskPushNotificationConfig for the push-config RPC methods.
+// It is the internal "details" view used by SendMessageConfiguration; the same
+// fields are carried directly on TaskPushNotificationConfig for the push-config
+// RPC methods.
 type PushNotificationConfig struct {
 	ID             string              `json:"id,omitempty"`
 	URL            string              `json:"url"`
@@ -246,7 +246,7 @@ type TaskPushNotificationConfig struct {
 }
 
 // Details returns the delivery details of this config as a PushNotificationConfig
-// (the view consumed by MessageProcessor via ProcessOptions).
+// (the flattened v1.0 fields viewed as the delivery-endpoint object).
 func (c *TaskPushNotificationConfig) Details() *PushNotificationConfig {
 	if c == nil {
 		return nil
