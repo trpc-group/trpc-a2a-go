@@ -56,11 +56,19 @@ type TaskManager struct {
 	// subscribers is a map of task IDs to subscriber channels.
 	subscribers map[string][]*taskSubscriber
 
-	// cancelMu is a mutex for the executions map.
+	// cancelMu is a mutex for the executions map and the closed flag.
 	cancelMu sync.RWMutex
 	// executions maps task IDs to live execution handles so OnCancelTask can
 	// cancel the MessageProcessor's context.
 	executions map[string]*liveExecution
+	// closed rejects new runs once Close has begun tearing the manager down.
+	closed bool
+	// engineWg counts live drain engines so Close can wait for their final
+	// persists before closing the Redis client.
+	engineWg sync.WaitGroup
+	// closeOnce/closeErr make Close idempotent.
+	closeOnce sync.Once
+	closeErr  error
 
 	// options
 	options *TaskManagerOptions
@@ -160,6 +168,19 @@ func (m *TaskManager) OnSendMessageStream(
 	if err != nil {
 		return nil, err
 	}
+	// Tie the pipe to the request: the execution itself stays detached (a
+	// client disconnect must not cancel the work), but once the stream's
+	// consumer is gone the pipe has no reader — close it so a blocking-send
+	// engine can never park on it and the server-side drain ends instead of
+	// leaking.
+	pipe := ex.pipe
+	go func() {
+		select {
+		case <-ctx.Done():
+			pipe.Close()
+		case <-pipe.done:
+		}
+	}()
 	return ex.pipe.Channel(), nil
 }
 
@@ -237,32 +258,59 @@ func (m *TaskManager) buildSendResponse(
 // cancels the MessageProcessor's context and returns the currently stored snapshot;
 // the engine persists the terminal state when the MessageProcessor winds down (the
 // MessageProcessor's own terminal event wins if it arrives). Without a live
-// execution a non-terminal task is marked CANCELED directly.
+// execution a non-terminal task is marked CANCELED directly, holding the
+// execution slot with a sentinel so no continuation can start (and write)
+// concurrently.
 func (m *TaskManager) OnCancelTask(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (*protocol.Task, error) {
-	m.cancelMu.RLock()
-	live, exists := m.executions[params.ID]
-	m.cancelMu.RUnlock()
+	for {
+		live, sentinel := m.claimCancelSlot(params.ID)
+		if live == nil {
+			defer m.deregisterExecution(params.ID, sentinel)
+			return m.cancelWithoutLiveRun(ctx, params)
+		}
 
-	if exists {
 		// A stored terminal state is immutable even while the round is still
 		// draining: canceling it must fail like the no-live path does.
 		task, err := m.getTaskInternal(ctx, params.ID)
+		if err != nil && !errors.Is(err, taskmanager.ErrTaskNotFoundSentinel) {
+			// Storage error, not a missing task: canceling is irreversible, so
+			// do not cancel a healthy run because the lookup blipped.
+			return nil, err
+		}
 		if err == nil && isFinalState(task.Status.State) {
 			return nil, taskmanager.ErrTaskNotCancelable(params.ID, task.Status.State)
 		}
 		// Flag before canceling so the engine's close rule sees the request even
 		// when the MessageProcessor reacts by closing the channel immediately.
 		live.requestCancel()
+
+		if m.liveRun(params.ID) != live {
+			// The run yielded (suspend) or finished while we were canceling, so
+			// its close rule will not persist CANCELED on our behalf. Reassess:
+			// the next pass either claims the free slot and persists CANCELED
+			// itself, or cancels the continuation that took the slot.
+			continue
+		}
+
 		if err != nil {
 			// Execution registered but no task materialized yet (lazy creation).
 			return nil, err
 		}
 		return task, nil
 	}
+}
 
+// cancelWithoutLiveRun persists CANCELED for a task with no live execution:
+// persist first, then broadcast, then close the task's subscribers. The caller
+// holds the task's execution slot (sentinel), making this the task's single
+// writer.
+func (m *TaskManager) cancelWithoutLiveRun(
+	ctx context.Context,
+	params protocol.TaskIDParams,
+) (*protocol.Task, error) {
 	task, err := m.getTaskInternal(ctx, params.ID)
 	if err != nil {
 		return nil, err
@@ -273,8 +321,6 @@ func (m *TaskManager) OnCancelTask(
 		return nil, taskmanager.ErrTaskNotCancelable(params.ID, task.Status.State)
 	}
 
-	// No live execution: persist CANCELED, then broadcast it (persist before
-	// broadcast) and close the task's subscribers.
 	event := &protocol.TaskStatusUpdateEvent{
 		TaskID:    task.ID,
 		ContextID: task.ContextID,
@@ -432,13 +478,9 @@ func (m *TaskManager) OnResubscribe(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (<-chan protocol.StreamResponse, error) {
-	// Read the snapshot and register the subscriber under subMu: an engine
-	// broadcast serializes with this section, so every update either precedes
-	// the snapshot (already persisted, hence included) or is delivered to the
-	// subscriber after the first frame — no gap, snapshot always first.
-	m.subMu.Lock()
-	defer m.subMu.Unlock()
-
+	// The snapshot read happens OUTSIDE subMu: getTaskInternal is a network
+	// round-trip and subMu sits on every broadcast's fan-out path — holding it
+	// across a slow Redis call would stall every stream in the process.
 	task, err := m.getTaskInternal(ctx, params.ID)
 	if err != nil {
 		return nil, err
@@ -457,15 +499,59 @@ func (m *TaskManager) OnResubscribe(
 		m.options.TaskSubscriberBlockingSend,
 	)
 
-	// v1.0: the first stream event must be the current Task snapshot.
-	// getTaskInternal returns a fresh copy, safe to hand to the subscriber.
+	// v1.0: the first stream event must be the current Task snapshot. The
+	// subscriber is not registered yet, so nothing can precede this frame.
 	if err := subscriber.Send(protocol.NewStreamResponseTask(task)); err != nil {
 		subscriber.Close()
 		return nil, err
 	}
+	m.subMu.Lock()
 	m.subscribers[params.ID] = append(m.subscribers[params.ID], subscriber)
+	m.subMu.Unlock()
+
+	// The snapshot predates the registration, so an update persisted between
+	// the two may be in neither. Re-read and, when anything changed, send a
+	// second snapshot superseding whatever was missed: persist-before-broadcast
+	// guarantees the re-read covers every event broadcast before registration.
+	// (Boundary events may be delivered both in a snapshot and as themselves —
+	// at-least-once, as before.)
+	current, err := m.getTaskInternal(ctx, params.ID)
+	if err == nil && taskChanged(task, current) {
+		if isFinalState(current.Status.State) {
+			// The task ended between the two reads: its terminal broadcast (and
+			// cleanSubscribers) may have run before the registration, which
+			// would leave this subscriber open forever. Reject like the
+			// up-front terminal check does; nothing was delivered to the caller.
+			m.cleanupFailedSubscribers(params.ID, []*taskSubscriber{subscriber})
+			return nil, taskmanager.ErrUnsupportedOperation(
+				fmt.Sprintf("subscribe to task %s in terminal state %s", params.ID, current.Status.State))
+		}
+		if err := subscriber.Send(protocol.NewStreamResponseTask(current)); err != nil {
+			log.Warnf("RedisTaskManager: failed to send refreshed snapshot for task %s: %v", params.ID, err)
+		}
+	}
+
+	// Tie the subscription to the request: when the client goes away the
+	// subscriber is removed and closed, so the server-side drain ends and the
+	// slot is not leaked (a suspended task may never reach a terminal state
+	// that would clean it).
+	go func() {
+		select {
+		case <-ctx.Done():
+			m.cleanupFailedSubscribers(params.ID, []*taskSubscriber{subscriber})
+		case <-subscriber.done:
+		}
+	}()
 
 	return subscriber.Channel(), nil
+}
+
+// taskChanged reports whether two snapshots of the same task differ in what a
+// stream conveys: status or artifact count.
+func taskChanged(before, after *protocol.Task) bool {
+	return before.Status.State != after.Status.State ||
+		before.Status.Timestamp != after.Status.Timestamp ||
+		len(before.Artifacts) != len(after.Artifacts)
 }
 
 // =============================================================================
@@ -575,12 +661,18 @@ func (m *TaskManager) getConversationHistory(
 	return messages, nil
 }
 
-// getTaskInternal retrieves a task from Redis.
+// getTaskInternal retrieves a task from Redis. A missing key maps to
+// ErrTaskNotFound; any other failure is a storage error and is reported as
+// such — callers that take irreversible actions on not-found (cancel paths)
+// must be able to tell the two apart.
 func (m *TaskManager) getTaskInternal(ctx context.Context, taskID string) (*protocol.Task, error) {
 	taskKey := taskPrefix + taskID
 	taskBytes, err := m.client.Get(ctx, taskKey).Bytes()
 	if err != nil {
-		return nil, taskmanager.ErrTaskNotFound(taskID)
+		if errors.Is(err, redis.Nil) {
+			return nil, taskmanager.ErrTaskNotFound(taskID)
+		}
+		return nil, fmt.Errorf("failed to load task %s: %w", taskID, err)
 	}
 
 	var task protocol.Task
@@ -628,12 +720,47 @@ func isSuspendedState(state protocol.TaskState) bool {
 func (m *TaskManager) registerExecution(taskID string, live *liveExecution) error {
 	m.cancelMu.Lock()
 	defer m.cancelMu.Unlock()
+	if m.closed {
+		return jsonrpc.ErrInternalError("task manager is closed")
+	}
 	if _, exists := m.executions[taskID]; exists {
 		return jsonrpc.ErrInvalidParams(
 			fmt.Sprintf("task %s already has an active execution", taskID))
 	}
 	m.executions[taskID] = live
+	// Counted under the registry lock so Close (which flips m.closed first)
+	// can never begin waiting before a just-admitted run is counted.
+	m.engineWg.Add(1)
 	return nil
+}
+
+// releaseExecution aborts a registered run whose engine never started: it
+// undoes registerExecution's registration and engine count.
+func (m *TaskManager) releaseExecution(taskID string, live *liveExecution) {
+	m.deregisterExecution(taskID, live)
+	m.engineWg.Done()
+}
+
+// claimCancelSlot atomically returns the task's live run or — when there is
+// none — claims the execution slot with a sentinel, so a no-live cancel's
+// CANCELED write gets the same single-writer guarantee as a run: no
+// continuation can register (and then write) concurrently with it.
+func (m *TaskManager) claimCancelSlot(taskID string) (live *liveExecution, sentinel *liveExecution) {
+	m.cancelMu.Lock()
+	defer m.cancelMu.Unlock()
+	if exec, ok := m.executions[taskID]; ok {
+		return exec, nil
+	}
+	sentinel = &liveExecution{cancel: func() {}}
+	m.executions[taskID] = sentinel
+	return nil, sentinel
+}
+
+// liveRun returns the task's currently registered execution handle, if any.
+func (m *TaskManager) liveRun(taskID string) *liveExecution {
+	m.cancelMu.RLock()
+	defer m.cancelMu.RUnlock()
+	return m.executions[taskID]
 }
 
 // deregisterExecution removes the handle at engine end. It only removes its
@@ -749,31 +876,50 @@ func (m *TaskManager) cleanupFailedSubscribers(taskID string, failedSubscribers 
 	}
 }
 
-// Close closes the Redis client and cleans up resources.
+// Close tears the manager down: it refuses new runs, cancels every live
+// MessageProcessor run, closes all streams, waits for the detached engines to wind
+// down (their close-rule persists land while the client is still open), and
+// only then closes the Redis client. A MessageProcessor is expected to close its
+// channel once its ctx is canceled; Close blocks until every run has.
+// It is safe to call Close multiple times.
 func (m *TaskManager) Close() error {
-	// Cancel every live MessageProcessor run; the detached engines wind down when
-	// the Executors close their channels.
-	m.cancelMu.Lock()
-	for _, live := range m.executions {
-		live.cancel()
-	}
-	m.executions = make(map[string]*liveExecution)
-	m.cancelMu.Unlock()
+	m.closeOnce.Do(func() {
+		// Refuse new runs, request cancellation of every live one, and collect
+		// their stream pipes: closing a pipe unblocks an engine parked on a
+		// blocking pipe send.
+		m.cancelMu.Lock()
+		m.closed = true
+		pipes := make([]*taskSubscriber, 0, len(m.executions))
+		for _, live := range m.executions {
+			live.requestCancel()
+			if live.pipe != nil {
+				pipes = append(pipes, live.pipe)
+			}
+		}
+		m.cancelMu.Unlock()
+		for _, pipe := range pipes {
+			pipe.Close()
+		}
 
-	// Collect subscribers under subMu, then close them outside the lock so a
-	// stuck blocking send can never wedge the manager-wide lock.
-	m.subMu.Lock()
-	subsToClose := make([]*taskSubscriber, 0)
-	for _, subscribers := range m.subscribers {
-		subsToClose = append(subsToClose, subscribers...)
-	}
-	m.subscribers = make(map[string][]*taskSubscriber)
-	m.subMu.Unlock()
+		// Close all fan-out subscribers (outside subMu, so a stuck blocking
+		// send can never wedge the manager-wide lock) — engine broadcasts must
+		// not be able to block either.
+		m.subMu.Lock()
+		subsToClose := make([]*taskSubscriber, 0)
+		for _, subscribers := range m.subscribers {
+			subsToClose = append(subsToClose, subscribers...)
+		}
+		m.subscribers = make(map[string][]*taskSubscriber)
+		m.subMu.Unlock()
+		for _, sub := range subsToClose {
+			sub.Close()
+		}
 
-	for _, sub := range subsToClose {
-		sub.Close()
-	}
+		// Wait for the detached engines: their final persists (close-rule
+		// CANCELED) must land while the Redis client is still usable.
+		m.engineWg.Wait()
 
-	// Close the Redis client.
-	return m.client.Close()
+		m.closeErr = m.client.Close()
+	})
+	return m.closeErr
 }

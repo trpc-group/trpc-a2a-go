@@ -50,6 +50,12 @@ type ExecContext struct {
 	// AcceptedOutputModes is the client's declared list of accepted output
 	// modes, when provided.
 	AcceptedOutputModes []string
+
+	// PushConfig is the push-notification configuration carried inline on the
+	// send request (configuration.pushNotificationConfig), when provided. The
+	// framework passes it through without registering it: honoring it is the
+	// MessageProcessor's decision.
+	PushConfig *protocol.TaskPushNotificationConfig
 }
 
 // MessageProcessor is the single interface implemented by users to define an agent's
@@ -86,6 +92,13 @@ type ExecContext struct {
 //   - after a CancelTask-triggered ctx cancellation: closing without a
 //     terminal state leads the framework to mark the task CANCELED on the
 //     processor's behalf.
+//
+// A terminal or suspend-state status event ends the round's writes early: a
+// suspend event yields the task — the framework immediately admits a
+// continuation, so this round no longer owns the task and any events it emits
+// afterwards are discarded (close the channel after suspending). The
+// message/stream response stream ends at the terminal or suspend frame; the
+// channel itself is still drained until closed.
 //
 // ctx is canceled when the task is canceled via CancelTask. A client
 // disconnect does NOT cancel ctx: the work keeps running and its results
@@ -138,8 +151,11 @@ type TaskManager interface {
 	) (*protocol.Task, error)
 
 	// OnCancelTask handles a request corresponding to the 'tasks/cancel' RPC method.
-	// It cancels the context passed to the running MessageProcessor and returns the
-	// task state after the cancellation attempt.
+	// With a live execution it cancels the context passed to the running
+	// MessageProcessor and returns the current (possibly still non-terminal) task
+	// snapshot: the terminal CANCELED state is persisted by the close rule when
+	// the MessageProcessor winds down, and a terminal state the MessageProcessor emits
+	// itself wins. Without a live execution CANCELED is persisted before returning.
 	OnCancelTask(
 		ctx context.Context,
 		params protocol.TaskIDParams,

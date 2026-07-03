@@ -49,6 +49,10 @@ type liveExecution struct {
 	// (task marked CANCELED) from an processor finishing in submitted/working
 	// without a conclusion (task marked FAILED).
 	cancelRequested atomic.Bool
+	// pipe is the message/stream response pipe (nil for unary requests). It is
+	// kept on the handle so manager Close can end every in-flight stream and
+	// unblock an engine parked on a blocking pipe send.
+	pipe *taskSubscriber
 }
 
 // requestCancel records the cancel request and cancels the MessageProcessor context.
@@ -57,13 +61,15 @@ func (le *liveExecution) requestCancel() {
 	le.cancel()
 }
 
-// engine consume modes: after a terminal event or a contract violation the
-// channel is still drained to closure (senders never leak) but events are
+// engine consume modes: after a terminal event, a contract violation, or a
+// yield (suspend state, §3.4 — ownership moved to a possible continuation)
+// the channel is still drained to closure (senders never leak) but events are
 // discarded.
 const (
 	engineConsuming = iota
 	engineDrainTerminal
 	engineDrainViolation
+	engineDrainYielded
 )
 
 // sendOutcome is a message-or-task result candidate for message/send: the
@@ -96,6 +102,10 @@ type execution struct {
 	// unary result on it: a continuation round that only emits Messages
 	// answers with the last Message, not the untouched task snapshot.
 	taskTouched bool
+	// yielded records that this round emitted a suspend state (§3.4) and gave
+	// the task up: a continuation may already own it, so later events from
+	// this round are discarded and the close rules are skipped.
+	yielded bool
 
 	// pipe is the message/stream request pipe; nil for message/send.
 	pipe *taskSubscriber
@@ -125,39 +135,13 @@ func (m *TaskManager) prepareExecution(
 		message.MessageID = protocol.GenerateMessageID()
 	}
 
-	// Continuation: a request addressing an existing task loads it, rejects
-	// terminal tasks without invoking the MessageProcessor (the task is frozen), and
-	// hands the MessageProcessor the current snapshot via ec.Task.
-	var task *protocol.Task
+	// ec.TaskID is always pre-allocated; whether a task comes into existence
+	// is up to the MessageProcessor (lazy creation).
+	continuation := message.TaskID != nil && *message.TaskID != ""
 	var taskID string
-	if message.TaskID != nil && *message.TaskID != "" {
-		loaded, err := m.getTaskInternal(ctx, *message.TaskID)
-		if err != nil {
-			return nil, err
-		}
-		if isFinalState(loaded.Status.State) {
-			return nil, jsonrpc.ErrInvalidParams(
-				fmt.Sprintf("task %s is in terminal state %s", loaded.ID, loaded.Status.State))
-		}
-		if message.ContextID != nil && *message.ContextID != "" && *message.ContextID != loaded.ContextID {
-			// A continuation must stay in the task's own conversation: a foreign
-			// contextId would resolve the wrong ec.History and contradict the
-			// task snapshot's ContextID.
-			return nil, jsonrpc.ErrInvalidParams(
-				fmt.Sprintf("message contextId does not match task %s context", loaded.ID))
-		}
-		task = loaded
-		taskID = loaded.ID
-
-		// A follow-up without an explicit contextId continues the task's
-		// conversation; otherwise ec.History would miss the earlier turns.
-		if (message.ContextID == nil || *message.ContextID == "") && task.ContextID != "" {
-			contextID := task.ContextID
-			message.ContextID = &contextID
-		}
+	if continuation {
+		taskID = *message.TaskID
 	} else {
-		// ec.TaskID is always pre-allocated; whether a task comes into
-		// existence is up to the MessageProcessor (lazy creation).
 		taskID = protocol.GenerateTaskID()
 	}
 
@@ -171,22 +155,62 @@ func (m *TaskManager) prepareExecution(
 		decisive: make(chan sendOutcome, 1),
 		done:     make(chan struct{}),
 	}
-	if task != nil {
-		// The engine's working copy must not alias ec.Task (the MessageProcessor's
-		// read-only snapshot).
-		ex.task = copyTask(task)
-	}
 	if streaming {
 		ex.pipe = newTaskSubscriber(taskID, m.options.TaskSubscriberBufSize, m.options.TaskSubscriberBlockingSend)
+		ex.live.pipe = ex.pipe
 	}
 
-	// Register-or-reject atomically under the registry lock before the message
-	// store and before the MessageProcessor is invoked: a task admits at most
-	// one live run, and a cancel arriving mid-round must find the handle. A
-	// rejected request never reaches the MessageProcessor and leaves no trace.
+	// Register-or-reject atomically under the registry lock before the
+	// continuation load, the message store, and the MessageProcessor: a task admits
+	// at most one live run, and a cancel arriving mid-round must find the
+	// handle. Registering before the load also orders the load after the
+	// previous round's (or a no-live cancel's) last write — the slot frees
+	// only after that write — so the working copy below can never be a stale
+	// pre-terminal snapshot that would smuggle writes past a terminal state.
+	// A rejected request never reaches the MessageProcessor and leaves no trace.
 	if err := m.registerExecution(taskID, ex.live); err != nil {
 		cancel()
 		return nil, err
+	}
+
+	// Continuation: a request addressing an existing task loads it, rejects
+	// terminal tasks without invoking the MessageProcessor (the task is frozen), and
+	// hands the MessageProcessor the current snapshot via ec.Task.
+	var task *protocol.Task
+	if continuation {
+		loaded, err := m.getTaskInternal(ctx, taskID)
+		if err != nil {
+			m.releaseExecution(taskID, ex.live)
+			cancel()
+			return nil, err
+		}
+		if isFinalState(loaded.Status.State) {
+			m.releaseExecution(taskID, ex.live)
+			cancel()
+			return nil, jsonrpc.ErrInvalidParams(
+				fmt.Sprintf("task %s is in terminal state %s", loaded.ID, loaded.Status.State))
+		}
+		if message.ContextID != nil && *message.ContextID != "" && *message.ContextID != loaded.ContextID {
+			m.releaseExecution(taskID, ex.live)
+			cancel()
+			// A continuation must stay in the task's own conversation: a foreign
+			// contextId would resolve the wrong ec.History and contradict the
+			// task snapshot's ContextID.
+			return nil, jsonrpc.ErrInvalidParams(
+				fmt.Sprintf("message contextId does not match task %s context", loaded.ID))
+		}
+		task = loaded
+
+		// The engine's working copy must not alias ec.Task (the MessageProcessor's
+		// read-only snapshot).
+		ex.task = copyTask(task)
+
+		// A follow-up without an explicit contextId continues the task's
+		// conversation; otherwise ec.History would miss the earlier turns.
+		if (message.ContextID == nil || *message.ContextID == "") && task.ContextID != "" {
+			contextID := task.ContextID
+			message.ContextID = &contextID
+		}
 	}
 
 	// Store the user message into the conversation, stamping ContextID when
@@ -214,21 +238,25 @@ func (m *TaskManager) prepareExecution(
 	}
 	if cfg := request.Configuration; cfg != nil {
 		ex.ec.AcceptedOutputModes = cfg.AcceptedOutputModes
+		ex.ec.PushConfig = cfg.PushConfig
 	}
 
 	events, err := m.processor.ProcessMessage(execCtx, ex.ec)
 	if err != nil {
-		m.deregisterExecution(taskID, ex.live)
+		m.releaseExecution(taskID, ex.live)
 		cancel()
 		return nil, err
 	}
 	if events == nil {
-		m.deregisterExecution(taskID, ex.live)
+		m.releaseExecution(taskID, ex.live)
 		cancel()
 		return nil, jsonrpc.ErrInternalError("processor returned nil channel")
 	}
 
-	go ex.run(events)
+	go func() {
+		defer m.engineWg.Done()
+		ex.run(events)
+	}()
 	return ex, nil
 }
 
@@ -245,6 +273,10 @@ func (ex *execution) run(events <-chan protocol.StreamEvent) {
 			continue
 		case engineDrainViolation:
 			log.Warnf("RedisTaskManager: discarding %T for task %s emitted after a contract violation",
+				event, ex.ec.TaskID)
+			continue
+		case engineDrainYielded:
+			log.Warnf("RedisTaskManager: discarding %T for task %s emitted after the round yielded (suspended task)",
 				event, ex.ec.TaskID)
 			continue
 		}
@@ -285,6 +317,9 @@ func (ex *execution) handleEvent(event protocol.StreamEvent) int {
 		if ex.task != nil && isFinalState(ex.task.Status.State) {
 			return engineDrainTerminal
 		}
+		if ex.yielded {
+			return engineDrainYielded
+		}
 		return engineConsuming
 	case *protocol.TaskArtifactUpdateEvent:
 		if ev == nil {
@@ -305,9 +340,11 @@ func (ex *execution) handleEvent(event protocol.StreamEvent) int {
 }
 
 // finish applies the channel-close rules, closes the pipe, deregisters the
-// execution, and signals the unary waiter.
+// execution, and signals the unary waiter. A yielded round (§3.4) skips the
+// close rules: ownership of the task moved on at the suspend event — a
+// continuation or a no-live cancel may already be writing it.
 func (ex *execution) finish() {
-	if ex.task != nil && !isFinalState(ex.task.Status.State) {
+	if ex.task != nil && !ex.yielded && !isFinalState(ex.task.Status.State) {
 		switch {
 		case ex.live.cancelRequested.Load():
 			// Cancellation-triggered close: the framework marks the task
@@ -410,12 +447,14 @@ func (ex *execution) stampTaskEventIDs(taskID, contextID *string) bool {
 
 // processMessageEvent stores a reply Message into the conversation and
 // forwards it to the request pipe and, when a task exists, its subscribers.
+// The decisive outcome is offered before the fan-out so a returnImmediately
+// waiter is never stalled behind a slow subscriber.
 func (ex *execution) processMessageEvent(msg *protocol.Message) {
 	contextID := ex.ec.ContextID
 	ex.manager.processReplyMessage(&contextID, msg)
 	ex.lastMessage = msg
-	ex.broadcast(protocol.NewStreamResponseMessage(msg))
 	ex.offerDecisive(sendOutcome{message: msg})
+	ex.broadcast(protocol.NewStreamResponseMessage(msg))
 }
 
 // processStatusEvent applies a status update to the task (lazily creating it
@@ -467,10 +506,15 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		log.Errorf("RedisTaskManager: failed to store task %s status %s: %v", ev.TaskID, status.State, err)
 		return
 	}
-	ex.broadcast(protocol.NewStreamResponseStatusUpdate(ev))
+	// Decisive first: a returnImmediately waiter must never be stalled behind
+	// a slow subscriber in the fan-out below.
 	ex.sendDecisiveTask()
+	ex.broadcast(protocol.NewStreamResponseStatusUpdate(ev))
 	if final {
 		ex.manager.cleanSubscribers(ev.TaskID)
+		// Nothing can follow a terminal frame: end the response stream here
+		// instead of trusting the MessageProcessor to close its channel promptly.
+		ex.closePipe()
 	} else if isSuspendedState(status.State) {
 		// §3.4: a suspended round has yielded the task back for a follow-up —
 		// it is no longer actively working. Free the registry slot NOW rather
@@ -479,7 +523,14 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		// collide with this still-registered run and be wrongly rejected
 		// "already has an active execution". finish()'s pointer-guarded
 		// deregister then no-ops and never removes a continuation's own entry.
+		//
+		// Yielding also ends this round's writes: a continuation (or a no-live
+		// cancel) may own the task from this instant, so later events from this
+		// round are discarded (run loop), the close rules are skipped
+		// (finish()), and the response stream ends at the suspend frame.
+		ex.yielded = true
 		ex.manager.deregisterExecution(ex.ec.TaskID, ex.live)
+		ex.closePipe()
 	}
 }
 
@@ -506,8 +557,10 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 		log.Errorf("RedisTaskManager: failed to store task %s artifact: %v", ev.TaskID, err)
 		return
 	}
-	ex.broadcast(protocol.NewStreamResponseArtifactUpdate(ev))
+	// Decisive first: a returnImmediately waiter must never be stalled behind
+	// a slow subscriber in the fan-out below.
 	ex.sendDecisiveTask()
+	ex.broadcast(protocol.NewStreamResponseArtifactUpdate(ev))
 }
 
 // newTask lazily materializes the task on the first task event, seeding the
@@ -520,6 +573,14 @@ func (ex *execution) newTask(taskID, contextID string, status protocol.TaskStatu
 		Artifacts: make([]protocol.Artifact, 0),
 		History:   make([]protocol.Message, 0),
 		Metadata:  make(map[string]interface{}),
+	}
+}
+
+// closePipe ends the message/stream response stream, if any. Subscriber close
+// is CAS-guarded, so calling it from more than one place is safe.
+func (ex *execution) closePipe() {
+	if ex.pipe != nil {
+		ex.pipe.Close()
 	}
 }
 

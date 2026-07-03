@@ -1111,7 +1111,7 @@ func TestOnGetTask_HistoryLength(t *testing.T) {
 func TestEngine_TaskHandleFacade(t *testing.T) {
 	processor := funcExecutor(
 		func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
-			h := taskmanager.NewTaskHandle(ec, 8)
+			h := taskmanager.NewTaskHandle(ctx, ec, 8)
 			go func() {
 				defer h.Close()
 				h.UpdateTaskState(protocol.TaskStateWorking, nil)

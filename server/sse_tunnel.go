@@ -87,8 +87,10 @@ func (t *sseTunnel) start(ctx context.Context, eventsChan <-chan protocol.Stream
 // discarding the events. The taskmanager pipe must always be drained to
 // closure: with a blocking-send manager the drain engine blocks on a full
 // pipe, so abandoning it on a client disconnect or write error would wedge the
-// execution forever. The goroutine ends when the engine closes the channel at
-// end of round, so it never leaks.
+// execution forever. The goroutine ends when the manager closes the channel —
+// at end of round for the request pipe, or when the manager unsubscribes the
+// disconnected client (request ctx) for resubscribe streams — so it never
+// leaks.
 func drainToClose(eventsChan <-chan protocol.StreamResponse) {
 	go func() {
 		for range eventsChan {

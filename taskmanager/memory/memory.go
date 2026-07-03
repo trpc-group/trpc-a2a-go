@@ -163,8 +163,13 @@ type TaskManager struct {
 	// keyed by task ID. Registered before ProcessMessage, removed when the engine
 	// finishes; OnCancelTask cancels through it.
 	executions map[string]*execution
-	// execMu protects the executions field
+	// execMu protects the executions and closed fields
 	execMu sync.Mutex
+	// closed rejects new runs once Close has begun tearing the manager down.
+	closed bool
+	// engineWg counts live drain engines so Close can wait for their final
+	// persists instead of clearing state under them.
+	engineWg sync.WaitGroup
 
 	// options
 	options *TaskManagerOptions
@@ -287,6 +292,18 @@ func (m *TaskManager) OnSendMessageStream(
 	if err != nil {
 		return nil, err
 	}
+	// Tie the pipe to the request: the execution itself stays detached (§3.3),
+	// but once the stream's consumer is gone the pipe has no reader — close it
+	// so a blocking-send engine can never park on it and the server-side drain
+	// ends instead of leaking.
+	pipe := eng.pipe
+	go func() {
+		select {
+		case <-ctx.Done():
+			pipe.Close()
+		case <-pipe.done:
+		}
+	}()
 	return eng.pipe.Channel(), nil
 }
 
@@ -312,9 +329,16 @@ func (m *TaskManager) OnGetTask(ctx context.Context, params protocol.TaskQueryPa
 // CANCELED state is persisted later by the engine's close rule — unless the
 // MessageProcessor still emits its own terminal status (completed/failed), which wins
 // (§3.3: it may genuinely have finished first). Without a live execution the
-// manager is the only writer and persists CANCELED directly.
+// manager persists CANCELED directly, holding the execution slot with a
+// sentinel so no continuation can start (and write) concurrently.
 func (m *TaskManager) OnCancelTask(ctx context.Context, params protocol.TaskIDParams) (*protocol.Task, error) {
-	if exec := m.liveExecution(params.ID); exec != nil {
+	for {
+		live, sentinel := m.claimCancelSlot(params.ID)
+		if live == nil {
+			defer m.deregisterExecution(params.ID, sentinel)
+			return m.cancelWithoutLiveRun(params)
+		}
+
 		// A stored terminal state is immutable even while the round is still
 		// draining: canceling it must fail like the no-live path does.
 		m.taskMu.RLock()
@@ -334,8 +358,16 @@ func (m *TaskManager) OnCancelTask(ctx context.Context, params protocol.TaskIDPa
 
 		// Flag before canceling so the engine's close rule sees the request even
 		// when the MessageProcessor reacts by closing the channel immediately.
-		exec.cancelRequested.Store(true)
-		exec.cancel()
+		live.cancelRequested.Store(true)
+		live.cancel()
+
+		if m.liveExecution(params.ID) != live {
+			// The run yielded (suspend) or finished while we were canceling, so
+			// its close rule will not persist CANCELED on our behalf. Reassess:
+			// the next pass either claims the free slot and persists CANCELED
+			// itself, or cancels the continuation that took the slot.
+			continue
+		}
 
 		if snapshot == nil {
 			// Execution registered but no task materialized yet (§3.2 lazy creation).
@@ -343,8 +375,12 @@ func (m *TaskManager) OnCancelTask(ctx context.Context, params protocol.TaskIDPa
 		}
 		return snapshot, nil
 	}
+}
 
-	// No live execution: persist first, then broadcast (§3.6).
+// cancelWithoutLiveRun persists CANCELED for a task with no live execution:
+// persist first, then broadcast (§3.6). The caller holds the task's execution
+// slot (sentinel), making this the task's single writer.
+func (m *TaskManager) cancelWithoutLiveRun(params protocol.TaskIDParams) (*protocol.Task, error) {
 	m.taskMu.Lock()
 	task, exists := m.tasks[params.ID]
 	if !exists {
@@ -497,6 +533,18 @@ func (m *TaskManager) OnResubscribe(
 
 	// Add to subscribers list
 	m.subscribers[params.ID] = append(m.subscribers[params.ID], subscriber)
+
+	// Tie the subscription to the request: when the client goes away the
+	// subscriber is removed and closed, so the server-side drain ends and the
+	// slot is not leaked (a suspended task may never reach a terminal state
+	// that would clean it).
+	go func() {
+		select {
+		case <-ctx.Done():
+			m.cleanupFailedSubscribers(params.ID, []*taskSubscriber{subscriber})
+		case <-subscriber.done:
+		}
+	}()
 
 	return subscriber.Channel(), nil
 }
@@ -841,8 +889,10 @@ func (m *TaskManager) cleanExpiredTasks(maxAge time.Duration) int {
 }
 
 // Close stops the cleanup goroutine and releases all resources.
-// It cancels any live MessageProcessor run and closes all subscribers without emitting
-// a terminal event, so streaming clients observe the channel close directly.
+// It refuses new runs, cancels every live MessageProcessor run, closes all streams,
+// and waits for the detached engines to wind down (their close-rule persists
+// land before teardown). A MessageProcessor is expected to close its channel once
+// its ctx is canceled; Close blocks until every run has.
 // It is safe to call Close multiple times; it always returns nil.
 func (m *TaskManager) Close() error {
 	m.closeOnce.Do(func() {
@@ -851,29 +901,46 @@ func (m *TaskManager) Close() error {
 		close(m.stopCleanup)
 		m.cleanupWg.Wait()
 
-		// Cancel every live MessageProcessor run; the detached engines wind down when
-		// the Executors close their channels.
+		// Refuse new runs, request cancellation of every live one, and collect
+		// their stream pipes: closing a pipe unblocks an engine parked on a
+		// blocking pipe send.
 		m.execMu.Lock()
+		m.closed = true
+		pipes := make([]*taskSubscriber, 0, len(m.executions))
 		for _, exec := range m.executions {
+			exec.cancelRequested.Store(true)
 			exec.cancel()
+			if exec.pipe != nil {
+				pipes = append(pipes, exec.pipe)
+			}
 		}
-		m.executions = make(map[string]*execution)
 		m.execMu.Unlock()
+		for _, pipe := range pipes {
+			pipe.Close()
+		}
 
+		// Close all fan-out subscribers (outside taskMu, so a stuck blocking
+		// send can never wedge the manager-wide lock) — engine broadcasts must
+		// not be able to block either.
 		m.taskMu.Lock()
 		subsToClose := make([]*taskSubscriber, 0)
 		for _, subs := range m.subscribers {
 			subsToClose = append(subsToClose, subs...)
 		}
 		m.subscribers = make(map[string][]*taskSubscriber)
-		m.tasks = make(map[string]*protocol.Task)
 		m.taskMu.Unlock()
-
-		// Close subscribers outside taskMu so a stuck blocking send can never
-		// wedge the manager-wide lock.
 		for _, sub := range subsToClose {
 			sub.Close()
 		}
+
+		// Wait for the detached engines: their final persists (close-rule
+		// CANCELED) land before teardown, and nothing re-populates the maps
+		// afterwards.
+		m.engineWg.Wait()
+
+		m.taskMu.Lock()
+		m.tasks = make(map[string]*protocol.Task)
+		m.taskMu.Unlock()
 	})
 	return nil
 }

@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
@@ -29,8 +28,7 @@ type taskSubscriber struct {
 	done   chan struct{}
 	closed atomic.Bool
 	// mu serializes Send against Close so an event is never sent on a closed channel.
-	mu         sync.RWMutex
-	lastAccess time.Time
+	mu sync.RWMutex
 	// blockingSend selects backpressure over drop: a full buffer blocks the
 	// sender instead of returning an error.
 	blockingSend bool
@@ -46,7 +44,6 @@ func newTaskSubscriber(taskID string, bufferSize int, blockingSend bool) *taskSu
 		taskID:       taskID,
 		eventQueue:   make(chan protocol.StreamResponse, bufferSize),
 		done:         make(chan struct{}),
-		lastAccess:   time.Now(),
 		blockingSend: blockingSend,
 	}
 }
@@ -66,8 +63,6 @@ func (s *taskSubscriber) Send(event protocol.StreamResponse) error {
 	if s.Closed() {
 		return fmt.Errorf("task subscriber for task %s is closed", s.taskID)
 	}
-
-	s.lastAccess = time.Now()
 
 	if s.blockingSend {
 		select {
