@@ -78,10 +78,9 @@ go run main.go --session "your-session-id"
 
 The repository includes several examples demonstrating different aspects of the A2A protocol:
 
-> **Note**: [examples/basic](examples/basic) and [examples/simple-v2](examples/simple-v2)
-> are on the v1.0 (`/v2`) contract — start there. The remaining examples still
-> use the v0.x taskmanager API and are pending the port (they do not build
-> against `/v2` yet).
+> **Note**: [examples/basic](examples/basic) is on the v1.0 (`/v2`) contract —
+> start there. The remaining examples still use the v0.x taskmanager API and
+> are pending the port (they do not build against `/v2` yet).
 
 ### 1. Simple Example ([examples/simple](examples/simple))
 
@@ -185,7 +184,7 @@ import (
 // TaskHandle carries the familiar verbs over the event stream. A synchronous
 // body works as-is (emits never block before Events()); for live streaming,
 // run the same body in a goroutine. The raw channel underneath is the actual
-// contract — see examples/simple-v2 for that style.
+// contract — see the MessageProcessor interface documentation for that style.
 type myMessageProcessor struct {
     // Add your custom fields here
 }
@@ -346,9 +345,10 @@ func (p *myProcessor) ProcessMessage(
 }
 ```
 
-Two reference examples: [examples/basic](examples/basic) is the minimal-edit
-`TaskHandle` port of a v0.x processor; [examples/simple-v2](examples/simple-v2)
-is the native channel style recommended for new code.
+The reference port: [examples/basic](examples/basic) is the minimal-edit
+`TaskHandle` port of a v0.x processor. A native channel-style example ships
+with the follow-up examples migration; until then the raw style is documented
+on the `MessageProcessor` interface.
 
 ### API mapping
 

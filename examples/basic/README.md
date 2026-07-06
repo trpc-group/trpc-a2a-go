@@ -8,8 +8,7 @@ This example demonstrates a basic implementation of the Agent-to-Agent (A2A) pro
 The server is written in the `taskmanager.TaskHandle` style: the minimal-edit
 port of a v0.x TaskHandler processor, with a fully synchronous body and one
 code path serving both `message/send` and `message/stream` (see "Migrating
-from v0.x" in the repository README). For the native channel style, see
-`examples/simple-v2`.
+from v0.x" in the repository README).
 
 ## Server Features
 
