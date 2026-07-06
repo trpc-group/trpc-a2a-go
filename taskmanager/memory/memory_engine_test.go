@@ -1138,11 +1138,15 @@ func TestEngine_TaskHandleFacade(t *testing.T) {
 	}
 }
 
-// Events() serves fully synchronous executors: no goroutine, one-line return.
-func TestEngine_SynchronousEventsHelper(t *testing.T) {
+// A fully synchronous TaskHandle body: emits buffered before Events(), no
+// goroutine needed — the engine still derives the unary result.
+func TestEngine_SynchronousTaskHandle(t *testing.T) {
 	processor := funcExecutor(
 		func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
-			return taskmanager.Events(taskmanager.ReplyText("sync answer")), nil
+			h := taskmanager.NewTaskHandle(ctx, ec)
+			defer h.Close()
+			h.Reply(taskmanager.ReplyText("sync answer"))
+			return h.Events(), nil
 		})
 	manager := newTestManager(t, processor)
 

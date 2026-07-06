@@ -50,16 +50,28 @@ func (e *simpleMessageProcessor) ProcessMessage(
 
 		// TaskID/ContextID on events may be left empty: the framework stamps
 		// them from the ExecContext and creates the task on this first event.
-		out <- taskmanager.Working(nil)
+		out <- &protocol.TaskStatusUpdateEvent{
+			Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
+		}
 
 		result := reverseString(text)
-		out <- taskmanager.NewArtifactUpdate(*protocol.NewArtifactWithID(
-			stringPtr("Reversed Text"),
-			stringPtr("The input text reversed"),
-			[]*protocol.Part{protocol.NewTextPart(result)},
-		), true)
+		lastChunk := true
+		out <- &protocol.TaskArtifactUpdateEvent{
+			Artifact: *protocol.NewArtifactWithID(
+				stringPtr("Reversed Text"),
+				stringPtr("The input text reversed"),
+				[]*protocol.Part{protocol.NewTextPart(result)},
+			),
+			LastChunk: &lastChunk,
+		}
 
-		out <- taskmanager.Completed(taskmanager.ReplyText(fmt.Sprintf("Processed result: %s", result)))
+		// A terminal status ends the round.
+		out <- &protocol.TaskStatusUpdateEvent{
+			Status: protocol.TaskStatus{
+				State:   protocol.TaskStateCompleted,
+				Message: taskmanager.ReplyText(fmt.Sprintf("Processed result: %s", result)),
+			},
+		}
 	}()
 	return out, nil
 }

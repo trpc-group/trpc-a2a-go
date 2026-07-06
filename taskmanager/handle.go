@@ -157,18 +157,36 @@ func (h *TaskHandle) emit(event protocol.StreamEvent) error {
 
 // UpdateTaskState emits a status event for this round's task
 // (former TaskHandler.UpdateTaskState; no taskID argument — one round drives
-// exactly its own task, and the framework stamps the IDs).
+// exactly its own task, and the framework stamps the IDs). The state drives
+// the round's lifecycle: completed/failed/canceled/rejected are terminal, and
+// input-required/auth-required suspend the task awaiting a follow-up message
+// (the framework calls ProcessMessage again with ExecContext.Task set).
 func (h *TaskHandle) UpdateTaskState(state protocol.TaskState, message *protocol.Message) error {
-	return h.emit(NewStatusUpdate(state, message))
+	return h.emit(&protocol.TaskStatusUpdateEvent{
+		Status: protocol.TaskStatus{State: state, Message: message},
+	})
 }
 
 // AddArtifact emits an artifact event for this round's task
 // (former TaskHandler.AddArtifact; lastChunk marks the artifact's final chunk).
 func (h *TaskHandle) AddArtifact(artifact protocol.Artifact, lastChunk bool) error {
-	return h.emit(NewArtifactUpdate(artifact, lastChunk))
+	return h.emit(&protocol.TaskArtifactUpdateEvent{
+		Artifact:  artifact,
+		LastChunk: &lastChunk,
+	})
 }
 
 // Reply emits a direct message reply (the former pure-Message result path).
 func (h *TaskHandle) Reply(message *protocol.Message) error {
 	return h.emit(message)
+}
+
+// ReplyText builds an agent text message, for Reply or as the message
+// attached to UpdateTaskState.
+func ReplyText(text string) *protocol.Message {
+	message := protocol.NewMessage(
+		protocol.MessageRoleAgent,
+		[]*protocol.Part{protocol.NewTextPart(text)},
+	)
+	return &message
 }

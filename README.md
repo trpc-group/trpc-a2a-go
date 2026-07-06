@@ -172,10 +172,15 @@ import (
 )
 
 // Implement the MessageProcessor interface: process one message and report
-// progress by sending events on the returned channel. The framework owns the
-// task lifecycle (lazy creation, persistence, subscriber fan-out) and derives
-// both the message/send result and the message/stream feed from these events —
-// there is no streaming/non-streaming branch in your code.
+// progress by emitting events. The framework owns the task lifecycle (lazy
+// creation, persistence, subscriber fan-out) and derives both the message/send
+// result and the message/stream feed from these events — there is no
+// streaming/non-streaming branch in your code.
+//
+// TaskHandle carries the familiar verbs over the event stream. A synchronous
+// body works as-is (emits never block before Events()); for live streaming,
+// run the same body in a goroutine. The raw channel underneath is the actual
+// contract — see examples/simple-v2 for that style.
 type myMessageProcessor struct {
     // Add your custom fields here
 }
@@ -184,32 +189,30 @@ func (p *myMessageProcessor) ProcessMessage(
     ctx context.Context,
     ec *taskmanager.ExecContext,
 ) (<-chan protocol.StreamEvent, error) {
-    out := make(chan protocol.StreamEvent, 4)
-    go func() {
-        defer close(out)
+    handle := taskmanager.NewTaskHandle(ctx, ec)
+    defer handle.Close()
 
-        text := extractTextFromMessage(ec.Message)
-        if text == "" {
-            // A pure-message reply: no task comes into existence this round.
-            out <- taskmanager.ReplyText("input message must contain text.")
-            return
-        }
+    text := extractTextFromMessage(ec.Message)
+    if text == "" {
+        // A pure-message reply: no task comes into existence this round.
+        handle.Reply(taskmanager.ReplyText("input message must contain text."))
+        return handle.Events(), nil
+    }
 
-        // Event IDs may be left empty — the framework stamps them from the
-        // ExecContext and creates the task on this first task event.
-        out <- taskmanager.Working(nil)
+    // The framework creates the task lazily on this first task event and
+    // stamps the event IDs from the ExecContext.
+    handle.UpdateTaskState(protocol.TaskStateWorking, nil)
 
-        result := reverseString(text)
-        out <- taskmanager.NewArtifactUpdate(*protocol.NewArtifactWithID(
-            stringPtr("Reversed Text"), nil,
-            []*protocol.Part{protocol.NewTextPart(result)},
-        ), true)
+    result := reverseString(text)
+    handle.AddArtifact(*protocol.NewArtifactWithID(
+        stringPtr("Reversed Text"), nil,
+        []*protocol.Part{protocol.NewTextPart(result)},
+    ), true)
 
-        // A terminal status ends the round; the message/send caller receives
-        // this final task snapshot (with its artifacts).
-        out <- taskmanager.Completed(taskmanager.ReplyText("Processed: " + result))
-    }()
-    return out, nil
+    // A terminal status ends the round; the message/send caller receives
+    // this final task snapshot (with its artifacts).
+    handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("Processed: "+result))
+    return handle.Events(), nil
 }
 
 func extractTextFromMessage(message protocol.Message) string {
@@ -354,7 +357,7 @@ is the native channel style recommended for new code.
 | `ProcessOptions.PushNotificationConfig` | `ExecContext.PushConfig` |
 | `ProcessOptions.AcceptedOutputModes` / `.Tenant` | `ExecContext.AcceptedOutputModes` / `.Tenant` |
 | `TaskHandler.BuildTask` | gone — tasks are created lazily on the first task event; the ID is `ExecContext.TaskID` / `TaskHandle.TaskID()` |
-| `TaskHandler.UpdateTaskState(taskID, state, msg)` | `TaskHandle.UpdateTaskState(state, msg)` or `out <- taskmanager.NewStatusUpdate(state, msg)` |
+| `TaskHandler.UpdateTaskState(taskID, state, msg)` | `TaskHandle.UpdateTaskState(state, msg)` (or emit a `protocol.TaskStatusUpdateEvent` on the raw channel) |
 | `TaskHandler.AddArtifact(taskID, artifact, isFinal, needMoreData)` | `TaskHandle.AddArtifact(artifact, lastChunk)` — `needMoreData` had no v1.0 wire meaning and is dropped |
 | `TaskHandler.SubscribeTask` / `.CleanTask` | removed — the framework owns fan-out and task lifecycle |
 | `TaskHandler.GetContextID/GetMessageHistory/GetTask` | same names on `TaskHandle` (fields on `ExecContext`) |
