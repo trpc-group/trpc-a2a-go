@@ -13,160 +13,131 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
-// ProcessOptions contains configuration options for processing messages
-type ProcessOptions struct {
-	// Blocking indicates whether this is a blocking request
-	// If true, the user should wait for processing completion before returning the final result
-	// If false, the user can immediately return the initial state and update later through other means
-	Blocking bool
+// ExecContext is the read-only snapshot of one incoming message for a
+// MessageProcessor to process. It is a struct (not an interface) on purpose:
+// adding fields later is a non-breaking change.
+type ExecContext struct {
+	// TaskID is pre-allocated by the framework. Whether a task actually comes
+	// into existence depends on the MessageProcessor: the framework creates (and
+	// persists) the task lazily when the first task event is emitted. On a
+	// continuation (see Task) it is the existing task's ID.
+	TaskID string
 
-	// HistoryLength indicates the length of historical messages requested by the client
-	HistoryLength int
+	// Task is non-nil on a continuation: when a client follows up on a task in
+	// the input-required or auth-required state by sending another message
+	// with the same taskId, Task carries the current task snapshot. It is nil
+	// on the first round.
+	Task *protocol.Task
 
-	// PushNotificationConfig contains push notification configuration
-	PushNotificationConfig *protocol.PushNotificationConfig
+	// Message is the incoming message to process.
+	Message protocol.Message
 
-	// AcceptedOutputModes is the list of accepted output modes.
+	// ContextID is the conversation context ID. When the request does not
+	// carry one, the framework generates it before invoking the MessageProcessor.
+	ContextID string
+
+	// Tenant is the A2A v1.0 tenant the request is addressed to (from the
+	// request body). It lets one process host multiple agents: the MessageProcessor
+	// dispatches on it. Empty for single-agent deployments.
+	Tenant string
+
+	// History is a snapshot of the conversation history for ContextID,
+	// truncated per the manager's configuration. (The client-requested
+	// historyLength applies to the task returned in responses, not to this
+	// snapshot.)
+	History []protocol.Message
+
+	// AcceptedOutputModes is the client's declared list of accepted output
+	// modes, when provided.
 	AcceptedOutputModes []string
 
-	// Streaming indicates whether this is a streaming request
-	// If true, the user should return event streams through the StreamingEvents channel
-	// If false, the user should return a single result through Result
-	Streaming bool
-
-	// Tenant is the A2A v1.0 tenant the request is addressed to (from
-	// params.Tenant). It lets one process host multiple agents: the processor
-	// dispatches on it instead of relying on URL-path routing. Empty for
-	// single-agent / v0 requests.
-	Tenant string
+	// PushConfig is the push-notification configuration carried inline on the
+	// send request (configuration.pushNotificationConfig), when provided. The
+	// framework passes it through without registering it: honoring it is the
+	// MessageProcessor's decision.
+	PushConfig *protocol.TaskPushNotificationConfig
 }
 
-// CancellableTask is a task that can be cancelled
-type CancellableTask interface {
-	// Task returns the original task.
-	Task() *protocol.Task
-
-	// Cancel cancels the task.
-	Cancel()
-}
-
-// TaskHandler provides methods for the agent logic (MessageProcessor) to interact
-// with the task manager during processing. It encapsulates the necessary callbacks.
-type TaskHandler interface {
-	// BuildTask creates a new task and returns the task ID.
-	// If ContextID is not set, it will assign a contextID from request or generate a new one
-	BuildTask(specificTaskID *string, contextID *string) (string, error)
-
-	// UpdateTaskState updates the task's state and returns the updated task ID.
-	UpdateTaskState(taskID *string, state protocol.TaskState, message *protocol.Message) error
-
-	// AddArtifact adds an artifact to the specified task.
-	AddArtifact(taskID *string, artifact protocol.Artifact, isFinal bool, needMoreData bool) error
-
-	// SubscribeTask subscribes to the task and returns the task subscriber.
-	SubscribeTask(taskID *string) (TaskSubscriber, error)
-
-	// GetTask returns the task by taskID. Returns an error if the task cannot be found.
-	GetTask(taskID *string) (CancellableTask, error)
-
-	// CleanTask cleans up the task from storage.
-	// CleanTask should be called when the task is no longer needed.
-	CleanTask(taskID *string) error
-
-	// GetMessageHistory returns the conversation history for the current context.
-	GetMessageHistory() []protocol.Message
-
-	// GetContextID returns the context ID of the current message, if any.
-	GetContextID() string
-
-	// GetMetadata returns the metadata of the current task.
-	GetMetadata() (map[string]interface{}, error)
-}
-
-// MessageProcessingResult represents the result of processing a message.
-type MessageProcessingResult struct {
-	// Result can contain Message or Task
-	// When Streaming=false, use this field
-	// The framework will automatically handle whether to wait for the task to complete based on ProcessOptions.Blocking
-	Result *protocol.SendMessageResponse
-
-	// StreamingEvents streaming event tunnel
-	// When Streaming=true, use this field
-	// Message、Task、TaskStatusUpdateEvent、TaskArtifactUpdateEvent is allowed to sent.
-	StreamingEvents TaskSubscriber
-}
-
-// TaskSubscriber is a subscriber for a task
-type TaskSubscriber interface {
-	// Send sends an event to the task subscriber, could be blocked if the channel is full
-	// If the contextID is not set, it will generate a new contextID automatically
-	Send(event protocol.StreamResponse) error
-
-	// Channel returns the channel of the task subscriber
-	Channel() <-chan protocol.StreamResponse
-
-	// Closed returns true if the task subscriber is closed
-	Closed() bool
-
-	// Close close the task subscriber
-	Close()
-}
-
-// MessageProcessor defines the interface for processing A2A messages.
-// This interface should be implemented by users to define their agent's behavior.
+// MessageProcessor is the single interface implemented by users to define an agent's
+// behavior: process one message and report progress by sending events on the
+// returned channel.
+//
+// Allowed event types:
+//   - *protocol.Message: a direct reply. No task comes into existence for a
+//     pure-message exchange.
+//   - *protocol.TaskStatusUpdateEvent, *protocol.TaskArtifactUpdateEvent:
+//     drive the task identified by ExecContext.TaskID. The framework owns the
+//     task lifecycle: it creates the task on the first task event, persists
+//     every event before broadcasting it to subscribers, and derives the
+//     unary (message/send) result from the stream.
+//   - *protocol.Task is NOT allowed: task snapshots are materialized by the
+//     framework from the event stream. Emitting one is a contract violation.
+//
+// Events may leave TaskID/ContextID empty; the framework stamps them. Filling
+// them with values different from the ExecContext's is a contract violation
+// (the framework marks the task failed and discards the remaining events; the
+// channel is still drained).
+//
+// Sending an event hands it off to the framework: the processor must not
+// retain and mutate an event (or its Parts/Message) after sending it.
+//
+// Closing the channel ends the round:
+//   - with the task in a terminal state, or after a pure-message reply: a
+//     normal end;
+//   - in input-required / auth-required: the task stays suspended awaiting a
+//     follow-up message (the framework will call ProcessMessage again with
+//     ExecContext.Task set);
+//   - in submitted / working: the framework marks the task failed —
+//     finishing without a conclusion is a MessageProcessor bug;
+//   - after a CancelTask-triggered ctx cancellation: closing without a
+//     terminal state leads the framework to mark the task CANCELED on the
+//     processor's behalf.
+//
+// A terminal or suspend-state status event ends the round's writes early: a
+// suspend event yields the task — the framework immediately admits a
+// continuation, so this round no longer owns the task and any events it emits
+// afterwards are discarded (close the channel after suspending). The
+// message/stream response stream ends at the terminal or suspend frame; the
+// channel itself is still drained until closed.
+//
+// ctx is canceled when the task is canceled via CancelTask. A client
+// disconnect does NOT cancel ctx: the work keeps running and its results
+// remain retrievable (GetTask / SubscribeToTask). The framework always drains
+// the channel until it is closed, so senders never leak.
+//
+// The framework starts consuming the channel only after ProcessMessage
+// returns: sends beyond the channel buffer from inside ProcessMessage itself
+// block forever. Emit from a goroutine, or use TaskHandle (NewTaskHandle) for
+// a synchronous body — its emits before Events() never block.
+//
+// Returning a non-nil error means the round failed to start: no events are
+// consumed and the error is mapped to a JSON-RPC error. To report a business
+// failure, emit a TASK_STATE_FAILED status event and close the channel
+// instead.
 type MessageProcessor interface {
-	// ProcessMessage processes an incoming message and returns the result.
-	//
-	// Processing modes:
-	// 1. Non-streaming (options.Streaming=false):
-	//    - Return MessageProcessingResult.Result (Message or Task)
-	//    - The framework directly returns the user's result (if it's a non-final Task state, a reminder log will be printed)
-	//
-	// 2. Streaming (options.Streaming=true):
-	//    - Return MessageProcessingResult.StreamingEvents channel
-	//    - Multiple types of events can be sent through the channel:
-	//      * protocol.Message - direct message reply
-	//      * protocol.Task - task status
-	//      * protocol.TaskStatusUpdateEvent - task status update
-	//      * protocol.TaskArtifactUpdateEvent - artifact update
-	//    - Users are responsible for closing the channel to end streaming transmission
-	//
-	// Parameters:
-	//   - ctx: Request context
-	//   - message: The incoming message to process
-	//   - options: Processing options including blocking, streaming, history length, etc.
-	//   - taskHandler: Task handler for accessing context, history, and task operations
-	//
-	// Returns:
-	//   - MessageProcessingResult: Contains the result or streaming channel
-	//   - error: Any error that occurred during processing
-	ProcessMessage(
-		ctx context.Context,
-		message protocol.Message,
-		options ProcessOptions,
-		taskHandler TaskHandler,
-	) (*MessageProcessingResult, error)
+	ProcessMessage(ctx context.Context, ec *ExecContext) (<-chan protocol.StreamEvent, error)
 }
 
 // TaskManager defines the interface for managing A2A task lifecycles based on the protocol.
 // Implementations handle task creation, updates, retrieval, cancellation, and events,
-// delegating the actual processing logic to an injected MessageProcessor.
+// delegating the agent logic to an injected MessageProcessor.
 // This interface corresponds to the Task Service defined in the A2A Specification.
-// Exported interface.
 type TaskManager interface {
 
 	// OnSendMessage handles a request corresponding to the 'message/send' RPC method.
-	// It creates and potentially starts processing a new message via the MessageProcessor.
-	// It returns the initial state of the message, possibly reflecting immediate processing results.
+	// It invokes the MessageProcessor and derives the result from the emitted events:
+	// the final task snapshot when task events were emitted, otherwise the last
+	// message. With returnImmediately=true it returns as soon as the first
+	// immediateResult event is persisted, while execution continues in the background.
 	OnSendMessage(
 		ctx context.Context,
 		request protocol.SendMessageParams,
 	) (*protocol.SendMessageResponse, error)
 
 	// OnSendMessageStream handles a request corresponding to the 'message/stream' RPC method.
-	// It creates a new message and returns a channel for receiving StreamingMessageEvent updates (streaming).
-	// It initiates asynchronous processing via the MessageProcessor.
-	// The channel will be closed when the message reaches a final state or an error occurs during setup/processing.
+	// It invokes the MessageProcessor and returns a channel that carries every emitted
+	// event (persisted before delivery). The channel is closed when the round
+	// ends; setup errors are returned directly instead.
 	OnSendMessageStream(
 		ctx context.Context,
 		request protocol.SendMessageParams,
@@ -180,9 +151,11 @@ type TaskManager interface {
 	) (*protocol.Task, error)
 
 	// OnCancelTask handles a request corresponding to the 'tasks/cancel' RPC method.
-	// It requests the cancellation of an ongoing task.
-	// This typically involves canceling the context passed to the MessageProcessor.
-	// It returns the task state after the cancellation attempt.
+	// With a live execution it cancels the context passed to the running
+	// MessageProcessor and returns the current (possibly still non-terminal) task
+	// snapshot: the terminal CANCELED state is persisted by the close rule when
+	// the MessageProcessor winds down, and a terminal state the MessageProcessor emits
+	// itself wins. Without a live execution CANCELED is persisted before returning.
 	OnCancelTask(
 		ctx context.Context,
 		params protocol.TaskIDParams,
@@ -224,7 +197,8 @@ type TaskManager interface {
 	) error
 
 	// OnResubscribe handles a request corresponding to the 'tasks/resubscribe' RPC method.
-	// It reestablishes an SSE stream for an existing task.
+	// It reestablishes an SSE stream for an existing non-terminal task. The
+	// first event is the current Task snapshot.
 	OnResubscribe(
 		ctx context.Context,
 		params protocol.TaskIDParams,

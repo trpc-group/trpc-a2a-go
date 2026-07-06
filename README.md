@@ -26,6 +26,7 @@ tRPC AI ecosystem
   - [Basic Example](#3-basic-example-examplesbasic)
   - [Authentication Examples](#4-authentication-examples-examplesauth)
 - [Creating Your Own Agent](#creating-your-own-agent)
+- [Migrating from v0.x](#migrating-from-v0x)
 - [Authentication](#authentication)
 - [Session Management](#session-management)
 - [Telemetry Metrics](#telemetry-metrics)
@@ -76,6 +77,10 @@ go run main.go --session "your-session-id"
 ## Examples
 
 The repository includes several examples demonstrating different aspects of the A2A protocol:
+
+> **Note**: [examples/basic](examples/basic) is on the v1.0 (`/v2`) contract —
+> start there. The remaining examples still use the v0.x taskmanager API and
+> are pending the port (they do not build against `/v2` yet).
 
 ### 1. Simple Example ([examples/simple](examples/simple))
 
@@ -170,38 +175,54 @@ import (
     "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
-// Implement the MessageProcessor interface
+// Implement the MessageProcessor interface: process one message and report
+// progress by emitting events. The framework owns the task lifecycle (lazy
+// creation, persistence, subscriber fan-out) and derives both the message/send
+// result and the message/stream feed from these events — there is no
+// streaming/non-streaming branch in your code.
+//
+// TaskHandle carries the familiar verbs over the event stream. A synchronous
+// body works as-is (emits never block before Events()); for live streaming,
+// run the same body in a goroutine. The raw channel underneath is the actual
+// contract — see the MessageProcessor interface documentation for that style.
 type myMessageProcessor struct {
     // Add your custom fields here
 }
 
 func (p *myMessageProcessor) ProcessMessage(
     ctx context.Context,
-    message protocol.Message,
-    options taskmanager.ProcessOptions,
-    handle taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
-    // Extract text from the incoming message
-    text := extractTextFromMessage(message)
-    
-    // Process the text (example: reverse it)
+    ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+    handle := taskmanager.NewTaskHandle(ctx, ec)
+    defer handle.Close()
+
+    text := extractTextFromMessage(ec.Message)
+    if text == "" {
+        // A pure-message reply: no task comes into existence this round.
+        handle.Reply(taskmanager.ReplyText("input message must contain text."))
+        return handle.Events(), nil
+    }
+
+    // The framework creates the task lazily on this first task event and
+    // stamps the event IDs from the ExecContext.
+    handle.UpdateTaskState(protocol.TaskStateWorking, nil)
+
     result := reverseString(text)
-    
-    // Return a simple response message
-    responseMessage := protocol.NewMessage(
-        protocol.MessageRoleAgent,
-        []protocol.Part{protocol.NewTextPart("Processed: " + result)},
-    )
-    
-    return &taskmanager.MessageProcessingResult{
-        Result: &responseMessage,
-    }, nil
+    handle.AddArtifact(*protocol.NewArtifactWithID(
+        stringPtr("Reversed Text"), nil,
+        []*protocol.Part{protocol.NewTextPart(result)},
+    ), true)
+
+    // A terminal status ends the round; the message/send caller receives
+    // this final task snapshot (with its artifacts).
+    handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("Processed: "+result))
+    return handle.Events(), nil
 }
 
 func extractTextFromMessage(message protocol.Message) string {
     for _, part := range message.Parts {
-        if textPart, ok := part.(*protocol.TextPart); ok {
-            return textPart.Text
+        if text := part.TextContent(); text != "" {
+            return text
         }
     }
     return ""
@@ -270,14 +291,15 @@ import (
     "log"
 
     "trpc.group/trpc-go/trpc-a2a-go/v2/server"
-    "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
 
 // Create the task processor
 processor := &myMessageProcessor{}
 
-// Create task manager, inject processor
-taskManager, err := taskmanager.NewMemoryTaskManager(processor)
+// Create task manager, inject processor. For persistent storage, swap in
+// redis.NewTaskManager(processor, redisClient) — the same MessageProcessor.
+taskManager, err := memory.NewTaskManager(processor)
 if err != nil {
     log.Fatalf("Failed to create task manager: %v", err)
 }
@@ -294,6 +316,97 @@ if err := srv.Start(":8080"); err != nil {
     log.Fatalf("Server start failed: %v", err)
 }
 ```
+
+## Migrating from v0.x
+
+The v1.0 (`/v2`) release replaces the multi-outcome `MessageProcessor` +
+`TaskHandler` callback with the single event-stream contract shown above. The
+familiar names survive: you still implement `MessageProcessor.ProcessMessage`,
+and the former `TaskHandler` verbs live on as the `TaskHandle` compatibility
+layer, so a v0.x processor body ports with minimal edits — including fully
+synchronous bodies, which were the common v0.x style:
+
+```go
+func (p *myProcessor) ProcessMessage(
+    ctx context.Context,
+    ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+    handle := taskmanager.NewTaskHandle(ctx, ec)
+    defer handle.Close()
+
+    // The v0.x body, minus the taskID arguments. Emits made before
+    // handle.Events() never block, so no goroutine is required.
+    handle.UpdateTaskState(protocol.TaskStateWorking, nil)
+    result := doWork(ec.Message)
+    handle.AddArtifact(result.Artifact, true)
+    handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("done"))
+
+    return handle.Events(), nil
+}
+```
+
+The reference port: [examples/basic](examples/basic) is the minimal-edit
+`TaskHandle` port of a v0.x processor. A native channel-style example ships
+with the follow-up examples migration; until then the raw style is documented
+on the `MessageProcessor` interface.
+
+### API mapping
+
+| v0.x | v1.0 |
+| --- | --- |
+| `ProcessMessage(ctx, message, options, handler)` | `ProcessMessage(ctx, execContext)` — the message, options and reads are all on `ExecContext` |
+| `MessageProcessingResult{Result: &message}` | emit the message: `handle.Reply(&msg)` / `out <- &msg` |
+| `MessageProcessingResult{StreamingEvents: subscriber}` | the returned channel is the stream |
+| `ProcessOptions.Streaming` / `.Blocking` | gone — one processor serves `message/send` and `message/stream`; the framework derives each result |
+| `ProcessOptions.HistoryLength` | gone — the framework applies it to responses |
+| `ProcessOptions.PushNotificationConfig` | `ExecContext.PushConfig` |
+| `ProcessOptions.AcceptedOutputModes` / `.Tenant` | `ExecContext.AcceptedOutputModes` / `.Tenant` |
+| `TaskHandler.BuildTask` | gone — tasks are created lazily on the first task event; the ID is `ExecContext.TaskID` / `TaskHandle.TaskID()` |
+| `TaskHandler.UpdateTaskState(taskID, state, msg)` | `TaskHandle.UpdateTaskState(state, msg)` (or emit a `protocol.TaskStatusUpdateEvent` on the raw channel) |
+| `TaskHandler.AddArtifact(taskID, artifact, isFinal, needMoreData)` | `TaskHandle.AddArtifact(artifact, lastChunk)` — `isFinal` maps to `lastChunk`; the `append` flag is not exposed: chunked streams that relied on it should emit `protocol.TaskArtifactUpdateEvent` on the raw channel with `Append` set |
+| `TaskHandler.SubscribeTask` / `.CleanTask` | removed — the framework owns fan-out and task lifecycle; nothing deletes tasks by default — set `memory.WithTaskTTL` to collect terminal tasks |
+| return an interim `Message` result while a goroutine drives the task (v0 non-blocking) | emit events from a goroutine; unary callers opt in with `returnImmediately=true` — the first persisted event answers the call; multi-turn suspends with `input-required` |
+| `TaskHandler.GetContextID` / `.GetMessageHistory` | same names on `TaskHandle`; `History` is a snapshot taken before the round and truncated to the manager's `MaxHistoryLength` — not a live read |
+| `TaskHandler.GetTask(taskID)` | `TaskHandle.GetTask()` — this round's continuation snapshot only, `nil` on a fresh round; arbitrary-task reads and `CancellableTask.Cancel` are gone |
+| `TaskHandler.GetMetadata` | removed (it always returned an error in v0.x); message metadata is `ExecContext.Message.Metadata` |
+| `taskmanager.TaskSubscriber` / `CancellableTask` | removed with the callback design |
+| redis `NewTaskSubscriber` / `WithSubscriberSendHook` / `WithSubscriberBlockingSend` | removed — cross-replica streaming is out of scope for the built-in managers |
+
+### Behavior changes to check
+
+These compile fine but behave differently from v0.x:
+
+- **v1.0 inverted the blocking default**: `message/send` without
+  `returnImmediately` waits for the round to end (v0.x `blocking:false`/absent
+  answered immediately). Legacy-endpoint clients served via `compat/v0` keep
+  the v0 default.
+- **The round ends only when the processor closes its event channel**: a round
+  that never closes pins the task's execution slot (follow-ups are rejected
+  with "already has an active execution") and blocks manager Close / server
+  Stop — close the channel (or `TaskHandle`) from the goroutine that emits.
+- **`input-required`/`auth-required` yields the round**: events emitted after
+  a suspend are discarded — deliver the completion from the continuation
+  round.
+- **One round drives exactly one task** (`ExecContext.TaskID`): an event
+  carrying any other task ID is a contract violation that fails the round's
+  task.
+- **Sending `*protocol.Task` as a stream event (legal in v0.x) is now a
+  contract violation** — the framework materializes task snapshots itself;
+  emit status and artifact events instead.
+- **A follow-up without `taskId` starts a new round with a fresh task**:
+  sessions keyed by contextID alone strand the suspended task (it is never
+  collected on the memory backend). Echo the `taskId` when answering
+  `input-required`.
+- `message/send` no longer always materializes a task: a pure message reply
+  leaves no task behind, and `tasks/get` for that round's ID returns not-found.
+- A round that produces no event at all is treated as a processor bug:
+  `message/send` fails with `-32603`.
+- Closing the event channel while the task is `submitted`/`working` marks it
+  `FAILED` — end a round deliberately, in a terminal or
+  `input-required`/`auth-required` state.
+- `tasks/cancel` returns the snapshot taken when cancellation was requested
+  (possibly still `working`); the terminal `CANCELED` state is persisted when
+  the processor's round winds down.
 
 ## Authentication
 
