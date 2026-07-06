@@ -30,27 +30,25 @@ var requestIDs = make(map[string]bool)
 // reimbursementProcessor implements the taskmanager.MessageProcessor interface
 type reimbursementProcessor struct{}
 
-// ProcessMessage implements the taskmanager.MessageProcessor interface
+// ProcessMessage implements the taskmanager.MessageProcessor interface. An
+// incomplete request gets a pure message reply asking for the missing fields;
+// a complete request runs as one working -> artifact -> completed task round.
 func (p *reimbursementProcessor) ProcessMessage(
 	ctx context.Context,
-	message protocol.Message,
-	options taskmanager.ProcessOptions,
-	handle taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
+	ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+	handle := taskmanager.NewTaskHandle(ctx, ec)
+	defer handle.Close()
+
 	// Extract text from the incoming message.
-	text := extractText(message)
+	text := extractText(ec.Message)
 	if text == "" {
 		errMsg := "input message must contain text."
 		log.Error("Message processing failed: %s", errMsg)
 
-		// Return error message directly
-		errorMessage := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart(errMsg)},
-		)
-		return &taskmanager.MessageProcessingResult{
-			Result: &errorMessage,
-		}, nil
+		// Reply with the error message directly
+		handle.Reply(taskmanager.ReplyText(errMsg))
+		return handle.Events(), nil
 	}
 
 	log.Info("Processing reimbursement request: %s", text)
@@ -88,10 +86,9 @@ func (p *reimbursementProcessor) ProcessMessage(
 	// Validate the reimbursement request
 	missing := validateForm(reimbursement)
 
-	var result string
 	if len(missing) > 0 {
 		// Request is incomplete - ask for missing information
-		result = fmt.Sprintf("Your reimbursement request is missing the following required information: %s.\n\n"+
+		result := fmt.Sprintf("Your reimbursement request is missing the following required information: %s.\n\n"+
 			"Please provide:\n", strings.Join(missing, ", "))
 
 		for _, field := range missing {
@@ -109,56 +106,45 @@ func (p *reimbursementProcessor) ProcessMessage(
 
 		result += "\nYou can provide information in natural language or structured format like:\n"
 		result += "Date: 2023-10-15\nAmount: $50.00\nPurpose: Business lunch with client"
-	} else {
-		// Request is complete - process it
-		requestID := reimbursement["request_id"].(string)
-		requestIDs[requestID] = true
 
-		result = fmt.Sprintf("✅ Reimbursement request processed successfully!\n\n"+
-			"Request Details:\n"+
-			"- Request ID: %s\n"+
-			"- Date: %s\n"+
-			"- Amount: %s\n"+
-			"- Purpose: %s\n\n"+
-			"Status: Approved\n"+
-			"Processing Time: 2-3 business days\n"+
-			"You will receive an email confirmation shortly.",
-			requestID,
-			reimbursement["date"],
-			reimbursement["amount"],
-			reimbursement["purpose"])
+		// Reply with the request for more information; no task comes into
+		// existence for an incomplete request.
+		handle.Reply(taskmanager.ReplyText(result))
+		return handle.Events(), nil
 	}
 
-	// Create response message
-	responseMessage := protocol.NewMessage(
-		protocol.MessageRoleAgent,
-		[]*protocol.Part{protocol.NewTextPart(result)},
-	)
+	// Request is complete - process it as one task round. The framework
+	// creates the task lazily on the first task event.
+	handle.UpdateTaskState(protocol.TaskStateWorking, nil)
 
-	// Create result with potential artifact for completed requests
-	processingResult := &taskmanager.MessageProcessingResult{
-		Result: &responseMessage,
-	}
+	requestID := reimbursement["request_id"].(string)
+	requestIDs[requestID] = true
 
-	// Add artifact for completed reimbursement requests
-	if len(missing) == 0 {
-		// Build task to get artifact support
-		task, err := handle.BuildTask(nil, nil)
-		if err == nil {
-			// Create reimbursement details artifact
-			reimbursementJSON, _ := json.Marshal(reimbursement)
-			artifact := protocol.Artifact{
-				ArtifactID:  fmt.Sprintf("reimb-%s", reimbursement["request_id"]),
-				Name:        stringPtr("Reimbursement Details"),
-				Description: stringPtr(fmt.Sprintf("Processed reimbursement request %s", reimbursement["request_id"])),
-				Parts:       []*protocol.Part{protocol.NewTextPart(string(reimbursementJSON))},
-			}
+	result := fmt.Sprintf("✅ Reimbursement request processed successfully!\n\n"+
+		"Request Details:\n"+
+		"- Request ID: %s\n"+
+		"- Date: %s\n"+
+		"- Amount: %s\n"+
+		"- Purpose: %s\n\n"+
+		"Status: Approved\n"+
+		"Processing Time: 2-3 business days\n"+
+		"You will receive an email confirmation shortly.",
+		requestID,
+		reimbursement["date"],
+		reimbursement["amount"],
+		reimbursement["purpose"])
 
-			_ = handle.AddArtifact(&task, artifact, true, false)
-		}
-	}
+	// Create reimbursement details artifact
+	reimbursementJSON, _ := json.Marshal(reimbursement)
+	handle.AddArtifact(protocol.Artifact{
+		ArtifactID:  fmt.Sprintf("reimb-%s", requestID),
+		Name:        stringPtr("Reimbursement Details"),
+		Description: stringPtr(fmt.Sprintf("Processed reimbursement request %s", requestID)),
+		Parts:       []*protocol.Part{protocol.NewTextPart(string(reimbursementJSON))},
+	}, true)
 
-	return processingResult, nil
+	handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText(result))
+	return handle.Events(), nil
 }
 
 // newReimbursementProcessor creates a new reimbursement processor

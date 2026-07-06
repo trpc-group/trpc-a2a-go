@@ -78,17 +78,14 @@ go run main.go --session "your-session-id"
 
 The repository includes several examples demonstrating different aspects of the A2A protocol:
 
-> **Note**: [examples/basic](examples/basic) is on the v1.0 (`/v2`) contract —
-> start there. The remaining examples still use the v0.x taskmanager API and
-> are pending the port (they do not build against `/v2` yet).
-
 ### 1. Simple Example ([examples/simple](examples/simple))
 
-A minimal example demonstrating the core A2A functionality:
-- Simple server that reverses text input
-- Simple client that sends non-streaming requests
-- Basic task lifecycle (submission, processing, completion)
-- Text processing with artifacts
+A minimal example demonstrating the core A2A functionality in the native
+channel style (the raw `MessageProcessor` contract):
+- Simple server that reverses text input, emitting events on the raw channel
+- Client demonstrating the three consumption modes: blocking send,
+  `returnImmediately`, and streaming — all served by one processor
+- Basic task lifecycle (lazy creation, processing, completion) and artifacts
 
 ```bash
 # Start the simple server
@@ -184,7 +181,7 @@ import (
 // TaskHandle carries the familiar verbs over the event stream. A synchronous
 // body works as-is (emits never block before Events()); for live streaming,
 // run the same body in a goroutine. The raw channel underneath is the actual
-// contract — see the MessageProcessor interface documentation for that style.
+// contract — see examples/simple for that style.
 type myMessageProcessor struct {
     // Add your custom fields here
 }
@@ -345,10 +342,9 @@ func (p *myProcessor) ProcessMessage(
 }
 ```
 
-The reference port: [examples/basic](examples/basic) is the minimal-edit
-`TaskHandle` port of a v0.x processor. A native channel-style example ships
-with the follow-up examples migration; until then the raw style is documented
-on the `MessageProcessor` interface.
+Two reference examples: [examples/basic](examples/basic) is the minimal-edit
+`TaskHandle` port of a v0.x processor; [examples/simple](examples/simple) is
+the native channel style recommended for new code.
 
 ### API mapping
 

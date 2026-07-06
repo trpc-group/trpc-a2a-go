@@ -20,6 +20,7 @@ package main
 import (
     "trpc.group/trpc-go/trpc-a2a-go/v2/server"
     "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
 
 // Create a simple message processor
@@ -27,22 +28,14 @@ type simpleProcessor struct{}
 
 func (p *simpleProcessor) ProcessMessage(
     ctx context.Context,
-    message protocol.Message,
-    options taskmanager.ProcessOptions,
-    taskHandler taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
-    response := &protocol.Message{
-        Role: protocol.MessageRoleAgent,
-        Kind: protocol.KindMessage,
-        MessageID: protocol.GenerateMessageID(),
-        Parts: []protocol.Part{
-            &protocol.TextPart{
-                Kind: protocol.KindText,
-                Text: "Hello from subpath agent!",
-            },
-        },
-    }
-    return &taskmanager.MessageProcessingResult{Result: response}, nil
+    ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+    handle := taskmanager.NewTaskHandle(ctx, ec)
+    defer handle.Close()
+
+    // A pure message reply: no task materializes.
+    handle.Reply(taskmanager.ReplyText("Hello from subpath agent!"))
+    return handle.Events(), nil
 }
 
 func main() {
@@ -53,7 +46,7 @@ func main() {
     }
 
     // 2. Create task manager with your processor
-    taskManager, _ := taskmanager.NewMemoryTaskManager(&simpleProcessor{})
+    taskManager, _ := memory.NewTaskManager(&simpleProcessor{})
 
     // 3. Create server (path automatically configured)
     a2aServer, _ := server.NewA2AServer(taskManager, server.WithAgentCard(agentCard))

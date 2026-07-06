@@ -95,15 +95,21 @@ go run main.go --help
 ## Sample Output
 
 ### Non-streaming Mode
+
+`message/send` blocks to the end of the round by default (v1.0) and returns
+the final task snapshot — the same working -> artifact -> completed round the
+streaming mode shows live:
+
 ```
 === Text Case Converter Client ===
 Server: http://localhost:8080/
 Input text: 'Hello World! THIS IS A TEST MESSAGE.'
 
 Test 1: Non-streaming conversion
-→ Sending non-streaming request...
-✓ Processing time: 45.123ms
-📄 Result 1: 'hello world! this is a test message.'
+[SUCCESS] Processing time: 2.3s
+[TASK] ID: task-a1b2c3d4... - State: completed
+[RESULT] 1: 'hello world! this is a test message.'
+[MESSAGE] [COMPLETED] Text processing finished! Original: 'Hello World! THIS IS A TEST MESSAGE.' -> Lowercase: 'hello world! this is a test message.'
 ```
 
 ### Streaming Mode (Enhanced Display)

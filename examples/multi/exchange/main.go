@@ -52,27 +52,25 @@ func getAPIKey() string {
 	return os.Getenv("GOOGLE_API_KEY")
 }
 
-// ProcessMessage implements the taskmanager.MessageProcessor interface
+// ProcessMessage implements the taskmanager.MessageProcessor interface. The
+// looked-up rate is emitted as a pure message reply — no task comes into
+// existence for a conversational exchange.
 func (p *exchangeProcessor) ProcessMessage(
 	ctx context.Context,
-	message protocol.Message,
-	options taskmanager.ProcessOptions,
-	handle taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
+	ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+	handle := taskmanager.NewTaskHandle(ctx, ec)
+	defer handle.Close()
+
 	// Extract text from the incoming message.
-	query := extractText(message)
+	query := extractText(ec.Message)
 	if query == "" {
 		errMsg := "input message must contain text."
 		log.Error("Message processing failed: %s", errMsg)
 
-		// Return error message directly
-		errorMessage := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart(errMsg)},
-		)
-		return &taskmanager.MessageProcessingResult{
-			Result: &errorMessage,
-		}, nil
+		// Reply with the error message directly
+		handle.Reply(taskmanager.ReplyText(errMsg))
+		return handle.Events(), nil
 	}
 
 	log.Info("Processing exchange request with query: %s", query)
@@ -134,13 +132,8 @@ func (p *exchangeProcessor) ProcessMessage(
 		completion, err := llms.GenerateFromSinglePrompt(ctx, p.llm, prompt)
 		if err == nil && !strings.Contains(strings.ToLower(completion), "exchange rate") {
 			// The LLM indicated this wasn't about exchange rates
-			responseMessage := protocol.NewMessage(
-				protocol.MessageRoleAgent,
-				[]*protocol.Part{protocol.NewTextPart(completion)},
-			)
-			return &taskmanager.MessageProcessingResult{
-				Result: &responseMessage,
-			}, nil
+			handle.Reply(taskmanager.ReplyText(completion))
+			return handle.Events(), nil
 		}
 	}
 
@@ -148,13 +141,8 @@ func (p *exchangeProcessor) ProcessMessage(
 	result, err := getExchangeRate(fromCurrency, toCurrency, date)
 	if err != nil {
 		log.Error("Exchange rate error: %v", err)
-		errorMessage := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart(fmt.Sprintf("Error processing request: %v", err))},
-		)
-		return &taskmanager.MessageProcessingResult{
-			Result: &errorMessage,
-		}, nil
+		handle.Reply(taskmanager.ReplyText(fmt.Sprintf("Error processing request: %v", err)))
+		return handle.Events(), nil
 	}
 
 	// Format response with some explanation
@@ -163,15 +151,9 @@ func (p *exchangeProcessor) ProcessMessage(
 
 	log.Info("Responding with: %s", finalResponse)
 
-	// Create response message
-	responseMessage := protocol.NewMessage(
-		protocol.MessageRoleAgent,
-		[]*protocol.Part{protocol.NewTextPart(finalResponse)},
-	)
-
-	return &taskmanager.MessageProcessingResult{
-		Result: &responseMessage,
-	}, nil
+	// Reply with the formatted result
+	handle.Reply(taskmanager.ReplyText(finalResponse))
+	return handle.Events(), nil
 }
 
 // parseExchangeQuery attempts to parse a natural language query to extract currency info.

@@ -75,32 +75,27 @@ func agentCardFor(name, desc, skill, url string) server.AgentCard {
 }
 
 // multiAgentProcessor dispatches on the v1.0 tenant carried in the request body
-// (taskmanager.ProcessOptions.Tenant) — no ctx-key, no URL parsing.
+// (taskmanager.ExecContext.Tenant) — no ctx-key, no URL parsing.
 type multiAgentProcessor struct{}
 
 func (p *multiAgentProcessor) ProcessMessage(
-	_ context.Context,
-	_ protocol.Message,
-	options taskmanager.ProcessOptions,
-	_ taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
-	switch options.Tenant {
-	case "chatAgent":
-		return reply("Hello from chat agent!"), nil
-	case "workerAgent":
-		return reply("Hello from worker agent!"), nil
-	default:
-		return nil, fmt.Errorf("no such tenant %q (use chatAgent or workerAgent)", options.Tenant)
-	}
-}
+	ctx context.Context,
+	ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+	handle := taskmanager.NewTaskHandle(ctx, ec)
+	defer handle.Close()
 
-func reply(text string) *taskmanager.MessageProcessingResult {
-	msg := &protocol.Message{
-		Role:      protocol.MessageRoleAgent,
-		MessageID: protocol.GenerateMessageID(),
-		Parts:     []*protocol.Part{protocol.NewTextPart(text)},
+	switch ec.Tenant {
+	case "chatAgent":
+		handle.Reply(taskmanager.ReplyText("Hello from chat agent!"))
+	case "workerAgent":
+		handle.Reply(taskmanager.ReplyText("Hello from worker agent!"))
+	default:
+		// Returning an error means the round failed to start: it is mapped to
+		// a JSON-RPC error, no task comes into existence.
+		return nil, fmt.Errorf("no such tenant %q (use chatAgent or workerAgent)", ec.Tenant)
 	}
-	return &taskmanager.MessageProcessingResult{Result: protocol.NewSendMessageResponseMessage(msg)}
+	return handle.Events(), nil
 }
 
 func stringPtr(s string) *string { return &s }

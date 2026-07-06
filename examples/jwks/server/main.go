@@ -7,8 +7,8 @@
 // Package main implements a server with push notification support using JWKS.
 // The server demonstrates how to set up and use push notifications in an A2A server:
 //
-// 1. Push notifications are enabled in the server factory via NewPushNotificationServer
-// 2. The task processor implements the PushNotificationProcessor interface
+// 1. The JWKS endpoint and JWT authenticator are enabled via server options
+// 2. The message processor runs tasks asynchronously and reports progress as events
 // 3. When a task reaches a terminal state, the task manager sends a push notification
 // 4. Notifications are signed using JWT with the private key in the authenticator
 // 5. Clients can verify the notification using the public key from the JWKS endpoint
@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
@@ -43,22 +42,23 @@ type pushNotificationMessageProcessor struct {
 	manager    *pushNotificationTaskManager
 }
 
-// ProcessMessage implements the MessageProcessor interface.
-// This method processes messages and can handle both streaming and non-streaming modes.
+// ProcessMessage implements the taskmanager.MessageProcessor interface.
+// One code path serves message/send and message/stream alike: the task is
+// moved to working right away and completed asynchronously, so unary clients
+// opt into returnImmediately=true to learn the task ID and register their
+// webhook while the task is still running.
 func (p *pushNotificationMessageProcessor) ProcessMessage(
 	ctx context.Context,
-	message protocol.Message,
-	options taskmanager.ProcessOptions,
-	handle taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
+	ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
 	log.Infof("Message processing started")
 
 	// Extract task payload from the message parts
 	var payload map[string]interface{}
 	var textContent string
 
-	if len(message.Parts) > 0 {
-		textContent = message.Parts[0].TextContent()
+	if len(ec.Message.Parts) > 0 {
+		textContent = ec.Message.Parts[0].TextContent()
 		if textContent != "" {
 			if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
 				log.Infof("Message content is plain text, not JSON: %s", textContent)
@@ -79,82 +79,33 @@ func (p *pushNotificationMessageProcessor) ProcessMessage(
 		}
 	}
 
-	// For non-streaming processing, return direct result
-	if !options.Streaming {
-		return p.processDirectly(ctx, payload)
+	handle := taskmanager.NewTaskHandle(ctx, ec)
+
+	// Move the task to working before returning: this persisted snapshot
+	// answers a returnImmediately unary call while processing continues below.
+	if err := handle.UpdateTaskState(protocol.TaskStateWorking,
+		taskmanager.ReplyText("Task queued for processing...")); err != nil {
+		log.Errorf("Failed to send working event: %v", err)
 	}
 
-	// For streaming processing, create a task and process asynchronously
-	taskID, err := handle.BuildTask(nil, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build task: %w", err)
-	}
+	// Start asynchronous processing: the goroutine emits the terminal event
+	// and closes the round.
+	go p.processTaskAsync(ctx, handle, payload)
 
-	// Subscribe to the task for streaming events
-	subscriber, err := handle.SubscribeTask(&taskID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to subscribe to task: %w", err)
-	}
-
-	// Start asynchronous processing
-	go p.processTaskAsync(ctx, taskID, payload, subscriber)
-
-	return &taskmanager.MessageProcessingResult{
-		StreamingEvents: subscriber,
-	}, nil
-}
-
-// processDirectly handles immediate processing for non-streaming requests
-func (p *pushNotificationMessageProcessor) processDirectly(
-	ctx context.Context,
-	payload map[string]interface{},
-) (*taskmanager.MessageProcessingResult, error) {
-	// Process the task immediately
-	completeMsg := "Task completed"
-	if content, ok := payload["content"].(string); ok {
-		completeMsg = fmt.Sprintf("Task completed: %s", content)
-	}
-
-	responseMessage := protocol.NewMessage(
-		protocol.MessageRoleAgent,
-		[]*protocol.Part{protocol.NewTextPart(completeMsg)},
-	)
-
-	return &taskmanager.MessageProcessingResult{
-		Result: protocol.NewSendMessageResponseMessage(&responseMessage),
-	}, nil
+	return handle.Events(), nil
 }
 
 // processTaskAsync handles the actual task processing in a separate goroutine.
 func (p *pushNotificationMessageProcessor) processTaskAsync(
 	ctx context.Context,
-	taskID string,
+	handle *taskmanager.TaskHandle,
 	payload map[string]interface{},
-	subscriber taskmanager.TaskSubscriber,
 ) {
-	defer func() {
-		if subscriber != nil {
-			subscriber.Close()
-		}
-	}()
+	// Closing the round with the task completed ends the stream normally.
+	defer handle.Close()
 
+	taskID := handle.TaskID()
 	log.Infof("Starting async processing of task: %s", taskID)
-
-	workingEvent := protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{
-		TaskID: taskID,
-		Status: protocol.TaskStatus{
-			State: protocol.TaskStateWorking,
-			Message: &protocol.Message{
-				MessageID: uuid.New().String(),
-				Role:      protocol.MessageRoleAgent,
-				Parts:     []*protocol.Part{protocol.NewTextPart("Task queued for processing...")},
-			},
-		},
-	})
-	err := subscriber.Send(workingEvent)
-	if err != nil {
-		log.Errorf("Failed to send working event: %v", err)
-	}
 
 	time.Sleep(5 * time.Second)
 
@@ -163,20 +114,8 @@ func (p *pushNotificationMessageProcessor) processTaskAsync(
 		completeMsg = fmt.Sprintf("Task completed: %s", content)
 	}
 
-	completedEvent := protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{
-		TaskID: taskID,
-		Status: protocol.TaskStatus{
-			State: protocol.TaskStateCompleted,
-			Message: &protocol.Message{
-				MessageID: uuid.New().String(),
-				Role:      protocol.MessageRoleAgent,
-				Parts:     []*protocol.Part{protocol.NewTextPart(completeMsg)},
-			},
-		},
-		Final: true,
-	})
-	err = subscriber.Send(completedEvent)
-	if err != nil {
+	if err := handle.UpdateTaskState(protocol.TaskStateCompleted,
+		taskmanager.ReplyText(completeMsg)); err != nil {
 		log.Errorf("Failed to send completed event: %v", err)
 	}
 
@@ -194,14 +133,10 @@ type pushNotificationTaskManager struct {
 // sendPushNotification sends a push notification for a completed task
 func (m *pushNotificationTaskManager) sendPushNotification(ctx context.Context, taskID, status string) {
 	log.Infof("Sending push notification for task: %s with status: %s", taskID, status)
-	// Get push config from task manager
-	ptm, ok := m.TaskManager.(*memory.TaskManager)
-	if !ok {
-		log.Errorf("failed to cast task manager to memory task manager")
-		return
-	}
-	pushConfig, exists := ptm.PushNotifications[taskID]
-	if !exists {
+	// Resolve the webhook the client registered for this task through the
+	// TaskManager interface.
+	pushConfig, err := m.TaskManager.OnPushNotificationGet(ctx, protocol.TaskIDParams{ID: taskID})
+	if err != nil {
 		log.Infof("No push notification configuration for task: %s", taskID)
 		return
 	}

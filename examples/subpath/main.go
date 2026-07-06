@@ -26,22 +26,14 @@ type simpleProcessor struct{}
 
 func (p *simpleProcessor) ProcessMessage(
 	ctx context.Context,
-	message protocol.Message,
-	options taskmanager.ProcessOptions,
-	taskHandler taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
-	// Simply return a text response
-	response := &protocol.Message{
-		Role:      protocol.MessageRoleAgent,
-		MessageID: protocol.GenerateMessageID(),
-		Parts: []*protocol.Part{
-			protocol.NewTextPart("Hello from subpath agent!"),
-		},
-	}
+	ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+	handle := taskmanager.NewTaskHandle(ctx, ec)
+	defer handle.Close()
 
-	return &taskmanager.MessageProcessingResult{
-		Result: protocol.NewSendMessageResponseMessage(response),
-	}, nil
+	// Simply return a text response: a pure message reply, no task materializes.
+	handle.Reply(taskmanager.ReplyText("Hello from subpath agent!"))
+	return handle.Events(), nil
 }
 
 func main() {

@@ -28,7 +28,7 @@ Single Server Process (localhost:8080)
 - **Static or dynamic registry**: register known agents with
   `server.WithTenantCard(tenant, card)`; for tenants not known at startup use
   `server.WithTenantCardProvider(func(ctx, tenant) (AgentCard, error))`.
-- **Processor dispatch**: the processor switches on `options.Tenant`.
+- **Processor dispatch**: the processor switches on `ec.Tenant`.
 - **No router/middleware/placeholder card** needed.
 
 ## Available Agents
@@ -98,17 +98,19 @@ server.WithTenantCardProvider(func(ctx context.Context, tenant string) (server.A
 ### 2. Dispatch on the tenant in the processor
 ```go
 func (p *multiAgentProcessor) ProcessMessage(
-    _ context.Context, _ protocol.Message,
-    options taskmanager.ProcessOptions, _ taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
-    switch options.Tenant {
+    ctx context.Context, ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+    handle := taskmanager.NewTaskHandle(ctx, ec)
+    defer handle.Close()
+    switch ec.Tenant {
     case "chatAgent":
-        return reply("Hello from chat agent!"), nil
+        handle.Reply(taskmanager.ReplyText("Hello from chat agent!"))
     case "workerAgent":
-        return reply("Hello from worker agent!"), nil
+        handle.Reply(taskmanager.ReplyText("Hello from worker agent!"))
     default:
-        return nil, fmt.Errorf("no such tenant %q", options.Tenant)
+        return nil, fmt.Errorf("no such tenant %q", ec.Tenant)
     }
+    return handle.Events(), nil
 }
 ```
 
