@@ -367,5 +367,5 @@ last frame, after which the SSE stream closes. Everything else — an explicit
 messages — is the agent's choice.
 
 Next: [Behavior](behavior.md) explains how this framework turns that event
-stream into persisted tasks and derived responses; [Usage](usage.md) shows how
+stream into persisted tasks and derived responses; [Server](server.md) shows how
 to emit it in code.

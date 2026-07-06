@@ -161,6 +161,8 @@ func (p *proc) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) 
   objects, the task state machine, and the interaction flows.
 - [Behavior](behavior.md) — the processor contract, round lifecycle,
   cancellation, and history/retention semantics.
-- [Usage](usage.md) — build recipes for every capability, each linked to a
-  runnable example.
+- [Server](server.md) — build an agent: the server, the processor, storage,
+  and every server-side capability.
+- [Client](client.md) — call agents: the consumption modes, task management,
+  and orchestration.
 - [Migrating from v0.x](migration.md) — port an existing v0.x agent.

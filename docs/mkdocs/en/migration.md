@@ -4,7 +4,7 @@ This guide ports an existing v0.x agent to v1.0 (the `/v2` module). It expands
 the mapping table in the README into a full account of what changed, what each
 v0.x symbol becomes, and the behavior changes that compile cleanly but run
 differently. For the runtime contract behind the new API, see
-[behavior.md](behavior.md); for build recipes, see [usage.md](usage.md).
+[behavior.md](behavior.md); for build recipes, see [server.md](server.md).
 
 ## What changed
 

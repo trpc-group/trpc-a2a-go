@@ -88,8 +88,8 @@ framework in depth (English and [中文](docs/mkdocs/zh/index.md)):
 - [behavior.md](docs/mkdocs/en/behavior.md) — how this framework behaves: the
   processor contract, round lifecycle, cancellation, history semantics, and
   retention.
-- [usage.md](docs/mkdocs/en/usage.md) — build recipes, each linked to a
-  runnable example.
+- [server.md](docs/mkdocs/en/server.md) / [client.md](docs/mkdocs/en/client.md)
+  — build an agent, and call agents; recipes linked to examples.
 - [migration.md](docs/mkdocs/en/migration.md) — port an existing v0.x agent
   to v1.0 (a summary is also in [Migrating from v0.x](#migrating-from-v0x)
   below).

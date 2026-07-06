@@ -143,5 +143,6 @@ func (p *proc) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) 
 - [协议](protocol.md)——学习 A2A 本身:agent card、四个 wire 对象、任务状态机、
   交互流程。
 - [框架行为](behavior.md)——processor 契约、轮次生命周期、取消、历史/留存语义。
-- [使用指南](usage.md)——覆盖每项能力的构建配方,每条链接一个可运行示例。
+- [服务端](server.md)——构建 agent:server、processor、存储,以及每项服务端能力。
+- [客户端](client.md)——调用 agent:消费模式、任务管理、编排。
 - [从 v0.x 迁移](migration.md)——移植既有 v0.x agent。

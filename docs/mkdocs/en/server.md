@@ -1,17 +1,18 @@
-# Building Agents with tRPC-A2A-Go
+# Building an Agent (Server)
 
-Recipes for every capability, each linked to a runnable example. Concepts are
-in [protocol.md](protocol.md) and [behavior.md](behavior.md); porting a v0.x
-agent is [Migrating from v0.x](migration.md).
+The server side: how to stand up an A2A server, define your agent as a
+`MessageProcessor`, choose a storage backend, and turn on the framework's
+server capabilities. For calling agents, see [Client](client.md); for the
+runtime contract behind these APIs, see [behavior.md](behavior.md).
 
 ```bash
 go get trpc.group/trpc-go/trpc-a2a-go/v2
 ```
 
-## 1. The server
+## The server in three parts
 
-A server binds three things: an **agent card** (identity + capabilities), a
-**TaskManager** (state), and your **MessageProcessor** (logic).
+A server binds an **agent card** (identity + capabilities), a **TaskManager**
+(state), and your **MessageProcessor** (logic):
 
 ```go
 import (
@@ -21,33 +22,53 @@ import (
 
 tm, _ := memory.NewTaskManager(&myProcessor{})
 srv, _ := server.NewA2AServer(tm, server.WithAgentCard(agentCard))
-srv.Start(":8080")            // serves JSON-RPC at "/" and the card at /.well-known/agent-card.json
+srv.Start(":8080")   // serves JSON-RPC at "/" and the card at /.well-known/agent-card.json
 ```
 
-`NewA2AServer` takes functional options. The ones you will reach for:
+`NewA2AServer` takes functional options:
 
 | Option | Purpose |
 | --- | --- |
 | `WithAgentCard(card)` | The public agent card (single-agent server). |
-| `WithTenantCard(tenant, card)` / `WithTenantCardProvider(fn)` | Per-tenant cards (multi-tenant server). |
-| `WithAuthProvider(p)` | Require authentication (§5). |
-| `WithJWKSEndpoint(enabled, path)` + `WithPushNotificationAuthenticator(a)` | Sign push notifications, publish keys (§6). |
-| `WithBasePath(prefix)` | Mount under a subpath (§8). |
-| `WithCompatHandler(h)` | Also serve the legacy v0.2.x wire (§9). |
+| `WithTenantCard(tenant, card)` / `WithTenantCardProvider(fn)` | Per-tenant cards (multi-tenant, below). |
+| `WithAuthProvider(p)` | Require authentication (below). |
+| `WithJWKSEndpoint(enabled, path)` + `WithPushNotificationAuthenticator(a)` | Sign push notifications, publish keys. |
+| `WithBasePath(prefix)` | Mount under a subpath. |
+| `WithCompatHandler(h)` | Also serve the legacy v0.2.x wire. |
 | `WithMiddleware(mw...)` | Wrap the HTTP handler chain. |
 | `WithCORSEnabled(true)` | Emit CORS headers. |
 | `WithReadTimeout` / `WithWriteTimeout` / `WithIdleTimeout` | HTTP server timeouts. |
-| `WithTelemetryMeterProvider(mp)` / `WithFirstTokenPolicy(p)` | Metrics + TTFT (§10). |
+| `WithTelemetryMeterProvider(mp)` / `WithFirstTokenPolicy(p)` | Metrics + TTFT. |
 
 Shut down with `srv.Stop(ctx)`, which drains in-flight rounds before closing.
 
-## 2. Writing the processor
+## Defining the MessageProcessor
 
-Your agent is one method. Read [`ExecContext`](behavior.md), emit events, and
-close the stream. Two authoring styles produce the same events.
+Your agent is one method:
 
-**`TaskHandle` style (recommended).** A synchronous body works as-is — emits
-before `Events()` never block.
+```go
+type MessageProcessor interface {
+    ProcessMessage(ctx context.Context, ec *ExecContext) (<-chan protocol.StreamEvent, error)
+}
+```
+
+You read the request from a read-only snapshot and return a channel of events —
+the task's event log. The framework serves `SendMessage` (unary) and
+`SendStreamingMessage` (streaming) from this one method; there is no
+streaming/non-streaming branch in your code.
+
+`ExecContext` carries what you need to answer: `Message` (the incoming
+message), `TaskID` (pre-allocated), `Task` (the current snapshot on a
+continuation round, `nil` on a fresh one), `ContextID`, `Tenant`, `History`
+(a conversation snapshot), `AcceptedOutputModes`, and `PushConfig` (an inline
+webhook config, if the client sent one).
+
+There are two authoring styles; both produce the same event stream.
+
+### Style 1 — `TaskHandle` (recommended)
+
+The familiar verb API. A synchronous body works as-is — emits before
+`Events()` never block, so no goroutine is required.
 → [examples/basic](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic)
 
 ```go
@@ -56,14 +77,21 @@ func (p *proc) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) 
     defer h.Close()
     h.UpdateTaskState(protocol.TaskStateWorking, nil)
     result := doWork(ec.Message)
-    h.AddArtifact(result.Artifact, true)
+    h.AddArtifact(result.Artifact, true)                              // lastChunk = true
     h.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("done"))
     return h.Events(), nil
 }
 ```
 
-**Raw channel style.** Full control over each `protocol.StreamEvent` — needed
-for artifact-append chunking.
+Verbs: `UpdateTaskState(state, message)`, `AddArtifact(artifact, lastChunk)`,
+`Reply(message)`, plus reads `TaskID()`, `GetContextID()`, `GetTask()`,
+`GetMessageHistory()`. `taskmanager.ReplyText(text)` builds an agent message.
+
+### Style 2 — raw channel
+
+Construct `protocol.StreamEvent` values and send them yourself. Full control
+over every field — needed for artifact-append chunking (`TaskHandle` does not
+expose the `Append` flag).
 → [examples/simple](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple)
 
 ```go
@@ -71,29 +99,37 @@ out := make(chan protocol.StreamEvent, 4)
 go func() {
     defer close(out)
     out <- &protocol.TaskStatusUpdateEvent{Status: protocol.TaskStatus{State: protocol.TaskStateWorking}}
-    // ... artifacts ...
+    out <- &protocol.TaskArtifactUpdateEvent{Artifact: art, LastChunk: &done}
+    out <- &protocol.TaskStatusUpdateEvent{Status: protocol.TaskStatus{State: protocol.TaskStateCompleted}}
 }()
 return out, nil
 ```
 
-Common shapes:
+### Common shapes
 
-- **Pure reply** (no task): `h.Reply(taskmanager.ReplyText("..."))`.
-- **Live streaming**: run the body in a goroutine so each event reaches
+- **Pure reply** (no task materializes): `h.Reply(taskmanager.ReplyText("..."))`.
+- **Live streaming** — run the body in a goroutine so each event reaches
   `SendStreamingMessage` consumers as it happens; check `ctx.Err()` in long
-  loops and just close on cancellation — the framework persists `CANCELED`.
+  loops and just close on cancellation (the framework persists `CANCELED`).
   → [examples/streaming](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/streaming)
-- **Multi-turn**: suspend with
+- **Multi-turn** — suspend with
   `h.UpdateTaskState(protocol.TaskStateInputRequired, taskmanager.ReplyText("need more"))`,
   close, and handle the follow-up (which echoes the `taskId`) as a new round
   with `ec.Task` set.
 
-Rules that keep you out of trouble: close the channel/handle from the goroutine
-that emits; end every round in a terminal or suspend state; one round drives
-exactly one task; never emit `*protocol.Task`; anything worth remembering
-across rounds goes out as a `Message` event.
+### Rules that keep you out of trouble
 
-## 3. Storage backends
+- Close the channel/handle from the goroutine that emits — the round ends only
+  on close, and a never-closing round pins the task and blocks shutdown.
+- End every round in a terminal or suspend state; closing in `working` marks
+  the task `FAILED`.
+- One round drives exactly one task; never emit `*protocol.Task`.
+- Anything worth remembering across rounds must be emitted as a `Message`
+  event (status messages are ephemeral; artifacts never enter history).
+
+The full contract is [behavior.md](behavior.md).
+
+## Storage backends
 
 The `TaskManager` owns task and conversation state. Two backends ship in-tree.
 
@@ -101,9 +137,9 @@ The `TaskManager` owns task and conversation state. Two backends ship in-tree.
 
 ```go
 tm, _ := memory.NewTaskManager(proc,
-    memory.WithMaxHistoryLength(100),          // conversation cap
+    memory.WithMaxHistoryLength(100),
     memory.WithConversationTTL(time.Hour, 30*time.Second),
-    memory.WithTaskTTL(time.Hour),             // 0 = keep terminal tasks forever (default)
+    memory.WithTaskTTL(time.Hour),   // 0 = keep terminal tasks forever (default)
 )
 ```
 
@@ -119,47 +155,16 @@ tm, _ := redistm.NewTaskManager(proc, redisClient,   // note: (processor, client
 ```
 
 → [examples/redis](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis).
-Retention differences (memory `TaskTTL` defaults to *keep forever*; Redis uses
-key TTL; suspended-task and cross-replica caveats) are in [behavior.md](behavior.md).
-Implement the `taskmanager.TaskManager` interface for a custom backend.
+Retention differences and the Redis cross-replica caveat are in
+[behavior.md](behavior.md). Implement the `taskmanager.TaskManager` interface
+for a custom backend.
 
-## 4. Clients and the consumption modes
+## Authentication
 
-```go
-import "trpc.group/trpc-go/trpc-a2a-go/v2/client"
-
-c, _ := client.NewA2AClient("http://localhost:8080/")
-```
-
-One processor, four ways to consume it:
+Require auth on the server; three schemes, composable into a chain. The client
+side is in [Client](client.md#authentication).
 
 ```go
-// 1. Blocking send (default): one call, final Task-or-Message result.
-resp, _ := c.SendMessage(ctx, params)
-
-// 2. returnImmediately: earliest result now, poll or resubscribe later.
-t := true
-params.Configuration = &protocol.SendMessageConfiguration{ReturnImmediately: &t}
-resp, _ = c.SendMessage(ctx, params)
-
-// 3. Streaming: every event live.
-events, _ := c.StreamMessage(ctx, params)
-
-// 4. Resubscribe: reattach to a running task (snapshot first, then increments).
-events, _ = c.ResubscribeTask(ctx, protocol.TaskIDParams{ID: taskID})
-```
-
-Also `c.GetTasks`, `c.ListTasks`, `c.CancelTasks`. The three consumption modes
-are demonstrated together by the
-[examples/simple client](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple).
-
-## 5. Authentication
-
-Require auth on the server; the client attaches credentials. Three schemes,
-composable into a chain.
-
-```go
-// Server: accept any of several schemes.
 provider := auth.NewChainAuthProvider(
     auth.NewJWTAuthProvider(secret, audience, issuer, time.Hour),
     auth.NewAPIKeyAuthProvider(keyMap, "X-API-Key"),
@@ -168,15 +173,13 @@ provider := auth.NewChainAuthProvider(
 srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card), server.WithAuthProvider(provider))
 ```
 
-The agent card's `securitySchemes` advertises what the server accepts; a client
-authenticates per the scheme it chose. Full server + client wiring for JWT,
-API key, and OAuth2:
+The card's `securitySchemes` advertises what the server accepts.
 → [examples/auth](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth).
 
-## 6. Push notifications
+## Push notifications
 
-For disconnected operation, the client registers a webhook and the server calls
-it as the task progresses. The framework signs each callback with JWT and
+For disconnected operation, the client registers a webhook and the server
+calls it as the task progresses. The framework signs each callback with JWT and
 publishes the verification keys at a JWKS endpoint.
 
 ```go
@@ -189,13 +192,11 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 ```
 
 Configs are stored via `CreateTaskPushNotificationConfig` (or the request's
-inline `pushNotificationConfig`, which reaches your processor as
-`ec.PushConfig`); the sender resolves them with `OnPushNotificationGet` and
-POSTs the signed payload. End-to-end, with client-side JWT verification via
-JWKS:
+inline config, reaching your processor as `ec.PushConfig`); the sender resolves
+them with `OnPushNotificationGet` and POSTs the signed payload.
 → [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks).
 
-## 7. Multi-tenant hosting
+## Multi-tenant hosting
 
 One process can host several agents. The request's tenant arrives as
 `ec.Tenant`; per-tenant cards are served with `WithTenantCard`.
@@ -210,20 +211,19 @@ srv, _ := server.NewA2AServer(tm,
 
 → [examples/tenant](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/tenant).
 
-## 8. Serving on a subpath
+## Serving on a subpath
 
 Mount the whole server under a path prefix (behind a gateway, say). The path
 goes in the agent card URL and `WithBasePath`:
 
 ```go
 srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
-    server.WithBasePath("/api/v1/agent"))
-// card + JSON-RPC now live under /api/v1/agent/…
+    server.WithBasePath("/api/v1/agent"))   // card + JSON-RPC under /api/v1/agent/…
 ```
 
 → [examples/subpath](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/subpath).
 
-## 9. Serving legacy v0.2.x clients
+## Serving legacy v0.2.x clients
 
 Keep unmodified v0.2.x clients working while they migrate: mount `compat/v0` on
 the same endpoint. Legacy slash-method names are disjoint from the v1.0
@@ -240,7 +240,7 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 
 → [examples/compat](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/compat).
 
-## 10. Telemetry
+## Telemetry
 
 The server records OpenTelemetry metrics through a meter provider you supply,
 including time-to-first-token (TTFT) for streaming responses. When "first
@@ -253,18 +253,8 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 )
 ```
 
-## 11. Agent orchestration
-
-An agent can call other agents through the A2A client — the same client you'd
-use standalone, invoked from inside a `ProcessMessage`. The root agent fans
-work out to specialists and aggregates their results into its own task.
-→ [examples/multi](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/multi).
-
 ## Capability status
 
 The framework serves the **JSON-RPC** transport binding today. The spec also
-defines **gRPC** and **HTTP+JSON (REST)** bindings — these are planned and not
-yet implemented; the agent card already models multi-transport declaration for
-when they land. On the Redis backend, live event fan-out is per-process
-(snapshots are shared); full cross-replica streaming is a planned addition.
-See [behavior.md](behavior.md) for the current runtime limits.
+defines **gRPC** and **HTTP+JSON (REST)** bindings — planned, not yet
+implemented. See the [Overview](overview.md#what-you-get) capability matrix.

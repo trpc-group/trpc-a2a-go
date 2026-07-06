@@ -10,7 +10,8 @@ nav:
   - Overview: overview.md
   - Protocol: protocol.md
   - Behavior: behavior.md
-  - Usage: usage.md
+  - Server: server.md
+  - Client: client.md
   - Migrating from v0.x: migration.md
 
 plugins:
@@ -31,7 +32,8 @@ plugins:
             - 框架概览: overview.md
             - 协议: protocol.md
             - 框架行为: behavior.md
-            - 使用指南: usage.md
+            - 服务端: server.md
+            - 客户端: client.md
             - 从 v0.x 迁移: migration.md
   - git-revision-date-localized:
       enable_creation_date: true

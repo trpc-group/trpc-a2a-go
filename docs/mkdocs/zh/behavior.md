@@ -1,7 +1,7 @@
 # tRPC-A2A-Go 的行为
 
 本页描述框架的运行时行为：你的 agent 代码遵循的契约，以及 client 观察到的语义。
-协议背景见 [protocol.md](protocol.md)，代码配方见 [usage.md](usage.md)。
+协议背景见 [protocol.md](protocol.md)，代码配方见 [server.md](server.md) 与 [client.md](client.md)。
 
 ## MessageProcessor 契约
 

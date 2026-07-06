@@ -3,7 +3,7 @@
 本指南把一个既有的 v0.x agent 迁移到 v1.0（`/v2` 模块）。它把 README 里的映射表
 展开为完整说明：改了什么、每个 v0.x 符号变成什么、以及那些能顺利编译但运行行为
 不同的变化。新 API 背后的运行时契约见 [behavior.md](behavior.md)，构建配方见
-[usage.md](usage.md)。
+[server.md](server.md)。
 
 ## 改了什么
 

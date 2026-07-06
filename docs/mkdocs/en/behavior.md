@@ -2,7 +2,8 @@
 
 This page describes the framework's runtime behavior: the contract your agent
 code lives under, and the semantics clients observe. Protocol background is in
-[protocol.md](protocol.md); code recipes are in [usage.md](usage.md).
+[protocol.md](protocol.md); code recipes are in [server.md](server.md) and
+[client.md](client.md).
 
 ## The MessageProcessor contract
 
