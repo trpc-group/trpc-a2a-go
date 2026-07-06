@@ -125,7 +125,7 @@ func TestTaskHandle_EmitAfterCloseErrors(t *testing.T) {
 	}
 }
 
-// A live emit blocked on the full channel (a mis-ported emitter racing no
+// A live emit blocked on the full channel (a wrongly ported emitter racing no
 // consumer) must abort with the ctx error once the round is canceled, instead
 // of deadlocking forever.
 func TestTaskHandle_BlockedLiveEmitUnblocksOnCancel(t *testing.T) {
