@@ -1,9 +1,9 @@
 # Understanding the A2A Protocol
 
 This page explains A2A from the user's seat: the problem it solves, the mental
-model, the interactions you will actually have with an agent — and only then
-the formal object and RPC definitions. How this framework implements the
-protocol is covered in [behavior.md](behavior.md).
+model, how you discover an agent, the interactions you will actually have with
+one — and only then the formal object and RPC definitions. How this framework
+implements the protocol is covered in [behavior.md](behavior.md).
 
 ## What problem does A2A solve?
 
@@ -20,11 +20,11 @@ how it is built:
 - an **orchestrator agent** fanning work out to specialist agents,
 - **cross-organization** calls that need authentication and webhooks.
 
-The transport is deliberately boring: the client fetches the agent's
-**agent card** (`/.well-known/agent-card.json`) to learn its identity, skills
-and capabilities, then speaks JSON-RPC — unary calls over HTTP POST, streaming
-over SSE. trpc-a2a-go implements A2A **v1.0** (the legacy v0.2.x wire is kept
-alive by [compat/v0](https://github.com/trpc-group/trpc-a2a-go/tree/v2/compat/v0)).
+The transport is deliberately boring: the client fetches the agent's **agent
+card** to learn its identity, skills and capabilities, then speaks JSON-RPC —
+unary calls over HTTP POST, streaming over SSE. trpc-a2a-go implements A2A
+**v1.0** (the legacy v0.2.x wire is kept alive by
+[compat/v0](https://github.com/trpc-group/trpc-a2a-go/tree/v2/compat/v0)).
 
 ## The mental model
 
@@ -56,6 +56,60 @@ Not every exchange creates a task. A quick answer is just a `Message` back —
 no lifecycle, no cleanup. The agent opens a task only when there is work worth
 tracking; from then on, everything the agent reports is an **event**: a status
 update (progress) or an artifact update (deliverable chunk).
+
+## Discovery: the Agent Card
+
+Before a client can call an agent it needs to know the agent exists, where it
+lives, what it can do, and how to authenticate. That is the **Agent Card** — a
+JSON document the agent publishes at a well-known path:
+
+```
+GET https://agent.example.com/.well-known/agent-card.json
+```
+
+The card is the entry point for the whole protocol. A client fetches it once,
+learns everything it needs, and proceeds. Its main sections:
+
+| Section | Fields | What it tells the client |
+| --- | --- | --- |
+| **Identity** | `name`, `description`, `version`, `provider`, `iconUrl`, `documentationUrl` | Who this agent is. |
+| **Transport** | `supportedInterfaces[]` (each: `url`, `protocolBinding`, optional `tenant`) | Where and how to call it. The first interface is preferred. |
+| **Capabilities** | `capabilities.streaming`, `.pushNotifications`, `.stateTransitionHistory`, `.extendedAgentCard`, `.extensions` | Which optional features it supports. |
+| **Skills** | `skills[]` (each: `id`, `name`, `description`, `tags`, `examples`, `inputModes`, `outputModes`) | What it can actually do, in discrete advertised capabilities. |
+| **I/O modes** | `defaultInputModes`, `defaultOutputModes` | The media types it accepts and produces by default (e.g. `"text"`). |
+| **Security** | `securitySchemes`, `securityRequirements` | How to authenticate (API key / HTTP / OAuth2 / OIDC). |
+
+A minimal card as this framework builds it:
+
+```go
+agentCard := server.AgentCard{
+    Name:        "Text Reversal Agent",
+    Description: "Reverses text input",
+    URL:         "http://localhost:8080/",   // becomes a supportedInterfaces entry
+    Version:     "1.0.0",
+    Capabilities: server.AgentCapabilities{
+        Streaming: boolPtr(true),
+    },
+    DefaultInputModes:  []string{"text"},
+    DefaultOutputModes: []string{"text"},
+    Skills: []server.AgentSkill{{
+        ID:          "reverse",
+        Name:        "Text Reverser",
+        Description: stringPtr("Input: reverse hello → Output: olleh"),
+        Tags:        []string{"text"},
+    }},
+}
+```
+
+Two related notions:
+
+- **Extended card** — an agent may serve a richer card *after* the client
+  authenticates (skills or details it does not want public). The client fetches
+  it with `GetExtendedAgentCard`; the public card advertises this via
+  `capabilities.extendedAgentCard`.
+- **Multi-transport** — `supportedInterfaces` can list several bindings
+  (JSON-RPC, gRPC, REST) and, in this framework, per-tenant URLs; the client
+  picks the first it supports.
 
 ## The interactions, one scenario at a time
 
@@ -159,17 +213,47 @@ The definitions behind the scenarios above.
 
 | Object | Role | One-liner |
 | --- | --- | --- |
-| **Message** | **Communication** | One conversational turn: `role` (user/agent), `parts` (text/file/data), `messageId`, optional `taskId`/`contextId`. |
-| **Task** | **The unit of work** | A stateful record: `id`, `contextId`, `status`, `artifacts[]`, `history[]`. Created by the server, immutable once terminal. |
-| **TaskStatusUpdateEvent** | **Progress** | Announces a state transition; may carry an explanatory `message`; `final=true` marks the round's last status frame. |
-| **TaskArtifactUpdateEvent** | **Deliverables** | Carries an `Artifact`. Chunked streaming uses `append` (continue the previous chunk) and `lastChunk`. |
+| **Message** | **Communication** | One conversational turn. |
+| **Task** | **The unit of work** | A stateful, observable record. |
+| **TaskStatusUpdateEvent** | **Progress** | A state-transition announcement. |
+| **TaskArtifactUpdateEvent** | **Deliverables** | A produced artifact (or chunk). |
+
+**Message** — required `messageId`, `role` (user/agent), `parts`; optional
+`taskId` (target/continue a task), `contextId` (the conversation),
+`referenceTaskIds` (point at related tasks without resuming them), `metadata`.
+
+**Task** — required `id`, `status`; plus `contextId`, `artifacts[]`,
+`history[]` (messages exchanged during the task; not every message is
+guaranteed to be persisted — retention is implementation-defined), `metadata`.
+
+**TaskStatusUpdateEvent** — `taskId`, `contextId`, `status` (a `TaskStatus`
+carrying the `state` and an optional explanatory `message`), and `final` —
+`true` on the round's last status frame.
+
+**TaskArtifactUpdateEvent** — `taskId`, `contextId`, `artifact`, and two chunk
+flags: `append` (this event continues the previous chunk of the same artifact
+rather than starting a new one) and `lastChunk` (the final chunk).
 
 Two identifiers glue everything together: **`contextId`** names the
 conversation (server-generated when absent; one context spans many tasks) and
-**`taskId`** names one unit of work (echoing it resumes a waiting task). Two
-spec rules follow: an agent **MUST reject** a message whose `contextId` does
-not match the targeted task's, and a message can point at related tasks
-*without* resuming them via the optional `referenceTaskIds` field.
+**`taskId`** names one unit of work (echoing it resumes a waiting task). A spec
+rule follows: an agent **MUST reject** a message whose `contextId` does not
+match the targeted task's.
+
+### Parts: what a message or artifact carries
+
+Both messages and artifacts carry a list of **parts**, so a single turn can mix
+text, files and structured data:
+
+| Part | Carries | Constructor |
+| --- | --- | --- |
+| **Text** | a UTF-8 string | `protocol.NewTextPart(text)` |
+| **File** | a file by URL + filename + media type (or raw bytes) | `protocol.NewFilePart(url, name, mediaType)` / `NewRawPart(bytes, mediaType)` |
+| **Data** | arbitrary structured JSON | `protocol.NewDataPart(value)` |
+
+`defaultInputModes` / `defaultOutputModes` on the agent card, and
+`acceptedOutputModes` on a request, negotiate which media types flow — as
+hints, not hard constraints.
 
 ### The task state machine
 
@@ -189,11 +273,21 @@ stateDiagram-v2
     rejected --> [*]
 ```
 
-Terminal states (`completed`/`failed`/`canceled`/`rejected`) are **immutable**:
-nothing may modify such a task, and subscribing to one is rejected. The spec
-calls `input-required`/`auth-required` **interrupted** states — processing
-paused awaiting client action; the wire enum also carries a
-`TASK_STATE_UNSPECIFIED` placeholder for indeterminate states.
+| State (wire enum) | Kind | Meaning |
+| --- | --- | --- |
+| `TASK_STATE_SUBMITTED` | active | acknowledged, not yet started |
+| `TASK_STATE_WORKING` | active | actively being processed |
+| `TASK_STATE_INPUT_REQUIRED` | interrupted | needs more input from the client |
+| `TASK_STATE_AUTH_REQUIRED` | interrupted | needs authentication to proceed |
+| `TASK_STATE_COMPLETED` | terminal | finished successfully |
+| `TASK_STATE_FAILED` | terminal | finished with an error |
+| `TASK_STATE_CANCELED` | terminal | canceled before completion |
+| `TASK_STATE_REJECTED` | terminal | the agent declined the task |
+| `TASK_STATE_UNSPECIFIED` | — | placeholder for an indeterminate state |
+
+**Terminal** states are immutable: nothing may modify such a task, and
+subscribing to one is rejected. **Interrupted** states pause processing
+awaiting client action (a follow-up message, or authentication).
 
 ### The RPC surface (v1.0)
 
@@ -211,6 +305,11 @@ slash-delimited names, shown for reference):
 | `CreateTaskPushNotificationConfig` / `Get…` / `List…` / `Delete…` | unary | Webhook config CRUD, for disconnected operation. | `tasks/pushNotificationConfig/*` |
 | `GetExtendedAgentCard` | unary | Authenticated agent card with extended metadata. | `agent/getAuthenticatedExtendedCard` |
 
+The v1.0 specification defines three functionally equivalent transport
+bindings — JSON-RPC, gRPC, and HTTP+JSON/REST — with binding-specific method
+naming. This framework implements the JSON-RPC binding (the names above); the
+agent card's `supportedInterfaces` declares which bindings an agent offers.
+
 ### Blocking vs `returnImmediately`
 
 `SendMessage` takes an optional `configuration.returnImmediately`:
@@ -222,8 +321,23 @@ slash-delimited names, shown for reference):
 > **v0.2.x note**: the old wire had the *opposite* default — `blocking` was
 > optional and absent meant "answer immediately". v1.0 inverted it. The compat
 > layer preserves the old default for legacy clients; migrating clients must
-> opt in explicitly (see the
-> [migration guide](https://github.com/trpc-group/trpc-a2a-go/blob/v2/README.md#migrating-from-v0x)).
+> opt in explicitly (see [Migrating from v0.x](migration.md)).
+
+### Error codes
+
+Standard JSON-RPC codes apply (`-32700` parse error, `-32600` invalid request,
+`-32601` method not found, `-32602` invalid params, `-32603` internal error),
+plus the A2A-specific range:
+
+| Code | Meaning |
+| --- | --- |
+| `-32001` | Task not found |
+| `-32002` | Task cannot be canceled (already terminal) |
+| `-32003` | Push notifications not supported |
+| `-32004` | Operation not supported |
+| `-32005` | Incompatible content types |
+| `-32006` | Invalid agent response |
+| `-32007` | Authenticated extended card not configured |
 
 ### The canonical event paradigm
 
@@ -240,3 +354,7 @@ Mandatory: end in a legal state (terminal, or a suspend state for
 multi-turn), `final=true` on the closing status frame, artifact chunk flags.
 Everything else — an explicit `submitted`, how many `working` frames, whether
 progress text rides on status messages — is the agent's choice.
+
+Next: [Behavior](behavior.md) explains how this framework turns that event
+stream into persisted tasks and derived responses; [Usage](usage.md) shows how
+to emit it in code.

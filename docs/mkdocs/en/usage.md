@@ -2,7 +2,7 @@
 
 Recipes for the common tasks, each linked to a runnable example. Concepts are
 in [protocol.md](protocol.md) and [behavior.md](behavior.md); porting a v0.x
-agent is covered by the [migration guide](https://github.com/trpc-group/trpc-a2a-go/blob/v2/README.md#migrating-from-v0x).
+agent is covered by the [Migrating from v0.x](migration.md).
 
 ```bash
 go get trpc.group/trpc-go/trpc-a2a-go/v2

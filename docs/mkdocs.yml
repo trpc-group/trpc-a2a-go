@@ -6,10 +6,12 @@ edit_uri: edit/v2/docs/mkdocs/
 docs_dir: mkdocs/
 
 nav:
-  - Overview: index.md
+  - Home: index.md
+  - Overview: overview.md
   - Protocol: protocol.md
   - Behavior: behavior.md
   - Usage: usage.md
+  - Migrating from v0.x: migration.md
 
 plugins:
   - search
@@ -25,10 +27,12 @@ plugins:
           name: 中文
           build: true
           nav:
-            - 概览: index.md
+            - 首页: index.md
+            - 框架概览: overview.md
             - 协议: protocol.md
             - 框架行为: behavior.md
             - 使用指南: usage.md
+            - 从 v0.x 迁移: migration.md
   - git-revision-date-localized:
       enable_creation_date: true
       type: iso_datetime

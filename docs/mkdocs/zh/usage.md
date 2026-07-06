@@ -2,7 +2,7 @@
 
 常见任务的配方，每条链接一个可运行示例。概念见 [protocol.md](protocol.md) 与
 [behavior.md](behavior.md)；移植 v0.x agent 见
-[迁移指南](https://github.com/trpc-group/trpc-a2a-go/blob/v2/README.md#migrating-from-v0x)。
+[从 v0.x 迁移](migration.md)。
 
 ```bash
 go get trpc.group/trpc-go/trpc-a2a-go/v2

@@ -1,8 +1,8 @@
 # 理解 A2A 协议
 
-本页从使用者的视角讲 A2A：它解决什么问题、心智模型是什么、你和一个 agent 之间
-实际会发生哪些交互——然后才是正式的对象与 RPC 定义。本框架如何实现这套协议见
-[behavior.md](behavior.md)。
+本页从使用者的视角讲 A2A：它解决什么问题、心智模型是什么、如何发现一个 agent、
+你和一个 agent 之间实际会发生哪些交互——然后才是正式的对象与 RPC 定义。本框架
+如何实现这套协议见 [behavior.md](behavior.md)。
 
 ## A2A 解决什么问题？
 
@@ -16,10 +16,10 @@ AI agent 正在变成服务：报告生成器、差旅预订助手、代码评�
 - **编排 agent** 把工作分发给多个专家 agent；
 - **跨组织调用**：需要鉴权与 webhook 回调。
 
-传输层刻意保持朴素：client 先取 agent 的 **agent card**
-（`/.well-known/agent-card.json`）了解其身份、技能与能力，然后走 JSON-RPC
-——一元调用基于 HTTP POST，流式基于 SSE。trpc-a2a-go 实现 A2A **v1.0**
-（legacy v0.2.x wire 由 [compat/v0](https://github.com/trpc-group/trpc-a2a-go/tree/v2/compat/v0) 层继续支持）。
+传输层刻意保持朴素：client 先取 agent 的 **agent card** 了解其身份、技能与能
+力，然后走 JSON-RPC——一元调用基于 HTTP POST，流式基于 SSE。trpc-a2a-go 实现
+A2A **v1.0**（legacy v0.2.x wire 由
+[compat/v0](https://github.com/trpc-group/trpc-a2a-go/tree/v2/compat/v0) 层继续支持）。
 
 ## 心智模型
 
@@ -49,6 +49,56 @@ flowchart LR
 不是每次交流都会产生任务：一个即答问题就是一条 `Message` 回来——没有生命周
 期、没有清理负担。只有值得跟踪的工作 agent 才会开任务；从那之后，agent 汇报
 的一切都是**事件**：状态更新（进度）或 artifact 更新（交付物分块）。
+
+## 发现：Agent Card
+
+在调用一个 agent 之前，client 需要知道它存在、部署在哪、能做什么、如何鉴权。
+这就是 **Agent Card**——agent 发布在 well-known 路径上的一份 JSON 文档：
+
+```
+GET https://agent.example.com/.well-known/agent-card.json
+```
+
+card 是整个协议的入口。client 取一次、得到所需的一切，然后开始交互。主要分区：
+
+| 分区 | 字段 | 告诉 client 什么 |
+| --- | --- | --- |
+| **身份** | `name`、`description`、`version`、`provider`、`iconUrl`、`documentationUrl` | 这个 agent 是谁。 |
+| **传输** | `supportedInterfaces[]`（每项：`url`、`protocolBinding`、可选 `tenant`） | 在哪、以何种方式调用。第一项为首选。 |
+| **能力** | `capabilities.streaming`、`.pushNotifications`、`.stateTransitionHistory`、`.extendedAgentCard`、`.extensions` | 支持哪些可选特性。 |
+| **技能** | `skills[]`（每项：`id`、`name`、`description`、`tags`、`examples`、`inputModes`、`outputModes`） | 实际能做什么，以离散公示的能力表达。 |
+| **输入输出模态** | `defaultInputModes`、`defaultOutputModes` | 默认接受与产出的媒体类型（如 `"text"`）。 |
+| **安全** | `securitySchemes`、`securityRequirements` | 如何鉴权（API key / HTTP / OAuth2 / OIDC）。 |
+
+本框架构造一张最小 card 的样子：
+
+```go
+agentCard := server.AgentCard{
+    Name:        "Text Reversal Agent",
+    Description: "Reverses text input",
+    URL:         "http://localhost:8080/",   // 成为一个 supportedInterfaces 项
+    Version:     "1.0.0",
+    Capabilities: server.AgentCapabilities{
+        Streaming: boolPtr(true),
+    },
+    DefaultInputModes:  []string{"text"},
+    DefaultOutputModes: []string{"text"},
+    Skills: []server.AgentSkill{{
+        ID:          "reverse",
+        Name:        "Text Reverser",
+        Description: stringPtr("Input: reverse hello → Output: olleh"),
+        Tags:        []string{"text"},
+    }},
+}
+```
+
+两个相关概念：
+
+- **扩展 card**——agent 可以在 client **鉴权之后**提供一张更丰富的 card（不想
+  公开的技能或细节）。client 用 `GetExtendedAgentCard` 获取；公开 card 用
+  `capabilities.extendedAgentCard` 声明这一点。
+- **多传输**——`supportedInterfaces` 可列出多个绑定（JSON-RPC、gRPC、REST），
+  在本框架里还可按租户列不同 URL；client 选它支持的第一个。
 
 ## 交互逻辑：一次一个场景
 
@@ -149,15 +199,44 @@ sequenceDiagram
 
 | 对象 | 角色 | 一句话 |
 | --- | --- | --- |
-| **Message** | **沟通** | 一轮对话：`role`（user/agent）、`parts`（text/file/data）、`messageId`，可选 `taskId`/`contextId`。 |
-| **Task** | **工作单元** | 有状态的持久记录：`id`、`contextId`、`status`、`artifacts[]`、`history[]`。由服务端创建，终态后不可变。 |
-| **TaskStatusUpdateEvent** | **进度** | 宣告一次状态迁移；可挂解释性 `message`；`final=true` 标记该轮最后一帧状态。 |
-| **TaskArtifactUpdateEvent** | **交付物** | 承载一个 `Artifact`。分块流式用 `append`（续上一块）与 `lastChunk`。 |
+| **Message** | **沟通** | 一轮对话。 |
+| **Task** | **工作单元** | 有状态、可观察的记录。 |
+| **TaskStatusUpdateEvent** | **进度** | 一次状态迁移的宣告。 |
+| **TaskArtifactUpdateEvent** | **交付物** | 一个产出的 artifact（或分块）。 |
+
+**Message**——必填 `messageId`、`role`（user/agent）、`parts`；可选 `taskId`
+（定向/续跑任务）、`contextId`（会话）、`referenceTaskIds`（引用相关任务而不
+恢复它们）、`metadata`。
+
+**Task**——必填 `id`、`status`；另有 `contextId`、`artifacts[]`、`history[]`
+（任务执行期间交换的 messages；不保证每条都被持久化——留存策略由实现自定）、
+`metadata`。
+
+**TaskStatusUpdateEvent**——`taskId`、`contextId`、`status`（一个 `TaskStatus`，
+携带 `state` 与可选的解释性 `message`），以及 `final`——该轮最后一帧状态为
+`true`。
+
+**TaskArtifactUpdateEvent**——`taskId`、`contextId`、`artifact`，以及两个分块
+标志：`append`（本事件续上同一 artifact 的上一块，而非新起一块）与 `lastChunk`
+（最后一块）。
 
 两个标识符把一切串起来：**`contextId`** 命名会话（缺席时服务端生成；一个会话
-跨多个任务），**`taskId`** 命名工作单元（回传它可恢复等待中的任务）。由此有
-两条 spec 规则：`contextId` 与目标任务不匹配的消息 agent **MUST 拒绝**；消息
-可经可选的 `referenceTaskIds` 字段*引用*相关任务而不恢复它们。
+跨多个任务），**`taskId`** 命名工作单元（回传它可恢复等待中的任务）。由此有一条
+spec 规则：`contextId` 与目标任务不匹配的消息 agent **MUST 拒绝**。
+
+### Part：message 或 artifact 携带什么
+
+message 和 artifact 都携带一个 **parts** 列表，所以一轮可以混合文本、文件与结
+构化数据：
+
+| Part | 携带 | 构造器 |
+| --- | --- | --- |
+| **Text** | 一个 UTF-8 字符串 | `protocol.NewTextPart(text)` |
+| **File** | 按 URL + 文件名 + 媒体类型引用文件（或原始字节） | `protocol.NewFilePart(url, name, mediaType)` / `NewRawPart(bytes, mediaType)` |
+| **Data** | 任意结构化 JSON | `protocol.NewDataPart(value)` |
+
+agent card 上的 `defaultInputModes` / `defaultOutputModes`，以及请求上的
+`acceptedOutputModes`，协商流动哪些媒体类型——作为提示，而非硬约束。
 
 ### 任务状态机
 
@@ -177,10 +256,20 @@ stateDiagram-v2
     rejected --> [*]
 ```
 
-终态（`completed`/`failed`/`canceled`/`rejected`）**不可变**：终态任务不可再
-修改，订阅它会被拒绝。spec 把 `input-required`/`auth-required` 称为
-**interrupted（中断）态**——处理暂停、等待 client 行动；wire 枚举里还有一个
-`TASK_STATE_UNSPECIFIED` 占位，用于状态不明的情形。
+| 状态（wire 枚举） | 类别 | 含义 |
+| --- | --- | --- |
+| `TASK_STATE_SUBMITTED` | 活跃 | 已受理，尚未开始 |
+| `TASK_STATE_WORKING` | 活跃 | 正在处理 |
+| `TASK_STATE_INPUT_REQUIRED` | 中断 | 需要 client 补充输入 |
+| `TASK_STATE_AUTH_REQUIRED` | 中断 | 需要鉴权才能继续 |
+| `TASK_STATE_COMPLETED` | 终态 | 成功完成 |
+| `TASK_STATE_FAILED` | 终态 | 出错结束 |
+| `TASK_STATE_CANCELED` | 终态 | 完成前被取消 |
+| `TASK_STATE_REJECTED` | 终态 | agent 拒绝了该任务 |
+| `TASK_STATE_UNSPECIFIED` | — | 状态不明的占位 |
+
+**终态**不可变：终态任务不可再修改，订阅它会被拒绝。**中断**态暂停处理、等待
+client 行动（一条后续消息，或鉴权）。
 
 ### RPC 面（v1.0）
 
@@ -198,6 +287,10 @@ v1.0 JSON-RPC 绑定定义的方法名如下（v0.2.x wire 用的是斜杠分隔
 | `CreateTaskPushNotificationConfig` / `Get…` / `List…` / `Delete…` | 一元 | webhook 配置 CRUD，用于离线运行。 | `tasks/pushNotificationConfig/*` |
 | `GetExtendedAgentCard` | 一元 | 鉴权后的扩展 agent card。 | `agent/getAuthenticatedExtendedCard` |
 
+v1.0 spec 定义了三种功能等价的传输绑定——JSON-RPC、gRPC、HTTP+JSON/REST——各自
+有绑定特定的方法命名。本框架实现 JSON-RPC 绑定（上表方法名）；agent card 的
+`supportedInterfaces` 声明一个 agent 提供哪些绑定。
+
 ### 阻塞与 `returnImmediately`
 
 `SendMessage` 可带 `configuration.returnImmediately`：
@@ -207,7 +300,22 @@ v1.0 JSON-RPC 绑定定义的方法名如下（v0.2.x wire 用的是斜杠分隔
 
 > **v0.2.x 注**：老 wire 的默认值恰好*相反*——`blocking` 可选且缺席意味着
 > "立即应答"。v1.0 把默认翻转了。compat 层为 legacy 客户端保留老默认；主动迁
-> 移的客户端必须显式选择（见[迁移指南](https://github.com/trpc-group/trpc-a2a-go/blob/v2/README.md#migrating-from-v0x)）。
+> 移的客户端必须显式选择（见[从 v0.x 迁移](migration.md)）。
+
+### 错误码
+
+标准 JSON-RPC 码适用（`-32700` 解析错误、`-32600` 无效请求、`-32601` 方法不存
+在、`-32602` 参数无效、`-32603` 内部错误），另加 A2A 专用区间：
+
+| 码 | 含义 |
+| --- | --- |
+| `-32001` | 任务未找到 |
+| `-32002` | 任务不可取消（已终态） |
+| `-32003` | 不支持推送通知 |
+| `-32004` | 不支持该操作 |
+| `-32005` | 内容类型不兼容 |
+| `-32006` | agent 响应无效 |
+| `-32007` | 未配置鉴权扩展 card |
 
 ### 典型事件范式
 
@@ -223,3 +331,6 @@ status  -> completed     必须：以合法状态收尾；带 final=true
 强制项：以合法状态结束（终态，或多轮场景的挂起态）、收尾状态帧带
 `final=true`、artifact 分块标志。其余——要不要显式 `submitted`、发几帧
 `working`、进度文字挂不挂在 status message 上——都由 agent 自定。
+
+下一步：[框架行为](behavior.md) 讲本框架如何把这条事件流变成持久化任务与派生
+响应；[使用指南](usage.md) 展示如何在代码里发出它。

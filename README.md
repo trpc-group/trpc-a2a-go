@@ -81,14 +81,18 @@ go run main.go --context "your-context-id"
 The [docs/](docs/mkdocs/en/index.md) directory covers the protocol and the
 framework in depth (English and [中文](docs/mkdocs/zh/index.md)):
 
-- [protocol.md](docs/mkdocs/en/protocol.md) — the A2A protocol: the wire
-  objects, the task state machine, and the interaction flows.
+- [overview.md](docs/mkdocs/en/overview.md) — what the framework is, its
+  architecture, and the core event-stream idea.
+- [protocol.md](docs/mkdocs/en/protocol.md) — the A2A protocol: agent cards,
+  the wire objects, the task state machine, and the interaction flows.
 - [behavior.md](docs/mkdocs/en/behavior.md) — how this framework behaves: the
   processor contract, round lifecycle, cancellation, history semantics, and
   retention.
 - [usage.md](docs/mkdocs/en/usage.md) — build recipes, each linked to a
   runnable example.
-- [Migrating from v0.x](#migrating-from-v0x) — port an existing v0.x agent.
+- [migration.md](docs/mkdocs/en/migration.md) — port an existing v0.x agent
+  to v1.0 (a summary is also in [Migrating from v0.x](#migrating-from-v0x)
+  below).
 
 ## Examples
 
