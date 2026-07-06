@@ -72,7 +72,7 @@ curl -X POST http://localhost:8080/ \
   -d '{"jsonrpc":"2.0","method":"SendMessage","id":1,"params":{
         "tenant":"chatAgent",
         "message":{"role":"ROLE_USER","messageId":"test-123",
-                   "content":[{"text":"Hello!"}]}}}'
+                   "parts":[{"text":"Hello!"}]}}}'
 ```
 
 ## Core Implementation

@@ -20,11 +20,13 @@ tRPC AI ecosystem
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Documentation](#documentation)
 - [Examples](#examples)
   - [Simple Example](#1-simple-example-examplessimple)
   - [Streaming Examples](#2-streaming-examples-examplesstreaming)
   - [Basic Example](#3-basic-example-examplesbasic)
   - [Authentication Examples](#4-authentication-examples-examplesauth)
+  - [v0 Compatibility Example](#5-v0-compatibility-example-examplescompat)
 - [Creating Your Own Agent](#creating-your-own-agent)
 - [Migrating from v0.x](#migrating-from-v0x)
 - [Authentication](#authentication)
@@ -70,9 +72,22 @@ go run main.go --timeout 30s
 # Disable streaming mode
 go run main.go --no-stream
 
-# Use a specific session ID
-go run main.go --session "your-session-id"
+# Use a specific context ID (conversation)
+go run main.go --context "your-context-id"
 ```
+
+## Documentation
+
+The [docs/](docs/) directory covers the protocol and the framework in depth:
+
+- [docs/protocol.md](docs/protocol.md) — the A2A protocol: the wire objects,
+  the task state machine, and the interaction flows.
+- [docs/behavior.md](docs/behavior.md) — how this framework behaves: the
+  processor contract, round lifecycle, cancellation, history semantics, and
+  retention.
+- [docs/usage.md](docs/usage.md) — build recipes, each linked to a runnable
+  example.
+- [Migrating from v0.x](#migrating-from-v0x) — port an existing v0.x agent.
 
 ## Examples
 
@@ -92,12 +107,12 @@ channel style (the raw `MessageProcessor` contract):
 cd examples/simple/server
 go run main.go
 
-# Run the simple client
+# Run the simple client (runs the blocking / returnImmediately / streaming demos)
 cd examples/simple/client
 go run main.go
 
-# Send a custom message
-go run main.go --message "Text to be reversed"
+# Point the client at a different server
+go run main.go -host localhost:8080
 ```
 
 ### 2. Streaming Examples ([examples/streaming](examples/streaming))
@@ -156,6 +171,24 @@ go run main.go --auth jwt --jwt-secret-file "path/to/jwt-secret.key"
 
 # Specify custom message and session ID
 go run main.go --auth jwt --message "Custom message" --session-id "session123"
+```
+
+### 5. v0 Compatibility Example ([examples/compat](examples/compat))
+
+One server, both protocol generations: v1.0 clients on the standard wire and
+unmodified v0.2.x clients through [compat/v0](compat/v0) — same endpoint,
+same authentication chain. The client demonstrates the preserved legacy
+defaults (a configuration-less `message/send` answers immediately) plus
+blocking and streaming over the legacy wire.
+
+```bash
+# Start the v0-compatible server
+cd examples/compat/server
+go run main.go
+
+# Run the legacy-wire client
+cd examples/compat/client
+go run main.go --message "hello legacy world"
 ```
 
 ## Creating Your Own Agent
@@ -256,17 +289,17 @@ func boolPtr(b bool) *bool {
 
 agentCard := server.AgentCard{
     Name: "My Agent",
-    Description: stringPtr("Agent description"),
+    Description: "Agent description",
     URL: "http://localhost:8080/",
     Version: "1.0.0",
     Provider: &server.AgentProvider{
-        Name: "Provider name",
+        Organization: "Provider name",
     },
     Capabilities: server.AgentCapabilities{
         Streaming: boolPtr(true),
     },
-    DefaultInputModes:  []string{protocol.KindText},
-    DefaultOutputModes: []string{protocol.KindText},
+    DefaultInputModes:  []string{"text"},
+    DefaultOutputModes: []string{"text"},
     Skills: []server.AgentSkill{
         {
             ID:          "text_processing",

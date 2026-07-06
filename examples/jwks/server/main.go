@@ -31,15 +31,13 @@ import (
 
 const (
 	defaultServerPort = 8000
-	defaultNotifyHost = "localhost"
 )
 
 // pushNotificationMessageProcessor is a message processor that sends push notifications.
 // It implements the taskmanager.MessageProcessor interface for message processing
 // and handles push notification functionality.
 type pushNotificationMessageProcessor struct {
-	notifyHost string
-	manager    *pushNotificationTaskManager
+	manager *pushNotificationTaskManager
 }
 
 // ProcessMessage implements the taskmanager.MessageProcessor interface.
@@ -107,7 +105,15 @@ func (p *pushNotificationMessageProcessor) processTaskAsync(
 	taskID := handle.TaskID()
 	log.Infof("Starting async processing of task: %s", taskID)
 
-	time.Sleep(5 * time.Second)
+	// Respect cancellation across the simulated work: closing without a
+	// terminal state lets the framework persist CANCELED — and no completed
+	// push fires for a canceled task.
+	select {
+	case <-time.After(5 * time.Second):
+	case <-ctx.Done():
+		log.Infof("Task %s canceled during processing", taskID)
+		return
+	}
 
 	completeMsg := "Task completed"
 	if content, ok := payload["content"].(string); ok {
@@ -117,6 +123,7 @@ func (p *pushNotificationMessageProcessor) processTaskAsync(
 	if err := handle.UpdateTaskState(protocol.TaskStateCompleted,
 		taskmanager.ReplyText(completeMsg)); err != nil {
 		log.Errorf("Failed to send completed event: %v", err)
+		return
 	}
 
 	// Send push notification
@@ -156,8 +163,7 @@ func (m *pushNotificationTaskManager) sendPushNotification(ctx context.Context, 
 func main() {
 	// Parse command line flags
 	var (
-		port       = flag.Int("port", defaultServerPort, "RPC port")
-		notifyHost = flag.String("notify-host", defaultNotifyHost, "push notification host")
+		port = flag.Int("port", defaultServerPort, "RPC port")
 	)
 	flag.Parse()
 
@@ -193,9 +199,7 @@ func main() {
 	}
 
 	// Create task processor
-	processor := &pushNotificationMessageProcessor{
-		notifyHost: *notifyHost,
-	}
+	processor := &pushNotificationMessageProcessor{}
 	// Create task manager
 	tm, err := memory.NewTaskManager(processor)
 	if err != nil {

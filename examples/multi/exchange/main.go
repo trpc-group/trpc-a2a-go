@@ -279,7 +279,7 @@ func getAgentCard() server.AgentCard {
 	return server.AgentCard{
 		Name:        "Exchange Rate Agent",
 		Description: "An agent that can fetch and display currency exchange rates.",
-		URL:         "http://localhost:8084",
+		URL:         "http://localhost:8081",
 		Version:     "1.0.0",
 		Capabilities: server.AgentCapabilities{
 			Streaming:              boolPtr(false),

@@ -89,10 +89,20 @@ func (p *ToLowerProcessor) ProcessMessage(
 	// so each update streams live instead of buffering until the round ends.
 	go func() {
 		defer handle.Close()
-		p.processText(inputText, handle)
+		p.processText(ctx, inputText, handle)
 	}()
 
 	return handle.Events(), nil
+}
+
+// sleepUnlessCanceled waits d, returning false if the round was canceled first.
+func sleepUnlessCanceled(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-time.After(d):
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // extractTextFromMessage extracts text content from message parts
@@ -107,8 +117,9 @@ func extractTextFromMessage(message protocol.Message) string {
 }
 
 // processText drives one working -> artifact -> completed task round with
-// staged progress updates.
-func (p *ToLowerProcessor) processText(inputText string, handle *taskmanager.TaskHandle) {
+// staged progress updates. Returning early on a canceled ctx closes the round
+// without a terminal state, letting the framework persist CANCELED.
+func (p *ToLowerProcessor) processText(ctx context.Context, inputText string, handle *taskmanager.TaskHandle) {
 	// Step 1: Starting processing
 	err := handle.UpdateTaskState(protocol.TaskStateWorking, taskmanager.ReplyText(msgStarting))
 	if err != nil {
@@ -117,7 +128,9 @@ func (p *ToLowerProcessor) processText(inputText string, handle *taskmanager.Tas
 	}
 
 	// Simulate analysis phase
-	time.Sleep(analysisDelay)
+	if !sleepUnlessCanceled(ctx, analysisDelay) {
+		return
+	}
 
 	// Step 2: Analysis phase
 	err = handle.UpdateTaskState(protocol.TaskStateWorking,
@@ -128,7 +141,9 @@ func (p *ToLowerProcessor) processText(inputText string, handle *taskmanager.Tas
 	}
 
 	// Simulate processing phase
-	time.Sleep(processingDelay)
+	if !sleepUnlessCanceled(ctx, processingDelay) {
+		return
+	}
 
 	// Step 3: Processing phase
 	err = handle.UpdateTaskState(protocol.TaskStateWorking, taskmanager.ReplyText(msgProcessing))
@@ -138,7 +153,9 @@ func (p *ToLowerProcessor) processText(inputText string, handle *taskmanager.Tas
 	}
 
 	// Simulate actual processing
-	time.Sleep(conversionDelay)
+	if !sleepUnlessCanceled(ctx, conversionDelay) {
+		return
+	}
 
 	// Process the text
 	result := strings.ToLower(inputText)

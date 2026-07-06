@@ -57,7 +57,7 @@ go run server/main.go
 
 Configure with optional flags:
 ```bash
-go run server/main.go -port 8000 -notify-host localhost
+go run server/main.go -port 8000
 ```
 
 ### Start the Client

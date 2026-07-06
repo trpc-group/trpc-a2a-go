@@ -107,7 +107,7 @@ Input text: 'Hello World! THIS IS A TEST MESSAGE.'
 
 Test 1: Non-streaming conversion
 [SUCCESS] Processing time: 2.3s
-[TASK] ID: task-a1b2c3d4... - State: completed
+[TASK] ID: task-a1b2c3d4... - State: TASK_STATE_COMPLETED
 [RESULT] 1: 'hello world! this is a test message.'
 [MESSAGE] [COMPLETED] Text processing finished! Original: 'Hello World! THIS IS A TEST MESSAGE.' -> Lowercase: 'hello world! this is a test message.'
 ```
@@ -117,16 +117,16 @@ Test 1: Non-streaming conversion
 Test 2: Streaming conversion with task updates
 -> Starting streaming request...
 [STREAMING] Processing events:
-[TASK] ID: msg-a1b2c3d4...
-[WORKING] Task State: working (Event #1)
+[TASK] ID: task-a1b2c3d4...
+[WORKING] Task State: TASK_STATE_WORKING (Event #1)
    [MESSAGE] [STARTING] Initializing text conversion process...
-[WORKING] Task State: working (Event #2)
+[WORKING] Task State: TASK_STATE_WORKING (Event #2)
    [MESSAGE] [ANALYZING] Processing input text (37 characters)...
-[WORKING] Task State: working (Event #3)
+[WORKING] Task State: TASK_STATE_WORKING (Event #3)
    [MESSAGE] [PROCESSING] Converting text to lowercase...
-[WORKING] Task State: working (Event #4)
+[WORKING] Task State: TASK_STATE_WORKING (Event #4)
    [MESSAGE] [ARTIFACT] Creating result artifact...
-[ARTIFACT] ID: processed-text-msg-a1b2c3d4...
+[ARTIFACT] ID: artifact-a1b2c3d4...
    [NAME] Text to Lowercase
    [DESC] Convert any text to lowercase
    [CONTENT] 'hello world! this is a test message.'
@@ -137,7 +137,7 @@ Test 2: Streaming conversion with task updates
       resultLength: 37
       processedAt: 2025-01-02T10:30:45Z
       processingTime: 1.7s
-[SUCCESS] Task State: completed
+[SUCCESS] Task State: TASK_STATE_COMPLETED
    [MESSAGE] [COMPLETED] Text processing finished! Original: 'Hello World! THIS IS A TEST MESSAGE.' -> Lowercase: 'hello world! this is a test message.'
 [FINISHED] Task completed! (Total time: 2.1s)
 [COMPLETED] Stream finished (5 events, 2.1s total)
