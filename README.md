@@ -78,15 +78,16 @@ go run main.go --context "your-context-id"
 
 ## Documentation
 
-The [docs/](docs/) directory covers the protocol and the framework in depth:
+The [docs/](docs/mkdocs/en/index.md) directory covers the protocol and the
+framework in depth (English and [中文](docs/mkdocs/zh/index.md)):
 
-- [docs/protocol.md](docs/protocol.md) — the A2A protocol: the wire objects,
-  the task state machine, and the interaction flows.
-- [docs/behavior.md](docs/behavior.md) — how this framework behaves: the
+- [protocol.md](docs/mkdocs/en/protocol.md) — the A2A protocol: the wire
+  objects, the task state machine, and the interaction flows.
+- [behavior.md](docs/mkdocs/en/behavior.md) — how this framework behaves: the
   processor contract, round lifecycle, cancellation, history semantics, and
   retention.
-- [docs/usage.md](docs/usage.md) — build recipes, each linked to a runnable
-  example.
+- [usage.md](docs/mkdocs/en/usage.md) — build recipes, each linked to a
+  runnable example.
 - [Migrating from v0.x](#migrating-from-v0x) — port an existing v0.x agent.
 
 ## Examples

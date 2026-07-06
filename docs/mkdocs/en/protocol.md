@@ -4,8 +4,8 @@ A2A (Agent-to-Agent) is an open protocol for interoperable AI agents: a client
 (often itself an agent) discovers a remote agent through its **agent card**,
 then talks to it over JSON-RPC — unary calls over HTTP POST, streaming over
 SSE. trpc-a2a-go implements A2A **v1.0**; the legacy v0.2.x wire is served
-through the [compat/v0](../compat/v0) layer (see
-[examples/compat](../examples/compat)).
+through the [compat/v0](https://github.com/trpc-group/trpc-a2a-go/tree/v2/compat/v0) layer (see
+[examples/compat](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/compat)).
 
 This page explains the protocol's object model and interaction flows — what
 the words mean and what the spec actually mandates. For how this framework
@@ -82,7 +82,7 @@ work continues; the client follows up via `tasks/get` or `tasks/resubscribe`.
 > optional and absent meant "answer immediately". v1.0 inverted it. The
 > compat layer preserves the old default for legacy clients; migrating
 > clients must opt in explicitly (see the
-> [migration guide](../README.md#migrating-from-v0x)).
+> [migration guide](https://github.com/trpc-group/trpc-a2a-go/blob/v2/README.md#migrating-from-v0x)).
 
 ### Resubscribe semantics
 

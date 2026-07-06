@@ -2,7 +2,7 @@
 
 Recipes for the common tasks, each linked to a runnable example. Concepts are
 in [protocol.md](protocol.md) and [behavior.md](behavior.md); porting a v0.x
-agent is covered by the [migration guide](../README.md#migrating-from-v0x).
+agent is covered by the [migration guide](https://github.com/trpc-group/trpc-a2a-go/blob/v2/README.md#migrating-from-v0x).
 
 ```bash
 go get trpc.group/trpc-go/trpc-a2a-go/v2
@@ -29,7 +29,7 @@ processor.
 
 **`TaskHandle` style** — the familiar verb API; a synchronous body works
 as-is (emits never block before `Events()`). Start here, especially when
-porting v0.x code. → [examples/basic](../examples/basic)
+porting v0.x code. → [examples/basic](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic)
 
 ```go
 func (p *proc) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
@@ -45,7 +45,7 @@ func (p *proc) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) 
 
 **Raw channel style** — the underlying contract, full control over every
 event field (needed e.g. for artifact `append` chunking).
-→ [examples/simple](../examples/simple)
+→ [examples/simple](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple)
 
 ```go
 out := make(chan protocol.StreamEvent, 4)
@@ -59,7 +59,7 @@ return out, nil
 
 **Live streaming**: run the same body in a goroutine so each event reaches
 `message/stream` consumers as it happens; check `ctx.Err()` in long loops and
-just close on cancellation. → [examples/streaming](../examples/streaming)
+just close on cancellation. → [examples/streaming](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/streaming)
 
 **Pure replies**: `h.Reply(taskmanager.ReplyText("..."))` answers without
 creating a task at all.
@@ -67,7 +67,7 @@ creating a task at all.
 **Multi-turn**: suspend with
 `h.UpdateTaskState(protocol.TaskStateInputRequired, taskmanager.ReplyText("need more"))`,
 close, and handle the follow-up (which must echo the `taskId`) as a new round
-with `ec.Task` set. → [examples/basic](../examples/basic) (`multi` command)
+with `ec.Task` set. → [examples/basic](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic) (`multi` command)
 
 Rules that keep you out of trouble: always close the channel/handle from the
 goroutine that emits; end every round in a terminal or suspend state; one
@@ -77,7 +77,7 @@ remembering across rounds goes out as a `Message` event.
 ## Clients — the three consumption modes
 
 One processor, three ways to consume it (all three demonstrated by the
-[examples/simple client](../examples/simple)):
+[examples/simple client](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple)):
 
 ```go
 c, _ := client.NewA2AClient("http://localhost:8080/")
@@ -100,10 +100,10 @@ snapshot first, then live events.
 
 | Need | How | Example |
 | --- | --- | --- |
-| Authentication (JWT / API key / OAuth2) | `server.WithAuthProvider(...)`; chain providers for multiple schemes | [examples/auth](../examples/auth) |
-| Push notifications (webhooks) | store configs via `tasks/pushNotificationConfig/set`, resolve with `OnPushNotificationGet`, sign with JWT + JWKS | [examples/jwks](../examples/jwks) |
-| Redis-backed persistence | `redis.NewTaskManager(processor, rdb)`; retention via `redis.WithExpireTime` | [examples/redis](../examples/redis) |
-| Multi-tenant hosting | dispatch on `ec.Tenant`; per-tenant cards via `server.WithTenantCard` | [examples/tenant](../examples/tenant) |
-| Serving on a subpath | put the path in the agent card URL; the server mounts accordingly | [examples/subpath](../examples/subpath) |
-| Legacy v0.2.x clients | `server.WithCompatHandler(v0.NewJSONRPCHandler(tm))` — same endpoint, same auth chain | [examples/compat](../examples/compat) |
-| Agent orchestration | an agent calling agents through the A2A client | [examples/multi](../examples/multi) |
+| Authentication (JWT / API key / OAuth2) | `server.WithAuthProvider(...)`; chain providers for multiple schemes | [examples/auth](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth) |
+| Push notifications (webhooks) | store configs via `tasks/pushNotificationConfig/set`, resolve with `OnPushNotificationGet`, sign with JWT + JWKS | [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks) |
+| Redis-backed persistence | `redis.NewTaskManager(processor, rdb)`; retention via `redis.WithExpireTime` | [examples/redis](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis) |
+| Multi-tenant hosting | dispatch on `ec.Tenant`; per-tenant cards via `server.WithTenantCard` | [examples/tenant](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/tenant) |
+| Serving on a subpath | put the path in the agent card URL; the server mounts accordingly | [examples/subpath](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/subpath) |
+| Legacy v0.2.x clients | `server.WithCompatHandler(v0.NewJSONRPCHandler(tm))` — same endpoint, same auth chain | [examples/compat](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/compat) |
+| Agent orchestration | an agent calling agents through the A2A client | [examples/multi](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/multi) |

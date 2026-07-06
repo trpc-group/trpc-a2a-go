@@ -11,10 +11,10 @@ how to build agents on top of it. Suggested reading order:
 
 Two more entry points live outside this directory:
 
-- **[Migrating from v0.x](../README.md#migrating-from-v0x)** (root README) — the
+- **[Migrating from v0.x](https://github.com/trpc-group/trpc-a2a-go/blob/v2/README.md#migrating-from-v0x)** (root README) — the
   v0.x → v1.0 API mapping and the behavior changes to check when porting an
   existing agent.
-- **[examples/](../examples/)** — runnable programs, one per topic. The two
-  reference styles are [examples/basic](../examples/basic) (`TaskHandle`,
+- **[examples/](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples)** — runnable programs, one per topic. The two
+  reference styles are [examples/basic](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic) (`TaskHandle`,
   minimal-edit port of a v0 processor) and
-  [examples/simple](../examples/simple) (the raw channel contract).
+  [examples/simple](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple) (the raw channel contract).

@@ -135,8 +135,8 @@ There is no per-conversation or per-task delete API; A2A defines none.
 
 - **Multi-tenant**: one process can host several agents; the request's tenant
   arrives as `ec.Tenant` and per-tenant agent cards are served via
-  `server.WithTenantCard`. See [examples/tenant](../examples/tenant).
+  `server.WithTenantCard`. See [examples/tenant](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/tenant).
 - **Legacy v0.2.x clients**: mount `compat/v0` on the same endpoint with
   `server.WithCompatHandler` — legacy method names are disjoint from v1.0's,
   and the legacy defaults (notably non-blocking `message/send`) are
-  preserved. See [examples/compat](../examples/compat).
+  preserved. See [examples/compat](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/compat).
