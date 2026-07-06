@@ -64,11 +64,11 @@ card 是整个协议的入口。client 取一次、得到所需的一切，然�
 | 分区 | 字段 | 告诉 client 什么 |
 | --- | --- | --- |
 | **身份** | `name`、`description`、`version`、`provider`、`iconUrl`、`documentationUrl` | 这个 agent 是谁。 |
-| **传输** | `supportedInterfaces[]`（每项：`url`、`protocolBinding`、可选 `tenant`） | 在哪、以何种方式调用。第一项为首选。 |
-| **能力** | `capabilities.streaming`、`.pushNotifications`、`.stateTransitionHistory`、`.extendedAgentCard`、`.extensions` | 支持哪些可选特性。 |
+| **传输** | `supportedInterfaces[]`（每项：`url`、`protocolBinding`、`protocolVersion`、可选 `tenant`） | 在哪、以何种方式调用。第一项为首选。 |
+| **能力** | `capabilities.streaming`、`.pushNotifications`、`.extendedAgentCard`、`.extensions` | 支持哪些可选特性。 |
 | **技能** | `skills[]`（每项：`id`、`name`、`description`、`tags`、`examples`、`inputModes`、`outputModes`） | 实际能做什么，以离散公示的能力表达。 |
 | **输入输出模态** | `defaultInputModes`、`defaultOutputModes` | 默认接受与产出的媒体类型（如 `"text"`）。 |
-| **安全** | `securitySchemes`、`securityRequirements` | 如何鉴权（API key / HTTP / OAuth2 / OIDC）。 |
+| **安全** | `securitySchemes`、`securityRequirements` | 如何鉴权（API key / HTTP / OAuth2 / OIDC / mTLS）。 |
 
 本框架构造一张最小 card 的样子：
 
@@ -99,6 +99,10 @@ agentCard := server.AgentCard{
   `capabilities.extendedAgentCard` 声明这一点。
 - **多传输**——`supportedInterfaces` 可列出多个绑定（JSON-RPC、gRPC、REST），
   在本框架里还可按租户列不同 URL；client 选它支持的第一个。
+- **扩展（Extensions）**——URI 标识的协议扩展，agent 在 `capabilities.extensions`
+  中声明；client 按请求选入，agent 可把某个标为 `required`（未选入则报
+  `-32008`）。
+- **签名**——card 可以经 JWS 签名（`signatures`），让 client 校验它未被篡改。
 
 ## 交互逻辑：一次一个场景
 
@@ -127,7 +131,7 @@ sequenceDiagram
     A-->>C: status working
     A-->>C: artifact report.pdf（分块 1）
     A-->>C: artifact report.pdf（分块 2，lastChunk）
-    A-->>C: status completed（final）— 流结束
+    A-->>C: status completed（终态）— 流结束
 ```
 
 想一次调用等到底？普通 `SendMessage` 默认就是阻塞的，返回最终任务快照，
@@ -150,7 +154,7 @@ sequenceDiagram
     A-->>C: Task {working}
     C->>A: SubscribeToTask {id}
     A-->>C: Task 快照，然后是实时事件…
-    A-->>C: status completed（final）
+    A-->>C: status completed（终态）
 ```
 
 要完全离线运行，注册 webhook（`CreateTaskPushNotificationConfig`），让服务端
@@ -186,7 +190,7 @@ sequenceDiagram
     A-->>C: status working
     C->>A: CancelTask {id}
     A-->>C: Task {working} — 取消已受理
-    A-->>C: status canceled（final）— 流结束
+    A-->>C: status canceled（终态）— 流结束
 ```
 
 ---
@@ -206,15 +210,15 @@ sequenceDiagram
 
 **Message**——必填 `messageId`、`role`（user/agent）、`parts`；可选 `taskId`
 （定向/续跑任务）、`contextId`（会话）、`referenceTaskIds`（引用相关任务而不
-恢复它们）、`metadata`。
+恢复它们）、`extensions`、`metadata`。
 
 **Task**——必填 `id`、`status`；另有 `contextId`、`artifacts[]`、`history[]`
 （任务执行期间交换的 messages；不保证每条都被持久化——留存策略由实现自定）、
 `metadata`。
 
 **TaskStatusUpdateEvent**——`taskId`、`contextId`、`status`（一个 `TaskStatus`，
-携带 `state` 与可选的解释性 `message`），以及 `final`——该轮最后一帧状态为
-`true`。
+携带 `state` 与可选的解释性 `message`）、`metadata`。v1.0 wire 没有显式的
+`final` 字段：`state` 为终态（或中断态）的那一帧就是最后一帧，之后 SSE 流关闭。
 
 **TaskArtifactUpdateEvent**——`taskId`、`contextId`、`artifact`，以及两个分块
 标志：`append`（本事件续上同一 artifact 的上一块，而非新起一块）与 `lastChunk`
@@ -236,7 +240,8 @@ message 和 artifact 都携带一个 **parts** 列表，所以一轮可以混合
 | **Data** | 任意结构化 JSON | `protocol.NewDataPart(value)` |
 
 agent card 上的 `defaultInputModes` / `defaultOutputModes`，以及请求上的
-`acceptedOutputModes`，协商流动哪些媒体类型——作为提示，而非硬约束。
+`acceptedOutputModes`，协商流动哪些媒体类型。输出协商是建议性的；不支持的
+*输入*内容类型则是硬错误（`-32005`）。
 
 ### 任务状态机
 
@@ -315,7 +320,9 @@ v1.0 spec 定义了三种功能等价的传输绑定——JSON-RPC、gRPC、HTTP
 | `-32004` | 不支持该操作 |
 | `-32005` | 内容类型不兼容 |
 | `-32006` | agent 响应无效 |
-| `-32007` | 未配置鉴权扩展 card |
+| `-32007` | 未配置扩展 agent card |
+| `-32008` | client 未选入某个必需的 extension |
+| `-32009` | 请求的 A2A 协议版本不受支持 |
 
 ### 典型事件范式
 
@@ -325,12 +332,13 @@ v1.0 spec 定义了三种功能等价的传输绑定——JSON-RPC、gRPC、HTTP
 status  -> submitted     可选：创建即隐含 submitted
 status  -> working       惯例；自然的"已受理"信号
 artifact-> chunk 1..N    同一 artifact 的分块用 append/lastChunk
-status  -> completed     必须：以合法状态收尾；带 final=true
+status  -> completed     必须：以合法状态收尾；终态即关闭流
 ```
 
-强制项：以合法状态结束（终态，或多轮场景的挂起态）、收尾状态帧带
-`final=true`、artifact 分块标志。其余——要不要显式 `submitted`、发几帧
-`working`、进度文字挂不挂在 status message 上——都由 agent 自定。
+强制项：以合法状态结束（终态，或多轮场景的挂起态）并标注 artifact 分块；终态
+（或中断态）的那一帧即流的最后一帧，之后 SSE 流关闭。其余——要不要显式
+`submitted`、发几帧 `working`、进度文字挂不挂在 status message 上——都由 agent
+自定。
 
 下一步：[框架行为](behavior.md) 讲本框架如何把这条事件流变成持久化任务与派生
 响应；[使用指南](usage.md) 展示如何在代码里发出它。

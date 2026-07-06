@@ -73,11 +73,11 @@ learns everything it needs, and proceeds. Its main sections:
 | Section | Fields | What it tells the client |
 | --- | --- | --- |
 | **Identity** | `name`, `description`, `version`, `provider`, `iconUrl`, `documentationUrl` | Who this agent is. |
-| **Transport** | `supportedInterfaces[]` (each: `url`, `protocolBinding`, optional `tenant`) | Where and how to call it. The first interface is preferred. |
-| **Capabilities** | `capabilities.streaming`, `.pushNotifications`, `.stateTransitionHistory`, `.extendedAgentCard`, `.extensions` | Which optional features it supports. |
+| **Transport** | `supportedInterfaces[]` (each: `url`, `protocolBinding`, `protocolVersion`, optional `tenant`) | Where and how to call it. The first interface is preferred. |
+| **Capabilities** | `capabilities.streaming`, `.pushNotifications`, `.extendedAgentCard`, `.extensions` | Which optional features it supports. |
 | **Skills** | `skills[]` (each: `id`, `name`, `description`, `tags`, `examples`, `inputModes`, `outputModes`) | What it can actually do, in discrete advertised capabilities. |
 | **I/O modes** | `defaultInputModes`, `defaultOutputModes` | The media types it accepts and produces by default (e.g. `"text"`). |
-| **Security** | `securitySchemes`, `securityRequirements` | How to authenticate (API key / HTTP / OAuth2 / OIDC). |
+| **Security** | `securitySchemes`, `securityRequirements` | How to authenticate (API key / HTTP / OAuth2 / OIDC / mTLS). |
 
 A minimal card as this framework builds it:
 
@@ -110,6 +110,11 @@ Two related notions:
 - **Multi-transport** — `supportedInterfaces` can list several bindings
   (JSON-RPC, gRPC, REST) and, in this framework, per-tenant URLs; the client
   picks the first it supports.
+- **Extensions** — URI-identified protocol extensions an agent declares in
+  `capabilities.extensions`; a client opts into them per request, and an agent
+  may mark one `required` (a missing opt-in is `-32008`).
+- **Signatures** — a card MAY be JWS-signed (`signatures`) so a client can
+  verify it was not tampered with.
 
 ## The interactions, one scenario at a time
 
@@ -139,7 +144,7 @@ sequenceDiagram
     A-->>C: status working
     A-->>C: artifact report.pdf (chunk 1)
     A-->>C: artifact report.pdf (chunk 2, lastChunk)
-    A-->>C: status completed (final) — stream ends
+    A-->>C: status completed (terminal) — stream ends
 ```
 
 Prefer one blocking call instead? Plain `SendMessage` waits by default and
@@ -163,7 +168,7 @@ sequenceDiagram
     A-->>C: Task {working}
     C->>A: SubscribeToTask {id}
     A-->>C: Task snapshot, then live events…
-    A-->>C: status completed (final)
+    A-->>C: status completed (terminal)
 ```
 
 For fully disconnected operation, register a webhook
@@ -200,7 +205,7 @@ sequenceDiagram
     A-->>C: status working
     C->>A: CancelTask {id}
     A-->>C: Task {working} — cancellation requested
-    A-->>C: status canceled (final) — stream ends
+    A-->>C: status canceled (terminal) — stream ends
 ```
 
 ---
@@ -220,15 +225,17 @@ The definitions behind the scenarios above.
 
 **Message** — required `messageId`, `role` (user/agent), `parts`; optional
 `taskId` (target/continue a task), `contextId` (the conversation),
-`referenceTaskIds` (point at related tasks without resuming them), `metadata`.
+`referenceTaskIds` (point at related tasks without resuming them),
+`extensions`, `metadata`.
 
 **Task** — required `id`, `status`; plus `contextId`, `artifacts[]`,
 `history[]` (messages exchanged during the task; not every message is
 guaranteed to be persisted — retention is implementation-defined), `metadata`.
 
 **TaskStatusUpdateEvent** — `taskId`, `contextId`, `status` (a `TaskStatus`
-carrying the `state` and an optional explanatory `message`), and `final` —
-`true` on the round's last status frame.
+carrying the `state` and an optional explanatory `message`), `metadata`. The
+v1.0 wire has no explicit `final` flag: the frame whose `state` is terminal
+(or an interrupted state) is the last one, and the SSE stream then closes.
 
 **TaskArtifactUpdateEvent** — `taskId`, `contextId`, `artifact`, and two chunk
 flags: `append` (this event continues the previous chunk of the same artifact
@@ -252,8 +259,9 @@ text, files and structured data:
 | **Data** | arbitrary structured JSON | `protocol.NewDataPart(value)` |
 
 `defaultInputModes` / `defaultOutputModes` on the agent card, and
-`acceptedOutputModes` on a request, negotiate which media types flow — as
-hints, not hard constraints.
+`acceptedOutputModes` on a request, negotiate which media types flow. Output
+negotiation is advisory; an unsupported *input* content type is a hard error
+(`-32005`).
 
 ### The task state machine
 
@@ -337,7 +345,9 @@ plus the A2A-specific range:
 | `-32004` | Operation not supported |
 | `-32005` | Incompatible content types |
 | `-32006` | Invalid agent response |
-| `-32007` | Authenticated extended card not configured |
+| `-32007` | Extended agent card not configured |
+| `-32008` | A required extension was not opted into by the client |
+| `-32009` | The requested A2A protocol version is not supported |
 
 ### The canonical event paradigm
 
@@ -347,13 +357,14 @@ The typical shape of a task-producing round, and what is actually mandatory:
 status  -> submitted     optional: creation implies submitted
 status  -> working       conventional; the natural "accepted" signal
 artifact-> chunk 1..N    append/lastChunk for chunks of one artifact
-status  -> completed     REQUIRED to end well; carries final=true
+status  -> completed     REQUIRED to end well; a terminal state closes the stream
 ```
 
-Mandatory: end in a legal state (terminal, or a suspend state for
-multi-turn), `final=true` on the closing status frame, artifact chunk flags.
-Everything else — an explicit `submitted`, how many `working` frames, whether
-progress text rides on status messages — is the agent's choice.
+Mandatory: end in a legal state (terminal, or a suspend state for multi-turn)
+and mark artifact chunks; the terminal (or interrupted) status is the stream's
+last frame, after which the SSE stream closes. Everything else — an explicit
+`submitted`, how many `working` frames, whether progress text rides on status
+messages — is the agent's choice.
 
 Next: [Behavior](behavior.md) explains how this framework turns that event
 stream into persisted tasks and derived responses; [Usage](usage.md) shows how
