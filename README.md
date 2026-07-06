@@ -78,6 +78,11 @@ go run main.go --session "your-session-id"
 
 The repository includes several examples demonstrating different aspects of the A2A protocol:
 
+> **Note**: [examples/basic](examples/basic) and [examples/simple-v2](examples/simple-v2)
+> are on the v1.0 (`/v2`) contract — start there. The remaining examples still
+> use the v0.x taskmanager API and are pending the port (they do not build
+> against `/v2` yet).
+
 ### 1. Simple Example ([examples/simple](examples/simple))
 
 A minimal example demonstrating the core A2A functionality:
@@ -358,9 +363,11 @@ is the native channel style recommended for new code.
 | `ProcessOptions.AcceptedOutputModes` / `.Tenant` | `ExecContext.AcceptedOutputModes` / `.Tenant` |
 | `TaskHandler.BuildTask` | gone — tasks are created lazily on the first task event; the ID is `ExecContext.TaskID` / `TaskHandle.TaskID()` |
 | `TaskHandler.UpdateTaskState(taskID, state, msg)` | `TaskHandle.UpdateTaskState(state, msg)` (or emit a `protocol.TaskStatusUpdateEvent` on the raw channel) |
-| `TaskHandler.AddArtifact(taskID, artifact, isFinal, needMoreData)` | `TaskHandle.AddArtifact(artifact, lastChunk)` — `needMoreData` had no v1.0 wire meaning and is dropped |
-| `TaskHandler.SubscribeTask` / `.CleanTask` | removed — the framework owns fan-out and task lifecycle |
-| `TaskHandler.GetContextID/GetMessageHistory/GetTask` | same names on `TaskHandle` (fields on `ExecContext`) |
+| `TaskHandler.AddArtifact(taskID, artifact, isFinal, needMoreData)` | `TaskHandle.AddArtifact(artifact, lastChunk)` — `isFinal` maps to `lastChunk`; the `append` flag is not exposed: chunked streams that relied on it should emit `protocol.TaskArtifactUpdateEvent` on the raw channel with `Append` set |
+| `TaskHandler.SubscribeTask` / `.CleanTask` | removed — the framework owns fan-out and task lifecycle; nothing deletes tasks by default — set `memory.WithTaskTTL` to collect terminal tasks |
+| return an interim `Message` result while a goroutine drives the task (v0 non-blocking) | emit events from a goroutine; unary callers opt in with `returnImmediately=true` — the first persisted event answers the call; multi-turn suspends with `input-required` |
+| `TaskHandler.GetContextID` / `.GetMessageHistory` | same names on `TaskHandle`; `History` is a snapshot taken before the round and truncated to the manager's `MaxHistoryLength` — not a live read |
+| `TaskHandler.GetTask(taskID)` | `TaskHandle.GetTask()` — this round's continuation snapshot only, `nil` on a fresh round; arbitrary-task reads and `CancellableTask.Cancel` are gone |
 | `TaskHandler.GetMetadata` | removed (it always returned an error in v0.x); message metadata is `ExecContext.Message.Metadata` |
 | `taskmanager.TaskSubscriber` / `CancellableTask` | removed with the callback design |
 | redis `NewTaskSubscriber` / `WithSubscriberSendHook` / `WithSubscriberBlockingSend` | removed — cross-replica streaming is out of scope for the built-in managers |
@@ -369,6 +376,27 @@ is the native channel style recommended for new code.
 
 These compile fine but behave differently from v0.x:
 
+- **v1.0 inverted the blocking default**: `message/send` without
+  `returnImmediately` waits for the round to end (v0.x `blocking:false`/absent
+  answered immediately). Legacy-endpoint clients served via `compat/v0` keep
+  the v0 default.
+- **The round ends only when the processor closes its event channel**: a round
+  that never closes pins the task's execution slot (follow-ups are rejected
+  with "already has an active execution") and blocks manager Close / server
+  Stop — close the channel (or `TaskHandle`) from the goroutine that emits.
+- **`input-required`/`auth-required` yields the round**: events emitted after
+  a suspend are discarded — deliver the completion from the continuation
+  round.
+- **One round drives exactly one task** (`ExecContext.TaskID`): an event
+  carrying any other task ID is a contract violation that fails the round's
+  task.
+- **Sending `*protocol.Task` as a stream event (legal in v0.x) is now a
+  contract violation** — the framework materializes task snapshots itself;
+  emit status and artifact events instead.
+- **A follow-up without `taskId` starts a new round with a fresh task**:
+  sessions keyed by contextID alone strand the suspended task (it is never
+  collected on the memory backend). Echo the `taskId` when answering
+  `input-required`.
 - `message/send` no longer always materializes a task: a pure message reply
   leaves no task behind, and `tasks/get` for that round's ID returns not-found.
 - A round that produces no event at all is treated as a processor bug:

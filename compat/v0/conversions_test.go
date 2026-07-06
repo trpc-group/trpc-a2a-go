@@ -170,6 +170,16 @@ func TestSendMessageParamsBlockingMapping(t *testing.T) {
 	v1 = ToV1SendMessageParams(legacy)
 	assert.True(t, *v1.Configuration.ReturnImmediately)
 
+	// An ABSENT configuration must also keep the legacy non-blocking default:
+	// v1's nil configuration means blocking, which would invert the most
+	// common legacy request shape.
+	legacy.Configuration = nil
+	v1 = ToV1SendMessageParams(legacy)
+	require.NotNil(t, v1.Configuration)
+	require.NotNil(t, v1.Configuration.ReturnImmediately)
+	assert.True(t, *v1.Configuration.ReturnImmediately, "absent legacy configuration -> returnImmediately=true")
+	assert.False(t, v1.Configuration.IsBlocking())
+
 	// Reverse direction.
 	back := FromV1SendMessageParams(v1)
 	require.NotNil(t, back.Configuration.Blocking)

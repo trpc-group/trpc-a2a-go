@@ -107,8 +107,8 @@ type ExecContext struct {
 //
 // The framework starts consuming the channel only after ProcessMessage
 // returns: sends beyond the channel buffer from inside ProcessMessage itself
-// block forever. Emit from a goroutine, or use the package-level Events
-// helper for fully synchronous replies.
+// block forever. Emit from a goroutine, or use TaskHandle (NewTaskHandle) for
+// a synchronous body — its emits before Events() never block.
 //
 // Returning a non-nil error means the round failed to start: no events are
 // consumed and the error is mapped to a JSON-RPC error. To report a business

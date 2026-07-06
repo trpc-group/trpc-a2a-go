@@ -489,6 +489,15 @@ func ToV1SendMessageParams(p SendMessageParams) protocol.SendMessageParams {
 			cfg.PushConfig = &flat
 		}
 		res.Configuration = cfg
+	} else {
+		// An absent configuration must keep the legacy default. v0.2.x
+		// blocking defaulted to false (answer immediately), while an absent
+		// v1.0 returnImmediately means blocking — falling through would
+		// silently invert the most common legacy request shape.
+		returnImmediately := true
+		res.Configuration = &protocol.SendMessageConfiguration{
+			ReturnImmediately: &returnImmediately,
+		}
 	}
 	return res
 }
