@@ -17,7 +17,7 @@ type MessageProcessor interface {
 You read a **read-only request snapshot** (`ExecContext`) and return a channel
 of events — the task's event log. The framework owns everything else: task
 creation, persistence, fan-out to subscribers, and the derivation of every
-response shape. **One processor serves `message/send` and `message/stream`
+response shape. **One processor serves `SendMessage` and `SendStreamingMessage`
 alike**; there is no streaming/non-streaming branch in agent code.
 
 `ExecContext` carries: `TaskID` (pre-allocated), `Task` (the snapshot on a
@@ -32,7 +32,7 @@ A **round** is one `ProcessMessage` invocation and the drain of its channel.
 
 - **Lazy task creation** — the task materializes when the first *task event*
   is persisted. A round that only emits a `Message` leaves no task behind
-  (`tasks/get` for that round's pre-allocated ID returns not-found).
+  (`GetTask` for that round's pre-allocated ID returns not-found).
 - **One active run per task** — a second message for a task whose round is
   still running is rejected (`-32602`, "already has an active execution").
 - **The round ends when you close the channel** — and only then. The close
@@ -59,32 +59,32 @@ A **round** is one `ProcessMessage` invocation and the drain of its channel.
 ## Execution and cancellation
 
 - Rounds run on a **detached context**: a client disconnect does **not**
-  cancel the work; results stay retrievable via `tasks/get`/`tasks/resubscribe`.
-- Only `tasks/cancel` (and manager shutdown) cancels the processor's `ctx`.
+  cancel the work; results stay retrievable via `GetTask`/`SubscribeToTask`.
+- Only `CancelTask` (and manager shutdown) cancels the processor's `ctx`.
   The polite processor reaction is to **stop emitting and close** — the
   framework persists `CANCELED`. A terminal event emitted *after* the cancel
   still wins (a round allowed to finish finishes).
-- `tasks/cancel` **returns the snapshot at the moment cancellation was
+- `CancelTask` **returns the snapshot at the moment cancellation was
   requested** (possibly still `working`); the terminal `CANCELED` state lands
   when the round winds down. Canceling an already-terminal task returns
   `-32002` (not cancelable).
 
 ## Response derivation
 
-**`message/send` (blocking, the default)** waits for the round to end, then
+**`SendMessage` (blocking, the default)** waits for the round to end, then
 answers with the **task snapshot** if the round touched a task, else the
 **last Message**; a round that emitted nothing is a processor bug (`-32603`).
 
-**`message/send` with `returnImmediately=true`** answers with the **earliest
+**`SendMessage` with `returnImmediately=true`** answers with the **earliest
 usable result**: the first *persisted* task snapshot or the first Message.
 Note a Message answered this way carries no `taskId` — if the client must
 track the task, emit a task event first.
 
-**`message/stream`** forwards every event in order, each **persisted before
-delivery** (`tasks/get` never lags what a subscriber saw). The stream ends at
+**`SendStreamingMessage`** forwards every event in order, each **persisted before
+delivery** (`GetTask` never lags what a subscriber saw). The stream ends at
 the terminal or suspend frame.
 
-**`tasks/resubscribe`** sends the current full task snapshot first, then live
+**`SubscribeToTask`** sends the current full task snapshot first, then live
 increments (at-least-once around the snapshot boundary on the Redis backend);
 terminal tasks are rejected. Subscriptions are tied to the request — a
 disconnect cleans the subscription up server-side.
@@ -106,6 +106,10 @@ previous `status.message` into `task.history` on every transition:
 > emitted as a `Message` event, or the next round's `ec.History` will contain
 > the user's turns only.
 
+(The spec itself only promises that `Task.history` contains *messages*
+exchanged during execution, and notes that not every message is guaranteed to
+be persisted — retention is implementation-defined.)
+
 `Task.history` is virtual: never persisted on the task, filled at response
 time from the conversation per the request's `historyLength` (unset = full
 history up to the manager's cap, `<=0` = none). `ec.History` is a snapshot
@@ -122,7 +126,7 @@ taken before the round starts, truncated to the manager's
 
 There is no per-conversation or per-task delete API; A2A defines none.
 
-## Configuration capabilities (`message/send` configuration)
+## Configuration capabilities (`SendMessage` configuration)
 
 | Field | Consumed by | Effect |
 | --- | --- | --- |
@@ -138,5 +142,5 @@ There is no per-conversation or per-task delete API; A2A defines none.
   `server.WithTenantCard`. See [examples/tenant](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/tenant).
 - **Legacy v0.2.x clients**: mount `compat/v0` on the same endpoint with
   `server.WithCompatHandler` — legacy method names are disjoint from v1.0's,
-  and the legacy defaults (notably non-blocking `message/send`) are
+  and the legacy defaults (notably the non-blocking `message/send`) are
   preserved. See [examples/compat](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/compat).

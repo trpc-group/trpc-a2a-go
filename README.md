@@ -355,7 +355,12 @@ The v1.0 (`/v2`) release replaces the multi-outcome `MessageProcessor` +
 familiar names survive: you still implement `MessageProcessor.ProcessMessage`,
 and the former `TaskHandler` verbs live on as the `TaskHandle` compatibility
 layer, so a v0.x processor body ports with minimal edits — including fully
-synchronous bodies, which were the common v0.x style:
+synchronous bodies, which were the common v0.x style. (Wire note: the v1.0
+JSON-RPC binding names operations `SendMessage`, `SendStreamingMessage`,
+`GetTask`, `ListTasks`, `CancelTask`, `SubscribeToTask` and the
+`*TaskPushNotificationConfig` CRUD; the slash-delimited names — `message/send`,
+`tasks/get`, ... — are the v0.2.x wire, still served by `compat/v0`. This
+guide refers to operations by the v0.x names migrating readers already know.)
 
 ```go
 func (p *myProcessor) ProcessMessage(

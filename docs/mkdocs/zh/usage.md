@@ -56,7 +56,7 @@ go func() {
 return out, nil
 ```
 
-**实时流式**：同样的函数体放进 goroutine，事件就会实时到达 `message/stream`
+**实时流式**：同样的函数体放进 goroutine，事件就会实时到达 `SendStreamingMessage`
 的消费者；长循环里检查 `ctx.Err()`，被取消时直接关闭即可。
 → [examples/streaming](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/streaming)
 
@@ -90,14 +90,14 @@ params.Configuration = &protocol.SendMessageConfiguration{ReturnImmediately: &t}
 events, _ := c.StreamMessage(ctx, params)
 ```
 
-重连运行中的任务：`tasks/resubscribe` 先给当前任务快照，再给实时事件。
+重连运行中的任务：`SubscribeToTask` 先给当前任务快照，再给实时事件。
 
 ## 功能配方
 
 | 需求 | 做法 | 示例 |
 | --- | --- | --- |
 | 鉴权（JWT / API key / OAuth2） | `server.WithAuthProvider(...)`；多方案用链式 provider | [examples/auth](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth) |
-| 推送通知（webhook） | 配置经 `tasks/pushNotificationConfig/set` 入库，用 `OnPushNotificationGet` 解析，JWT + JWKS 签名 | [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks) |
+| 推送通知（webhook） | 配置经 `CreateTaskPushNotificationConfig` 入库，用 `OnPushNotificationGet` 解析，JWT + JWKS 签名 | [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks) |
 | Redis 持久化 | `redis.NewTaskManager(processor, rdb)`；留存用 `redis.WithExpireTime` | [examples/redis](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis) |
 | 多租户 | 按 `ec.Tenant` 分发；按租户卡片用 `server.WithTenantCard` | [examples/tenant](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/tenant) |
 | 子路径部署 | 把路径写进 agent card 的 URL，服务端按此挂载 | [examples/subpath](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/subpath) |

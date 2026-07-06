@@ -15,7 +15,7 @@ type MessageProcessor interface {
 
 读一份**只读的请求快照**（`ExecContext`），返回一个事件 channel——任务的事件日
 志。其余一切归框架所有：任务创建、持久化、订阅者扇出、以及每种响应形状的推导。
-**一份 processor 同时服务 `message/send` 与 `message/stream`**；agent 代码里没
+**一份 processor 同时服务 `SendMessage` 与 `SendStreamingMessage`**；agent 代码里没
 有流式/非流式分支。
 
 `ExecContext` 携带：`TaskID`（预分配）、`Task`（续跑轮的快照，首轮为 nil）、
@@ -27,7 +27,7 @@ type MessageProcessor interface {
 一个**轮次**是一次 `ProcessMessage` 调用及其 channel 的排空过程。
 
 - **懒创建**——首个*任务事件*落库时任务才成立。只发 Message 的轮次不留任务
-  （对该轮预分配 ID 的 `tasks/get` 返回 not-found）。
+  （对该轮预分配 ID 的 `GetTask` 返回 not-found）。
 - **单活跃 run**——上一轮还在跑时，同一任务的第二条消息被拒
   （`-32602`，"already has an active execution"）。
 - **关 channel 才是轮次结束**——且只有这一种结束方式。关闭时应用 close 规则：
@@ -50,26 +50,26 @@ type MessageProcessor interface {
 ## 执行与取消
 
 - 轮次跑在**分离的 context** 上：client 断连**不会**取消工作；结果始终可经
-  `tasks/get`/`tasks/resubscribe` 取回。
-- 只有 `tasks/cancel`（和 manager 停机）会取消 processor 的 `ctx`。得体的反应
+  `GetTask`/`SubscribeToTask` 取回。
+- 只有 `CancelTask`（和 manager 停机）会取消 processor 的 `ctx`。得体的反应
   是**停止发送并关闭**——框架落 `CANCELED`。取消*之后*发出的终态事件依然生效
   （被允许收尾的轮次就让它收尾）。
-- `tasks/cancel` **返回取消请求时刻的快照**（可能仍是 `working`）；终态
+- `CancelTask` **返回取消请求时刻的快照**（可能仍是 `working`）；终态
   `CANCELED` 在该轮收尾时落库。取消已终态的任务返回 `-32002`（不可取消）。
 
 ## 响应推导
 
-**`message/send`（阻塞，默认）**等该轮结束：碰过任务就答**任务快照**，否则答
+**`SendMessage`（阻塞，默认）**等该轮结束：碰过任务就答**任务快照**，否则答
 **最后一条 Message**；一个事件都没发的轮次是 processor 的 bug（`-32603`）。
 
-**`message/send` + `returnImmediately=true`** 以**最早可用结果**应答：首个*已
+**`SendMessage` + `returnImmediately=true`** 以**最早可用结果**应答：首个*已
 落库*的任务快照或首条 Message。注意以 Message 应答时不带 `taskId`——client 若
 需要追踪任务，先发任务事件。
 
-**`message/stream`** 按序转发每个事件，且**先持久化再投递**（`tasks/get` 永远
+**`SendStreamingMessage`** 按序转发每个事件，且**先持久化再投递**（`GetTask` 永远
 不落后于订阅者所见）。流在终态或挂起帧结束。
 
-**`tasks/resubscribe`** 先发当前完整任务快照、再发实时增量（Redis 后端在快照
+**`SubscribeToTask`** 先发当前完整任务快照、再发实时增量（Redis 后端在快照
 边界上是 at-least-once）；终态任务被拒。订阅绑定请求——断连即在服务端清理。
 
 ## 会话、历史，以及什么会被记住
@@ -87,6 +87,9 @@ type MessageProcessor interface {
 > **artifact 永不进入历史**。任何需要跨轮记住的内容——尤其是 LLM 的最终回
 > 答——必须作为 `Message` 事件发出，否则下一轮的 `ec.History` 只有用户的发言。
 
+（spec 本身对 `Task.history` 的承诺也只是"包含执行期间交换的 *messages*"，
+并明确"不保证每条消息都被持久化"——留存策略由实现自定。）
+
 `Task.history` 是虚拟的：从不持久化在任务上，响应时按请求的 `historyLength`
 从会话现算（缺省 = 全量至 manager 上限，`<=0` = 不带）。`ec.History` 是轮次
 开始前的快照，按 manager 的 `MaxHistoryLength`（默认 100）截断。
@@ -101,7 +104,7 @@ type MessageProcessor interface {
 
 没有按会话/按任务的删除 API；A2A 未定义此类接口。
 
-## configuration 能力（`message/send` 的 configuration）
+## configuration 能力（`SendMessage` 的 configuration）
 
 | 字段 | 消费方 | 效果 |
 | --- | --- | --- |

@@ -58,7 +58,7 @@ return out, nil
 ```
 
 **Live streaming**: run the same body in a goroutine so each event reaches
-`message/stream` consumers as it happens; check `ctx.Err()` in long loops and
+`SendStreamingMessage` consumers as it happens; check `ctx.Err()` in long loops and
 just close on cancellation. → [examples/streaming](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/streaming)
 
 **Pure replies**: `h.Reply(taskmanager.ReplyText("..."))` answers without
@@ -93,7 +93,7 @@ params.Configuration = &protocol.SendMessageConfiguration{ReturnImmediately: &t}
 events, _ := c.StreamMessage(ctx, params)
 ```
 
-Reconnecting to a running task: `tasks/resubscribe` delivers the current task
+Reconnecting to a running task: `SubscribeToTask` delivers the current task
 snapshot first, then live events.
 
 ## Feature recipes
@@ -101,7 +101,7 @@ snapshot first, then live events.
 | Need | How | Example |
 | --- | --- | --- |
 | Authentication (JWT / API key / OAuth2) | `server.WithAuthProvider(...)`; chain providers for multiple schemes | [examples/auth](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth) |
-| Push notifications (webhooks) | store configs via `tasks/pushNotificationConfig/set`, resolve with `OnPushNotificationGet`, sign with JWT + JWKS | [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks) |
+| Push notifications (webhooks) | store configs via `CreateTaskPushNotificationConfig`, resolve with `OnPushNotificationGet`, sign with JWT + JWKS | [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks) |
 | Redis-backed persistence | `redis.NewTaskManager(processor, rdb)`; retention via `redis.WithExpireTime` | [examples/redis](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis) |
 | Multi-tenant hosting | dispatch on `ec.Tenant`; per-tenant cards via `server.WithTenantCard` | [examples/tenant](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/tenant) |
 | Serving on a subpath | put the path in the agent card URL; the server mounts accordingly | [examples/subpath](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/subpath) |

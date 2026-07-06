@@ -1,7 +1,51 @@
-# tRPC-A2A-Go Documentation
+# tRPC-A2A-Go
 
-This directory documents the A2A protocol as trpc-a2a-go implements it, and
-how to build agents on top of it. Suggested reading order:
+tRPC-A2A-Go is the Go implementation of the A2A (Agent-to-Agent) protocol,
+v1.0: everything needed to expose an agent to the A2A ecosystem and to call
+other agents — server, client, task lifecycle management, streaming,
+authentication, push notifications, multi-tenant hosting, and a compatibility
+layer that keeps legacy v0.2.x clients working.
+
+## Architecture
+
+```
+A2A client (v1.0) ─────────► ┌────────────────────────────────┐
+                             │ server                         │
+legacy v0.2.x client ──────► │   auth chain / agent cards     │
+                             │   JSON-RPC + SSE               │
+                             │   compat/v0 handler            │
+                             └───────────────┬────────────────┘
+                                             ▼
+                             TaskManager (memory | redis)
+                                             ▼
+                             MessageProcessor  ◄── your agent
+```
+
+- **server** terminates the wire: authentication, agent-card discovery,
+  JSON-RPC dispatch, SSE streaming, and (optionally) the legacy v0.2.x
+  endpoint on the same port and auth chain.
+- **TaskManager** owns everything stateful: lazy task creation, the round
+  close rules, cancellation, conversation history, and subscriber fan-out.
+  Memory and Redis backends ship in-tree.
+- **MessageProcessor** is the only part you write: read a request snapshot
+  (`ExecContext`), emit events on a channel. Two styles — the `TaskHandle`
+  verb API or the raw channel — and one code path serves `SendMessage` and
+  `SendStreamingMessage` alike.
+
+## Feature highlights
+
+- A2A **v1.0** wire protocol; sealed result unions, agent cards, tenants.
+- **One processor, every consumption mode**: blocking send,
+  `returnImmediately`, live streaming, and `SubscribeToTask` reattachment.
+- **Authentication**: JWT / API key / OAuth2, chainable providers.
+- **Push notifications** signed with JWT, keys served via a JWKS endpoint.
+- **Multi-tenant hosting** with per-tenant agent cards.
+- **Legacy compatibility**: unmodified v0.2.x clients via `compat/v0`, with
+  the original wire defaults preserved.
+
+## Documentation map
+
+Suggested reading order:
 
 | Document | What it covers |
 | --- | --- |

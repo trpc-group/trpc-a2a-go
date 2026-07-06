@@ -20,8 +20,9 @@ srv, _ := server.NewA2AServer(tm,
 ```
 
 Legacy method names (`message/send`, `tasks/get`, `tasks/resubscribe`, ...)
-are disjoint from the v1.0 names, so a single JSON-RPC endpoint dispatches
-both generations. `WithCompatHandler` mounts the legacy path **inside** the
+are disjoint from the v1.0 PascalCase names (`SendMessage`, `GetTask`,
+`SubscribeToTask`, ...), so a single JSON-RPC endpoint dispatches both
+generations. `WithCompatHandler` mounts the legacy path **inside** the
 authentication middleware chain — legacy clients authenticate exactly like v1
 clients.
 

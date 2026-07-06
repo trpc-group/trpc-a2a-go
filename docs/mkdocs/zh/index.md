@@ -1,6 +1,45 @@
-# tRPC-A2A-Go 文档
+# tRPC-A2A-Go
 
-本目录介绍 trpc-a2a-go 所实现的 A2A 协议，以及如何基于它构建 agent。建议按以下顺序阅读：
+tRPC-A2A-Go 是 A2A（Agent-to-Agent）协议 v1.0 的 Go 实现：把 agent 接入 A2A
+生态、以及调用其他 agent 所需的一切——服务端、客户端、任务生命周期管理、流
+式、鉴权、推送通知、多租户托管，以及让 legacy v0.2.x 客户端继续工作的兼容层。
+
+## 架构
+
+```
+A2A client (v1.0) ─────────► ┌────────────────────────────────┐
+                             │ server                         │
+legacy v0.2.x client ──────► │   auth chain / agent cards     │
+                             │   JSON-RPC + SSE               │
+                             │   compat/v0 handler            │
+                             └───────────────┬────────────────┘
+                                             ▼
+                             TaskManager (memory | redis)
+                                             ▼
+                             MessageProcessor  ◄── your agent
+```
+
+- **server** 终结 wire 层：鉴权、agent card 发现、JSON-RPC 分发、SSE 流式，
+  以及（可选地）在同一端口、同一鉴权链上提供 legacy v0.2.x 端点。
+- **TaskManager** 拥有一切有状态的东西：懒创建、轮次 close 规则、取消、会话
+  历史、订阅者扇出。内置 memory 与 Redis 两种后端。
+- **MessageProcessor** 是你唯一要写的部分：读一份请求快照（`ExecContext`），
+  往 channel 上发事件。两种风格——`TaskHandle` 动词 API 或裸 channel——一份
+  代码同时服务 `SendMessage` 与 `SendStreamingMessage`。
+
+## 功能亮点
+
+- A2A **v1.0** wire 协议；sealed 结果 union、agent card、租户。
+- **一份 processor，全部消费模式**：阻塞 send、`returnImmediately`、实时流
+  式、`SubscribeToTask` 重连。
+- **鉴权**：JWT / API key / OAuth2，provider 可链式组合。
+- **推送通知** JWT 签名，公钥经 JWKS 端点分发。
+- **多租户托管**，按租户提供 agent card。
+- **legacy 兼容**：v0.2.x 客户端经 `compat/v0` 原样接入，老 wire 默认值保留。
+
+## 文档地图
+
+建议按以下顺序阅读：
 
 | 文档 | 内容 |
 | --- | --- |
