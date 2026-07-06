@@ -107,7 +107,12 @@ func (p *basicMessageProcessor) ProcessMessage(
 			return nil, fmt.Errorf("failed to subscribe to task: %w", err)
 		}
 
-		// Process asynchronously with full multi-turn support
+		// Process asynchronously with full multi-turn support.
+		// NOTE: we intentionally do not CleanTask here. A multi-turn task can
+		// park in the input-required state across several turns, so it must
+		// outlive this call. Once it reaches a terminal state the manager reaps
+		// it automatically after TaskTTL (default 1h); for stateful agents like
+		// this one, that framework-side reaping is the intended cleanup path.
 		go p.processMessageAsync(ctx, text, contextID, taskID, handle)
 
 		return &taskmanager.MessageProcessingResult{

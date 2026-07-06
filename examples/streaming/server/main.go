@@ -81,6 +81,10 @@ func (p *streamingMessageProcessor) ProcessMessage(
 			if subscriber != nil {
 				subscriber.Close()
 			}
+			// Release the task once streaming is done. Terminal tasks are also
+			// reaped automatically after the manager's TaskTTL, but cleaning up
+			// explicitly frees the task and its resources immediately.
+			handle.CleanTask(&taskID)
 		}()
 
 		msg := protocol.NewMessage(
