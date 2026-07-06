@@ -38,10 +38,10 @@ A2A 的一切都挂在两个名词上：
 ```mermaid
 flowchart LR
     subgraph Conversation["会话 (contextId)"]
-        M1[Message: user] --> M2[Message: agent]
+        M1["Message: user"] --> M2["Message: agent"]
         subgraph Task["任务 (taskId)"]
-            S[status: submitted → working → ...]
-            A1[Artifact: report.pdf]
+            S["status: submitted -> working -> ..."]
+            A1["Artifact: report.pdf"]
         end
     end
 ```

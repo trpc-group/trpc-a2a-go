@@ -44,10 +44,10 @@ And there are exactly two kinds of content:
 ```mermaid
 flowchart LR
     subgraph Conversation["Conversation (contextId)"]
-        M1[Message: user] --> M2[Message: agent]
+        M1["Message: user"] --> M2["Message: agent"]
         subgraph Task["Task (taskId)"]
-            S[status: submitted → working → ...]
-            A1[Artifact: report.pdf]
+            S["status: submitted -> working -> ..."]
+            A1["Artifact: report.pdf"]
         end
     end
 ```
