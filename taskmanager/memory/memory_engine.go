@@ -72,9 +72,9 @@ type engine struct {
 	pipe *taskSubscriber
 
 	// Engine-goroutine-local state (only run() and its callees touch these).
-	terminal     bool
-	violated     bool
-	decisiveSent bool
+	terminal            bool
+	violated            bool
+	immediateResultSent bool
 	// yielded records that this round emitted a suspend state (§3.4) and gave
 	// the task up: a continuation may already own it, so later events from this
 	// round are discarded and the close rules are skipped.
@@ -90,10 +90,10 @@ type engine struct {
 	taskTouched bool
 	lastMessage *protocol.Message
 
-	// decisive carries the first decisive event (first persisted task snapshot
+	// immediateResult carries the immediate result (first persisted task snapshot
 	// or first Message) to a returnImmediately waiter. Buffered with 1 slot and
 	// written at most once, so the engine never blocks on it.
-	decisive chan sendOutcome
+	immediateResult chan sendOutcome
 	// finalTask is the task snapshot at end of stream; written before done is
 	// closed, read by unary waiters only after done is closed.
 	finalTask *protocol.Task
@@ -129,41 +129,16 @@ func (m *TaskManager) prepareExecContext(
 	}
 
 	// Continuation: a message carrying a taskId targets an existing task (§3.4).
-	var taskCopy *protocol.Task
-	if message.TaskID != nil && *message.TaskID != "" {
-		m.taskMu.RLock()
-		stored, exists := m.tasks[taskID]
-		if !exists {
-			m.taskMu.RUnlock()
-			m.releaseExecution(taskID, exec)
-			return nil, taskmanager.ErrTaskNotFound(taskID)
-		}
-		if isFinalState(stored.Status.State) {
-			state := stored.Status.State
-			m.taskMu.RUnlock()
-			m.releaseExecution(taskID, exec)
-			// A terminal task is immutable: reject without invoking the MessageProcessor.
-			return nil, jsonrpc.ErrInvalidParams(
-				fmt.Sprintf("task %s is in terminal state %s", taskID, state))
-		}
-		if message.ContextID != nil && *message.ContextID != "" && *message.ContextID != stored.ContextID {
-			m.taskMu.RUnlock()
-			m.releaseExecution(taskID, exec)
-			// A continuation must stay in the task's own conversation: a foreign
-			// contextId would resolve the wrong ec.History and contradict the
-			// task snapshot's ContextID.
-			return nil, jsonrpc.ErrInvalidParams(
-				fmt.Sprintf("message contextId does not match task %s context", taskID))
-		}
-		taskCopy = copyTask(stored)
-		m.taskMu.RUnlock()
-
-		// A follow-up without an explicit contextId continues the task's
-		// conversation; otherwise ec.History would miss the earlier turns.
-		if (message.ContextID == nil || *message.ContextID == "") && taskCopy.ContextID != "" {
-			contextID := taskCopy.ContextID
-			message.ContextID = &contextID
-		}
+	taskCopy, err := m.resolveContinuation(message)
+	if err != nil {
+		m.releaseExecution(taskID, exec)
+		return nil, err
+	}
+	// A follow-up without an explicit contextId continues the task's
+	// conversation; otherwise ec.History would miss the earlier turns.
+	if taskCopy != nil && (message.ContextID == nil || *message.ContextID == "") && taskCopy.ContextID != "" {
+		contextID := taskCopy.ContextID
+		message.ContextID = &contextID
 	}
 
 	if message.ContextID == nil || *message.ContextID == "" {
@@ -190,6 +165,37 @@ func (m *TaskManager) prepareExecContext(
 		AcceptedOutputModes: acceptedOutputModes,
 		PushConfig:          pushConfig,
 	}, nil
+}
+
+// resolveContinuation loads and validates the task a continuation message
+// targets (§3.4), returning a copy for ec.Task. A message without a taskId is
+// a fresh round and resolves to nil. When taskId is set it is the same value
+// the caller registered the execution under (see startExecution).
+func (m *TaskManager) resolveContinuation(message *protocol.Message) (*protocol.Task, error) {
+	if message.TaskID == nil || *message.TaskID == "" {
+		return nil, nil
+	}
+	taskID := *message.TaskID
+
+	m.taskMu.RLock()
+	defer m.taskMu.RUnlock()
+	stored, exists := m.tasks[taskID]
+	if !exists {
+		return nil, taskmanager.ErrTaskNotFound(taskID)
+	}
+	if isFinalState(stored.Status.State) {
+		// A terminal task is immutable: reject without invoking the MessageProcessor.
+		return nil, jsonrpc.ErrInvalidParams(
+			fmt.Sprintf("task %s is in terminal state %s", taskID, stored.Status.State))
+	}
+	if message.ContextID != nil && *message.ContextID != "" && *message.ContextID != stored.ContextID {
+		// A continuation must stay in the task's own conversation: a foreign
+		// contextId would resolve the wrong ec.History and contradict the
+		// task snapshot's ContextID.
+		return nil, jsonrpc.ErrInvalidParams(
+			fmt.Sprintf("message contextId does not match task %s context", taskID))
+	}
+	return copyTask(stored), nil
 }
 
 // startExecution prepares the ExecContext, invokes the MessageProcessor, and starts
@@ -247,12 +253,12 @@ func (m *TaskManager) startExecution(
 	}
 
 	eng := &engine{
-		manager:  m,
-		ec:       ec,
-		exec:     exec,
-		pipe:     exec.pipe,
-		decisive: make(chan sendOutcome, 1),
-		done:     make(chan struct{}),
+		manager:         m,
+		ec:              ec,
+		exec:            exec,
+		pipe:            exec.pipe,
+		immediateResult: make(chan sendOutcome, 1),
+		done:            make(chan struct{}),
 	}
 	go func() {
 		defer m.engineWg.Done()
@@ -418,7 +424,7 @@ func (eng *engine) handleMessage(message *protocol.Message) {
 	contextID := eng.ec.ContextID
 	m.processReplyMessage(&contextID, message)
 	eng.lastMessage = message
-	eng.offerDecisive(sendOutcome{message: message})
+	eng.offerImmediateResult(sendOutcome{message: message})
 
 	response := protocol.NewStreamResponseMessage(message)
 	eng.sendToPipe(response)
@@ -466,7 +472,7 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 		task.Status = event.Status
 	}
 	eng.taskTouched = true
-	snapshot := eng.decisiveSnapshotLocked(task)
+	snapshot := eng.immediateSnapshotLocked(task)
 	suspended := !final && isSuspendedState(event.Status.State)
 	if suspended {
 		// The round is about to yield ownership: keep its own copy as the unary
@@ -531,7 +537,7 @@ func (eng *engine) handleArtifact(event *protocol.TaskArtifactUpdateEvent) {
 	}
 	task.Artifacts = append(task.Artifacts, event.Artifact)
 	eng.taskTouched = true
-	snapshot := eng.decisiveSnapshotLocked(task)
+	snapshot := eng.immediateSnapshotLocked(task)
 	m.taskMu.Unlock()
 
 	eng.broadcast(protocol.NewStreamResponseArtifactUpdate(event), snapshot)
@@ -550,11 +556,11 @@ func (eng *engine) newTask(status protocol.TaskStatus) *protocol.Task {
 	}
 }
 
-// decisiveSnapshotLocked returns a copy of the task for the first decisive
-// (returnImmediately) outcome, or nil once one was already taken. The caller
-// must hold taskMu so the snapshot equals what was just persisted.
-func (eng *engine) decisiveSnapshotLocked(task *protocol.Task) *protocol.Task {
-	if eng.decisiveSent {
+// immediateSnapshotLocked returns a copy of the task to serve as the
+// immediate result (returnImmediately), or nil once one was already taken.
+// The caller must hold taskMu so the snapshot equals what was just persisted.
+func (eng *engine) immediateSnapshotLocked(task *protocol.Task) *protocol.Task {
+	if eng.immediateResultSent {
 		return nil
 	}
 	return copyTask(task)
@@ -564,19 +570,19 @@ func (eng *engine) decisiveSnapshotLocked(task *protocol.Task) *protocol.Task {
 // task subscribers. snapshot, when non-nil, resolves a returnImmediately wait.
 func (eng *engine) broadcast(response protocol.StreamResponse, snapshot *protocol.Task) {
 	if snapshot != nil {
-		eng.offerDecisive(sendOutcome{task: snapshot})
+		eng.offerImmediateResult(sendOutcome{task: snapshot})
 	}
 	eng.sendToPipe(response)
 	eng.manager.notifySubscribers(eng.ec.TaskID, response)
 }
 
-// offerDecisive publishes the first decisive event exactly once.
-func (eng *engine) offerDecisive(out sendOutcome) {
-	if eng.decisiveSent {
+// offerImmediateResult publishes the immediate result exactly once.
+func (eng *engine) offerImmediateResult(out sendOutcome) {
+	if eng.immediateResultSent {
 		return
 	}
-	eng.decisiveSent = true
-	eng.decisive <- out // buffered, single write: never blocks
+	eng.immediateResultSent = true
+	eng.immediateResult <- out // buffered, single write: never blocks
 }
 
 // sendToPipe forwards an event to the streaming request pipe, if any.
@@ -615,9 +621,9 @@ func (eng *engine) violate(reason string) {
 	task.Status = event.Status
 	eng.taskTouched = true
 	// The framework-written FAILED is a task event (§3.1): offer it as the
-	// decisive outcome so a returnImmediately caller is not left waiting for
+	// immediateResult outcome so a returnImmediately caller is not left waiting for
 	// the violating processor to close its channel.
-	snapshot := eng.decisiveSnapshotLocked(task)
+	snapshot := eng.immediateSnapshotLocked(task)
 	m.taskMu.Unlock()
 
 	eng.terminal = true

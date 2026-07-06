@@ -116,7 +116,7 @@ func NewTaskManager(
 // and derives the result from the emitted events: the final task snapshot
 // when task events were emitted, otherwise the last Message. The default is
 // blocking (returnImmediately=false); with returnImmediately=true it returns
-// on the first decisive event while the execution continues in background.
+// on the immediate result while the execution continues in background.
 func (m *TaskManager) OnSendMessage(
 	ctx context.Context,
 	request protocol.SendMessageParams,
@@ -130,14 +130,14 @@ func (m *TaskManager) OnSendMessage(
 
 	historyLength := historyLengthFromConfig(request.Configuration)
 	if !request.Configuration.IsBlocking() {
-		// returnImmediately=true: answer with the first decisive event (first
+		// returnImmediately=true: answer with the immediate result (first
 		// persisted task snapshot or first Message); execution continues in
 		// background and results stay retrievable via GetTask/subscriptions.
 		select {
-		case out := <-ex.decisive:
+		case out := <-ex.immediateResult:
 			return m.buildSendResponse(out.task, out.message, historyLength)
 		case <-ex.done:
-			// The stream closed before any decisive event: same derivation as
+			// The stream closed before any immediate result: same derivation as
 			// blocking.
 			return m.buildSendResponse(ex.finalTask, ex.lastMessage, historyLength)
 		case <-ctx.Done():

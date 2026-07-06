@@ -509,7 +509,7 @@ func TestOnSendMessageStream_StartupFailureLeavesNoTrace(t *testing.T) {
 // §3.1: returnImmediately with an empty round → -32603
 // =============================================================================
 
-// returnImmediately with a round that closes before any decisive event takes
+// returnImmediately with a round that closes before any immediateResult event takes
 // the <-done arm and reports the empty execution.
 func TestOnSendMessage_ReturnImmediatelyEmptyRound(t *testing.T) {
 	m, _ := setupTest(t, scriptedExecutor())

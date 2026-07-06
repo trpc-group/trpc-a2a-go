@@ -73,7 +73,7 @@ const (
 )
 
 // sendOutcome is a message-or-task result candidate for message/send: the
-// first decisive event (returnImmediately) or the end-of-stream derivation.
+// first immediateResult event (returnImmediately) or the end-of-stream derivation.
 type sendOutcome struct {
 	task    *protocol.Task
 	message *protocol.Message
@@ -110,15 +110,47 @@ type execution struct {
 	// pipe is the message/stream request pipe; nil for message/send.
 	pipe *taskSubscriber
 
-	// decisive carries the first decisive event (first persisted task
+	// immediateResult carries the immediate result (first persisted task
 	// snapshot or first Message) for returnImmediately=true. Buffered so the
 	// engine never blocks on it.
-	decisive     chan sendOutcome
-	decisiveSent bool
+	immediateResult     chan sendOutcome
+	immediateResultSent bool
 
 	// done is closed after the engine ran the close rules, closed the pipe,
 	// and deregistered; the blocking unary waiter reads results after it.
 	done chan struct{}
+}
+
+// resolveContinuation loads and validates the task a continuation message
+// targets, returning the stored snapshot. A message without a taskId is a
+// fresh round and resolves to nil. When taskId is set it is the same value
+// the caller registered the execution under (see prepareExecution).
+func (m *TaskManager) resolveContinuation(
+	ctx context.Context,
+	message *protocol.Message,
+) (*protocol.Task, error) {
+	if message.TaskID == nil || *message.TaskID == "" {
+		return nil, nil
+	}
+	taskID := *message.TaskID
+
+	loaded, err := m.getTaskInternal(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if isFinalState(loaded.Status.State) {
+		// A terminal task is immutable: reject without invoking the MessageProcessor.
+		return nil, jsonrpc.ErrInvalidParams(
+			fmt.Sprintf("task %s is in terminal state %s", loaded.ID, loaded.Status.State))
+	}
+	if message.ContextID != nil && *message.ContextID != "" && *message.ContextID != loaded.ContextID {
+		// A continuation must stay in the task's own conversation: a foreign
+		// contextId would resolve the wrong ec.History and contradict the
+		// task snapshot's ContextID.
+		return nil, jsonrpc.ErrInvalidParams(
+			fmt.Sprintf("message contextId does not match task %s context", loaded.ID))
+	}
+	return loaded, nil
 }
 
 // prepareExecution runs the shared message/send + message/stream request
@@ -137,9 +169,8 @@ func (m *TaskManager) prepareExecution(
 
 	// ec.TaskID is always pre-allocated; whether a task comes into existence
 	// is up to the MessageProcessor (lazy creation).
-	continuation := message.TaskID != nil && *message.TaskID != ""
 	var taskID string
-	if continuation {
+	if message.TaskID != nil && *message.TaskID != "" {
 		taskID = *message.TaskID
 	} else {
 		taskID = protocol.GenerateTaskID()
@@ -149,11 +180,11 @@ func (m *TaskManager) prepareExecution(
 	// disconnect must not cancel the work) but cancelable via OnCancelTask.
 	execCtx, cancel := context.WithCancel(detachedCtx{parent: ctx})
 	ex := &execution{
-		manager:  m,
-		ec:       &taskmanager.ExecContext{},
-		live:     &liveExecution{cancel: cancel},
-		decisive: make(chan sendOutcome, 1),
-		done:     make(chan struct{}),
+		manager:         m,
+		ec:              &taskmanager.ExecContext{},
+		live:            &liveExecution{cancel: cancel},
+		immediateResult: make(chan sendOutcome, 1),
+		done:            make(chan struct{}),
 	}
 	if streaming {
 		ex.pipe = newTaskSubscriber(taskID, m.options.TaskSubscriberBufSize, m.options.TaskSubscriberBlockingSend)
@@ -176,31 +207,13 @@ func (m *TaskManager) prepareExecution(
 	// Continuation: a request addressing an existing task loads it, rejects
 	// terminal tasks without invoking the MessageProcessor (the task is frozen), and
 	// hands the MessageProcessor the current snapshot via ec.Task.
-	var task *protocol.Task
-	if continuation {
-		loaded, err := m.getTaskInternal(ctx, taskID)
-		if err != nil {
-			m.releaseExecution(taskID, ex.live)
-			cancel()
-			return nil, err
-		}
-		if isFinalState(loaded.Status.State) {
-			m.releaseExecution(taskID, ex.live)
-			cancel()
-			return nil, jsonrpc.ErrInvalidParams(
-				fmt.Sprintf("task %s is in terminal state %s", loaded.ID, loaded.Status.State))
-		}
-		if message.ContextID != nil && *message.ContextID != "" && *message.ContextID != loaded.ContextID {
-			m.releaseExecution(taskID, ex.live)
-			cancel()
-			// A continuation must stay in the task's own conversation: a foreign
-			// contextId would resolve the wrong ec.History and contradict the
-			// task snapshot's ContextID.
-			return nil, jsonrpc.ErrInvalidParams(
-				fmt.Sprintf("message contextId does not match task %s context", loaded.ID))
-		}
-		task = loaded
-
+	task, err := m.resolveContinuation(ctx, message)
+	if err != nil {
+		m.releaseExecution(taskID, ex.live)
+		cancel()
+		return nil, err
+	}
+	if task != nil {
 		// The engine's working copy must not alias ec.Task (the MessageProcessor's
 		// read-only snapshot).
 		ex.task = copyTask(task)
@@ -447,13 +460,13 @@ func (ex *execution) stampTaskEventIDs(taskID, contextID *string) bool {
 
 // processMessageEvent stores a reply Message into the conversation and
 // forwards it to the request pipe and, when a task exists, its subscribers.
-// The decisive outcome is offered before the fan-out so a returnImmediately
+// The immediateResult outcome is offered before the fan-out so a returnImmediately
 // waiter is never stalled behind a slow subscriber.
 func (ex *execution) processMessageEvent(msg *protocol.Message) {
 	contextID := ex.ec.ContextID
 	ex.manager.processReplyMessage(&contextID, msg)
 	ex.lastMessage = msg
-	ex.offerDecisive(sendOutcome{message: msg})
+	ex.offerImmediateResult(sendOutcome{message: msg})
 	ex.broadcast(protocol.NewStreamResponseMessage(msg))
 }
 
@@ -506,9 +519,9 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		log.Errorf("RedisTaskManager: failed to store task %s status %s: %v", ev.TaskID, status.State, err)
 		return
 	}
-	// Decisive first: a returnImmediately waiter must never be stalled behind
+	// Immediate result first: a returnImmediately waiter must never be stalled behind
 	// a slow subscriber in the fan-out below.
-	ex.sendDecisiveTask()
+	ex.offerImmediateTask()
 	ex.broadcast(protocol.NewStreamResponseStatusUpdate(ev))
 	if final {
 		ex.manager.cleanSubscribers(ev.TaskID)
@@ -557,9 +570,9 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 		log.Errorf("RedisTaskManager: failed to store task %s artifact: %v", ev.TaskID, err)
 		return
 	}
-	// Decisive first: a returnImmediately waiter must never be stalled behind
+	// Immediate result first: a returnImmediately waiter must never be stalled behind
 	// a slow subscriber in the fan-out below.
-	ex.sendDecisiveTask()
+	ex.offerImmediateTask()
 	ex.broadcast(protocol.NewStreamResponseArtifactUpdate(ev))
 }
 
@@ -597,23 +610,23 @@ func (ex *execution) broadcast(event protocol.StreamResponse) {
 	}
 }
 
-// offerDecisive publishes the first decisive event exactly once (for
+// offerImmediateResult publishes the immediate result exactly once (for
 // returnImmediately=true waiters).
-func (ex *execution) offerDecisive(out sendOutcome) {
-	if ex.decisiveSent {
+func (ex *execution) offerImmediateResult(out sendOutcome) {
+	if ex.immediateResultSent {
 		return
 	}
-	ex.decisiveSent = true
-	ex.decisive <- out // buffered, single write: never blocks
+	ex.immediateResultSent = true
+	ex.immediateResult <- out // buffered, single write: never blocks
 }
 
-// sendDecisiveTask publishes the just-persisted task snapshot as the decisive
+// offerImmediateTask publishes the just-persisted task snapshot as the immediateResult
 // event.
-func (ex *execution) sendDecisiveTask() {
-	if ex.decisiveSent {
+func (ex *execution) offerImmediateTask() {
+	if ex.immediateResultSent {
 		return
 	}
-	ex.offerDecisive(sendOutcome{task: copyTask(ex.task)})
+	ex.offerImmediateResult(sendOutcome{task: copyTask(ex.task)})
 }
 
 // copyTask returns a copy safe to hand out of the engine.

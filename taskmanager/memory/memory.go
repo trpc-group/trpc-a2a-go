@@ -239,7 +239,7 @@ func NewTaskManager(processor taskmanager.MessageProcessor, opts ...TaskManagerO
 // OnSendMessage handles the message/send request. It runs the MessageProcessor and
 // derives the result from the drained event stream: the task snapshot when a
 // task exists, otherwise the last emitted Message (§3.1). With
-// returnImmediately=true it returns on the first decisive event while the
+// returnImmediately=true it returns on the immediate result while the
 // execution continues in the background.
 func (m *TaskManager) OnSendMessage(
 	ctx context.Context,
@@ -254,14 +254,14 @@ func (m *TaskManager) OnSendMessage(
 
 	historyLength := historyLengthFromConfig(request.Configuration)
 	if !request.Configuration.IsBlocking() {
-		// v1.0 returnImmediately: answer with the first decisive event — the
+		// v1.0 returnImmediately: answer with the immediate result — the
 		// first persisted task snapshot or the first Message — and let the
 		// engine keep running; later state is retrievable via GetTask/subscribe.
 		select {
-		case out := <-eng.decisive:
+		case out := <-eng.immediateResult:
 			return m.buildSendResponse(out.task, out.message, historyLength)
 		case <-eng.done:
-			// The stream closed before any decisive event: same derivation as blocking.
+			// The stream closed before any immediate result: same derivation as blocking.
 			return m.buildSendResponse(eng.finalTask, eng.lastMessage, historyLength)
 		case <-ctx.Done():
 			return nil, ctx.Err()

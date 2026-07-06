@@ -816,7 +816,7 @@ func TestOnSendMessageReturnImmediatelyPureMessage(t *testing.T) {
 		t.Fatalf("OnSendMessage failed: %v", err)
 	}
 	if resp.GetMessage() == nil || resp.GetMessage().Parts[0].TextContent() != "quick reply" {
-		t.Fatalf("expected first message as decisive result, got %+v", resp.Result)
+		t.Fatalf("expected first message as immediateResult result, got %+v", resp.Result)
 	}
 }
 

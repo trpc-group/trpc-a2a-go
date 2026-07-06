@@ -918,7 +918,7 @@ func TestOnSendMessage_ReturnImmediatelyTask(t *testing.T) {
 	waitTaskState(t, manager, task.ID, protocol.TaskStateCompleted)
 }
 
-// returnImmediately=true with a Message as the first decisive event returns
+// returnImmediately=true with a Message as the immediate result returns
 // that message.
 func TestOnSendMessage_ReturnImmediatelyMessage(t *testing.T) {
 	release := make(chan struct{})
@@ -1164,7 +1164,7 @@ func TestEngine_SynchronousTaskHandle(t *testing.T) {
 }
 
 // =============================================================================
-// Review-fix regressions: single-writer, terminal immutability, decisive
+// Review-fix regressions: single-writer, terminal immutability, immediateResult
 // =============================================================================
 
 // assertRPCCode fails unless err is a *jsonrpc.Error with the wanted code.
@@ -1255,10 +1255,10 @@ func TestOnCancelTask_LiveButTerminalNotCancelable(t *testing.T) {
 	close(release)
 }
 
-// §3.1: the framework-written violation FAILED is decisive — a
+// §3.1: the framework-written violation FAILED is immediateResult — a
 // returnImmediately caller gets it promptly, not when the violating processor
 // finally closes its channel.
-func TestOnSendMessage_ReturnImmediatelyViolationIsDecisive(t *testing.T) {
+func TestOnSendMessage_ReturnImmediatelyViolationIsImmediateResult(t *testing.T) {
 	release := make(chan struct{})
 	var round atomic.Int32
 	processor := funcExecutor(
@@ -1460,7 +1460,7 @@ func TestOnSendMessageStream_StartupFailureLeavesNoTrace(t *testing.T) {
 	}
 }
 
-// returnImmediately with a round that closes before any decisive event takes
+// returnImmediately with a round that closes before any immediate result takes
 // the <-done arm and reports the empty execution.
 func TestOnSendMessage_ReturnImmediatelyEmptyRound(t *testing.T) {
 	manager := newTestManager(t, eventsExecutor())

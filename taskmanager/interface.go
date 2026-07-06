@@ -128,7 +128,7 @@ type TaskManager interface {
 	// It invokes the MessageProcessor and derives the result from the emitted events:
 	// the final task snapshot when task events were emitted, otherwise the last
 	// message. With returnImmediately=true it returns as soon as the first
-	// decisive event is persisted, while execution continues in the background.
+	// immediateResult event is persisted, while execution continues in the background.
 	OnSendMessage(
 		ctx context.Context,
 		request protocol.SendMessageParams,
