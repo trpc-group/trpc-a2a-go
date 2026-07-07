@@ -2,7 +2,7 @@
 
 服务端:如何起一个 A2A server、把你的 agent 定义为 `MessageProcessor`、选存储后
 端、打开框架的各项服务端能力。调用 agent 见 [客户端](client.md);这些 API 依赖
-的运行时契约见下文 [轮次契约](#轮次契约)。
+的运行时规则见下文的[轮次生命周期](#轮次生命周期)等几节。
 
 ```bash
 go get trpc.group/trpc-go/trpc-a2a-go/v2
@@ -121,12 +121,10 @@ return out, nil
 - 需要跨轮记住的内容必须作为 `Message` 事件发出(status message 是易失的;
   artifact 永不进入历史)。
 
-## 轮次契约
+## 轮次生命周期
 
-你的 agent 代码所遵循、客户端所观察到的确切语义。一个**轮次**是一次
-`ProcessMessage` 调用及其 channel 的排空过程。
-
-### 轮次生命周期
+一个**轮次**是一次 `ProcessMessage` 调用及其 channel 的排空过程。以下是你的
+agent 代码所遵循、客户端所观察到的确切语义。
 
 - **懒创建**——首个*任务事件*落库时任务才成立。只发 `Message` 的轮次不留任务
   (对该轮预分配 ID 的 `GetTask` 返回 not-found)。
@@ -143,20 +141,23 @@ return out, nil
 
 - **挂起即让出**——发出 `input-required`/`auth-required` 后任务立刻被释放以便续
   跑开始;老轮之后再发的事件一律丢弃。完成要由续跑轮交付。
-- **违规快速失败**——给别的 `taskId` 发事件、发 `*protocol.Task` 快照
+- **违规立即失败**——给别的 `taskId` 发事件、发 `*protocol.Task` 快照
   (v1.0 中仅框架可产生)、发无状态的 status,都会把该轮任务打成 `FAILED` 并丢弃
   其余事件。
 
-### 执行与取消
+## 执行与取消
 
-- 轮次跑在**分离的 context** 上:client 断连**不会**取消工作;结果始终可经
-  `GetTask`/`SubscribeToTask` 取回。
-- 只有 `CancelTask`(和 manager 停机)会取消 processor 的 `ctx`。得体的反应是
-  **停止发送并关闭**——框架落 `CANCELED`。取消*之后*发出的终态事件依然生效。
-- `CancelTask` **返回取消请求时刻的快照**(可能仍是 `working`);终态 `CANCELED`
-  在该轮收尾时落库。取消已终态的任务返回 `-32002`。
+- **分离的 context**——轮次跑在与请求分离的 context 上:client 断连**不会**取消
+  工作;结果始终可经 `GetTask`/`SubscribeToTask` 取回。
+- **谁能取消**——只有 `CancelTask`(和 manager 停机)会取消 processor 的 `ctx`。
+  得体的反应是停止发送并关闭——框架落 `CANCELED`。取消*之后*发出的终态事件依然
+  生效(允许收尾的轮次就让它收尾)。
+- **取消的返回值**——`CancelTask` 返回取消请求时刻的快照(可能仍是 `working`);
+  终态 `CANCELED` 要等该轮收尾时才落库。取消已终态的任务返回 `-32002`。
 
-### 响应推导
+## 响应生成
+
+四种调用方式各自这样得到答案:
 
 - **`SendMessage`(阻塞,默认)**等该轮结束:碰过任务就答**任务快照**,否则答
   **最后一条 Message**;一个事件都没发的轮次是 processor 的 bug(`-32603`)。
@@ -167,7 +168,7 @@ return out, nil
   挂起帧结束。
 - **`SubscribeToTask`** 先发当前任务快照、再发实时增量;终态任务被拒。
 
-### 会话、历史,以及什么会被记住
+## 会话、历史,以及什么会被记住
 
 存储是两级的:**按 `messageId` 存消息本体**,按 `contextId` 存会话索引。进入会
 话的只有:每轮的请求消息,以及 processor 发出的每个 **`Message` 事件**——没有别
