@@ -6,6 +6,8 @@
 
 This is a breaking release: the module path moves to `/v2`, the JSON-RPC wire moves from slash-form v0.2.x method names to the v1.0 PascalCase methods, and the agent-authoring interface is redesigned around a single event-stream contract. Existing v0.2.x **clients** keep working unchanged via an in-tree compatibility layer. Full walkthrough: [Migrating from v0.x](README.md#migrating-from-v0x) (README) and the [docs site](docs/) (`docs/mkdocs/{en,zh}/migration.md`).
 
+**v0.x stays maintained.** The v0.2.x line continues on the `main` branch, while v1.0 / `/v2` development lives on the `v2` branch. We will keep maintaining v0.x on `main` — bug fixes and compatible improvements — until the v1.x protocol is broadly adopted, so existing users are not forced to migrate on this release's schedule.
+
 #### Highlights
 
 - **Module path bumped to `trpc.group/trpc-go/trpc-a2a-go/v2`.** Every import needs the `/v2` suffix.
