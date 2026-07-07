@@ -1,7 +1,6 @@
 # 调用 Agent（客户端）
 
-客户端:如何调用一个 A2A agent——四种消费模式、任务管理、鉴权,以及从一个 agent
-内部调用别的 agent。构建 agent 见 [服务端](server.md)。
+客户端:如何调用一个 A2A agent——四种消费模式、任务管理、鉴权,以及从一个 agent 内部调用别的 agent。构建 agent 见 [服务端](server.md)。
 
 ```go
 import "trpc.group/trpc-go/trpc-a2a-go/v2/client"
@@ -9,8 +8,7 @@ import "trpc.group/trpc-go/trpc-a2a-go/v2/client"
 c, _ := client.NewA2AClient("http://localhost:8080/")
 ```
 
-`NewA2AClient` 接收 option(超时、HTTP client、鉴权——见下)。它经 JSON-RPC 绑定
-与 agent 通信。
+`NewA2AClient` 接收 option(超时、HTTP client、鉴权——见下)。它经 JSON-RPC 绑定与 agent 通信。
 
 ## 四种消费模式
 
@@ -25,8 +23,7 @@ params := protocol.SendMessageParams{
 }
 ```
 
-**1. 阻塞 send(默认)**——一次调用,等该轮结束,返回最终的 `Task` 或 `Message`
-(sealed union):
+**1. 阻塞 send(默认)**——一次调用,等该轮结束,返回最终的 `Task` 或 `Message`(sealed union):
 
 ```go
 resp, _ := c.SendMessage(ctx, params)
@@ -37,8 +34,7 @@ if task := resp.GetTask(); task != nil {
 }
 ```
 
-**2. `returnImmediately`**——以最早可用的结果应答,工作继续;之后用 `GetTasks`
-或 `ResubscribeTask` 跟进:
+**2. `returnImmediately`**——以最早可用的结果应答,工作继续;之后用 `GetTasks` 或 `ResubscribeTask` 跟进:
 
 ```go
 t := true
@@ -62,16 +58,13 @@ for event := range events {
 } // 任务到达终态（或中断态）时 channel 关闭
 ```
 
-**4. Resubscribe**——断连后接回运行中的任务;首帧是当前任务快照,之后是实时
-增量:
+**4. Resubscribe**——断连后接回运行中的任务;首帧是当前任务快照,之后是实时增量:
 
 ```go
 events, _ := c.ResubscribeTask(ctx, protocol.TaskIDParams{ID: taskID})
 ```
 
-三种 send 模式由
-[examples/simple 的 client](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple)
-一并演示。
+三种 send 模式由 [examples/simple 的 client](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple)一并演示。
 
 ## 任务管理
 
@@ -81,14 +74,11 @@ list, _  := c.ListTasks(ctx, protocol.ListTasksParams{ContextID: contextID}) // 
 task, _  = c.CancelTasks(ctx, protocol.TaskIDParams{ID: taskID})             // 请求取消
 ```
 
-`GetTasks` 可带可选的 `HistoryLength` 决定随附多少会话历史。取消一个已结束的任务
-返回 `-32002`(不可取消);返回的任务是取消请求时刻的快照——见
-[服务端：轮次契约](server.md)。
+`GetTasks` 可带可选的 `HistoryLength` 决定随附多少会话历史。取消一个已结束的任务返回 `-32002`(不可取消);返回的任务是取消请求时刻的快照——见 [服务端：轮次契约](server.md)。
 
 ## 多轮续跑
 
-当一次调用返回 `input-required`(或 `auth-required`)的任务,回传**相同的
-`taskId`** 发另一条消息来恢复它:
+当一次调用返回 `input-required`(或 `auth-required`)的任务,回传**相同的 `taskId`** 发另一条消息来恢复它:
 
 ```go
 follow := protocol.SendMessageParams{
@@ -105,8 +95,7 @@ resp, _ := c.SendMessage(ctx, follow)
 
 ## 鉴权
 
-按 agent card 公示的方案附带凭据。服务端一侧见
-[服务端](server.md#鉴权)。
+按 agent card 公示的方案附带凭据。服务端一侧见 [服务端](server.md#鉴权)。
 
 ```go
 c, _ := client.NewA2AClient("http://localhost:8080/",
@@ -114,17 +103,11 @@ c, _ := client.NewA2AClient("http://localhost:8080/",
 )
 ```
 
-另有 `client.WithAPIKeyAuth`、`WithOAuth2ClientCredentials`、
-`WithOAuth2TokenSource`、`WithAuthProvider`。JWT、API key、OAuth2 的完整客户端
-接法:
-→ [examples/auth](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth)。
+另有 `client.WithAPIKeyAuth`、`WithOAuth2ClientCredentials`、`WithOAuth2TokenSource`、`WithAuthProvider`。JWT、API key、OAuth2 的完整客户端接法:→ [examples/auth](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth)。
 
 ## 从一个 agent 内部调用别的 agent（编排）
 
-一个 agent 可以经这个同样的 client 调用别的 agent,在自己的 `ProcessMessage` 内
-部调用:根 agent 把工作分发给专家 agent,再把它们的结果聚合进自己的任务。注意出
-站的 `SendMessage` 会阻塞到子 agent 那轮结束(v1.0 默认),这通常正是编排器想要
-的。
+一个 agent 可以经这个同样的 client 调用别的 agent,在自己的 `ProcessMessage` 内部调用:根 agent 把工作分发给专家 agent,再把它们的结果聚合进自己的任务。注意出站的 `SendMessage` 会阻塞到子 agent 那轮结束(v1.0 默认),这通常正是编排器想要的。
 
 ```go
 func (p *root) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
@@ -141,8 +124,7 @@ func (p *root) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) 
 
 ## legacy v0.2.x wire
 
-要讲 legacy wire(对一个 v0.2.x server,或挂了 compat handler 的 v1.0 server),
-用 `compat/v0` 客户端——它接收同样的 v1 类型,底层转换:
+要讲 legacy wire(对一个 v0.2.x server,或挂了 compat handler 的 v1.0 server),用 `compat/v0` 客户端——它接收同样的 v1 类型,底层转换:
 
 ```go
 import v0 "trpc.group/trpc-go/trpc-a2a-go/v2/compat/v0"

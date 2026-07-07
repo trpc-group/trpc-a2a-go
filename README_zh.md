@@ -2,12 +2,7 @@
 
 # tRPC-A2A-Go
 
-[![Go Reference](https://pkg.go.dev/badge/trpc.group/trpc-go/trpc-a2a-go/v2.svg)](https://pkg.go.dev/trpc.group/trpc-go/trpc-a2a-go/v2)
-[![Go Report Card](https://goreportcard.com/badge/github.com/trpc-group/trpc-a2a-go)](https://goreportcard.com/report/github.com/trpc-group/trpc-a2a-go)
-[![LICENSE](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/trpc-group/trpc-a2a-go/blob/main/LICENSE)
-[![Releases](https://img.shields.io/github/release/trpc-group/trpc-a2a-go.svg?style=flat-square)](https://github.com/trpc-group/trpc-a2a-go/releases)
-[![Tests](https://github.com/trpc-group/trpc-a2a-go/actions/workflows/prc.yml/badge.svg)](https://github.com/trpc-group/trpc-a2a-go/actions/workflows/prc.yml)
-[![Coverage](https://codecov.io/gh/trpc-group/trpc-a2a-go/branch/main/graph/badge.svg)](https://app.codecov.io/gh/trpc-group/trpc-a2a-go/tree/main)
+[![Go Reference](https://pkg.go.dev/badge/trpc.group/trpc-go/trpc-a2a-go/v2.svg)](https://pkg.go.dev/trpc.group/trpc-go/trpc-a2a-go/v2) [![Go Report Card](https://goreportcard.com/badge/github.com/trpc-group/trpc-a2a-go)](https://goreportcard.com/report/github.com/trpc-group/trpc-a2a-go) [![LICENSE](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/trpc-group/trpc-a2a-go/blob/main/LICENSE) [![Releases](https://img.shields.io/github/release/trpc-group/trpc-a2a-go.svg?style=flat-square)](https://github.com/trpc-group/trpc-a2a-go/releases) [![Tests](https://github.com/trpc-group/trpc-a2a-go/actions/workflows/prc.yml/badge.svg)](https://github.com/trpc-group/trpc-a2a-go/actions/workflows/prc.yml) [![Coverage](https://codecov.io/gh/trpc-group/trpc-a2a-go/branch/main/graph/badge.svg)](https://app.codecov.io/gh/trpc-group/trpc-a2a-go/tree/main)
 
 这是 tRPC group 对 [A2A 协议](https://google.github.io/A2A/) 的 Go 实现，让不同的 AI agent 能够相互发现并协作。
 
@@ -80,19 +75,13 @@ go run main.go --context "your-context-id"
 
 ## 文档
 
-[docs/](docs/mkdocs/en/index.md) 目录深入讲解了协议与框架（英文，以及
-[中文](docs/mkdocs/zh/index.md)）：
+[docs/](docs/mkdocs/en/index.md) 目录深入讲解了协议与框架（英文，以及 [中文](docs/mkdocs/zh/index.md)）：
 
-- [overview.md](docs/mkdocs/en/overview.md) —— 框架是什么、它的架构，以及核心的
-  event-stream 思路。
-- [protocol.md](docs/mkdocs/en/protocol.md) —— A2A 协议：agent card、wire
-  对象、task 状态机，以及交互流程。
-- [server.md](docs/mkdocs/en/server.md) —— 构建 agent：server、processor、运行时
-  契约（round 生命周期、取消、history、保留策略），以及所有服务端能力。
-- [client.md](docs/mkdocs/en/client.md) —— 调用 agent：消费模式、task 管理与
-  编排。
-- [migration.md](docs/mkdocs/en/migration.md) —— 把已有的 v0.x agent 迁移到
-  v1.0（下方 [从 v0.x 迁移](#从-v0x-迁移) 也有摘要）。
+- [overview.md](docs/mkdocs/en/overview.md) —— 框架是什么、它的架构，以及核心的 event-stream 思路。
+- [protocol.md](docs/mkdocs/en/protocol.md) —— A2A 协议：agent card、wire 对象、task 状态机，以及交互流程。
+- [server.md](docs/mkdocs/en/server.md) —— 构建 agent：server、processor、运行时契约（round 生命周期、取消、history、保留策略），以及所有服务端能力。
+- [client.md](docs/mkdocs/en/client.md) —— 调用 agent：消费模式、task 管理与编排。
+- [migration.md](docs/mkdocs/en/migration.md) —— 把已有的 v0.x agent 迁移到 v1.0（下方 [从 v0.x 迁移](#从-v0x-迁移) 也有摘要）。
 
 ## 示例
 
@@ -100,11 +89,9 @@ go run main.go --context "your-context-id"
 
 ### 1. 简单示例 ([examples/simple](examples/simple))
 
-一个最小示例，以原生 channel 风格（即裸 `MessageProcessor` 契约）演示 A2A
-的核心功能：
+一个最小示例，以原生 channel 风格（即裸 `MessageProcessor` 契约）演示 A2A 的核心功能：
 - 一个简单 server，将文本输入反转，并在裸 channel 上发出 event
-- 客户端演示三种消费模式：阻塞式 send、`returnImmediately`、以及
-  streaming——全部由同一个 processor 提供服务
+- 客户端演示三种消费模式：阻塞式 send、`returnImmediately`、以及 streaming——全部由同一个 processor 提供服务
 - 基本的 task 生命周期（惰性创建、处理、完成）与 artifact
 
 ```bash
@@ -180,10 +167,7 @@ go run main.go --auth jwt --message "Custom message" --session-id "session123"
 
 ### 5. v0 兼容示例 ([examples/compat](examples/compat))
 
-一个 server，同时服务两代协议：v1.0 客户端走标准 wire，未经改动的 v0.2.x
-客户端通过 [compat/v0](compat/v0) 接入——同一个 endpoint、同一条鉴权链。该客户端
-演示了被保留的 legacy 默认行为（无任何配置的 `message/send` 会立即应答），以及
-在 legacy wire 上的阻塞式与流式调用。
+一个 server，同时服务两代协议：v1.0 客户端走标准 wire，未经改动的 v0.2.x 客户端通过 [compat/v0](compat/v0) 接入——同一个 endpoint、同一条鉴权链。该客户端演示了被保留的 legacy 默认行为（无任何配置的 `message/send` 会立即应答），以及在 legacy wire 上的阻塞式与流式调用。
 
 ```bash
 # Start the v0-compatible server
@@ -353,15 +337,7 @@ if err := srv.Start(":8080"); err != nil {
 
 ## 从 v0.x 迁移
 
-v1.0（`/v2`）版本用上文所示的单一 event-stream 契约，替换了原来多结果返回的
-`MessageProcessor` + `TaskHandler` 回调。熟悉的名字得以保留：你依然实现
-`MessageProcessor.ProcessMessage`，原来的 `TaskHandler` 动词以 `TaskHandle`
-兼容层的形式延续，因此 v0.x 的 processor 函数体只需极少改动即可迁移——包括完全
-同步的函数体，而它正是 v0.x 常见的写法。（wire 说明：v1.0 的 JSON-RPC 绑定将操作
-命名为 `SendMessage`、`SendStreamingMessage`、`GetTask`、`ListTasks`、
-`CancelTask`、`SubscribeToTask` 以及 `*TaskPushNotificationConfig` 的 CRUD；带
-斜杠的名字——`message/send`、`tasks/get`……——是 v0.2.x 的 wire，仍由 `compat/v0`
-提供服务。本指南沿用迁移读者已经熟悉的 v0.x 名称来指代这些操作。）
+v1.0（`/v2`）版本用上文所示的单一 event-stream 契约，替换了原来多结果返回的 `MessageProcessor` + `TaskHandler` 回调。熟悉的名字得以保留：你依然实现 `MessageProcessor.ProcessMessage`，原来的 `TaskHandler` 动词以 `TaskHandle` 兼容层的形式延续，因此 v0.x 的 processor 函数体只需极少改动即可迁移——包括完全同步的函数体，而它正是 v0.x 常见的写法。（wire 说明：v1.0 的 JSON-RPC 绑定将操作命名为 `SendMessage`、`SendStreamingMessage`、`GetTask`、`ListTasks`、`CancelTask`、`SubscribeToTask` 以及 `*TaskPushNotificationConfig` 的 CRUD；带斜杠的名字——`message/send`、`tasks/get`……——是 v0.2.x 的 wire，仍由 `compat/v0` 提供服务。本指南沿用迁移读者已经熟悉的 v0.x 名称来指代这些操作。）
 
 ```go
 func (p *myProcessor) ProcessMessage(
@@ -382,9 +358,7 @@ func (p *myProcessor) ProcessMessage(
 }
 ```
 
-两个参考示例：[examples/basic](examples/basic) 是对 v0.x processor 做最小改动的
-`TaskHandle` 迁移版；[examples/simple](examples/simple) 则是推荐给新代码的原生
-channel 风格。
+两个参考示例：[examples/basic](examples/basic) 是对 v0.x processor 做最小改动的 `TaskHandle` 迁移版；[examples/simple](examples/simple) 则是推荐给新代码的原生 channel 风格。
 
 ### API 映射
 
@@ -412,31 +386,16 @@ channel 风格。
 
 以下代码能正常编译，但行为与 v0.x 不同：
 
-- **v1.0 反转了阻塞的默认行为**：不带 `returnImmediately` 的 `message/send`
-  会等待本轮结束（v0.x 在 `blocking:false`/缺省时立即应答）。通过 `compat/v0`
-  服务的 legacy endpoint 客户端仍保持 v0 的默认行为。
-- **只有当 processor 关闭其 event channel 时本轮才结束**：永不关闭的一轮会占住
-  该 task 的执行槽（后续请求会被以 “already has an active execution” 拒绝），并
-  阻塞 manager 的 Close / server 的 Stop——请在发出 event 的那个 goroutine 里
-  关闭 channel（或 `TaskHandle`）。
-- **`input-required`/`auth-required` 会让出本轮**：挂起之后再发出的 event 会被
-  丢弃——请在续跑的那一轮里交付完成结果。
-- **一轮恰好驱动一个 task**（`ExecContext.TaskID`）：携带任何其他 task ID 的
-  event 属于违反契约，会使本轮的 task 失败。
-- **把 `*protocol.Task` 作为 stream event 发送（在 v0.x 合法）现在属于违反
-  契约**——框架会自行物化 task 快照；请改为发出 status 与 artifact event。
-- **不带 `taskId` 的后续请求会以一个全新的 task 开启新一轮**：仅以 contextID
-  作为键的 session 会把被挂起的 task 搁置（在 memory 后端上它永远不会被回收）。
-  在应答 `input-required` 时请回带 `taskId`。
-- `message/send` 不再总是物化一个 task：纯 message 应答不会留下任何 task，对该
-  轮 ID 调用 `tasks/get` 会返回 not-found。
-- 完全不产生任何 event 的一轮会被当作 processor 的 bug：`message/send` 以
-  `-32603` 失败。
-- 在 task 处于 `submitted`/`working` 时关闭 event channel 会把它标记为
-  `FAILED`——请有意识地结束一轮，处于终态或 `input-required`/`auth-required`
-  状态。
-- `tasks/cancel` 返回请求取消时拍下的快照（可能仍是 `working`）；终态
-  `CANCELED` 会在 processor 那一轮收尾时被持久化。
+- **v1.0 反转了阻塞的默认行为**：不带 `returnImmediately` 的 `message/send` 会等待本轮结束（v0.x 在 `blocking:false`/缺省时立即应答）。通过 `compat/v0` 服务的 legacy endpoint 客户端仍保持 v0 的默认行为。
+- **只有当 processor 关闭其 event channel 时本轮才结束**：永不关闭的一轮会占住该 task 的执行槽（后续请求会被以 “already has an active execution” 拒绝），并阻塞 manager 的 Close / server 的 Stop——请在发出 event 的那个 goroutine 里关闭 channel（或 `TaskHandle`）。
+- **`input-required`/`auth-required` 会让出本轮**：挂起之后再发出的 event 会被丢弃——请在续跑的那一轮里交付完成结果。
+- **一轮恰好驱动一个 task**（`ExecContext.TaskID`）：携带任何其他 task ID 的 event 属于违反契约，会使本轮的 task 失败。
+- **把 `*protocol.Task` 作为 stream event 发送（在 v0.x 合法）现在属于违反契约**——框架会自行物化 task 快照；请改为发出 status 与 artifact event。
+- **不带 `taskId` 的后续请求会以一个全新的 task 开启新一轮**：仅以 contextID 作为键的 session 会把被挂起的 task 搁置（在 memory 后端上它永远不会被回收）。在应答 `input-required` 时请回带 `taskId`。
+- `message/send` 不再总是物化一个 task：纯 message 应答不会留下任何 task，对该轮 ID 调用 `tasks/get` 会返回 not-found。
+- 完全不产生任何 event 的一轮会被当作 processor 的 bug：`message/send` 以 `-32603` 失败。
+- 在 task 处于 `submitted`/`working` 时关闭 event channel 会把它标记为 `FAILED`——请有意识地结束一轮，处于终态或 `input-required`/`auth-required` 状态。
+- `tasks/cancel` 返回请求取消时拍下的快照（可能仍是 `working`）；终态 `CANCELED` 会在 processor 那一轮收尾时被持久化。
 
 ## 鉴权
 
@@ -604,8 +563,7 @@ if err != nil {
 
 ## 遥测指标
 
-server 可以为每个 A2A 请求的生命周期发出 OpenTelemetry 指标。这有助于你观测
-吞吐、延迟，以及流式首 token 的响应性。
+server 可以为每个 A2A 请求的生命周期发出 OpenTelemetry 指标。这有助于你观测吞吐、延迟，以及流式首 token 的响应性。
 
 ### 内置指标
 
@@ -720,15 +678,12 @@ if err != nil {
 
 ## 贡献
 
-欢迎贡献代码与改进建议！请确保你的代码遵循 Go 编码规范并包含适当的测试。更多
-细节见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+欢迎贡献代码与改进建议！请确保你的代码遵循 Go 编码规范并包含适当的测试。更多细节见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 致谢
 
-本项目的协议设计基于 Google 开源的 A2A 协议（[原始仓库](https://github.com/google/A2A)），遵循
-Apache 2.0 许可证。这是一个非官方实现。
+本项目的协议设计基于 Google 开源的 A2A 协议（[原始仓库](https://github.com/google/A2A)），遵循 Apache 2.0 许可证。这是一个非官方实现。
 
 ## 版权
 
-本仓库中与 Tencent 代码相关的版权声明此前以 “THL A29 Limited” 名义登记。该实体
-现已注销。你应将所有此前分发的代码副本视同其版权声明以 “Tencent” 名义登记。
+本仓库中与 Tencent 代码相关的版权声明此前以 “THL A29 Limited” 名义登记。该实体现已注销。你应将所有此前分发的代码副本视同其版权声明以 “Tencent” 名义登记。
