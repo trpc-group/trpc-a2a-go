@@ -1,4 +1,4 @@
-module github.com/futrime/a2a-go-github/examples/multi
+module trpc.group/trpc-go/trpc-a2a-go/v2/examples/multi
 
 go 1.23.0
 
