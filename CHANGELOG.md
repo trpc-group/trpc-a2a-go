@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0-beta (2026-07-07)
+## 2.0.0-alpha.1 (2026-07-07)
 
 ### A2A Specification Upgrade ([a2a spec v0.2.x](https://github.com/a2aproject/A2A/releases/tag/v0.2.0) -> [a2a spec v1.0](https://github.com/a2aproject/A2A/releases/tag/v1.0.0))
 
