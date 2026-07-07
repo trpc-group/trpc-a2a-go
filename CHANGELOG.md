@@ -1,5 +1,62 @@
 # Changelog
 
+## 2.0.0-beta (2026-07-07)
+
+### A2A Specification Upgrade ([a2a spec v0.2.x](https://github.com/a2aproject/A2A/releases/tag/v0.2.0) -> [a2a spec v1.0](https://github.com/a2aproject/A2A/releases/tag/v1.0.0))
+
+This is a breaking release: the module path moves to `/v2`, the JSON-RPC wire moves from slash-form v0.2.x method names to the v1.0 PascalCase methods, and the agent-authoring interface is redesigned around a single event-stream contract. Existing v0.2.x **clients** keep working unchanged via an in-tree compatibility layer. Full walkthrough: [Migrating from v0.x](README.md#migrating-from-v0x) (README) and the [docs site](docs/) (`docs/mkdocs/{en,zh}/migration.md`).
+
+#### Highlights
+
+- **Module path bumped to `trpc.group/trpc-go/trpc-a2a-go/v2`.** Every import needs the `/v2` suffix.
+- **`MessageProcessor` redesigned around one method:** `ProcessMessage(ctx, *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error)`. One event stream now serves `SendMessage` (blocking or `returnImmediately`) and `SendStreamingMessage` alike — the framework derives each response shape instead of the processor branching on streaming vs. blocking. `taskmanager.NewTaskHandle(ctx, ec)` is the recommended way to write one: a helper over the same channel with familiar verbs (`UpdateTaskState`, `AddArtifact`, `Reply`, `Close`, `Events()`).
+- **New v1.0 operations:** `ListTasks`, `ListTaskPushNotificationConfigs`, `DeleteTaskPushNotificationConfig`, and authenticated extended agent cards (`GetExtendedAgentCard` / `server.WithAuthenticatedExtendedCardHandler` / `client.GetAuthenticatedExtendedCard`).
+- **`TaskPushNotificationConfig` flattened** onto one struct — v0.2.x nested the delivery details under a `pushNotificationConfig` object.
+- **Spec-shaped agent cards and results:** `AgentCard.SupportedInterfaces` ([]AgentInterface, multi-transport declaration) alongside deprecated v0.2.x-mirror fields for old clients; `SendMessage`/`SendStreamingMessage` now return a sealed `Task | Message` union (`SendMessageResponse` / `StreamResponse`).
+- **Legacy v0.2.x wire compatibility ships in-tree:** `compat/v0` mounts on the same server and auth chain (`server.WithCompatHandler(v0.NewJSONRPCHandler(tm))`) or is used standalone as a client (`v0.NewClient(...)`), preserving the old non-blocking default. See [examples/compat](examples/compat).
+- **Tenant-native multi-agent hosting:** one process can host multiple agents routed by a `tenant` field on the request body rather than by URL path (`server.WithTenantCard` / `WithTenantCardProvider`). See [examples/tenant](examples/tenant) (renamed from `multi_endpoint`).
+- **OpenTelemetry metrics and time-to-first-token (TTFT) tracking** (`server.WithTelemetryMeterProvider` / `WithTelemetryMeterProviderOptions` / `WithFirstTokenPolicy`).
+- **All examples ported to the new contract**, plus a new [examples/compat](examples/compat) (dual v1.0/v0.2.x wire) example; `examples/simple/python_client` removed.
+- **New bilingual documentation site** under `docs/` (English + Chinese): protocol semantics, server/client guides, and the migration guide, cross-linked to the examples.
+
+#### Breaking Changes
+
++ trpc.group/trpc-go/trpc-a2a-go (module path)
+    + Import path changed to trpc.group/trpc-go/trpc-a2a-go/v2 for every package.
+
++ trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager
+    + MessageProcessor.ProcessMessage(ctx, message, options, handler) (*MessageProcessingResult, error): removed -> ProcessMessage(ctx, *ExecContext) (<-chan protocol.StreamEvent, error)
+    + ProcessOptions: removed — fields moved onto ExecContext (Message, TaskID, ContextID, Task, History, Tenant, AcceptedOutputModes, PushConfig)
+    + MessageProcessingResult: removed — closing the channel is the only outcome; the framework derives every response shape
+    + TaskHandler (interface): removed — replaced by TaskHandle, a concrete helper over the returned channel (NewTaskHandle(ctx, ec))
+    + TaskHandler.BuildTask / .SubScribeTask / .CleanTask / .GetMetadata: removed
+    + TaskHandler.UpdateTaskState(taskID, state, msg): now TaskHandle.UpdateTaskState(state, msg) — no taskID argument
+    + TaskHandler.AddArtifact(taskID, artifact, isFinal, needMoreData): now TaskHandle.AddArtifact(artifact, lastChunk) — needMoreData/append dropped
+    + TaskHandler.GetTask(taskID): now TaskHandle.GetTask() — this round's continuation snapshot only, arbitrary-task reads removed
+    + TaskSubscriber, CancellableTask (and .Cancel): removed
+    + redis.NewTaskManager: argument order is now (processor, rdb, opts...)
+    + redis NewTaskSubscriber / WithSubscriberSendHook / WithSubscriberBlockingSend: removed
+
++ trpc.group/trpc-go/trpc-a2a-go/v2/protocol
+    + JSON-RPC method names: message/send -> SendMessage, message/stream -> SendStreamingMessage, tasks/get -> GetTask, tasks/cancel -> CancelTask, tasks/resubscribe -> SubscribeToTask, tasks/pushNotificationConfig/set -> CreateTaskPushNotificationConfig, tasks/pushNotificationConfig/get -> GetTaskPushNotificationConfig, agent/getAuthenticatedExtendedCard -> GetExtendedAgentCard
+    + TaskPushNotificationConfig: flattened — URL/Token/Authentication/Metadata moved directly onto the struct (previously nested under PushNotificationConfig)
+    + Blocking default inverted: SendMessage without configuration now waits for a terminal or interrupted state by default; the old fire-and-forget behavior is configuration.returnImmediately = true
+    + TaskStatusUpdateEvent.Final: no longer a wire field (json:"-"); stream closure is signaled by terminal/interrupted state, not an explicit flag
+
++ trpc.group/trpc-go/trpc-a2a-go/v2/server
+    + WithAgentCardHandler: removed — use WithAgentCard / WithTenantCard / WithTenantCardProvider
+    + WithHTTPRouter, customRouter, the HTTPRouter interface: removed — integrate multi-agent routing via the tenant field, or mount Handler() into your own mux
+    + WithMiddleWare: renamed to WithMiddleware
+
+#### New (non-breaking)
+
+- `server.WithAuthenticatedExtendedCardHandler`, `client.GetAuthenticatedExtendedCard`
+- `server.WithJSONRPCEndpoint`, `server.WithTelemetryMeterProviderOptions`, `server.WithFirstTokenPolicy`
+- `client.ListTasks`, `client.ListPushNotifications`, `client.DeletePushNotification`
+- `taskmanager.OnListTasks`, `.OnPushNotificationList`, `.OnPushNotificationDelete`
+- OpenTelemetry request-count/duration/TTFT metrics (#103)
+- Hardened terminal-state subscriber cleanup and manager `Close` in the memory `TaskManager` (#105)
+
 ## 0.2.5 (2025-10-27)
 
 - Support get agent card interface (#96)
