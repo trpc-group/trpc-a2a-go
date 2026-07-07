@@ -83,7 +83,7 @@ task, _  = c.CancelTasks(ctx, protocol.TaskIDParams{ID: taskID})             // 
 
 `GetTasks` 可带可选的 `HistoryLength` 决定随附多少会话历史。取消一个已结束的任务
 返回 `-32002`(不可取消);返回的任务是取消请求时刻的快照——见
-[behavior.md](behavior.md)。
+[服务端：轮次契约](server.md)。
 
 ## 多轮续跑
 

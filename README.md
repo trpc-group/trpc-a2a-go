@@ -1,3 +1,5 @@
+English | [中文](README_zh.md)
+
 # tRPC-A2A-Go
 
 [![Go Reference](https://pkg.go.dev/badge/trpc.group/trpc-go/trpc-a2a-go/v2.svg)](https://pkg.go.dev/trpc.group/trpc-go/trpc-a2a-go/v2)
@@ -85,11 +87,11 @@ framework in depth (English and [中文](docs/mkdocs/zh/index.md)):
   architecture, and the core event-stream idea.
 - [protocol.md](docs/mkdocs/en/protocol.md) — the A2A protocol: agent cards,
   the wire objects, the task state machine, and the interaction flows.
-- [behavior.md](docs/mkdocs/en/behavior.md) — how this framework behaves: the
-  processor contract, round lifecycle, cancellation, history semantics, and
-  retention.
-- [server.md](docs/mkdocs/en/server.md) / [client.md](docs/mkdocs/en/client.md)
-  — build an agent, and call agents; recipes linked to examples.
+- [server.md](docs/mkdocs/en/server.md) — build an agent: the server, the
+  processor, the runtime contract (round lifecycle, cancellation, history,
+  retention), and every server-side capability.
+- [client.md](docs/mkdocs/en/client.md) — call agents: the consumption modes,
+  task management, and orchestration.
 - [migration.md](docs/mkdocs/en/migration.md) — port an existing v0.x agent
   to v1.0 (a summary is also in [Migrating from v0.x](#migrating-from-v0x)
   below).

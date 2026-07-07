@@ -85,7 +85,7 @@ task, _  = c.CancelTasks(ctx, protocol.TaskIDParams{ID: taskID})            // r
 `GetTasks` takes an optional `HistoryLength` to shape how much conversation
 history rides along. Canceling a task that has already finished returns
 `-32002` (not cancelable); the returned task is the snapshot at the moment
-cancellation was requested — see [behavior.md](behavior.md).
+cancellation was requested — see [Server: the round contract](server.md#the-round-contract).
 
 ## Multi-turn continuation
 

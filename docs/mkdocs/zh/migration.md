@@ -2,7 +2,7 @@
 
 本指南把一个既有的 v0.x agent 迁移到 v1.0（`/v2` 模块）。它把 README 里的映射表
 展开为完整说明：改了什么、每个 v0.x 符号变成什么、以及那些能顺利编译但运行行为
-不同的变化。新 API 背后的运行时契约见 [behavior.md](behavior.md)，构建配方见
+不同的变化。新 API 背后的运行时契约见 [服务端：轮次契约](server.md)，构建配方见
 [server.md](server.md)。
 
 ## 改了什么
@@ -274,7 +274,7 @@ v1.0 的 JSON-RPC 绑定使用 PascalCase 方法名。斜杠分隔的名字是 v
   任意任务的能力已取消。→ *该怎么做：* 续跑快照用 `ec.Task` / `handle.GetTask()`；
   要读其他任务，从 processor 外部经 `TaskManager` API 读取。
 
-这些规则背后的完整运行时契约见 [behavior.md](behavior.md)。
+这些规则背后的完整运行时契约见 [服务端：轮次契约](server.md)。
 
 ## 保持 v0.x 客户端可用
 

@@ -9,7 +9,6 @@ Go 实现——把 agent 接入 A2A 生态、以及调用其他 agent 所需的�
 | --- | --- |
 | 了解这个框架是什么、各部分如何组合 | [框架概览](overview.md) |
 | 学习 A2A 协议——对象、任务生命周期、交互 | [协议](protocol.md) |
-| 推断 agent 在生产环境中的运行时行为 | [框架行为](behavior.md) |
 | 构建 agent——服务端、processor、存储、鉴权、租户 | [服务端](server.md) |
 | 调用 agent——四种消费模式、任务管理 | [客户端](client.md) |
 | 把既有 v0.x agent 迁移到 v1.0 | [从 v0.x 迁移](migration.md) |

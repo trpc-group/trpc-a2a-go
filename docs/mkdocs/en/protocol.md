@@ -3,7 +3,7 @@
 This page explains A2A from the user's seat: the problem it solves, the mental
 model, how you discover an agent, the interactions you will actually have with
 one — and only then the formal object and RPC definitions. How this framework
-implements the protocol is covered in [behavior.md](behavior.md).
+implements the protocol is covered in [Server: the round contract](server.md#the-round-contract).
 
 ## What problem does A2A solve?
 
@@ -366,6 +366,6 @@ last frame, after which the SSE stream closes. Everything else — an explicit
 `submitted`, how many `working` frames, whether progress text rides on status
 messages — is the agent's choice.
 
-Next: [Behavior](behavior.md) explains how this framework turns that event
+Next: [Server](server.md) explains how this framework turns that event
 stream into persisted tasks and derived responses; [Server](server.md) shows how
 to emit it in code.

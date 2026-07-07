@@ -2,8 +2,8 @@
 
 The server side: how to stand up an A2A server, define your agent as a
 `MessageProcessor`, choose a storage backend, and turn on the framework's
-server capabilities. For calling agents, see [Client](client.md); for the
-runtime contract behind these APIs, see [behavior.md](behavior.md).
+server capabilities. For calling agents, see [Client](client.md); the runtime contract these APIs
+rely on is [The round contract](#the-round-contract) below.
 
 ```bash
 go get trpc.group/trpc-go/trpc-a2a-go/v2
@@ -63,12 +63,10 @@ continuation round, `nil` on a fresh one), `ContextID`, `Tenant`, `History`
 (a conversation snapshot), `AcceptedOutputModes`, and `PushConfig` (an inline
 webhook config, if the client sent one).
 
-There are two authoring styles; both produce the same event stream.
-
-### Style 1 — `TaskHandle` (recommended)
-
-The familiar verb API. A synchronous body works as-is — emits before
-`Events()` never block, so no goroutine is required.
+Wrap a **`TaskHandle`** — a small helper that carries the familiar verbs
+(`UpdateTaskState`, `AddArtifact`, `Reply`) and hands you the channel to
+return. A synchronous body works as-is; emits before `Events()` never block,
+so no goroutine is required.
 → [examples/basic](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic)
 
 ```go
@@ -87,23 +85,27 @@ Verbs: `UpdateTaskState(state, message)`, `AddArtifact(artifact, lastChunk)`,
 `Reply(message)`, plus reads `TaskID()`, `GetContextID()`, `GetTask()`,
 `GetMessageHistory()`. `taskmanager.ReplyText(text)` builds an agent message.
 
-### Style 2 — raw channel
-
-Construct `protocol.StreamEvent` values and send them yourself. Full control
-over every field — needed for artifact-append chunking (`TaskHandle` does not
-expose the `Append` flag).
-→ [examples/simple](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple)
+**`TaskHandle` is just channel operations underneath.** The real contract is
+the `<-chan protocol.StreamEvent` you return: `UpdateTaskState` sends a
+`*protocol.TaskStatusUpdateEvent`, `AddArtifact` sends a
+`*protocol.TaskArtifactUpdateEvent`, `Reply` sends a `*protocol.Message`, and
+`Close` closes the channel. You rarely need to, but you can build and send
+those events yourself — the only way to reach a field `TaskHandle` doesn't
+expose, such as the artifact `Append` flag for chunked streaming:
 
 ```go
 out := make(chan protocol.StreamEvent, 4)
 go func() {
     defer close(out)
     out <- &protocol.TaskStatusUpdateEvent{Status: protocol.TaskStatus{State: protocol.TaskStateWorking}}
-    out <- &protocol.TaskArtifactUpdateEvent{Artifact: art, LastChunk: &done}
+    out <- &protocol.TaskArtifactUpdateEvent{Artifact: art, Append: &appendFlag, LastChunk: &done}
     out <- &protocol.TaskStatusUpdateEvent{Status: protocol.TaskStatus{State: protocol.TaskStateCompleted}}
 }()
 return out, nil
 ```
+
+([examples/simple](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple)
+is a processor written entirely on the raw channel.)
 
 ### Common shapes
 
@@ -117,7 +119,7 @@ return out, nil
   close, and handle the follow-up (which echoes the `taskId`) as a new round
   with `ec.Task` set.
 
-### Rules that keep you out of trouble
+### Usage constraints
 
 - Close the channel/handle from the goroutine that emits — the round ends only
   on close, and a never-closing round pins the task and blocks shutdown.
@@ -127,7 +129,80 @@ return out, nil
 - Anything worth remembering across rounds must be emitted as a `Message`
   event (status messages are ephemeral; artifacts never enter history).
 
-The full contract is [behavior.md](behavior.md).
+## The round contract
+
+The exact semantics your agent code lives under and clients observe. A
+**round** is one `ProcessMessage` invocation and the drain of its channel.
+
+### Round lifecycle
+
+- **Lazy task creation** — the task materializes when the first *task event* is
+  persisted. A round that only emits a `Message` leaves no task behind
+  (`GetTask` for that round's pre-allocated ID returns not-found).
+- **One active run per task** — a second message for a task whose round is
+  still running is rejected (`-32602`, "already has an active execution").
+- **The round ends when you close the channel** — and only then. The close
+  rules applied at that moment:
+
+  | Task state at close | Outcome |
+  | --- | --- |
+  | terminal (you emitted it) | round ends normally |
+  | `input-required` / `auth-required` | task **suspends**, awaiting a follow-up |
+  | `submitted` / `working` | **`FAILED`** — "processor finished without terminal state" (a bug signal) |
+  | cancellation was requested | **`CANCELED`** |
+
+- **Suspend yields the round** — emitting `input-required`/`auth-required`
+  releases the task immediately so a continuation can start; anything the old
+  round emits afterwards is discarded. Deliver the completion from the
+  continuation round.
+- **Contract violations fail fast** — emitting an event for a foreign `taskId`,
+  a `*protocol.Task` snapshot (framework-only in v1.0), or a stateless status
+  marks the round's task `FAILED` and discards the rest.
+
+### Execution and cancellation
+
+- Rounds run on a **detached context**: a client disconnect does **not** cancel
+  the work; results stay retrievable via `GetTask`/`SubscribeToTask`.
+- Only `CancelTask` (and manager shutdown) cancels the processor's `ctx`. The
+  polite reaction is to **stop emitting and close** — the framework persists
+  `CANCELED`. A terminal event emitted *after* the cancel still wins.
+- `CancelTask` **returns the snapshot at the moment cancellation was requested**
+  (possibly still `working`); the terminal `CANCELED` lands when the round winds
+  down. Canceling an already-terminal task returns `-32002`.
+
+### Response derivation
+
+- **`SendMessage` (blocking, the default)** waits for the round to end, then
+  answers with the **task snapshot** if the round touched a task, else the
+  **last Message**; a round that emitted nothing is a processor bug (`-32603`).
+- **`SendMessage` with `returnImmediately=true`** answers with the **earliest
+  usable result**: the first persisted task snapshot or the first Message (which
+  carries no `taskId` — emit a task event first if the client must track it).
+- **`SendStreamingMessage`** forwards every event in order, each **persisted
+  before delivery**. The stream ends at the terminal or suspend frame.
+- **`SubscribeToTask`** sends the current task snapshot first, then live
+  increments; terminal tasks are rejected.
+
+### Conversation, history, and what gets remembered
+
+Storage is two-level: **message bodies by `messageId`**, and per-`contextId`
+**conversation indexes**. What enters the conversation: every round's request
+message, and every **`Message` event** the processor emits — nothing else.
+
+> **Status messages are ephemeral** (overwritten by the next status, never
+> stored) and **artifacts never enter history**. Anything to remember across
+> rounds — an LLM's final answer above all — must be a `Message` event, or the
+> next round's `ec.History` will hold the user's turns only. (This differs from
+> the official a2a SDKs, which roll each `status.message` into `task.history`.)
+
+`Task.history` is virtual: filled at response time from the conversation per the
+request's `historyLength`. `ec.History` is a snapshot taken before the round,
+truncated to `MaxHistoryLength` (default 100).
+
+Request `configuration` fields: `returnImmediately` and `historyLength` are
+consumed by the framework; `acceptedOutputModes` (`ec.AcceptedOutputModes`) and
+`taskPushNotificationConfig` (`ec.PushConfig`) are passed through to your
+processor.
 
 ## Storage backends
 
@@ -155,9 +230,18 @@ tm, _ := redistm.NewTaskManager(proc, redisClient,   // note: (processor, client
 ```
 
 → [examples/redis](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis).
-Retention differences and the Redis cross-replica caveat are in
-[behavior.md](behavior.md). Implement the `taskmanager.TaskManager` interface
-for a custom backend.
+Implement the `taskmanager.TaskManager` interface for a custom backend.
+
+Retention:
+
+| | memory backend | redis backend |
+| --- | --- | --- |
+| Conversations | cleaned after `ConversationTTL` idle (default 1h); capped at `MaxHistoryLength` | key TTL (default 1h), refreshed on writes |
+| Terminal tasks | **kept forever by default** (`TaskTTL` = 0) — set `memory.WithTaskTTL` in production | key TTL (default 1h, `WithExpireTime`) |
+| Suspended tasks | never collected (cleaner is terminal-only) — have clients resume or cancel them | expire with the key TTL |
+
+There is no per-task delete API; A2A defines none. On the Redis backend, live
+event fan-out is per-process (snapshots are shared).
 
 ## Authentication
 

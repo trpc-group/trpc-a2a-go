@@ -10,7 +10,6 @@ New here? Read the [Overview](overview.md) first, then pick a path:
 | --- | --- |
 | Understand what the framework is and how it fits together | [Overview](overview.md) |
 | Learn the A2A protocol — objects, task lifecycle, interactions | [Protocol](protocol.md) |
-| Reason about your agent's runtime behavior in production | [Behavior](behavior.md) |
 | Build an agent — server, processor, storage, auth, tenants | [Server](server.md) |
 | Call agents — the four consumption modes, task management | [Client](client.md) |
 | Port an existing v0.x agent to v1.0 | [Migrating from v0.x](migration.md) |

@@ -7,6 +7,9 @@ everything stateful in between (task lifecycle, streaming, conversation
 history, authentication, push notifications, multi-tenant hosting), so the
 only thing you write is your agent's logic.
 
+For the A2A protocol itself see [Protocol](protocol.md); for build recipes and
+the runtime contract see [Server](server.md) and [Client](client.md).
+
 ## What you get
 
 | Capability | Status | Notes |
@@ -22,7 +25,7 @@ only thing you write is your agent's logic.
 | Multi-tenant hosting with per-tenant agent cards | ✅ | One process, many agents, routed by tenant. |
 | Legacy v0.2.x wire compatibility | ✅ | `compat/v0` on the same endpoint and auth chain. |
 | Telemetry: OpenTelemetry metrics, TTFT tracking | ✅ | Pluggable meter provider and first-token policy. |
-| Cross-replica streaming on the Redis backend | 🚧 Partial | Snapshots are shared; live event fan-out is per-process (see [behavior.md](behavior.md)). |
+| Cross-replica streaming on the Redis backend | 🚧 Partial | Snapshots are shared; live event fan-out is per-process. |
 
 ## Architecture
 
@@ -56,15 +59,11 @@ Three layers, three responsibilities:
 - **`server`** terminates the wire. It authenticates the request, serves agent
   cards for discovery, dispatches JSON-RPC methods and SSE streams, and —
   optionally — mounts the legacy v0.2.x endpoint on the same port inside the
-  same auth chain. Configured through functional options
-  (`server.WithAgentCard`, `WithAuthProvider`, `WithJWKSEndpoint`,
-  `WithBasePath`, `WithCompatHandler`, `WithMiddleware`, …).
+  same auth chain.
 - **`TaskManager`** owns everything stateful: lazy task creation, the round
   close rules, cancellation, conversation history, retention, and subscriber
-  fan-out. The `taskmanager` package defines the interface (`OnSendMessage`,
-  `OnSendMessageStream`, `OnGetTask`, `OnListTasks`, `OnCancelTask`,
-  `OnResubscribe`, and the `OnPushNotification*` set); `taskmanager/memory` and
-  `taskmanager/redis` implement it, and you can supply your own.
+  fan-out. `taskmanager/memory` and `taskmanager/redis` implement the
+  interface, and you can supply your own.
 - **`MessageProcessor`** is the only part you write. It reads a read-only
   request snapshot (`ExecContext`) and returns a channel of events. That is
   your agent.
@@ -94,57 +93,27 @@ The load-bearing idea: **your agent is one method that emits an event stream,
 and the framework derives every response shape from it.** There is no
 streaming/non-streaming branch in your code; `SendMessage` blocks and returns
 the terminal snapshot, `SendStreamingMessage` forwards the events live, and
-both come from the same `ProcessMessage`.
+both come from the same `ProcessMessage`. You write it by wrapping a
+`TaskHandle` — see [Server](server.md#defining-the-messageprocessor).
 
-## How the framework handles the protocol
+## What the framework does for you
 
 A large part of the framework is the protocol work you don't have to do:
 
 - **Result derivation** — `SendMessage` returns a `Task` or a `Message` (the
-  sealed union) depending on what your processor emitted, blocking until the
-  round ends; `returnImmediately` answers with the first usable result while
-  work continues. You just emit events.
+  sealed union) from what your processor emitted; `SendStreamingMessage`
+  forwards the events live. One processor, every response shape.
 - **Lazy task creation & persistence** — the task materializes on the first
-  task event and every event is persisted before it is broadcast, so
-  `GetTask` never lags what a subscriber saw.
-- **Agent card normalization** — cards are emitted with both the v1.0 fields
-  (`supportedInterfaces`, `securitySchemes`) and their deprecated v0.2.x
-  mirrors, so a single card is readable by both client generations.
-- **Stream lifecycle** — SSE streams start with the current task snapshot on
-  resubscribe, end at a terminal/interrupted state, and are drained on client
-  disconnect without cancelling the detached work.
+  task event, and every event is persisted before it is broadcast.
+- **Agent card normalization** — cards carry both the v1.0 fields and their
+  deprecated v0.2.x mirrors, so one card is readable by both client
+  generations.
 - **Legacy translation** — `compat/v0` maps the v0.2.x slash-method wire onto
-  the same `TaskManager`, preserving the old defaults (notably non-blocking
-  `message/send`).
+  the same `TaskManager`, preserving the old defaults.
 
-The exact contract — round lifecycle, cancellation, history and retention
-semantics, and where behavior is a deliberate choice on top of the spec — is
-[behavior.md](behavior.md).
-
-## Writing the agent — two styles
-
-Both produce the same event stream; pick by taste and by what you are porting.
-
-- **`TaskHandle`** — the familiar verb API (`UpdateTaskState`, `AddArtifact`,
-  `Reply`). A synchronous body works as-is. The recommended default and the
-  shape a v0.x processor ports into.
-  → [examples/basic](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic)
-- **Raw channel** — construct `protocol.StreamEvent` values and send them
-  yourself. Full control over every field (needed for artifact-append
-  chunking).
-  → [examples/simple](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple)
-
-```go
-func (p *proc) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
-    h := taskmanager.NewTaskHandle(ctx, ec)
-    defer h.Close()
-    h.UpdateTaskState(protocol.TaskStateWorking, nil)
-    result := doWork(ec.Message)
-    h.AddArtifact(result.Artifact, true)
-    h.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("done"))
-    return h.Events(), nil
-}
-```
+The exact runtime contract — round lifecycle, cancellation, history and
+retention semantics — lives with the agent-author guide in
+[Server](server.md#the-round-contract).
 
 ## Roadmap
 
@@ -159,10 +128,8 @@ func (p *proc) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) 
 
 - [Protocol](protocol.md) — learn A2A itself: agent cards, the four wire
   objects, the task state machine, and the interaction flows.
-- [Behavior](behavior.md) — the processor contract, round lifecycle,
-  cancellation, and history/retention semantics.
-- [Server](server.md) — build an agent: the server, the processor, storage,
-  and every server-side capability.
+- [Server](server.md) — build an agent: the server, the processor, the runtime
+  contract, and every server-side capability.
 - [Client](client.md) — call agents: the consumption modes, task management,
   and orchestration.
 - [Migrating from v0.x](migration.md) — port an existing v0.x agent.

@@ -4,7 +4,7 @@ This guide ports an existing v0.x agent to v1.0 (the `/v2` module). It expands
 the mapping table in the README into a full account of what changed, what each
 v0.x symbol becomes, and the behavior changes that compile cleanly but run
 differently. For the runtime contract behind the new API, see
-[behavior.md](behavior.md); for build recipes, see [server.md](server.md).
+[Server: the round contract](server.md#the-round-contract); for build recipes see [Server](server.md) and [Client](client.md).
 
 ## What changed
 
@@ -301,7 +301,7 @@ These compile fine but behave differently from v0.x. Each ends with a one-line
   snapshot; read other tasks through the `TaskManager` API from outside the
   processor.
 
-For the full runtime contract behind these rules, see [behavior.md](behavior.md).
+For the full runtime contract behind these rules, see [Server: the round contract](server.md#the-round-contract).
 
 ## Keeping v0.x clients working
 
