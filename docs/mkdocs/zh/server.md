@@ -1,14 +1,22 @@
 # 构建 Agent（服务端）
 
-服务端:如何起一个 A2A server、把你的 agent 定义为 `MessageProcessor`、选存储后端、打开框架的各项服务端能力。调用 agent 见 [客户端](client.md);这些 API 依赖的运行时规则见下文的[轮次生命周期](#轮次生命周期)等几节。
+本页讲如何把一个 Go agent 暴露为 A2A server：启动 HTTP 服务、实现 `MessageProcessor`、选择存储后端，并按需打开鉴权、推送通知、多租户、子路径部署、legacy 兼容和遥测。调用 agent 见 [客户端](client.md)；协议对象与交互模型见 [协议](protocol.md)。
 
 ```bash
 go get trpc.group/trpc-go/trpc-a2a-go/v2
 ```
 
-## server 的三个部分
+## 最小组成
 
-一个 server 绑定 **agent card**(身份 + 能力)、**TaskManager**(状态)、你的**MessageProcessor**(逻辑):
+一个 A2A server 由三件事组成：
+
+| 部分 | 你提供什么 | 框架做什么 |
+| --- | --- | --- |
+| agent card | agent 的身份、URL、能力、技能、鉴权声明 | 暴露 `/.well-known/agent-card.json`，并归一化 v1/v0 字段。 |
+| `TaskManager` | 选择 memory、Redis 或自定义实现 | 管理任务、事件、会话历史、取消、订阅和留存。 |
+| `MessageProcessor` | 你的 agent 逻辑 | 接收 `ExecContext`，消费你返回的事件流，派生一元和流式响应。 |
+
+最小启动代码如下：
 
 ```go
 import (
@@ -25,18 +33,21 @@ srv.Start(":8080")   // 在 "/" 服务 JSON-RPC，在 /.well-known/agent-card.js
 
 | Option | 用途 |
 | --- | --- |
-| `WithAgentCard(card)` | 公开 agent card(单 agent server)。 |
-| `WithTenantCard(tenant, card)` / `WithTenantCardProvider(fn)` | 按租户 card(多租户,见下)。 |
-| `WithAuthProvider(p)` | 要求鉴权(见下)。 |
-| `WithJWKSEndpoint(enabled, path)` + `WithPushNotificationAuthenticator(a)` | 签名推送通知、发布公钥。 |
+| `WithAgentCard(card)` | 公开默认 agent card。单 agent server 必填；多租户 server 可作为默认目录 card。 |
+| `WithTenantCard(tenant, card)` / `WithTenantCardProvider(fn)` | 注册按租户解析的 card，多租户时使用。 |
+| `WithAuthenticatedExtendedCardHandler(fn)` | 开启鉴权后的 extended agent card。 |
+| `WithAuthProvider(p)` | 要求 JSON-RPC 请求鉴权。 |
+| `WithJWKSEndpoint(enabled, path)` + `WithPushNotificationAuthenticator(a)` | 签名推送通知并发布 JWKS 公钥。 |
 | `WithBasePath(prefix)` | 挂载到子路径。 |
+| `WithJSONRPCEndpoint(path)` | 自定义 JSON-RPC endpoint。通常优先用 `WithBasePath`。 |
 | `WithCompatHandler(h)` | 同时服务 legacy v0.2.x wire。 |
 | `WithMiddleware(mw...)` | 包裹 HTTP handler 链。 |
 | `WithCORSEnabled(true)` | 输出 CORS 头。 |
 | `WithReadTimeout` / `WithWriteTimeout` / `WithIdleTimeout` | HTTP server 超时。 |
-| `WithTelemetryMeterProvider(mp)` / `WithFirstTokenPolicy(p)` | 指标 + TTFT。 |
+| `WithTelemetryMeterProvider(mp)` / `WithTelemetryMeterProviderOptions(...)` | 注入已有 meter provider，或让 server 创建 OTLP provider。 |
+| `WithFirstTokenPolicy(p)` | 自定义 TTFT 首 token 识别策略。 |
 
-用 `srv.Stop(ctx)` 停机,它会先排空在途轮次再关闭。
+用 `srv.Stop(ctx)` 停机，它会先排空在途轮次再关闭。
 
 ## 定义 MessageProcessor
 
@@ -89,55 +100,79 @@ return out, nil
 - **实时流式**——把函数体放进 goroutine,事件就会实时到达 `SendStreamingMessage` 的消费者;长循环里检查 `ctx.Err()`,被取消时直接关闭(框架落 `CANCELED`)。→ [examples/streaming](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/streaming)
 - **多轮**——用 `h.UpdateTaskState(protocol.TaskStateInputRequired, taskmanager.ReplyText("need more"))` 挂起并关闭;后续消息(回传 `taskId`)作为新一轮到来,此时 `ec.Task` 已就位。
 
-### 使用约束
+### 写 Processor 时记住这几条
 
-- channel/handle 由发事件的 goroutine 负责关闭——轮次只在关闭时结束,永不关闭的轮次会钉死任务并阻塞停机。
-- 每轮以终态或挂起态收尾;在 `working` 关闭会把任务打成 `FAILED`。
-- 一轮只驱动一个任务;永不发 `*protocol.Task`。
-- 需要跨轮记住的内容必须作为 `Message` 事件发出(status message 是易失的;artifact 永不进入历史)。
+这几条是避免任务卡住或历史丢失的核心规则：
+
+- **谁发事件，谁负责关闭。** 如果你在 goroutine 里发事件，就在那个 goroutine 里关闭 channel 或 `TaskHandle`。channel 不关闭，轮次就不会结束，任务也会一直占着执行槽。
+- **每轮都要给出结论。** 正常结束用 `completed` / `failed` / `canceled` / `rejected`；需要用户继续输入时用 `input-required` / `auth-required`。如果还停在 `submitted` 或 `working` 就关闭，框架会把任务标成 `FAILED`。
+- **一轮只属于一个任务。** 事件默认属于 `ec.TaskID`。不要发其他 `taskId` 的事件，也不要自己发 `*protocol.Task` 快照；任务快照只由框架生成。
+- **要让下一轮记住，就发 `Message`。** `status.message` 适合展示进度，artifact 适合交付结果；它们都不会进入会话历史。需要跨轮保留的回答，尤其是 LLM 最终回复，要作为 `Message` 事件发出。
 
 ## 轮次生命周期
 
-一个**轮次**是一次 `ProcessMessage` 调用及其 channel 的排空过程。以下是你的 agent 代码所遵循、客户端所观察到的确切语义。
+一个**轮次**就是一次 `ProcessMessage` 调用，以及框架把它返回的 channel 读完的过程。可以把它理解为“agent 推进一次任务”的最小执行单位。
 
-- **懒创建**——首个*任务事件*落库时任务才成立。只发 `Message` 的轮次不留任务(对该轮预分配 ID 的 `GetTask` 返回 not-found)。
-- **单活跃 run**——上一轮还在跑时,同一任务的第二条消息被拒(`-32602`,"already has an active execution")。
-- **关 channel 才是轮次结束**——且只有这一种结束方式。关闭时应用 close 规则:
+轮次大致按这个顺序发生：
 
-  | 关闭时的任务状态 | 结果 |
+1. 框架收到 `SendMessage` 或 `SendStreamingMessage`，准备好 `ExecContext`，然后调用你的 `ProcessMessage`。
+2. 你的 processor 返回事件 channel。
+3. 框架读取事件：每个事件都会先持久化，再返回给调用方或订阅者。
+4. channel 关闭时，本轮结束；框架根据最后的任务状态收尾。
+
+关键语义如下：
+
+- **任务是懒创建的。** 只有发出 status 或 artifact 这类任务事件后，任务才真正落库。只发 `Message` 的轮次不会留下任务；对该轮预分配 ID 调 `GetTask` 会得到 not-found。
+- **同一任务同一时间只能跑一轮。** 上一轮还没结束时，针对同一个 `taskId` 的后续消息会被拒绝：`-32602`，`"already has an active execution"`。
+- **channel 关闭才算结束。** 关闭时框架应用下面的规则：
+
+  | 关闭时的情况 | 结果 |
   | --- | --- |
-  | 终态(你发过了) | 正常结束 |
-  | `input-required` / `auth-required` | 任务**挂起**,等待后续 |
-  | `submitted` / `working` | **`FAILED`**——"processor finished without terminal state"(bug 信号) |
-  | 期间收到过取消请求 | **`CANCELED`** |
+  | 已经发过终态 | 正常结束，保留你发出的终态 |
+  | 停在 `input-required` / `auth-required` | 任务挂起，等待下一条带相同 `taskId` 的消息 |
+  | 停在 `submitted` / `working` | 标记为 `FAILED`，错误信息是 `"processor finished without terminal state"` |
+  | 收到取消且没有发出终态 | 标记为 `CANCELED` |
 
-- **挂起即让出**——发出 `input-required`/`auth-required` 后任务立刻被释放以便续跑开始;老轮之后再发的事件一律丢弃。完成要由续跑轮交付。
-- **违规立即失败**——给别的 `taskId` 发事件、发 `*protocol.Task` 快照(v1.0 中仅框架可产生)、发无状态的 status,都会把该轮任务打成 `FAILED` 并丢弃其余事件。
+- **挂起会立刻让出任务。** 发出 `input-required` / `auth-required` 后，框架允许续跑轮次开始。旧轮次之后再发出的事件会被丢弃；完成结果应该由续跑轮次交付。
+- **违反事件契约会失败。** 例如给别的 `taskId` 发事件、发 `*protocol.Task` 快照、发没有状态的 status，都会让本轮任务失败，并丢弃后续事件。
 
 ## 执行与取消
 
-- **分离的 context**——轮次跑在与请求分离的 context 上:client 断连**不会**取消工作;结果始终可经 `GetTask`/`SubscribeToTask` 取回。
-- **谁能取消**——只有 `CancelTask`(和 manager 停机)会取消 processor 的 `ctx`。得体的反应是停止发送并关闭——框架落 `CANCELED`。取消*之后*发出的终态事件依然生效(允许收尾的轮次就让它收尾)。
-- **取消的返回值**——`CancelTask` 返回取消请求时刻的快照(可能仍是 `working`);终态 `CANCELED` 要等该轮收尾时才落库。取消已终态的任务返回 `-32002`。
+client 断开连接不会自动取消 agent 的工作。框架会让轮次在一个与请求连接分离的 context 上继续跑，结果仍然可以通过 `GetTask` 或 `SubscribeToTask` 取回。
+
+真正会取消 processor `ctx` 的只有两类动作：client 调 `CancelTask`，或者 manager / server 停机。收到取消后，推荐做法是停止继续发送普通进度，尽快关闭 channel；如果你需要收尾，也可以发出自己的终态事件，框架会尊重它。
+
+`CancelTask` 返回的是“发起取消那一刻”的任务快照，所以它可能仍然是 `working`。最终是否落成 `CANCELED`，要等 processor 停下并关闭 channel。已经终态的任务不能取消，会返回 `-32002`。
 
 ## 响应生成
 
-四种调用方式各自这样得到答案:
+你的 processor 只写一条事件流，框架会按不同调用方式生成不同响应：
 
-- **`SendMessage`(阻塞,默认)**等该轮结束:碰过任务就答**任务快照**,否则答**最后一条 Message**;一个事件都没发的轮次是 processor 的 bug(`-32603`)。
-- **`SendMessage` + `returnImmediately=true`** 以**最早可用结果**应答:首个已落库的任务快照或首条 Message(它不带 `taskId`——client 若需追踪任务,先发一个任务事件)。
-- **`SendStreamingMessage`** 按序转发每个事件,且**先持久化再投递**。流在终态或挂起帧结束。
-- **`SubscribeToTask`** 先发当前任务快照、再发实时增量;终态任务被拒。
+| 调用方式 | 框架如何响应 |
+| --- | --- |
+| `SendMessage`（默认阻塞） | 等本轮结束。只要本轮创建过任务，就返回最终任务快照；如果只是纯回复，则返回最后一条 `Message`。没有任何事件是 processor bug，返回 `-32603`。 |
+| `SendMessage` + `returnImmediately=true` | 返回最早可用结果：第一个已落库的任务快照，或第一条 `Message`。如果 client 需要后续跟踪任务，processor 应先发任务事件。 |
+| `SendStreamingMessage` | 按事件顺序实时转发；每个事件都会先持久化再投递。流在终态或挂起帧结束。 |
+| `SubscribeToTask` | 先发送当前任务快照，再发送实时增量。终态任务不能订阅。 |
 
-## 会话、历史,以及什么会被记住
+## 会话、历史，以及什么会被记住
 
-存储是两级的:**按 `messageId` 存消息本体**,按 `contextId` 存会话索引。进入会话的只有:每轮的请求消息,以及 processor 发出的每个 **`Message` 事件**——没有别的。
+会话历史只记录“对话”，不记录所有运行细节。框架按 `messageId` 保存消息本体，再按 `contextId` 维护会话索引。会进入会话历史的只有两类内容：
 
-> **status message 是易失的**(被下一个 status 覆盖、从不入库),**artifact 永不进入历史**。任何需要跨轮记住的内容——尤其是 LLM 的最终回答——必须作为 `Message` 事件发出,否则下一轮的 `ec.History` 只有用户的发言。(这一点与官方 a2a SDK 不同,后者会把每条 `status.message` 滚入 `task.history`。)
+- 每一轮的请求消息；
+- processor 主动发出的 `Message` 事件。
 
-`Task.history` 是虚拟的:响应时按请求的 `historyLength` 从会话现算。`ec.History` 是轮次开始前的快照,按 `MaxHistoryLength`(默认 100)截断。
+不会进入会话历史的内容也很重要：
 
-请求 `configuration` 字段:`returnImmediately` 与 `historyLength` 由框架消费;`acceptedOutputModes`(`ec.AcceptedOutputModes`)与 `taskPushNotificationConfig`(`ec.PushConfig`)透传给你的 processor。
+- `status.message` 是进度说明，会被下一次 status 覆盖；
+- artifact 是任务交付物，只挂在任务上；
+- 这两者都不会出现在下一轮的 `ec.History` 里。
+
+所以，如果你希望下一轮还能看到某段内容，例如 LLM 的最终回答、用户确认后的摘要、工具调用后的结论，就把它作为 `Message` 事件发出。否则下一轮的 `ec.History` 可能只有用户输入，看不到 agent 上一轮真正说了什么。
+
+`Task.history` 是响应时按 `historyLength` 从会话里临时组出来的；`ec.History` 是本轮开始前拍下的快照，并按 `MaxHistoryLength`（默认 100）截断。
+
+请求里的 `configuration` 也按职责分开：`returnImmediately` 和 `historyLength` 由框架消费；`acceptedOutputModes` 会进入 `ec.AcceptedOutputModes`，`taskPushNotificationConfig` 会进入 `ec.PushConfig`，交给你的 processor 自行决定怎么用。
 
 ## 存储后端
 
@@ -178,7 +213,7 @@ tm, _ := redistm.NewTaskManager(proc, redisClient,   // 注意参数序:(process
 
 ## 鉴权
 
-在服务端要求鉴权;三种方案,可链式组合。客户端一侧见 [客户端](client.md#鉴权)。
+在服务端要求鉴权；三种方案可链式组合。客户端一侧见 [客户端](client.md)。
 
 ```go
 provider := auth.NewChainAuthProvider(
@@ -190,6 +225,26 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card), server.WithAuthPro
 ```
 
 card 的 `securitySchemes` 公示服务端接受什么。→ [examples/auth](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth)。
+
+## 扩展 Agent Card
+
+公开 agent card 适合放基础身份、公开技能和鉴权声明。如果某些技能、内部路由或配额信息只想在鉴权后暴露，可以开启 extended agent card：
+
+```go
+enabled := true
+card.Capabilities.ExtendedAgentCard = &enabled
+
+srv, _ := server.NewA2AServer(tm,
+    server.WithAgentCard(card),
+    server.WithAuthProvider(provider),
+    server.WithAuthenticatedExtendedCardHandler(func(ctx context.Context, base server.AgentCard) (server.AgentCard, error) {
+        base.Skills = append(base.Skills, privateSkill)
+        return base, nil
+    }),
+)
+```
+
+客户端用 `GetAuthenticatedExtendedCard` 获取；底层 wire 方法是 `GetExtendedAgentCard`。→ [examples/auth](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth)。
 
 ## 推送通知
 
@@ -204,11 +259,13 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 )
 ```
 
-配置经 `CreateTaskPushNotificationConfig` 入库(或请求内联的配置,作为 `ec.PushConfig` 到达你的 processor);发送方用 `OnPushNotificationGet` 解析并 POST 签名过的 payload。→ [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks)。
+配置经 `CreateTaskPushNotificationConfig` 入库，也可以通过 `ListTaskPushNotificationConfigs` / `DeleteTaskPushNotificationConfig` 管理。请求内联的 `configuration.taskPushNotificationConfig` 不会自动注册，而是作为 `ec.PushConfig` 传给你的 processor；是否兑现由 agent 逻辑决定。
+
+服务端发送 webhook 时复用同一个 `PushNotificationAuthenticator` 签名 payload，接收方再从 JWKS 端点取公钥校验。→ [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks)。
 
 ## 多租户托管
 
-一个进程可承载多个 agent。请求的租户经 `ec.Tenant` 到达;按租户的 card 用 `WithTenantCard` 提供。
+一个进程可承载多个 agent。A2A v1.0 的多 agent 路由不靠 URL path，而靠请求体里的 `tenant` 字段；该值会进入 `ec.Tenant`。每个租户的 agent card 通过 `WithTenantCard` 或 `WithTenantCardProvider` 提供，客户端用 `/.well-known/agent-card.json?tenant=<tenant>` 获取。
 
 ```go
 srv, _ := server.NewA2AServer(tm,
@@ -218,16 +275,20 @@ srv, _ := server.NewA2AServer(tm,
 // 在 ProcessMessage 里:switch ec.Tenant { … }
 ```
 
+纯多租户 server 可以不提供默认 `WithAgentCard`；此时不带 `?tenant=` 获取 card 会返回 404。若需要一个目录型默认 card，再额外传 `WithAgentCard(card)`。
+
 → [examples/tenant](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/tenant)。
 
 ## 子路径部署
 
-把整个 server 挂到路径前缀下(比如放在网关后面)。路径写进 agent card 的 URL 和 `WithBasePath`:
+把整个 server 挂到路径前缀下，比如放在网关后面。推荐显式使用 `WithBasePath`，它会同时调整 agent card、JSON-RPC 和 JWKS endpoint：
 
 ```go
 srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
     server.WithBasePath("/api/v1/agent"))   // card + JSON-RPC 位于 /api/v1/agent/…
 ```
+
+如果没有设置 `WithBasePath`，server 会尝试从 `agentCard.URL` 的 path 自动推导 base path；显式 `WithBasePath` 的优先级更高，适合外部 URL 和内部路由不一致的网关场景。
 
 → [examples/subpath](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/subpath)。
 
@@ -246,15 +307,43 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 
 ## 遥测
 
-server 通过你提供的 meter provider 记录 OpenTelemetry 指标,包括流式响应的首 token 时延(TTFT)。当"首 token"对你的 agent 不是第一帧时,自定义策略:
+server 通过 OpenTelemetry 记录请求数、请求耗时和流式首 token 时延（TTFT）。你可以注入已有 meter provider，也可以让 server 根据 OTLP option 创建 provider：
 
 ```go
 srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
     server.WithTelemetryMeterProvider(meterProvider),
+)
+
+srv, _ = server.NewA2AServer(tm, server.WithAgentCard(card),
+    server.WithTelemetryMeterProviderOptions(
+        metrics.WithEndpoint("localhost:4317"),
+        metrics.WithServiceName("my-a2a-server"),
+    ),
+)
+```
+
+当“首 token”对你的 agent 不是第一帧时，自定义策略：
+
+```go
+srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
     server.WithFirstTokenPolicy(myFirstTokenPolicy),
 )
 ```
 
 ## 能力状态
 
-本框架当前服务 **JSON-RPC** 传输绑定。spec 还定义了 **gRPC** 与**HTTP+JSON(REST)** 绑定——规划中、尚未实现。见 [框架概览](overview.md#你能得到什么)的能力矩阵。
+生产部署时可以按下面选择：
+
+| 需求 | 推荐配置 | 注意事项 |
+| --- | --- | --- |
+| 本地开发、单进程 demo | `taskmanager/memory` | 默认终态任务永久保留；生产请设置 `memory.WithTaskTTL`。 |
+| 重启后保留任务、多个进程共享快照 | `taskmanager/redis` | 实时 SSE 事件扇出仍是进程内；断线后用快照恢复。 |
+| 用户在线等结果 | `SendMessage` 或 `SendStreamingMessage` | v1.0 `SendMessage` 默认阻塞。 |
+| 用户离线等待回调 | push notification + JWKS | 需要 agent card 声明 push 能力，服务端负责发送 webhook。 |
+| 一个 agent 一个进程 | `WithAgentCard` | 最简单，card 直接代表该 agent。 |
+| 一个进程多个 agent | `WithTenantCard` / `WithTenantCardProvider` | 请求体带 `tenant`，card 用 `?tenant=` 获取。 |
+| 网关或统一前缀部署 | `WithBasePath` | 显式配置优先于从 `agentCard.URL` 推导。 |
+| 兼容老客户端 | `WithCompatHandler(v0.NewJSONRPCHandler(tm))` | 必须挂在 server 内部，才能共享鉴权链。 |
+| 指标与 TTFT | `WithTelemetryMeterProvider` 或 `WithTelemetryMeterProviderOptions` | `WithFirstTokenPolicy` 可调整首 token 判定。 |
+
+当前框架服务 **JSON-RPC** 传输绑定。A2A v1.0 spec 还定义了 **gRPC** 与 **HTTP+JSON（REST）** 绑定，当前尚未实现。见 [框架概览](overview.md)。

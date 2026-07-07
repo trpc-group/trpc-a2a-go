@@ -1,136 +1,284 @@
 # 调用 Agent（客户端）
 
-客户端:如何调用一个 A2A agent——四种消费模式、任务管理、鉴权,以及从一个 agent 内部调用别的 agent。构建 agent 见 [服务端](server.md)。
+本页讲如何从 Go 程序调用一个 A2A agent：发现 agent、发送消息、消费流式事件、管理任务、注册推送通知，以及在一个 agent 内部编排调用其他 agent。构建服务端见 [服务端](server.md)，协议对象与状态机见 [协议](protocol.md)。
 
 ```go
 import "trpc.group/trpc-go/trpc-a2a-go/v2/client"
 
-c, _ := client.NewA2AClient("http://localhost:8080/")
+c, err := client.NewA2AClient("http://localhost:8080/")
+if err != nil {
+    return err
+}
 ```
 
-`NewA2AClient` 接收 option(超时、HTTP client、鉴权——见下)。它经 JSON-RPC 绑定与 agent 通信。
+`NewA2AClient` 接收 agent 的 JSON-RPC endpoint。默认没有超时；生产代码通常会传 `client.WithTimeout(...)` 或自定义 `http.Client`。
 
-## 四种消费模式
+## 先发现 Agent
 
-一个 agent,四种消费方式——都出自同一个 `SendMessage` 请求形状:
+A2A client 通常先取 agent card，确认这个 agent 是谁、支持哪些技能、是否支持 streaming / push notification / extended card，以及应该用哪个 endpoint。
+
+```go
+card, err := c.GetAgentCard(ctx, "")
+if err != nil {
+    return err
+}
+fmt.Println(card.Name, card.Skills)
+```
+
+`GetAgentCard(ctx, "")` 会先请求 `/.well-known/agent-card.json`，失败后回退到 legacy `/.well-known/agent.json`。如果 agent 部署在子路径，可以传相对路径；如果 card 托管在独立地址，可以传绝对 URL。
+
+```go
+card, _ = c.GetAgentCard(ctx, "/api/v1/agent")
+card, _ = c.GetAgentCard(ctx, "https://example.com/cards/weather.json")
+```
+
+如果公开 card 声明了 `capabilities.extendedAgentCard=true`，鉴权后可以取扩展 card。Go 方法名是 `GetAuthenticatedExtendedCard`，底层调用 A2A v1.0 的 `GetExtendedAgentCard`。
+
+```go
+extended, err := c.GetAuthenticatedExtendedCard(ctx)
+```
+
+## 发送一条消息
+
+所有调用都从同一个请求形状开始：
 
 ```go
 params := protocol.SendMessageParams{
-    Message: protocol.Message{
-        Role:  protocol.MessageRoleUser,
-        Parts: []*protocol.Part{protocol.NewTextPart("hello")},
-    },
+    Message: protocol.NewMessage(
+        protocol.MessageRoleUser,
+        []*protocol.Part{protocol.NewTextPart("hello")},
+    ),
 }
 ```
 
-**1. 阻塞 send(默认)**——一次调用,等该轮结束,返回最终的 `Task` 或 `Message`(sealed union):
+需要保持会话上下文时，带上 `contextId`：
 
 ```go
-resp, _ := c.SendMessage(ctx, params)
+contextID := "order-123"
+params.Message.ContextID = &contextID
+```
+
+服务端如果是多租户托管，额外设置 `Tenant`：
+
+```go
+params.Tenant = "weather"
+```
+
+## 四种消费模式
+
+同一个 agent 可以按四种方式消费，区别只在 client 如何等待和跟进。
+
+### 1. 阻塞 send（默认）
+
+`SendMessage` 默认等到本轮到达终态或挂起态，再返回最终 `Task` 或直接 `Message`。
+
+```go
+resp, err := c.SendMessage(ctx, params)
+if err != nil {
+    return err
+}
+
 if task := resp.GetTask(); task != nil {
-    // completed / failed / input-required 任务，带其 artifacts
+    // 有任务生命周期：读 task.Status、task.Artifacts、task.History。
 } else if msg := resp.GetMessage(); msg != nil {
-    // 纯消息回复（没有创建任务）
+    // 纯消息回复：本轮没有创建任务。
 }
 ```
 
-**2. `returnImmediately`**——以最早可用的结果应答,工作继续;之后用 `GetTasks` 或 `ResubscribeTask` 跟进:
+适合短任务、编排器调用下游 agent 后等待结果、以及命令行工具这类同步场景。
+
+### 2. 立即返回，稍后跟进
+
+如果不想等任务结束，设置 `returnImmediately=true`。服务端会在最早可用结果出现时返回，任务继续在服务端运行。
 
 ```go
-t := true
-params.Configuration = &protocol.SendMessageConfiguration{ReturnImmediately: &t}
-resp, _ := c.SendMessage(ctx, params)   // 首个任务快照或首条消息
+immediate := true
+params.Configuration = &protocol.SendMessageConfiguration{
+    ReturnImmediately: &immediate,
+}
+
+resp, err := c.SendMessage(ctx, params)
 ```
 
-**3. 流式**——每个事件经 SSE 实时到达:
+如果返回的是任务快照，保存 `task.ID`，之后用 `GetTasks` 轮询或用 `ResubscribeTask` 接回事件流。
+
+### 3. 实时流式
+
+`StreamMessage` 建立 SSE 连接，每个状态事件、artifact 分块或消息都会实时到达。
 
 ```go
-events, _ := c.StreamMessage(ctx, params)
+events, err := c.StreamMessage(ctx, params)
+if err != nil {
+    return err
+}
+
 for event := range events {
     switch {
     case event.GetStatusUpdate() != nil:
-        // 状态帧
+        // 状态更新：working、completed、input-required 等。
     case event.GetArtifactUpdate() != nil:
-        // artifact 分块
+        // artifact 分块：注意 append / lastChunk。
     case event.GetMessage() != nil:
-        // 消息
+        // 直接消息回复。
     }
-} // 任务到达终态（或中断态）时 channel 关闭
+}
 ```
 
-**4. Resubscribe**——断连后接回运行中的任务;首帧是当前任务快照,之后是实时增量:
+当任务到达终态或挂起态时，SSE 流会关闭。
+
+### 4. 断线后重新订阅
+
+对仍在运行的任务，`ResubscribeTask` 会先返回当前任务快照，再返回后续实时增量。它对应协议方法 `SubscribeToTask`。
 
 ```go
-events, _ := c.ResubscribeTask(ctx, protocol.TaskIDParams{ID: taskID})
+events, err := c.ResubscribeTask(ctx, protocol.TaskIDParams{ID: taskID})
 ```
 
-三种 send 模式由 [examples/simple 的 client](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple)一并演示。
+终态任务不能订阅；已经结束的任务请用 `GetTasks` 读取快照。
 
 ## 任务管理
 
 ```go
-task, _  := c.GetTasks(ctx, protocol.TaskQueryParams{ID: taskID})            // 快照
-list, _  := c.ListTasks(ctx, protocol.ListTasksParams{ContextID: contextID}) // 过滤 + 分页
-task, _  = c.CancelTasks(ctx, protocol.TaskIDParams{ID: taskID})             // 请求取消
+task, err := c.GetTasks(ctx, protocol.TaskQueryParams{
+    ID: taskID,
+})
+
+list, err := c.ListTasks(ctx, protocol.ListTasksParams{
+    ContextID: contextID,
+})
+
+task, err = c.CancelTasks(ctx, protocol.TaskIDParams{
+    ID: taskID,
+})
 ```
 
-`GetTasks` 可带可选的 `HistoryLength` 决定随附多少会话历史。取消一个已结束的任务返回 `-32002`(不可取消);返回的任务是取消请求时刻的快照——见 [服务端：轮次契约](server.md)。
+`GetTasks` 可带 `HistoryLength` 控制响应里附带多少会话历史。`ListTasks` 可按 `ContextID`、`Status`、分页参数和时间过滤。`CancelTasks` 返回的是取消请求时刻的任务快照，可能仍是 `TASK_STATE_WORKING`；最终的 `TASK_STATE_CANCELED` 要等 processor 收尾后落库。
 
 ## 多轮续跑
 
-当一次调用返回 `input-required`(或 `auth-required`)的任务,回传**相同的 `taskId`** 发另一条消息来恢复它:
+当任务停在 `TASK_STATE_INPUT_REQUIRED` 或 `TASK_STATE_AUTH_REQUIRED`，下一条消息必须带相同 `taskId`，这样服务端才知道是在恢复原任务，而不是新建一个任务。
 
 ```go
 follow := protocol.SendMessageParams{
-    Message: protocol.Message{
-        Role:   protocol.MessageRoleUser,
-        TaskID: &taskID,   // 续跑等待中的任务——不是新任务
-        Parts:  []*protocol.Part{protocol.NewTextPart("March 3rd")},
-    },
+    Message: protocol.NewMessageWithContext(
+        protocol.MessageRoleUser,
+        []*protocol.Part{protocol.NewTextPart("3 月 3 日")},
+        &taskID,
+        &contextID,
+    ),
 }
-resp, _ := c.SendMessage(ctx, follow)
+
+resp, err := c.SendMessage(ctx, follow)
 ```
 
-**不带** `taskId` 的后续消息会开一个全新任务,把挂起的那个晾在那里。
+只带 `contextId` 不够；不带 `taskId` 的后续消息会开启新任务，原来的挂起任务仍然挂起。
 
-## 鉴权
+## 推送通知
 
-按 agent card 公示的方案附带凭据。服务端一侧见 [服务端](server.md#鉴权)。
+如果 agent card 声明支持 push notification，client 可以为任务注册 webhook。服务端会在任务进展时回调该 URL；服务端侧的 JWT 签名与 JWKS 发布见 [服务端](server.md)。
 
 ```go
-c, _ := client.NewA2AClient("http://localhost:8080/",
+cfg, err := c.SetPushNotification(ctx, protocol.TaskPushNotificationConfig{
+    TaskID: taskID,
+    ID:     "default",
+    URL:    "https://client.example.com/a2a/push",
+    Token:  "opaque-correlation-token",
+})
+
+cfg, err = c.GetPushNotification(ctx, protocol.TaskIDParams{ID: taskID})
+
+configs, err := c.ListPushNotifications(ctx,
+    protocol.ListTaskPushNotificationConfigsParams{TaskID: taskID},
+)
+
+err = c.DeletePushNotification(ctx,
+    protocol.DeleteTaskPushNotificationConfigParams{TaskID: taskID, ID: "default"},
+)
+```
+
+也可以在 `SendMessageConfiguration.PushConfig` 内联传入一次性 push 配置。框架会把它透传给服务端 processor 的 `ec.PushConfig`；是否兑现或注册，由服务端实现决定。
+
+## 鉴权与请求头
+
+按 agent card 公示的 `securitySchemes` 附带凭据。内置 client option 覆盖 JWT、API key、OAuth2，也可以接入自定义 provider。
+
+```go
+c, err := client.NewA2AClient("https://agent.example.com/",
+    client.WithTimeout(30*time.Second),
     client.WithJWTAuth(secret, audience, issuer, time.Hour),
 )
 ```
 
-另有 `client.WithAPIKeyAuth`、`WithOAuth2ClientCredentials`、`WithOAuth2TokenSource`、`WithAuthProvider`。JWT、API key、OAuth2 的完整客户端接法:→ [examples/auth](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth)。
+常用 option：
 
-## 从一个 agent 内部调用别的 agent（编排）
+| Option | 用途 |
+| --- | --- |
+| `WithTimeout` / `WithHTTPClient` | 控制 HTTP client 与请求超时。 |
+| `WithJWTAuth` | 使用 JWT 鉴权。 |
+| `WithAPIKeyAuth` | 在指定 header 中发送 API key。 |
+| `WithOAuth2ClientCredentials` / `WithOAuth2TokenSource` | 使用 OAuth2。 |
+| `WithAuthProvider` | 自定义鉴权 provider。 |
+| `WithUserAgent` | 设置 User-Agent。 |
+| `WithChannelSize` / `WithBuffer` | 调整 SSE 读取缓冲。 |
 
-一个 agent 可以经这个同样的 client 调用别的 agent,在自己的 `ProcessMessage` 内部调用:根 agent 把工作分发给专家 agent,再把它们的结果聚合进自己的任务。注意出站的 `SendMessage` 会阻塞到子 agent 那轮结束(v1.0 默认),这通常正是编排器想要的。
+单次请求可以追加 header，例如 trace ID 或一次性鉴权信息：
+
+```go
+resp, err := c.SendMessage(ctx, params,
+    client.WithRequestHeader("X-Trace-ID", traceID),
+)
+```
+
+## 从一个 Agent 内部调用别的 Agent
+
+一个 root agent 可以在自己的 `ProcessMessage` 中使用同一个 client 调用下游 agent，再把结果汇总成自己的任务事件。由于 v1.0 `SendMessage` 默认阻塞，编排器通常不用额外轮询就能等到下游结果。
 
 ```go
 func (p *root) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
     h := taskmanager.NewTaskHandle(ctx, ec)
     defer h.Close()
+
     h.UpdateTaskState(protocol.TaskStateWorking, nil)
-    sub, _ := p.weatherClient.SendMessage(ctx, forward(ec.Message))   // 调用另一个 agent
+    sub, err := p.weatherClient.SendMessage(ctx, forward(ec.Message))
+    if err != nil {
+        h.UpdateTaskState(protocol.TaskStateFailed, taskmanager.ReplyText(err.Error()))
+        return h.Events(), nil
+    }
     h.UpdateTaskState(protocol.TaskStateCompleted, extractReply(sub))
     return h.Events(), nil
 }
 ```
 
-→ [examples/multi](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/multi)。
+完整示例见 [`examples/multi`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/multi)。
+
+## Go API 与协议方法名
+
+A2A v1.0 wire 使用 PascalCase JSON-RPC 方法名；Go client 保留了一些历史命名。看日志或抓包时，以右侧 wire 名为准。
+
+| Go client 方法 | A2A v1.0 JSON-RPC 方法 |
+| --- | --- |
+| `SendMessage` | `SendMessage` |
+| `StreamMessage` | `SendStreamingMessage` |
+| `GetTasks` | `GetTask` |
+| `ListTasks` | `ListTasks` |
+| `CancelTasks` | `CancelTask` |
+| `ResubscribeTask` | `SubscribeToTask` |
+| `SetPushNotification` | `CreateTaskPushNotificationConfig` |
+| `GetPushNotification` | `GetTaskPushNotificationConfig` |
+| `ListPushNotifications` | `ListTaskPushNotificationConfigs` |
+| `DeletePushNotification` | `DeleteTaskPushNotificationConfig` |
+| `GetAgentCard` | HTTP GET `/.well-known/agent-card.json` |
+| `GetAuthenticatedExtendedCard` | `GetExtendedAgentCard` |
 
 ## legacy v0.2.x wire
 
-要讲 legacy wire(对一个 v0.2.x server,或挂了 compat handler 的 v1.0 server),用 `compat/v0` 客户端——它接收同样的 v1 类型,底层转换:
+如果需要调用 v0.2.x server，或调用一个挂了 `compat/v0` handler 的 v1.0 server，可以使用 `compat/v0` client。它接收 v1 类型，底层转换成 legacy 斜杠方法名，并保留 v0 的非阻塞默认行为。
 
 ```go
 import v0 "trpc.group/trpc-go/trpc-a2a-go/v2/compat/v0"
 
-lc, _ := v0.NewClient("http://localhost:8080/")
-resp, _ := lc.SendMessage(ctx, params)   // 保留 v0 的非阻塞默认
+lc, err := v0.NewClient("http://localhost:8080/")
+resp, err := lc.SendMessage(ctx, params)
 ```
 
-→ [examples/compat](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/compat)。
+完整示例见 [`examples/compat`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/compat)。

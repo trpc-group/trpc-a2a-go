@@ -1,6 +1,8 @@
 # 理解 A2A 协议
 
-本页从使用者的视角讲 A2A：它解决什么问题、心智模型是什么、如何发现一个 agent、你和一个 agent 之间实际会发生哪些交互——然后才是正式的对象与 RPC 定义。本框架如何实现这套协议见 [服务端：轮次契约](server.md)。
+本页从使用者的视角讲 A2A：它解决什么问题、心智模型是什么、如何发现一个 agent、你和一个 agent 之间实际会发生哪些交互，然后才是正式的对象与 RPC 定义。
+
+阅读方式：前半段帮你建立“会话、任务、消息、交付物”的心智模型；后半段是 reference，用于查字段、状态和 JSON-RPC 方法。本页使用 A2A v1.0 JSON-RPC wire 方法名；Go client 的方法名映射见 [客户端](client.md)。
 
 ## A2A 解决什么问题？
 
@@ -36,7 +38,7 @@ flowchart LR
     end
 ```
 
-不是每次交流都会产生任务：一个即答问题就是一条 `Message` 回来——没有生命周期、没有清理负担。只有值得跟踪的工作 agent 才会开任务；从那之后，agent 汇报的一切都是**事件**：状态更新（进度）或 artifact 更新（交付物分块）。
+不是每次交流都会产生任务：一个即答问题可以只返回一条 `Message`，没有任务生命周期，也没有任务清理负担。注意这不等于“没有会话历史”；具体实现可以把请求消息和 agent 发出的 `Message` 事件放入同一个 `contextId` 的历史里。只有值得跟踪的工作才需要开任务；从那之后，agent 汇报的一切都是**事件**：状态更新（进度）或 artifact 更新（交付物分块）。
 
 ## 发现：Agent Card
 
@@ -57,14 +59,18 @@ card 是整个协议的入口。client 取一次、得到所需的一切，然�
 | **输入输出模态** | `defaultInputModes`、`defaultOutputModes` | 默认接受与产出的媒体类型（如 `"text"`）。 |
 | **安全** | `securitySchemes`、`securityRequirements` | 如何鉴权（API key / HTTP / OAuth2 / OIDC / mTLS）。 |
 
-本框架构造一张最小 card 的样子：
+一张 v1.0 原生最小 card 的样子：
 
 ```go
 agentCard := server.AgentCard{
     Name:        "Text Reversal Agent",
     Description: "Reverses text input",
-    URL:         "http://localhost:8080/",   // 成为一个 supportedInterfaces 项
     Version:     "1.0.0",
+    SupportedInterfaces: []server.AgentInterface{{
+        URL:             "http://localhost:8080/",
+        ProtocolBinding: "JSONRPC",
+        ProtocolVersion: "1.0",
+    }},
     Capabilities: server.AgentCapabilities{
         Streaming: boolPtr(true),
     },
@@ -79,18 +85,31 @@ agentCard := server.AgentCard{
 }
 ```
 
+如果你为了兼容旧代码仍填写 top-level `URL`，server 会把它归一化成 `supportedInterfaces` 项；新文档和新代码建议优先写 `supportedInterfaces`。
+
 两个相关概念：
 
-- **扩展 card**——agent 可以在 client **鉴权之后**提供一张更丰富的 card（不想公开的技能或细节）。client 用 `GetExtendedAgentCard` 获取；公开 card 用 `capabilities.extendedAgentCard` 声明这一点。
+- **扩展 card**——agent 可以在 client **鉴权之后**提供一张更丰富的 card（不想公开的技能或细节）。wire 方法是 `GetExtendedAgentCard`，Go client 方法是 `GetAuthenticatedExtendedCard`；公开 card 用 `capabilities.extendedAgentCard` 声明这一点。
 - **多传输**——`supportedInterfaces` 可列出多个绑定（JSON-RPC、gRPC、REST），在本框架里还可按租户列不同 URL；client 选它支持的第一个。
 - **扩展（Extensions）**——URI 标识的协议扩展，agent 在 `capabilities.extensions` 中声明；client 按请求选入，agent 可把某个标为 `required`（未选入则报 `-32008`）。
 - **签名**——card 可以经 JWS 签名（`signatures`），让 client 校验它未被篡改。
 
 ## 交互逻辑：一次一个场景
 
+先用这张表选交互方式：
+
+| 你需要 | 用什么 | 返回/观察到什么 |
+| --- | --- | --- |
+| 问一句、直接拿回答 | `SendMessage`，agent 返回 `Message` | 没有 `Task`，不能查询或取消。 |
+| 提交任务并等到结束 | `SendMessage` 默认模式 | 最终 `Task` 快照，包含状态和 artifacts。 |
+| 提交后马上返回 | `SendMessage` + `returnImmediately=true` | 最早可用的 `Task` 或 `Message`；任务可继续跑。 |
+| 实时看进度 | `SendStreamingMessage` | SSE 事件流：status / artifact / message。 |
+| 断线后接回任务 | `SubscribeToTask` | 先给当前 `Task` 快照，再给实时增量。 |
+| 不在线也要拿进展 | push notification | 服务端回调 client 的 webhook。 |
+
 ### 1. 即问即答——完全没有任务
 
-最简单的交流：`SendMessage`，agent 用一条纯 Message 应答。无须跟踪，不留痕迹。
+最简单的交流：`SendMessage`，agent 用一条纯 Message 应答。它不会创建 `Task`，因此不能用 `GetTask` 跟踪；如果带了 `contextId`，这条消息仍可成为会话历史的一部分。
 
 ```mermaid
 sequenceDiagram
@@ -191,6 +210,8 @@ sequenceDiagram
 
 两个标识符把一切串起来：**`contextId`** 命名会话（缺席时服务端生成；一个会话跨多个任务），**`taskId`** 命名工作单元（回传它可恢复等待中的任务）。由此有一条 spec 规则：`contextId` 与目标任务不匹配的消息 agent **MUST 拒绝**。
 
+多租户场景还有一个独立的 **`tenant`**：它选择本次请求要路由到哪个 agent，不等同于会话 ID，也不替代 `taskId`。
+
 ### Part：message 或 artifact 携带什么
 
 message 和 artifact 都携带一个 **parts** 列表，所以一轮可以混合文本、文件与结构化数据：
@@ -237,7 +258,7 @@ stateDiagram-v2
 
 ### RPC 面（v1.0）
 
-v1.0 JSON-RPC 绑定定义的方法名如下（v0.2.x wire 用的是斜杠分隔名，列出以供对照）：
+v1.0 JSON-RPC 绑定定义的方法名如下（v0.2.x wire 用的是斜杠分隔名，列出以供对照）。Go client 为兼容历史保留了少量不同的方法名，例如 `StreamMessage` 对应 `SendStreamingMessage`，`GetTasks` 对应 `GetTask`。
 
 | 方法（v1.0） | 类型 | 用途 | v0.2.x 名称 |
 | --- | --- | --- | --- |
@@ -252,9 +273,18 @@ v1.0 JSON-RPC 绑定定义的方法名如下（v0.2.x wire 用的是斜杠分隔
 
 v1.0 spec 定义了三种功能等价的传输绑定——JSON-RPC、gRPC、HTTP+JSON/REST——各自有绑定特定的方法命名。本框架实现 JSON-RPC 绑定（上表方法名）；agent card 的 `supportedInterfaces` 声明一个 agent 提供哪些绑定。
 
-### 阻塞与 `returnImmediately`
+### 请求配置
 
-`SendMessage` 可带 `configuration.returnImmediately`：
+`SendMessage` 与 `SendStreamingMessage` 都使用 `SendMessageParams`。除 `message` 外，常用配置在 `configuration` 里：
+
+| 字段 | 作用 |
+| --- | --- |
+| `returnImmediately` | 只影响 `SendMessage`。`false` 或缺省表示等待本轮到达终态/挂起态；`true` 表示最早可用结果出现后立即返回。 |
+| `historyLength` | 控制响应里的 `Task.history` 带多少条历史。 |
+| `acceptedOutputModes` | client 声明可接受的输出媒体类型，agent 可据此选择输出形式。 |
+| `taskPushNotificationConfig` | 随本次请求内联携带 webhook 配置；框架会透传给 processor。 |
+
+`returnImmediately` 的默认值是 v1.0 最容易踩的变化：
 
 > 若为 `false`（**默认**），操作 MUST 等到任务到达终态（COMPLETED、FAILED、CANCELED、REJECTED）或中断态（INPUT_REQUIRED、AUTH_REQUIRED）后再返回。
 
@@ -278,15 +308,21 @@ v1.0 spec 定义了三种功能等价的传输绑定——JSON-RPC、gRPC、HTTP
 
 ### 典型事件范式
 
-产生任务的一轮通常长这样，其中真正强制的部分：
+常见输出分两类。
 
 ```
-status  -> submitted     可选：创建即隐含 submitted
-status  -> working       惯例；自然的"已受理"信号
-artifact-> chunk 1..N    同一 artifact 的分块用 append/lastChunk
-status  -> completed     必须：以合法状态收尾；终态即关闭流
+纯消息回复（不创建任务）：
+message  -> direct reply
+
+任务事件流（创建并推进任务）：
+status   -> submitted      可选：创建即隐含 submitted
+status   -> working        惯例；自然的"已受理"信号
+artifact -> chunk 1..N     同一 artifact 的分块用 append/lastChunk
+status   -> completed      必须：以合法状态收尾；终态即关闭流
 ```
 
-强制项：以合法状态结束（终态，或多轮场景的挂起态）并标注 artifact 分块；终态（或中断态）的那一帧即流的最后一帧，之后 SSE 流关闭。其余——要不要显式 `submitted`、发几帧 `working`、进度文字挂不挂在 status message 上——都由 agent 自定。
+强制项：产生任务后，要以合法状态结束（终态，或多轮场景的挂起态）并标注 artifact 分块；终态（或中断态）的那一帧即流的最后一帧，之后 SSE 流关闭。其余——要不要显式 `submitted`、发几帧 `working`、进度文字挂不挂在 status message 上——都由 agent 自定。
 
-下一步：[服务端](server.md) 讲本框架如何把这条事件流变成持久化任务与派生响应；[服务端](server.md) 展示如何在代码里发出它。
+实现层面还有一个重要边界：`TaskStatus.message` 更适合放进度解释，它会被下一个 status 覆盖；需要跨轮进入会话历史的最终回答，应作为独立 `Message` 事件发出。详见 [服务端](server.md)。
+
+下一步：[服务端](server.md) 讲本框架如何把这条事件流变成持久化任务与派生响应；[客户端](client.md) 展示如何从 Go 代码消费这些响应。

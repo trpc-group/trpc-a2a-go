@@ -1,6 +1,19 @@
 # 从 v0.x 迁移
 
-本指南把一个既有的 v0.x agent 迁移到 v1.0（`/v2` 模块）。它把 README 里的映射表展开为完整说明：改了什么、每个 v0.x 符号变成什么、以及那些能顺利编译但运行行为不同的变化。新 API 背后的运行时契约见 [服务端：轮次契约](server.md)，构建配方见 [server.md](server.md)。
+本指南面向已经有 v0.x agent 的用户，目标是迁移到 A2A v1.0（`/v2` 模块）。如果你是新项目，直接读 [服务端](server.md) 和 [客户端](client.md) 即可；如果你要保留老客户端或移植旧 processor，本页按“概念变化 -> API 映射 -> 行为差异 -> 迁移清单”的顺序展开。
+
+新 API 背后的运行时规则见 [服务端](server.md)，构建配方也在同一页。
+
+## 迁移路线
+
+建议按这个顺序做：
+
+1. 先把服务端 processor 改到新的 `ProcessMessage(ctx, ec) (<-chan protocol.StreamEvent, error)` 签名。
+2. 用 `taskmanager.NewTaskHandle(ctx, ec)` 保留旧代码里熟悉的 `UpdateTaskState`、`AddArtifact`、`Reply` 写法。
+3. 移除 `BuildTask`、`SubscribeTask`、`CleanTask` 和所有显式 `taskID` 写入参数。
+4. 明确每轮如何结束：终态、挂起态，或取消后关闭 channel。
+5. 复核客户端响应时机：v1.0 `SendMessage` 默认阻塞；依赖早返回的调用要设置 `returnImmediately=true`。
+6. 如果 v0.2.x 客户端还要继续用，在同一个 v1.0 server 上挂 `compat/v0` handler。
 
 ## 改了什么
 
@@ -217,7 +230,7 @@ v1.0 的 JSON-RPC 绑定使用 PascalCase 方法名。斜杠分隔的名字是 v
 - **`GetMessageHistory` 是轮前快照**（`ec.History`），不是实时存储读取，且按 manager 的 `MaxHistoryLength` 截断。→ *该怎么做：* 把它当作轮次开始前捕获的一次性状态；别指望它反映轮次进行中发生的写入。
 - **`GetTask()` 不带参数，只返回本轮的任务**（首轮为 `nil`）。从 processor 内部读取任意任务的能力已取消。→ *该怎么做：* 续跑快照用 `ec.Task` / `handle.GetTask()`；要读其他任务，从 processor 外部经 `TaskManager` API 读取。
 
-这些规则背后的完整运行时契约见 [服务端：轮次契约](server.md)。
+这些规则背后的完整运行时规则见 [服务端](server.md)。
 
 ## 保持 v0.x 客户端可用
 
