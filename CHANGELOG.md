@@ -12,7 +12,7 @@ This is a breaking release: the module path moves to `/v2`, the JSON-RPC wire mo
 - **`MessageProcessor` redesigned around one method:** `ProcessMessage(ctx, *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error)`. One event stream now serves `SendMessage` (blocking or `returnImmediately`) and `SendStreamingMessage` alike — the framework derives each response shape instead of the processor branching on streaming vs. blocking. `taskmanager.NewTaskHandle(ctx, ec)` is the recommended way to write one: a helper over the same channel with familiar verbs (`UpdateTaskState`, `AddArtifact`, `Reply`, `Close`, `Events()`).
 - **New v1.0 operations:** `ListTasks`, `ListTaskPushNotificationConfigs`, `DeleteTaskPushNotificationConfig`, and authenticated extended agent cards (`GetExtendedAgentCard` / `server.WithAuthenticatedExtendedCardHandler` / `client.GetAuthenticatedExtendedCard`).
 - **`TaskPushNotificationConfig` flattened** onto one struct — v0.2.x nested the delivery details under a `pushNotificationConfig` object.
-- **Spec-shaped agent cards and results:** `AgentCard.SupportedInterfaces` ([]AgentInterface, multi-transport declaration) alongside deprecated v0.2.x-mirror fields for old clients; `SendMessage`/`SendStreamingMessage` now return a sealed `Task | Message` union (`SendMessageResponse` / `StreamResponse`).
+- **Spec-shaped agent cards and results:** `AgentCard.SupportedInterfaces` ([]AgentInterface, multi-transport declaration) alongside deprecated v0.2.x-mirror fields for old clients; `SendMessage` now returns a sealed `Task | Message` union (`SendMessageResponse`), while `SendStreamingMessage` returns sealed stream events (`StreamResponse`: status/artifact/task/message).
 - **Legacy v0.2.x wire compatibility ships in-tree:** `compat/v0` mounts on the same server and auth chain (`server.WithCompatHandler(v0.NewJSONRPCHandler(tm))`) or is used standalone as a client (`v0.NewClient(...)`), preserving the old non-blocking default. See [examples/compat](examples/compat).
 - **Tenant-native multi-agent hosting:** one process can host multiple agents routed by a `tenant` field on the request body rather than by URL path (`server.WithTenantCard` / `WithTenantCardProvider`). See [examples/tenant](examples/tenant) (renamed from `multi_endpoint`).
 - **OpenTelemetry metrics and time-to-first-token (TTFT) tracking** (`server.WithTelemetryMeterProvider` / `WithTelemetryMeterProviderOptions` / `WithFirstTokenPolicy`).
@@ -29,7 +29,7 @@ This is a breaking release: the module path moves to `/v2`, the JSON-RPC wire mo
     + ProcessOptions: removed — fields moved onto ExecContext (Message, TaskID, ContextID, Task, History, Tenant, AcceptedOutputModes, PushConfig)
     + MessageProcessingResult: removed — closing the channel is the only outcome; the framework derives every response shape
     + TaskHandler (interface): removed — replaced by TaskHandle, a concrete helper over the returned channel (NewTaskHandle(ctx, ec))
-    + TaskHandler.BuildTask / .SubScribeTask / .CleanTask / .GetMetadata: removed
+    + TaskHandler.BuildTask / .SubscribeTask / .CleanTask / .GetMetadata: removed
     + TaskHandler.UpdateTaskState(taskID, state, msg): now TaskHandle.UpdateTaskState(state, msg) — no taskID argument
     + TaskHandler.AddArtifact(taskID, artifact, isFinal, needMoreData): now TaskHandle.AddArtifact(artifact, lastChunk) — needMoreData/append dropped
     + TaskHandler.GetTask(taskID): now TaskHandle.GetTask() — this round's continuation snapshot only, arbitrary-task reads removed
@@ -307,5 +307,4 @@ These methods remain functional for backward compatibility but are deprecated in
 - Streaming data client sample.
 - Authentication server demonstration.
 - Redis task management implementation.
-
 
