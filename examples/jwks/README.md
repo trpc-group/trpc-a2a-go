@@ -6,7 +6,8 @@ This example demonstrates how to implement secure push notifications using JWT (
 
 The example showcases a robust approach for long-running tasks with secure notifications:
 
-1. Client sends a task via the non-streaming API (`tasks/send`)
+1. Client sends a task via the non-streaming API (`message/send` with
+   `returnImmediately=true`, so the task ID is returned while the task runs)
 2. Client registers a webhook URL to receive push notifications
 3. Server processes the task asynchronously in the background
 4. When the task completes, the server sends a cryptographically signed push notification
@@ -56,7 +57,7 @@ go run server/main.go
 
 Configure with optional flags:
 ```bash
-go run server/main.go -port 8000 -notify-host localhost
+go run server/main.go -port 8000
 ```
 
 ### Start the Client
@@ -99,8 +100,11 @@ The example demonstrates these A2A API features:
 - `server.NewA2AServer()` - Create an A2A server
 - `server.WithJWKSEndpoint()` - Enable JWKS endpoint
 - `server.WithPushNotificationAuthenticator()` - Configure JWT authentication
-- `a2aClient.SendMessage()` - Send message via non-streaming API
+- `a2aClient.SendMessage()` - Send message via non-streaming API (with
+  `returnImmediately=true` for the v0-style non-blocking behavior)
 - `a2aClient.SetPushNotification()` - Register webhook for notifications
+- `taskmanager.TaskManager.OnPushNotificationGet()` - Resolve the registered
+  webhook for a task before sending the signed notification
 
 ## License
 

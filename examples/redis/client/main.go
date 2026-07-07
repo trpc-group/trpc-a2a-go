@@ -152,6 +152,9 @@ func runNonStreamingDemo(ctx context.Context, client *client.A2AClient, inputTex
 		fmt.Printf("-> Sending non-streaming request...\n")
 	}
 
+	// v1.0: message/send blocks to the end of the round by default and, since
+	// the server drives a task for every request, returns the final task
+	// snapshot (artifact + completion message) instead of a direct message.
 	start := time.Now()
 	result, err := client.SendMessage(ctx, params)
 	duration := time.Since(start)
@@ -163,14 +166,34 @@ func runNonStreamingDemo(ctx context.Context, client *client.A2AClient, inputTex
 
 	fmt.Printf("%s Processing time: %v\n", prefixSuccess, duration)
 
-	if response := result.GetMessage(); response != nil {
-		for i, part := range response.Parts {
+	switch {
+	case result.GetTask() != nil:
+		task := result.GetTask()
+		fmt.Printf("%s ID: %s - State: %s\n", prefixTask, task.ID, task.Status.State)
+		i := 0
+		for _, artifact := range task.Artifacts {
+			for _, part := range artifact.Parts {
+				if t := part.TextContent(); t != "" {
+					i++
+					fmt.Printf("%s %d: '%s'\n", prefixResult, i, t)
+				}
+			}
+		}
+		if task.Status.Message != nil {
+			for _, part := range task.Status.Message.Parts {
+				if t := part.TextContent(); t != "" {
+					fmt.Printf("%s %s\n", prefixMessage, t)
+				}
+			}
+		}
+	case result.GetMessage() != nil:
+		for i, part := range result.GetMessage().Parts {
 			if t := part.TextContent(); t != "" {
 				fmt.Printf("%s %d: '%s'\n", prefixResult, i+1, t)
 			}
 		}
-	} else {
-		fmt.Printf("%s No message in result\n", prefixWarning)
+	default:
+		fmt.Printf("%s No task or message in result\n", prefixWarning)
 	}
 }
 

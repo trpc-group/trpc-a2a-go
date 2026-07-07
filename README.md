@@ -1,3 +1,5 @@
+English | [中文](README_zh.md)
+
 # tRPC-A2A-Go
 
 [![Go Reference](https://pkg.go.dev/badge/trpc.group/trpc-go/trpc-a2a-go/v2.svg)](https://pkg.go.dev/trpc.group/trpc-go/trpc-a2a-go/v2)
@@ -20,11 +22,13 @@ tRPC AI ecosystem
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Documentation](#documentation)
 - [Examples](#examples)
   - [Simple Example](#1-simple-example-examplessimple)
   - [Streaming Examples](#2-streaming-examples-examplesstreaming)
   - [Basic Example](#3-basic-example-examplesbasic)
   - [Authentication Examples](#4-authentication-examples-examplesauth)
+  - [v0 Compatibility Example](#5-v0-compatibility-example-examplescompat)
 - [Creating Your Own Agent](#creating-your-own-agent)
 - [Migrating from v0.x](#migrating-from-v0x)
 - [Authentication](#authentication)
@@ -33,7 +37,7 @@ tRPC AI ecosystem
 - [Future Enhancements](#future-enhancements)
 - [Contributing](#contributing)
 - [Acknowledgements](#acknowledgements)
-- [Copyright](#copyright)
+- [License](#license)
 
 ## Quick Start
 
@@ -70,37 +74,52 @@ go run main.go --timeout 30s
 # Disable streaming mode
 go run main.go --no-stream
 
-# Use a specific session ID
-go run main.go --session "your-session-id"
+# Use a specific context ID (conversation)
+go run main.go --context "your-context-id"
 ```
+
+## Documentation
+
+The [docs/](docs/mkdocs/en/index.md) directory covers the protocol and the
+framework in depth (English and [中文](docs/mkdocs/zh/index.md)):
+
+- [overview.md](docs/mkdocs/en/overview.md) — what the framework is, its
+  architecture, and the core event-stream idea.
+- [protocol.md](docs/mkdocs/en/protocol.md) — the A2A protocol: agent cards,
+  the wire objects, the task state machine, and the interaction flows.
+- [server.md](docs/mkdocs/en/server.md) — build an agent: the server, the
+  processor, the runtime contract (round lifecycle, cancellation, history,
+  retention), and every server-side capability.
+- [client.md](docs/mkdocs/en/client.md) — call agents: the consumption modes,
+  task management, and orchestration.
+- [migration.md](docs/mkdocs/en/migration.md) — port an existing v0.x agent
+  to v1.0 (a summary is also in [Migrating from v0.x](#migrating-from-v0x)
+  below).
 
 ## Examples
 
 The repository includes several examples demonstrating different aspects of the A2A protocol:
 
-> **Note**: [examples/basic](examples/basic) is on the v1.0 (`/v2`) contract —
-> start there. The remaining examples still use the v0.x taskmanager API and
-> are pending the port (they do not build against `/v2` yet).
-
 ### 1. Simple Example ([examples/simple](examples/simple))
 
-A minimal example demonstrating the core A2A functionality:
-- Simple server that reverses text input
-- Simple client that sends non-streaming requests
-- Basic task lifecycle (submission, processing, completion)
-- Text processing with artifacts
+A minimal example demonstrating the core A2A functionality in the native
+channel style (the raw `MessageProcessor` contract):
+- Simple server that reverses text input, emitting events on the raw channel
+- Client demonstrating the three consumption modes: blocking send,
+  `returnImmediately`, and streaming — all served by one processor
+- Basic task lifecycle (lazy creation, processing, completion) and artifacts
 
 ```bash
 # Start the simple server
 cd examples/simple/server
 go run main.go
 
-# Run the simple client
+# Run the simple client (runs the blocking / returnImmediately / streaming demos)
 cd examples/simple/client
 go run main.go
 
-# Send a custom message
-go run main.go --message "Text to be reversed"
+# Point the client at a different server
+go run main.go -host localhost:8080
 ```
 
 ### 2. Streaming Examples ([examples/streaming](examples/streaming))
@@ -161,6 +180,24 @@ go run main.go --auth jwt --jwt-secret-file "path/to/jwt-secret.key"
 go run main.go --auth jwt --message "Custom message" --session-id "session123"
 ```
 
+### 5. v0 Compatibility Example ([examples/compat](examples/compat))
+
+One server, both protocol generations: v1.0 clients on the standard wire and
+unmodified v0.2.x clients through [compat/v0](compat/v0) — same endpoint,
+same authentication chain. The client demonstrates the preserved legacy
+defaults (a configuration-less `message/send` answers immediately) plus
+blocking and streaming over the legacy wire.
+
+```bash
+# Start the v0-compatible server
+cd examples/compat/server
+go run main.go
+
+# Run the legacy-wire client
+cd examples/compat/client
+go run main.go --message "hello legacy world"
+```
+
 ## Creating Your Own Agent
 
 ### 1. Implement the MessageProcessor Interface
@@ -184,7 +221,7 @@ import (
 // TaskHandle carries the familiar verbs over the event stream. A synchronous
 // body works as-is (emits never block before Events()); for live streaming,
 // run the same body in a goroutine. The raw channel underneath is the actual
-// contract — see the MessageProcessor interface documentation for that style.
+// contract — see examples/simple for that style.
 type myMessageProcessor struct {
     // Add your custom fields here
 }
@@ -259,17 +296,17 @@ func boolPtr(b bool) *bool {
 
 agentCard := server.AgentCard{
     Name: "My Agent",
-    Description: stringPtr("Agent description"),
+    Description: "Agent description",
     URL: "http://localhost:8080/",
     Version: "1.0.0",
     Provider: &server.AgentProvider{
-        Name: "Provider name",
+        Organization: "Provider name",
     },
     Capabilities: server.AgentCapabilities{
         Streaming: boolPtr(true),
     },
-    DefaultInputModes:  []string{protocol.KindText},
-    DefaultOutputModes: []string{protocol.KindText},
+    DefaultInputModes:  []string{"text"},
+    DefaultOutputModes: []string{"text"},
     Skills: []server.AgentSkill{
         {
             ID:          "text_processing",
@@ -324,7 +361,12 @@ The v1.0 (`/v2`) release replaces the multi-outcome `MessageProcessor` +
 familiar names survive: you still implement `MessageProcessor.ProcessMessage`,
 and the former `TaskHandler` verbs live on as the `TaskHandle` compatibility
 layer, so a v0.x processor body ports with minimal edits — including fully
-synchronous bodies, which were the common v0.x style:
+synchronous bodies, which were the common v0.x style. (Wire note: the v1.0
+JSON-RPC binding names operations `SendMessage`, `SendStreamingMessage`,
+`GetTask`, `ListTasks`, `CancelTask`, `SubscribeToTask` and the
+`*TaskPushNotificationConfig` CRUD; the slash-delimited names — `message/send`,
+`tasks/get`, ... — are the v0.2.x wire, still served by `compat/v0`. This
+guide refers to operations by the v0.x names migrating readers already know.)
 
 ```go
 func (p *myProcessor) ProcessMessage(
@@ -345,10 +387,9 @@ func (p *myProcessor) ProcessMessage(
 }
 ```
 
-The reference port: [examples/basic](examples/basic) is the minimal-edit
-`TaskHandle` port of a v0.x processor. A native channel-style example ships
-with the follow-up examples migration; until then the raw style is documented
-on the `MessageProcessor` interface.
+Two reference examples: [examples/basic](examples/basic) is the minimal-edit
+`TaskHandle` port of a v0.x processor; [examples/simple](examples/simple) is
+the native channel style recommended for new code.
 
 ### API mapping
 
@@ -695,6 +736,6 @@ Contributions and improvement suggestions are welcome! Please ensure your code f
 
 This project's protocol design is based on Google's open-source A2A protocol ([original repository](https://github.com/google/A2A)), following the Apache 2.0 license. This is an unofficial implementation.
 
-## Copyright
+## License
 
-The copyright notice pertaining to the Tencent code in this repo was previously in the name of “THL A29 Limited.”  That entity has now been de-registered.  You should treat all previously distributed copies of the code as if the copyright notice was in the name of “Tencent.”
+Licensed under the **Apache 2.0 License** - see [LICENSE](LICENSE) file for details.

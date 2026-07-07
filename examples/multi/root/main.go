@@ -33,27 +33,26 @@ type rootAgentProcessor struct {
 	reimbursementClient *client.A2AClient
 }
 
-// ProcessMessage implements the taskmanager.MessageProcessor interface
+// ProcessMessage implements the taskmanager.MessageProcessor interface. The
+// body is fully synchronous: the outbound sub-agent calls block until the
+// sub-agent's round finishes, and the aggregated answer is emitted as a pure
+// message reply — no task comes into existence for a routing exchange.
 func (p *rootAgentProcessor) ProcessMessage(
 	ctx context.Context,
-	message protocol.Message,
-	options taskmanager.ProcessOptions,
-	handle taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
+	ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+	handle := taskmanager.NewTaskHandle(ctx, ec)
+	defer handle.Close()
+
 	// Extract text from the incoming message
-	text := extractText(message)
+	text := extractText(ec.Message)
 	if text == "" {
 		errMsg := "input message must contain text"
 		log.Error("Message processing failed: %s", errMsg)
 
-		// Return error message directly
-		errorMessage := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart(errMsg)},
-		)
-		return &taskmanager.MessageProcessingResult{
-			Result: &errorMessage,
-		}, nil
+		// Reply with the error message directly
+		handle.Reply(taskmanager.ReplyText(errMsg))
+		return handle.Events(), nil
 	}
 
 	log.Info("RootAgent received new request: %s", text)
@@ -62,14 +61,8 @@ func (p *rootAgentProcessor) ProcessMessage(
 	subagent, err := p.routeTaskToSubagent(ctx, text)
 	if err != nil {
 		log.Error("Error routing task: %v", err)
-		errMsg := fmt.Sprintf("Failed to process your request: %v", err)
-		errMessage := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart(errMsg)},
-		)
-		return &taskmanager.MessageProcessingResult{
-			Result: &errMessage,
-		}, nil
+		handle.Reply(taskmanager.ReplyText(fmt.Sprintf("Failed to process your request: %v", err)))
+		return handle.Events(), nil
 	}
 
 	var result string
@@ -94,25 +87,13 @@ func (p *rootAgentProcessor) ProcessMessage(
 
 	if err != nil {
 		log.Error("Error from subagent: %v", err)
-		errMsg := fmt.Sprintf("Failed to get response from subagent: %v", err)
-		errMessage := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart(errMsg)},
-		)
-		return &taskmanager.MessageProcessingResult{
-			Result: &errMessage,
-		}, nil
+		handle.Reply(taskmanager.ReplyText(fmt.Sprintf("Failed to get response from subagent: %v", err)))
+		return handle.Events(), nil
 	}
 
-	// Create response message
-	responseMessage := protocol.NewMessage(
-		protocol.MessageRoleAgent,
-		[]*protocol.Part{protocol.NewTextPart(result)},
-	)
-
-	return &taskmanager.MessageProcessingResult{
-		Result: &responseMessage,
-	}, nil
+	// Reply with the aggregated subagent response
+	handle.Reply(taskmanager.ReplyText(result))
+	return handle.Events(), nil
 }
 
 // routeTaskToSubagent uses the LLM to decide which subagent should handle the task.

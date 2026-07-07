@@ -335,27 +335,21 @@ type echoMessageProcessor struct{}
 
 func (p *echoMessageProcessor) ProcessMessage(
 	ctx context.Context,
-	message protocol.Message,
-	options taskmanager.ProcessOptions,
-	handle taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
+	ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+	handle := taskmanager.NewTaskHandle(ctx, ec)
+	defer handle.Close()
+
 	var responseText string
-	for _, part := range message.Parts {
+	for _, part := range ec.Message.Parts {
 		if text := part.TextContent(); text != "" {
 			responseText += text + " "
 		}
 	}
 
-	responseMsg := protocol.NewMessage(
-		protocol.MessageRoleAgent,
-		[]*protocol.Part{
-			protocol.NewTextPart(fmt.Sprintf("Echo: %s", responseText)),
-		},
-	)
-
-	return &taskmanager.MessageProcessingResult{
-		Result: &protocol.SendMessageResponse{Result: &responseMsg},
-	}, nil
+	// A pure message reply: no task comes into existence this round.
+	handle.Reply(taskmanager.ReplyText(fmt.Sprintf("Echo: %s", responseText)))
+	return handle.Events(), nil
 }
 
 // mockOAuthServer implements a simple OAuth2 server for demonstration purposes.

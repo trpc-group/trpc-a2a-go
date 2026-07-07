@@ -46,7 +46,6 @@ type config struct {
 	OAuth2Scopes       string
 
 	// Task options
-	TaskID      string
 	TaskMessage string
 	SessionID   string
 }
@@ -78,7 +77,6 @@ func parseFlags() config {
 	flag.StringVar(&config.OAuth2Scopes, "oauth2-scopes", "a2a.read,a2a.write", "OAuth2 scopes (comma-separated)")
 
 	// Task options
-	flag.StringVar(&config.TaskID, "task-id", "auth-test-task", "ID for the task to send")
 	flag.StringVar(&config.TaskMessage, "message", "Hello, this is an authenticated request", "Message to send")
 	flag.StringVar(&config.SessionID, "session-id", "", "Optional session ID for the task")
 

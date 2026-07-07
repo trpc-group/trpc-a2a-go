@@ -8,12 +8,13 @@
 // push notifications using JWKS.
 //
 // This example demonstrates the recommended approach for long-running tasks:
-// 1. Client sends a task via non-streaming API (tasks/send)
-// 2. Client registers a webhook for push notifications
-// 3. Client disconnects or does other work
-// 4. Server processes the task asynchronously
-// 5. When task completes, server sends push notification to the webhook
-// 6. Client processes the notification
+//  1. Client sends a task via the non-streaming API (message/send with
+//     returnImmediately=true, so the task ID arrives while the task runs)
+//  2. Client registers a webhook for push notifications
+//  3. Client disconnects or does other work
+//  4. Server processes the task asynchronously
+//  5. When task completes, server sends push notification to the webhook
+//  6. Client processes the notification
 package main
 
 import (
@@ -594,9 +595,16 @@ func sendMessage(ctx context.Context, a2aClient *client.A2AClient, content strin
 		[]*protocol.Part{protocol.NewTextPart(content)},
 	)
 
-	// Create send message parameters
+	// Create send message parameters. v1.0 message/send blocks to round end by
+	// default; this demo needs the task ID while the task is still running so
+	// it can register the webhook, so it opts into returnImmediately (the v0
+	// non-blocking behavior).
+	returnImmediately := true
 	params := protocol.SendMessageParams{
 		Message: message,
+		Configuration: &protocol.SendMessageConfiguration{
+			ReturnImmediately: &returnImmediately,
+		},
 	}
 
 	// Send the message

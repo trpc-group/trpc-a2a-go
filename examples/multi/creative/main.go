@@ -15,7 +15,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/llms/googleai"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
@@ -88,36 +87,32 @@ func getAPIKey() string {
 	return apiKey
 }
 
-// ProcessMessage implements the taskmanager.MessageProcessor interface
+// ProcessMessage implements the taskmanager.MessageProcessor interface. The
+// generated text is emitted as a pure message reply — no task comes into
+// existence for a conversational exchange.
 func (p *creativeWritingProcessor) ProcessMessage(
 	ctx context.Context,
-	message protocol.Message,
-	options taskmanager.ProcessOptions,
-	handle taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
+	ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+	handle := taskmanager.NewTaskHandle(ctx, ec)
+	defer handle.Close()
+
 	// Extract text from the incoming message
-	prompt := extractText(message)
+	prompt := extractText(ec.Message)
 	if prompt == "" {
 		errMsg := "input message must contain text."
 		log.Error("Message processing failed: %s", errMsg)
 
-		// Return error message directly
-		errorMessage := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart(errMsg)},
-		)
-		return &taskmanager.MessageProcessingResult{
-			Result: &errorMessage,
-		}, nil
+		// Reply with the error message directly
+		handle.Reply(taskmanager.ReplyText(errMsg))
+		return handle.Events(), nil
 	}
 
 	log.Info("Processing creative writing message with prompt: %s", prompt)
 
-	// Get session ID from message context or generate one
+	// The conversation context ID drives session management (the framework
+	// generates one when the request carries none).
 	sessionID := handle.GetContextID()
-	if sessionID == "" {
-		sessionID = uuid.New().String()
-	}
 
 	// Build the context from conversation history
 	history := p.cache.GetHistory(sessionID)
@@ -144,28 +139,17 @@ func (p *creativeWritingProcessor) ProcessMessage(
 		errorMsg := fmt.Sprintf("Failed to generate response: %v", err)
 		log.Error("Message processing failed: %s", errorMsg)
 
-		errorMessage := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart(errorMsg)},
-		)
-		return &taskmanager.MessageProcessingResult{
-			Result: &errorMessage,
-		}, nil
+		handle.Reply(taskmanager.ReplyText(errorMsg))
+		return handle.Events(), nil
 	}
 
 	// Save prompt and response to conversation history
 	p.cache.AddMessage(sessionID, fmt.Sprintf("User: %s", prompt))
 	p.cache.AddMessage(sessionID, fmt.Sprintf("Assistant: %s", response))
 
-	// Create response message with the generated text
-	responseMessage := protocol.NewMessage(
-		protocol.MessageRoleAgent,
-		[]*protocol.Part{protocol.NewTextPart(response)},
-	)
-
-	return &taskmanager.MessageProcessingResult{
-		Result: &responseMessage,
-	}, nil
+	// Reply with the generated text
+	handle.Reply(taskmanager.ReplyText(response))
+	return handle.Events(), nil
 }
 
 // extractText extracts the text content from a message

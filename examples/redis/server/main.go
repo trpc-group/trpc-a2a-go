@@ -64,34 +64,45 @@ var (
 // ToLowerProcessor implements a simple text processing service that converts text to lowercase
 type ToLowerProcessor struct{}
 
-// ProcessMessage processes incoming messages by converting text to lowercase.
-// It supports both streaming and non-streaming modes of operation.
+// ProcessMessage implements the taskmanager.MessageProcessor interface. One
+// code path serves message/send and message/stream alike: the staged task
+// updates stream live to message/stream subscribers, while message/send
+// blocks and returns the final task snapshot.
 func (p *ToLowerProcessor) ProcessMessage(
 	ctx context.Context,
-	message protocol.Message,
-	options taskmanager.ProcessOptions,
-	handle taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
-	log.Printf("Processing message: %s", message.MessageID)
+	ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+	log.Printf("Processing message: %s", ec.Message.MessageID)
+
+	handle := taskmanager.NewTaskHandle(ctx, ec)
 
 	// Extract text from message parts
-	inputText := extractTextFromMessage(message)
+	inputText := extractTextFromMessage(ec.Message)
 	if inputText == "" {
-		return &taskmanager.MessageProcessingResult{
-			Result: protocol.NewSendMessageResponseMessage(&protocol.Message{
-				Role: protocol.MessageRoleAgent,
-				Parts: []*protocol.Part{
-					protocol.NewTextPart("Error: No text found in message"),
-				},
-			}),
-		}, nil
+		// A pure message reply: no task comes into existence this round.
+		defer handle.Close()
+		handle.Reply(taskmanager.ReplyText("Error: No text found in message"))
+		return handle.Events(), nil
 	}
 
-	if options.Streaming {
-		return p.processStreamingMode(inputText, message.ContextID, handle)
-	}
+	// The staged conversion takes a couple of seconds: emit from a goroutine
+	// so each update streams live instead of buffering until the round ends.
+	go func() {
+		defer handle.Close()
+		p.processText(ctx, inputText, handle)
+	}()
 
-	return p.processNonStreamingMode(inputText), nil
+	return handle.Events(), nil
+}
+
+// sleepUnlessCanceled waits d, returning false if the round was canceled first.
+func sleepUnlessCanceled(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-time.After(d):
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // extractTextFromMessage extracts text content from message parts
@@ -105,115 +116,52 @@ func extractTextFromMessage(message protocol.Message) string {
 	return inputText
 }
 
-// processStreamingMode handles streaming processing with task updates
-func (p *ToLowerProcessor) processStreamingMode(
-	inputText string,
-	contextID *string,
-	handle taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
-	// Build task for streaming mode
-	taskID, err := handle.BuildTask(nil, contextID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build task: %w", err)
-	}
-
-	// Subscribe to the task
-	subscriber, err := handle.SubscribeTask(&taskID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to subscribe to task: %w", err)
-	}
-
-	// Process asynchronously
-	go p.processTextAsync(inputText, taskID, handle)
-
-	return &taskmanager.MessageProcessingResult{
-		StreamingEvents: subscriber,
-	}, nil
-}
-
-// processNonStreamingMode handles direct processing without streaming
-func (p *ToLowerProcessor) processNonStreamingMode(inputText string) *taskmanager.MessageProcessingResult {
-	result := strings.ToLower(inputText)
-
-	response := &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []*protocol.Part{
-			protocol.NewTextPart(result),
-		},
-	}
-
-	return &taskmanager.MessageProcessingResult{
-		Result: protocol.NewSendMessageResponseMessage(response),
-	}
-}
-
-func (p *ToLowerProcessor) processTextAsync(
-	inputText string,
-	taskID string,
-	handle taskmanager.TaskHandler,
-) {
-	defer func() {
-		err := handle.CleanTask(&taskID)
-		if err != nil {
-			log.Printf("Failed to clean task: %v", err)
-		}
-	}()
-
+// processText drives one working -> artifact -> completed task round with
+// staged progress updates. Returning early on a canceled ctx closes the round
+// without a terminal state, letting the framework persist CANCELED.
+func (p *ToLowerProcessor) processText(ctx context.Context, inputText string, handle *taskmanager.TaskHandle) {
 	// Step 1: Starting processing
-	err := handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []*protocol.Part{
-			protocol.NewTextPart(msgStarting),
-		},
-	})
+	err := handle.UpdateTaskState(protocol.TaskStateWorking, taskmanager.ReplyText(msgStarting))
 	if err != nil {
 		log.Printf("Failed to update task state: %v", err)
 		return
 	}
 
 	// Simulate analysis phase
-	time.Sleep(analysisDelay)
+	if !sleepUnlessCanceled(ctx, analysisDelay) {
+		return
+	}
 
 	// Step 2: Analysis phase
-	err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []*protocol.Part{
-			protocol.NewTextPart(fmt.Sprintf(msgAnalyzing, len(inputText))),
-		},
-	})
+	err = handle.UpdateTaskState(protocol.TaskStateWorking,
+		taskmanager.ReplyText(fmt.Sprintf(msgAnalyzing, len(inputText))))
 	if err != nil {
 		log.Printf("Failed to update task state: %v", err)
 		return
 	}
 
 	// Simulate processing phase
-	time.Sleep(processingDelay)
+	if !sleepUnlessCanceled(ctx, processingDelay) {
+		return
+	}
 
 	// Step 3: Processing phase
-	err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []*protocol.Part{
-			protocol.NewTextPart(msgProcessing),
-		},
-	})
+	err = handle.UpdateTaskState(protocol.TaskStateWorking, taskmanager.ReplyText(msgProcessing))
 	if err != nil {
 		log.Printf("Failed to update task state: %v", err)
 		return
 	}
 
 	// Simulate actual processing
-	time.Sleep(conversionDelay)
+	if !sleepUnlessCanceled(ctx, conversionDelay) {
+		return
+	}
 
 	// Process the text
 	result := strings.ToLower(inputText)
 
 	// Step 4: Creating artifact
-	err = handle.UpdateTaskState(&taskID, protocol.TaskStateWorking, &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []*protocol.Part{
-			protocol.NewTextPart(msgArtifact),
-		},
-	})
+	err = handle.UpdateTaskState(protocol.TaskStateWorking, taskmanager.ReplyText(msgArtifact))
 	if err != nil {
 		log.Printf("Failed to update task state: %v", err)
 		return
@@ -238,23 +186,18 @@ func (p *ToLowerProcessor) processTextAsync(
 	}
 
 	// Add artifact to task
-	if err := handle.AddArtifact(&taskID, artifact, true, false); err != nil {
+	if err := handle.AddArtifact(artifact, true); err != nil {
 		log.Printf("Failed to add artifact: %v", err)
 	}
 
 	// Small delay to show artifact creation
 	time.Sleep(artifactCreationDelay)
 
-	// Send final status with result message
-	finalMessage := &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []*protocol.Part{
-			protocol.NewTextPart(fmt.Sprintf(msgCompleted, inputText, result)),
-		},
-	}
-
-	// Update task to completed state
-	err = handle.UpdateTaskState(&taskID, protocol.TaskStateCompleted, finalMessage)
+	// Update task to completed state with the result message. Ending the
+	// round terminal replaces the former CleanTask: the framework owns the
+	// task lifecycle (set redis.WithExpireTime to bound retention).
+	err = handle.UpdateTaskState(protocol.TaskStateCompleted,
+		taskmanager.ReplyText(fmt.Sprintf(msgCompleted, inputText, result)))
 	if err != nil {
 		log.Printf("Failed to complete task: %v", err)
 	}
@@ -318,7 +261,7 @@ func main() {
 	processor := &ToLowerProcessor{}
 
 	// Create Redis TaskManager
-	taskManager, err := redisTaskManager.NewTaskManager(rdb, processor)
+	taskManager, err := redisTaskManager.NewTaskManager(processor, rdb)
 	if err != nil {
 		log.Fatalf("Failed to create Redis TaskManager: %v", err)
 	}

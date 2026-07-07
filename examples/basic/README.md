@@ -8,7 +8,8 @@ This example demonstrates a basic implementation of the Agent-to-Agent (A2A) pro
 The server is written in the `taskmanager.TaskHandle` style: the minimal-edit
 port of a v0.x TaskHandler processor, with a fully synchronous body and one
 code path serving both `message/send` and `message/stream` (see "Migrating
-from v0.x" in the repository README).
+from v0.x" in the repository README). For the native channel style, see
+`examples/simple`.
 
 ## Server Features
 
@@ -55,7 +56,7 @@ Client options:
 - `--agent`: Agent URL (default: http://localhost:8080/)
 - `--timeout`: Request timeout (default: 60s)
 - `--no-stream`: Disable streaming mode
-- `--session`: Use specific session ID (generate new if empty)
+- `--context`: Use specific context ID (generate new if empty)
 - `--use-tasks-get`: Use tasks/get to fetch final state (default: true)
 - `--history`: Number of history messages to request (default: 0)
 
@@ -65,7 +66,7 @@ Once the client is running, you can use the following commands:
 
 - `help`: Show help message
 - `exit`: Exit the program
-- `session [id]`: Set or generate a new session ID
+- `context [id]`: Set or generate a new context ID
 - `mode [stream|sync]`: Set interaction mode (streaming or standard)
 - `cancel [task-id]`: Cancel a task
 - `get [task-id] [history]`: Get task details

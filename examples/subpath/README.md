@@ -18,8 +18,12 @@ The server will automatically configure endpoints at `/api/v1/agent/*` based on 
 package main
 
 import (
+    "context"
+
+    "trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
     "trpc.group/trpc-go/trpc-a2a-go/v2/server"
     "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
 
 // Create a simple message processor
@@ -27,22 +31,14 @@ type simpleProcessor struct{}
 
 func (p *simpleProcessor) ProcessMessage(
     ctx context.Context,
-    message protocol.Message,
-    options taskmanager.ProcessOptions,
-    taskHandler taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
-    response := &protocol.Message{
-        Role: protocol.MessageRoleAgent,
-        Kind: protocol.KindMessage,
-        MessageID: protocol.GenerateMessageID(),
-        Parts: []protocol.Part{
-            &protocol.TextPart{
-                Kind: protocol.KindText,
-                Text: "Hello from subpath agent!",
-            },
-        },
-    }
-    return &taskmanager.MessageProcessingResult{Result: response}, nil
+    ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+    handle := taskmanager.NewTaskHandle(ctx, ec)
+    defer handle.Close()
+
+    // A pure message reply: no task materializes.
+    handle.Reply(taskmanager.ReplyText("Hello from subpath agent!"))
+    return handle.Events(), nil
 }
 
 func main() {
@@ -53,7 +49,7 @@ func main() {
     }
 
     // 2. Create task manager with your processor
-    taskManager, _ := taskmanager.NewMemoryTaskManager(&simpleProcessor{})
+    taskManager, _ := memory.NewTaskManager(&simpleProcessor{})
 
     // 3. Create server (path automatically configured)
     a2aServer, _ := server.NewA2AServer(taskManager, server.WithAgentCard(agentCard))
@@ -66,7 +62,8 @@ func main() {
 **Result**: Endpoints available at:
 - Agent Card: `http://localhost:8080/api/v1/agent/.well-known/agent-card.json`  
 - JSON-RPC: `http://localhost:8080/api/v1/agent/`
-- JWKS: `http://localhost:8080/api/v1/agent/.well-known/jwks.json`
+- JWKS (when enabled via `server.WithJWKSEndpoint` and a push-notification
+  authenticator): `http://localhost:8080/api/v1/agent/.well-known/jwks.json`
 
 ### Method 2: Explicit Path Configuration (Advanced)
 
@@ -184,11 +181,12 @@ curl -X POST http://localhost:8080/api/v1/agent/ \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
-    "method": "message/send", 
+    "method": "SendMessage",
     "params": {
       "message": {
-        "role": "user",
-        "parts": [{"kind": "text", "text": "Hello"}]
+        "role": "ROLE_USER",
+        "messageId": "test-1",
+        "parts": [{"text": "Hello"}]
       }
     },
     "id": "1"

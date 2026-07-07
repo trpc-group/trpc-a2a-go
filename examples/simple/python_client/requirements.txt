@@ -1,3 +1,0 @@
-# Official A2A SDK dependencies  
-a2a-sdk>=0.2.5
-httpx>=0.24.0 

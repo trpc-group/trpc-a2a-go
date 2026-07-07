@@ -4,7 +4,9 @@
 //
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
-// Package main implements a simple A2A server example.
+// Package main implements a simple A2A server example built on the MessageProcessor
+// contract: one code path serves both message/send and message/stream, and the
+// framework owns the task lifecycle (creation, persistence, fan-out).
 package main
 
 import (
@@ -15,131 +17,63 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/google/uuid"
-
-	goredis "github.com/redis/go-redis/v9"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/redis"
 )
 
 // simpleMessageProcessor implements the taskmanager.MessageProcessor interface.
 type simpleMessageProcessor struct{}
 
-// ProcessMessage implements the taskmanager.MessageProcessor interface.
-func (p *simpleMessageProcessor) ProcessMessage(
+// ProcessMessage processes one message and reports progress as events. There is no
+// streaming/non-streaming branch: for message/send the framework drains the
+// events and answers with the final task snapshot (or the reply message); for
+// message/stream it forwards them as they happen.
+func (e *simpleMessageProcessor) ProcessMessage(
 	ctx context.Context,
-	message protocol.Message,
-	options taskmanager.ProcessOptions,
-	handler taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
-	text := extractText(message)
-	if text == "" {
-		errMsg := "input message must contain text."
-		log.Errorf("Message processing failed: %s", errMsg)
-
-		errorMessage := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart(errMsg)},
-		)
-
-		return &taskmanager.MessageProcessingResult{
-			Result: protocol.NewSendMessageResponseMessage(&errorMessage),
-		}, nil
-	}
-
-	log.Infof("Processing message with input: %s", text)
-
-	result := reverseString(text)
-
-	if !options.Streaming {
-		responseMessage := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart(fmt.Sprintf("Processed result: %s", result))},
-		)
-
-		return &taskmanager.MessageProcessingResult{
-			Result: protocol.NewSendMessageResponseMessage(&responseMessage),
-		}, nil
-	}
-
-	taskID, err := handler.BuildTask(nil, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build task: %w", err)
-	}
-
-	subscriber, err := handler.SubscribeTask(&taskID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to subscribe to task: %w", err)
-	}
-
+	ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+	out := make(chan protocol.StreamEvent, 4)
 	go func() {
-		defer func() {
-			if subscriber != nil {
-				subscriber.Close()
-			}
-			handler.CleanTask(&taskID)
-		}()
+		defer close(out)
 
-		startMessage := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart("Task started, processing...")},
-		)
-		err = subscriber.Send(protocol.NewStreamResponseMessage(&startMessage))
-		if err != nil {
-			log.Errorf("Failed to send start message: %v", err)
+		text := extractText(ec.Message)
+		if text == "" {
+			// A pure-message reply: no task comes into existence for this round.
+			out <- taskmanager.ReplyText("input message must contain text.")
+			return
 		}
 
-		err := subscriber.Send(protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{
-			TaskID: taskID,
-			Status: protocol.TaskStatus{
-				State: protocol.TaskStateWorking,
-			},
-		}))
-		if err != nil {
-			log.Errorf("Failed to send working event: %v", err)
+		log.Infof("Processing message with input: %s", text)
+
+		// TaskID/ContextID on events may be left empty: the framework stamps
+		// them from the ExecContext and creates the task on this first event.
+		out <- &protocol.TaskStatusUpdateEvent{
+			Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
 		}
 
-		responseMessage := protocol.NewMessage(
-			protocol.MessageRoleAgent,
-			[]*protocol.Part{protocol.NewTextPart(fmt.Sprintf("Processed result: %s", result))},
-		)
+		result := reverseString(text)
+		lastChunk := true
+		out <- &protocol.TaskArtifactUpdateEvent{
+			Artifact: *protocol.NewArtifactWithID(
+				stringPtr("Reversed Text"),
+				stringPtr("The input text reversed"),
+				[]*protocol.Part{protocol.NewTextPart(result)},
+			),
+			LastChunk: &lastChunk,
+		}
 
-		err = subscriber.Send(protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{
-			TaskID: taskID,
+		// A terminal status ends the round.
+		out <- &protocol.TaskStatusUpdateEvent{
 			Status: protocol.TaskStatus{
 				State:   protocol.TaskStateCompleted,
-				Message: &responseMessage,
+				Message: taskmanager.ReplyText(fmt.Sprintf("Processed result: %s", result)),
 			},
-			Final: true,
-		}))
-		if err != nil {
-			log.Errorf("Failed to send completed event: %v", err)
-		}
-
-		artifact := protocol.Artifact{
-			ArtifactID:  uuid.New().String(),
-			Name:        stringPtr("Reversed Text"),
-			Description: stringPtr("The input text reversed"),
-			Parts:       []*protocol.Part{protocol.NewTextPart(result)},
-		}
-
-		err = subscriber.Send(protocol.NewStreamResponseArtifactUpdate(&protocol.TaskArtifactUpdateEvent{
-			TaskID:    taskID,
-			Artifact:  artifact,
-			LastChunk: boolPtr(true),
-		}))
-		if err != nil {
-			log.Errorf("Failed to send artifact event: %v", err)
 		}
 	}()
-
-	return &taskmanager.MessageProcessingResult{
-		StreamingEvents: subscriber,
-	}, nil
+	return out, nil
 }
 
 // extractText extracts the text content from a message.
@@ -175,7 +109,6 @@ func main() {
 	// Parse command-line flags.
 	host := flag.String("host", "localhost", "Host to listen on")
 	port := flag.Int("port", 8080, "Port to listen on")
-	manager := flag.String("manager", "memory", "Task manager to use: memory or redis")
 	flag.Parse()
 
 	// Create the agent card.
@@ -208,26 +141,9 @@ func main() {
 		},
 	}
 
-	// Create the message processor.
-	processor := &simpleMessageProcessor{}
-
-	// Create task manager and inject processor.
-	var taskManager taskmanager.TaskManager
-	var err error
-	switch *manager {
-	case "memory":
-		log.Infof("Using memory task manager")
-		taskManager, err = memory.NewTaskManager(processor)
-	case "redis":
-		log.Infof("Using redis task manager")
-		cli := goredis.NewClient(&goredis.Options{
-			Addr: "localhost:6379",
-		})
-		taskManager, err = redis.NewTaskManager(cli, processor)
-	default:
-		log.Fatalf("Invalid task manager: %s", *manager)
-	}
-
+	// Create the processor and inject it into a task manager.
+	// (redis.NewTaskManager accepts the same MessageProcessor for persistent storage.)
+	taskManager, err := memory.NewTaskManager(&simpleMessageProcessor{})
 	if err != nil {
 		log.Fatalf("Failed to create task manager: %v", err)
 	}

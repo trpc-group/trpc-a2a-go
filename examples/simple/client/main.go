@@ -4,257 +4,168 @@
 //
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
-// Package main implements a simple A2A client example.
+// Package main demonstrates how message/send (non-streaming) and
+// message/stream (streaming) consume the SAME server-side MessageProcessor:
+// the caller picks the endpoint; the processor code does not change.
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/client"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 func main() {
-	// Parse command-line flags.
-	agentURL := flag.String("agent", "http://localhost:8080/", "Target A2A agent URL")
-	timeout := flag.Duration("timeout", 30*time.Second, "Request timeout (e.g., 30s, 1m)")
-	message := flag.String("message", "Hello, world!", "Message to send to the agent")
-	streaming := flag.Bool("streaming", false, "Use streaming mode (message/stream)")
+	host := flag.String("host", "localhost:8080", "server address")
 	flag.Parse()
 
-	// Create A2A client.
-	a2aClient, err := client.NewA2AClient(*agentURL, client.WithTimeout(*timeout))
+	a2aClient, err := client.NewA2AClient(
+		fmt.Sprintf("http://%s/", *host),
+		// NOTE: http.Client.Timeout caps the WHOLE response body read, which
+		// for message/stream is the entire SSE lifetime. A real long-running
+		// streaming agent needs a longer timeout (or none); 30s only suits this
+		// toy example where every round finishes in milliseconds.
+		client.WithTimeout(30*time.Second),
+	)
 	if err != nil {
 		log.Fatalf("Failed to create A2A client: %v", err)
 	}
 
-	// Display connection information.
-	log.Infof("Connecting to agent: %s (Timeout: %v)", *agentURL, *timeout)
-	log.Infof("Mode: %s", map[bool]string{true: "Streaming", false: "Standard"}[*streaming])
-
-	// Create the message to send using the new constructor.
-	userMessage := protocol.NewMessage(
-		protocol.MessageRoleUser,
-		[]*protocol.Part{protocol.NewTextPart(*message)},
-	)
-
-	// Create message parameters using the new SendMessageParams structure.
-	params := protocol.SendMessageParams{
-		Message: userMessage,
-		Configuration: &protocol.SendMessageConfiguration{
-			ReturnImmediately:   boolPtr(true), // v1.0: replaces Blocking with inverted semantics (true = don't wait)
-			AcceptedOutputModes: []string{"text"},
-		},
-	}
-
-	log.Infof("Sending message with content: %s", *message)
-
-	// Create context for the request.
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
-
-	if *streaming {
-		// Use streaming mode
-		handleStreamingMode(ctx, a2aClient, params)
-	} else {
-		// Use standard mode
-		handleStandardMode(ctx, a2aClient, params)
-	}
+	demoNonStreaming(a2aClient)
+	demoReturnImmediately(a2aClient)
+	demoStreaming(a2aClient)
+	demoPureMessage(a2aClient)
 }
 
-// handleStreamingMode handles streaming message sending and event processing
-func handleStreamingMode(ctx context.Context, a2aClient *client.A2AClient, params protocol.SendMessageParams) {
-	log.Infof("Starting streaming request...")
-
-	// Send streaming message request
-	eventChan, err := a2aClient.StreamMessage(ctx, params)
+// demoPureMessage: a message with no text part drives the server's pure-Message
+// path — it replies with a validation Message and NO task is created (lazy
+// creation). The union carries a Message, not a Task.
+func demoPureMessage(c *client.A2AClient) {
+	fmt.Println("=== message/send (pure-message path: no task created) ===")
+	resp, err := c.SendMessage(context.Background(), protocol.SendMessageParams{
+		Message: protocol.NewMessage(
+			protocol.MessageRoleUser,
+			[]*protocol.Part{protocol.NewDataPart(map[string]any{"unsupported": true})},
+		),
+	})
 	if err != nil {
-		log.Fatalf("Failed to start streaming: %v", err)
+		log.Fatalf("SendMessage failed: %v", err)
 	}
-
-	log.Infof("Processing streaming events...")
-
-	eventCount := 0
-	var finalResult string
-
-	// Process streaming events
-	for {
-		select {
-		case event, ok := <-eventChan:
-			if !ok {
-				log.Infof("Stream completed. Total events received: %d", eventCount)
-				if finalResult != "" {
-					log.Infof("Final result: %s", finalResult)
-				}
-				return
-			}
-
-			eventCount++
-			log.Infof("Event %d received: %s", eventCount, getEventDescription(event))
-
-			// Extract final result from completed events
-			if result := extractFinalResult(event); result != "" {
-				finalResult = result
-				log.Infof("Received msg: [Text: %s]", result)
-			}
-
-		case <-ctx.Done():
-			log.Infof("Request timed out after receiving %d events", eventCount)
-			return
-		}
+	switch {
+	case resp.GetMessage() != nil:
+		fmt.Printf("message reply (no task): %s\n", firstText(resp.GetMessage().Parts))
+	case resp.GetTask() != nil:
+		fmt.Printf("unexpected task: %s\n", resp.GetTask().Status.State)
 	}
+	fmt.Println()
 }
 
-// handleStandardMode handles standard (non-streaming) message sending
-func handleStandardMode(ctx context.Context, a2aClient *client.A2AClient, params protocol.SendMessageParams) {
-	messageResult, err := a2aClient.SendMessage(ctx, params)
+// demoNonStreaming: one request, one FINAL answer. The intermediate working
+// events are consumed by the framework (persisted, fanned out to any
+// subscribers) — this caller sees only the derived result: the terminal task
+// snapshot with its artifacts, or the reply message for pure-message rounds.
+func demoNonStreaming(c *client.A2AClient) {
+	fmt.Println("=== message/send (non-streaming, blocking) ===")
+	resp, err := c.SendMessage(context.Background(), protocol.SendMessageParams{
+		Message: newUserMessage("Hello world!"),
+	})
 	if err != nil {
-		log.Fatalf("Failed to send message: %v", err)
+		log.Fatalf("SendMessage failed: %v", err)
 	}
 
-	// Display the result.
-	log.Infof("Message sent successfully")
-
-	if msg := messageResult.GetMessage(); msg != nil {
-		log.Infof("Received message response:")
-		printMessage(*msg)
-	} else if task := messageResult.GetTask(); task != nil {
-		log.Infof("Received task response - ID: %s, State: %s", task.ID, task.Status.State)
-
-		if task.Status.State != protocol.TaskStateCompleted &&
-			task.Status.State != protocol.TaskStateFailed &&
-			task.Status.State != protocol.TaskStateCanceled {
-
-			log.Infof("Task %s is %s, fetching final state...", task.ID, task.Status.State)
-
-			queryParams := protocol.TaskQueryParams{
-				ID: task.ID,
-			}
-
-			time.Sleep(500 * time.Millisecond)
-
-			finalTask, err := a2aClient.GetTasks(ctx, queryParams)
-			if err != nil {
-				log.Fatalf("Failed to get task status: %v", err)
-			}
-
-			log.Infof("Task %s final state: %s", finalTask.ID, finalTask.Status.State)
-			printTaskResult(finalTask)
-		} else {
-			printTaskResult(task)
-		}
-	} else {
-		log.Infof("Received empty result")
-	}
-}
-
-// getEventDescription returns a human-readable description of the streaming event
-func getEventDescription(event protocol.StreamResponse) string {
-	if msg := event.GetMessage(); msg != nil {
-		ctxID := "unknown"
-		if msg.ContextID != nil {
-			ctxID = *msg.ContextID
-		}
-		return fmt.Sprintf("Message from %s, ContextID: %v", msg.Role, ctxID)
-	}
-	if task := event.GetTask(); task != nil {
-		return fmt.Sprintf("Task %s - State: %s, ContextID: %v", task.ID, task.Status.State, task.ContextID)
-	}
-	if su := event.GetStatusUpdate(); su != nil {
-		return fmt.Sprintf("Status Update - Task: %s, State: %s, ContextID: %v", su.TaskID, su.Status.State, su.ContextID)
-	}
-	if au := event.GetArtifactUpdate(); au != nil {
-		artifactName := "Unnamed"
-		if au.Artifact.Name != nil {
-			artifactName = *au.Artifact.Name
-		}
-		return fmt.Sprintf("Artifact Update - %s, ContextID: %v", artifactName, au.ContextID)
-	}
-	return "Unknown event"
-}
-
-// extractFinalResult extracts the final text result from streaming events
-func extractFinalResult(event protocol.StreamResponse) string {
-	if msg := event.GetMessage(); msg != nil {
-		for _, part := range msg.Parts {
-			if t := part.TextContent(); t != "" {
-				return t
-			}
-		}
-	}
-	if task := event.GetTask(); task != nil {
+	switch {
+	case resp.GetTask() != nil:
+		task := resp.GetTask()
+		fmt.Printf("final task: state=%s\n", task.Status.State)
 		if task.Status.Message != nil {
-			for _, part := range task.Status.Message.Parts {
-				if t := part.TextContent(); t != "" {
-					return t
-				}
-			}
+			fmt.Printf("  status message: %s\n", firstText(task.Status.Message.Parts))
+		}
+		for _, artifact := range task.Artifacts {
+			fmt.Printf("  artifact: %s\n", firstText(artifact.Parts))
+		}
+	case resp.GetMessage() != nil:
+		// The pure-message path (e.g. the server's input-validation reply).
+		fmt.Printf("message reply: %s\n", firstText(resp.GetMessage().Parts))
+	}
+	fmt.Println()
+}
+
+// demoReturnImmediately: the non-blocking variant of message/send — returns
+// the first persisted task snapshot right away; the result is collected later
+// via GetTasks (or SubscribeToTask).
+func demoReturnImmediately(c *client.A2AClient) {
+	fmt.Println("=== message/send (returnImmediately + poll) ===")
+	returnImmediately := true
+	resp, err := c.SendMessage(context.Background(), protocol.SendMessageParams{
+		Message: newUserMessage("Hello world!"),
+		Configuration: &protocol.SendMessageConfiguration{
+			ReturnImmediately: &returnImmediately,
+		},
+	})
+	if err != nil {
+		log.Fatalf("SendMessage failed: %v", err)
+	}
+	task := resp.GetTask()
+	if task == nil {
+		log.Fatalf("Expected an immediate task snapshot, got %+v", resp)
+	}
+	fmt.Printf("immediate snapshot: state=%s\n", task.Status.State)
+
+	// Poll for the final state (a real client might resubscribe instead).
+	time.Sleep(100 * time.Millisecond)
+	final, err := c.GetTasks(context.Background(), protocol.TaskQueryParams{ID: task.ID})
+	if err != nil {
+		log.Fatalf("GetTasks failed: %v", err)
+	}
+	fmt.Printf("after poll: state=%s artifacts=%d\n\n", final.Status.State, len(final.Artifacts))
+}
+
+// demoStreaming: the same request via message/stream — every event as it
+// happens; the channel closes when the round ends.
+func demoStreaming(c *client.A2AClient) {
+	fmt.Println("=== message/stream (streaming) ===")
+	events, err := c.StreamMessage(context.Background(), protocol.SendMessageParams{
+		Message: newUserMessage("Hello world!"),
+	})
+	if err != nil {
+		log.Fatalf("StreamMessage failed: %v", err)
+	}
+
+	for event := range events {
+		switch {
+		case event.GetStatusUpdate() != nil:
+			fmt.Printf("status: %s\n", event.GetStatusUpdate().Status.State)
+		case event.GetArtifactUpdate() != nil:
+			fmt.Printf("artifact: %s\n", firstText(event.GetArtifactUpdate().Artifact.Parts))
+		case event.GetMessage() != nil:
+			fmt.Printf("message: %s\n", firstText(event.GetMessage().Parts))
+		case event.GetTask() != nil:
+			// Task snapshot frames (e.g. the first frame of a resubscribe).
+			fmt.Printf("task snapshot: %s\n", event.GetTask().Status.State)
 		}
 	}
-	if au := event.GetArtifactUpdate(); au != nil {
-		for _, part := range au.Artifact.Parts {
-			if t := part.TextContent(); t != "" {
-				return t
-			}
+	fmt.Println("stream closed (round ended)")
+}
+
+// newUserMessage builds a user text message.
+func newUserMessage(text string) protocol.Message {
+	return protocol.NewMessage(
+		protocol.MessageRoleUser,
+		[]*protocol.Part{protocol.NewTextPart(text)},
+	)
+}
+
+// firstText extracts the first text content from parts.
+func firstText(parts []*protocol.Part) string {
+	for _, part := range parts {
+		if t := part.TextContent(); t != "" {
+			return t
 		}
 	}
 	return ""
-}
-
-func printPartContent(prefix string, i int, part *protocol.Part) {
-	switch c := part.Content.(type) {
-	case protocol.Text:
-		log.Infof("%sPart %d (text): %s", prefix, i+1, string(c))
-	case protocol.URL:
-		log.Infof("%sPart %d (url): %s", prefix, i+1, string(c))
-	case protocol.Data:
-		log.Infof("%sPart %d (data): %+v", prefix, i+1, c.Value)
-	default:
-		log.Infof("%sPart %d (unknown): %+v", prefix, i+1, part)
-	}
-}
-
-// printMessage prints the contents of a message.
-func printMessage(message protocol.Message) {
-	log.Infof("Message ID: %s", message.MessageID)
-	if message.ContextID != nil {
-		log.Infof("Context ID: %s", *message.ContextID)
-	}
-	log.Infof("Role: %s", message.Role)
-
-	log.Infof("Message parts:")
-	for i, part := range message.Parts {
-		printPartContent("  ", i, part)
-	}
-}
-
-// printTaskResult prints the contents of a task result.
-func printTaskResult(task *protocol.Task) {
-	if task.Status.Message != nil {
-		log.Infof("Task result message:")
-		printMessage(*task.Status.Message)
-	}
-
-	if len(task.Artifacts) > 0 {
-		log.Infof("Task artifacts:")
-		for i, artifact := range task.Artifacts {
-			name := "Unnamed"
-			if artifact.Name != nil {
-				name = *artifact.Name
-			}
-			log.Infof("  Artifact %d: %s", i+1, name)
-			for j, part := range artifact.Parts {
-				printPartContent("    ", j, part)
-			}
-		}
-	}
-}
-
-// boolPtr returns a pointer to a boolean value.
-func boolPtr(b bool) *bool {
-	return &b
 }
