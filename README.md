@@ -9,6 +9,8 @@
 
 This is tRPC group's Go implementation of the [A2A protocol](https://google.github.io/A2A/), enabling different AI agents to discover and collaborate with each other.
 
+> **Note:** The A2A protocol **v1.0** implementation (Go module `trpc.group/trpc-go/trpc-a2a-go/v2`) is developed on the [`v2`](https://github.com/trpc-group/trpc-a2a-go/tree/v2) branch. This `main` branch is the A2A protocol **v0.x** line (`trpc.group/trpc-go/trpc-a2a-go`).
+
 ## Related Projects
 
 tRPC AI ecosystem
@@ -32,7 +34,7 @@ tRPC AI ecosystem
 - [Future Enhancements](#future-enhancements)
 - [Contributing](#contributing)
 - [Acknowledgements](#acknowledgements)
-- [Copyright](#copyright)
+- [License](#license)
 
 ## Quick Start
 
@@ -582,6 +584,6 @@ Contributions and improvement suggestions are welcome! Please ensure your code f
 
 This project's protocol design is based on Google's open-source A2A protocol ([original repository](https://github.com/google/A2A)), following the Apache 2.0 license. This is an unofficial implementation.
 
-## Copyright
+## License
 
-The copyright notice pertaining to the Tencent code in this repo was previously in the name of “THL A29 Limited.”  That entity has now been de-registered.  You should treat all previously distributed copies of the code as if the copyright notice was in the name of “Tencent.”
+Licensed under the **Apache 2.0 License** - see [LICENSE](LICENSE) file for details.
