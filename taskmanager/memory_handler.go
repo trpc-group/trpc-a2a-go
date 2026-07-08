@@ -298,13 +298,16 @@ func (h *memoryTaskHandler) CleanTask(taskID *string) error {
 	task.Cancel()
 	delete(h.manager.Tasks, *taskID)
 
-	// Clean up subscribers while holding the lock to avoid another lock acquisition
-	for _, sub := range h.manager.Subscribers[*taskID] {
-		sub.Close()
-	}
+	// Collect subscribers under the lock but close them after releasing it, so a
+	// stuck blocking send can never wedge taskMu (mirrors cleanExpiredTasks).
+	subsToClose := h.manager.Subscribers[*taskID]
 	delete(h.manager.Subscribers, *taskID)
 
 	h.manager.taskMu.Unlock()
+
+	for _, sub := range subsToClose {
+		sub.Close()
+	}
 
 	// Drop any push notification config for the task. Guarded by the
 	// manager-wide mu, consistent with OnPushNotificationSet/Get and
