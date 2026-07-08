@@ -104,7 +104,7 @@ func (p *creativeWritingProcessor) ProcessMessage(
 		log.Error("Message processing failed: %s", errMsg)
 
 		// Reply with the error message directly
-		handle.Reply(taskmanager.ReplyText(errMsg))
+		handle.Reply(protocol.NewAgentText(errMsg))
 		return handle.Events(), nil
 	}
 
@@ -139,7 +139,7 @@ func (p *creativeWritingProcessor) ProcessMessage(
 		errorMsg := fmt.Sprintf("Failed to generate response: %v", err)
 		log.Error("Message processing failed: %s", errorMsg)
 
-		handle.Reply(taskmanager.ReplyText(errorMsg))
+		handle.Reply(protocol.NewAgentText(errorMsg))
 		return handle.Events(), nil
 	}
 
@@ -148,7 +148,7 @@ func (p *creativeWritingProcessor) ProcessMessage(
 	p.cache.AddMessage(sessionID, fmt.Sprintf("Assistant: %s", response))
 
 	// Reply with the generated text
-	handle.Reply(taskmanager.ReplyText(response))
+	handle.Reply(protocol.NewAgentText(response))
 	return handle.Events(), nil
 }
 

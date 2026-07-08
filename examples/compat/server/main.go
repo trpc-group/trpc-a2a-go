@@ -51,7 +51,7 @@ func (p *reverseProcessor) ProcessMessage(
 	text := extractText(ec.Message)
 	if text == "" {
 		// A pure message reply: no task comes into existence this round.
-		handle.Reply(taskmanager.ReplyText("input message must contain text"))
+		handle.Reply(protocol.NewAgentText("input message must contain text"))
 		handle.Close()
 		return handle.Events(), nil
 	}
@@ -79,7 +79,7 @@ func (p *reverseProcessor) ProcessMessage(
 			Parts:      []*protocol.Part{protocol.NewTextPart(result)},
 		}, true)
 		handle.UpdateTaskState(protocol.TaskStateCompleted,
-			taskmanager.ReplyText(fmt.Sprintf("Reversed: %s", result)))
+			protocol.NewAgentText(fmt.Sprintf("Reversed: %s", result)))
 	}()
 	return handle.Events(), nil
 }

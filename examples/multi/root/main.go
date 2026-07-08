@@ -51,7 +51,7 @@ func (p *rootAgentProcessor) ProcessMessage(
 		log.Error("Message processing failed: %s", errMsg)
 
 		// Reply with the error message directly
-		handle.Reply(taskmanager.ReplyText(errMsg))
+		handle.Reply(protocol.NewAgentText(errMsg))
 		return handle.Events(), nil
 	}
 
@@ -61,7 +61,7 @@ func (p *rootAgentProcessor) ProcessMessage(
 	subagent, err := p.routeTaskToSubagent(ctx, text)
 	if err != nil {
 		log.Error("Error routing task: %v", err)
-		handle.Reply(taskmanager.ReplyText(fmt.Sprintf("Failed to process your request: %v", err)))
+		handle.Reply(protocol.NewAgentText(fmt.Sprintf("Failed to process your request: %v", err)))
 		return handle.Events(), nil
 	}
 
@@ -87,12 +87,12 @@ func (p *rootAgentProcessor) ProcessMessage(
 
 	if err != nil {
 		log.Error("Error from subagent: %v", err)
-		handle.Reply(taskmanager.ReplyText(fmt.Sprintf("Failed to get response from subagent: %v", err)))
+		handle.Reply(protocol.NewAgentText(fmt.Sprintf("Failed to get response from subagent: %v", err)))
 		return handle.Events(), nil
 	}
 
 	// Reply with the aggregated subagent response
-	handle.Reply(taskmanager.ReplyText(result))
+	handle.Reply(protocol.NewAgentText(result))
 	return handle.Events(), nil
 }
 

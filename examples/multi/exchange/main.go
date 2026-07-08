@@ -69,7 +69,7 @@ func (p *exchangeProcessor) ProcessMessage(
 		log.Error("Message processing failed: %s", errMsg)
 
 		// Reply with the error message directly
-		handle.Reply(taskmanager.ReplyText(errMsg))
+		handle.Reply(protocol.NewAgentText(errMsg))
 		return handle.Events(), nil
 	}
 
@@ -132,7 +132,7 @@ func (p *exchangeProcessor) ProcessMessage(
 		completion, err := llms.GenerateFromSinglePrompt(ctx, p.llm, prompt)
 		if err == nil && !strings.Contains(strings.ToLower(completion), "exchange rate") {
 			// The LLM indicated this wasn't about exchange rates
-			handle.Reply(taskmanager.ReplyText(completion))
+			handle.Reply(protocol.NewAgentText(completion))
 			return handle.Events(), nil
 		}
 	}
@@ -141,7 +141,7 @@ func (p *exchangeProcessor) ProcessMessage(
 	result, err := getExchangeRate(fromCurrency, toCurrency, date)
 	if err != nil {
 		log.Error("Exchange rate error: %v", err)
-		handle.Reply(taskmanager.ReplyText(fmt.Sprintf("Error processing request: %v", err)))
+		handle.Reply(protocol.NewAgentText(fmt.Sprintf("Error processing request: %v", err)))
 		return handle.Events(), nil
 	}
 
@@ -152,7 +152,7 @@ func (p *exchangeProcessor) ProcessMessage(
 	log.Info("Responding with: %s", finalResponse)
 
 	// Reply with the formatted result
-	handle.Reply(taskmanager.ReplyText(finalResponse))
+	handle.Reply(protocol.NewAgentText(finalResponse))
 	return handle.Events(), nil
 }
 

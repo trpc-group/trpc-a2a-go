@@ -42,7 +42,7 @@ func (e *simpleMessageProcessor) ProcessMessage(
 		text := extractText(ec.Message)
 		if text == "" {
 			// A pure-message reply: no task comes into existence for this round.
-			out <- taskmanager.ReplyText("input message must contain text.")
+			out <- protocol.NewAgentText("input message must contain text.")
 			return
 		}
 
@@ -69,7 +69,7 @@ func (e *simpleMessageProcessor) ProcessMessage(
 		out <- &protocol.TaskStatusUpdateEvent{
 			Status: protocol.TaskStatus{
 				State:   protocol.TaskStateCompleted,
-				Message: taskmanager.ReplyText(fmt.Sprintf("Processed result: %s", result)),
+				Message: protocol.NewAgentText(fmt.Sprintf("Processed result: %s", result)),
 			},
 		}
 	}()

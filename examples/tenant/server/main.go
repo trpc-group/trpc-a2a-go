@@ -87,9 +87,9 @@ func (p *multiAgentProcessor) ProcessMessage(
 
 	switch ec.Tenant {
 	case "chatAgent":
-		handle.Reply(taskmanager.ReplyText("Hello from chat agent!"))
+		handle.Reply(protocol.NewAgentText("Hello from chat agent!"))
 	case "workerAgent":
-		handle.Reply(taskmanager.ReplyText("Hello from worker agent!"))
+		handle.Reply(protocol.NewAgentText("Hello from worker agent!"))
 	default:
 		// Returning an error means the round failed to start: it is mapped to
 		// a JSON-RPC error, no task comes into existence.

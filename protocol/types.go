@@ -548,6 +548,14 @@ func NewMessageWithContext(role MessageRole, parts []*Part, taskID, contextID *s
 	}
 }
 
+// NewAgentText creates an agent-role Message carrying a single text part. It is
+// a shorthand for building the status or reply messages an agent emits from a
+// plain string.
+func NewAgentText(text string) *Message {
+	message := NewMessage(MessageRoleAgent, []*Part{NewTextPart(text)})
+	return &message
+}
+
 // NewArtifactWithID creates a new Artifact with a generated ID.
 func NewArtifactWithID(name, description *string, parts []*Part) *Artifact {
 	return &Artifact{
