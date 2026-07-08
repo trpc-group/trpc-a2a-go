@@ -10,4 +10,5 @@ test_output.txt
 *jwt-secret.key*
 
 !CODEOWNERS
+!NOTICE
 .idea/
