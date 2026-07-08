@@ -4,12 +4,11 @@
 //
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
-// Package main implements a simple A2A server example. Instead of hand-writing a
-// MessageProcessor, it drives the server from a mock agent (examples/util) whose
-// interface mirrors trpc-agent-go's agent.Agent: util.NewMessageProcessor adapts
-// the agent's event stream onto the A2A task lifecycle, and the framework owns
-// task creation, persistence and fan-out. One code path serves both
-// message/send and message/stream.
+// Package main runs an A2A server whose work takes a little time, so a client
+// can send a message, get the task id back immediately (returnImmediately), and
+// then collect the result later via tasks/get (polling) or tasks/resubscribe
+// (streaming). The processing logic is a mock agent (examples/util) whose
+// interface mirrors trpc-agent-go's agent.Agent.
 package main
 
 import (
@@ -17,7 +16,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/examples/util"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
@@ -25,45 +26,29 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
 
-// newAgent builds the mock agent backing this server: it reverses the input
-// text and returns it as a single reply.
+// newAgent builds a mock agent that takes a couple of seconds to finish, so the
+// send-then-collect flow is observable. It uppercases the input and streams it
+// back in chunks with a delay between them.
 func newAgent() util.Agent {
 	return util.NewMockAgent(
 		func(input string) []string {
-			return []string{reverseString(input)}
+			return util.Chunk(strings.ToUpper(input), 8)
 		},
+		util.WithChunkDelay(500*time.Millisecond),
 	)
 }
 
-// reverseString reverses a string.
-func reverseString(s string) string {
-	runes := []rune(s)
-	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
-		runes[i], runes[j] = runes[j], runes[i]
-	}
-	return string(runes)
-}
-
-// Helper function to create string pointers.
-func stringPtr(s string) *string {
-	return &s
-}
-
-// Helper function to create bool pointers.
-func boolPtr(b bool) *bool {
-	return &b
-}
+func stringPtr(s string) *string { return &s }
+func boolPtr(b bool) *bool       { return &b }
 
 func main() {
-	// Parse command-line flags.
 	host := flag.String("host", "localhost", "Host to listen on")
-	port := flag.Int("port", 8080, "Port to listen on")
+	port := flag.Int("port", 8082, "Port to listen on")
 	flag.Parse()
 
-	// Create the agent card.
 	agentCard := server.AgentCard{
-		Name:        "Simple A2A Example Server",
-		Description: "A simple example A2A server that reverses text",
+		Name:        "Task Result Example Server",
+		Description: "Runs a slow task so clients can fetch its result via tasks/get or tasks/resubscribe",
 		URL:         fmt.Sprintf("http://%s:%d/", *host, *port),
 		Version:     "1.0.0",
 		Provider: &server.AgentProvider{
@@ -79,44 +64,38 @@ func main() {
 		DefaultOutputModes: []string{"text"},
 		Skills: []server.AgentSkill{
 			{
-				ID:          "text_reversal",
-				Name:        "Text Reversal",
-				Description: stringPtr("Reverses the input text"),
-				Tags:        []string{"text", "processing"},
-				Examples:    []string{"Hello, world!"},
+				ID:          "slow_uppercase",
+				Name:        "Slow Uppercase",
+				Description: stringPtr("Uppercases text over a few seconds"),
+				Tags:        []string{"text", "async"},
+				Examples:    []string{"hello world"},
 				InputModes:  []string{"text"},
 				OutputModes: []string{"text"},
 			},
 		},
 	}
 
-	// Adapt the mock agent into a MessageProcessor and inject it into a task manager.
-	// (redis.NewTaskManager accepts the same MessageProcessor for persistent storage.)
 	taskManager, err := memory.NewTaskManager(util.NewMessageProcessor(newAgent()))
 	if err != nil {
 		log.Fatalf("Failed to create task manager: %v", err)
 	}
 
-	// Create the server.
 	srv, err := server.NewA2AServer(taskManager, server.WithAgentCard(agentCard))
 	if err != nil {
 		log.Fatalf("Failed to create server: %v", err)
 	}
 
-	// Set up a channel to listen for termination signals.
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start the server in a goroutine.
 	go func() {
 		serverAddr := fmt.Sprintf("%s:%d", *host, *port)
-		log.Infof("Starting server on %s...", serverAddr)
+		log.Infof("Starting task-result server on %s...", serverAddr)
 		if err := srv.Start(serverAddr); err != nil {
 			log.Fatalf("Server failed: %v", err)
 		}
 	}()
 
-	// Wait for termination signal.
 	sig := <-sigChan
 	log.Infof("Received signal %v, shutting down...", sig)
 }
