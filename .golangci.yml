@@ -1,8 +1,6 @@
 linters-settings:
   gocyclo:
     min-complexity: 20
-  goliddjoijnt:
-    min-confidence: 0
   revive:
     rules:
       - name: package-comments
