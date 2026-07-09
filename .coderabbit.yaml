@@ -1,0 +1,61 @@
+# yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+#
+# CodeRabbit AI code review configuration.
+# This file only customizes review behavior. Enabling CodeRabbit itself is done
+# by installing the CodeRabbit GitHub App on the repository/organization; no CI
+# workflow is required.
+
+language: en-US
+
+reviews:
+  # "chill" keeps a balanced signal-to-noise ratio; switch to "assertive" for
+  # stricter nitpicks or "quiet" for the minimum.
+  profile: chill
+  # Post comments only; do not formally block merges with "changes requested".
+  request_changes_workflow: false
+  high_level_summary: true
+  review_status: true
+  collapse_walkthrough: true
+  # Skip the auto-generated poem for a cleaner PR thread.
+  poem: false
+
+  auto_review:
+    enabled: true
+    # Do not spend reviews on draft PRs.
+    drafts: false
+
+  # Do not review generated code (mirrors .golangci.yml and .typos.toml).
+  path_filters:
+    - "!**/*.pb.go"
+    - "!**/*_mock.go"
+    - "!**/*.gen.go"
+    - "!**/*.trpc.go"
+    - "!**/*_string.go"
+    - "!go.sum"
+
+  path_instructions:
+    - path: "**/*.go"
+      instructions: >-
+        Follow the rules in .golangci.yml. Flag exported identifiers that lack a
+        doc comment (revive/exported), potential security issues (gosec), and
+        functions whose cyclomatic complexity exceeds 20 (gocyclo). Prefer
+        concrete, actionable suggestions over pure style nitpicks.
+
+  tools:
+    # Reuse the repo's existing linter config so CodeRabbit and CI stay aligned.
+    golangci-lint:
+      enabled: true
+      config_file: .golangci.yml
+    # Wait for and incorporate existing CI check results (build/test/lint).
+    github-checks:
+      enabled: true
+    # Secret scanning on changed files.
+    gitleaks:
+      enabled: true
+    # Lint the GitHub Actions workflows themselves.
+    actionlint:
+      enabled: true
+
+chat:
+  # Let contributors talk to CodeRabbit without @-mentioning it every time.
+  auto_reply: true
