@@ -177,13 +177,18 @@ func TestMemoryTaskHandler_GetTask(t *testing.T) {
 }
 
 func TestMemoryTaskHandler_CleanTask(t *testing.T) {
-	handler, _ := setupTestHandler(t)
+	handler, manager := setupTestHandler(t)
 
 	// First create a task
 	taskID, err := handler.BuildTask(nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}
+
+	// Register a push notification config so we can verify it is also cleaned.
+	manager.mu.Lock()
+	manager.PushNotifications[taskID] = protocol.TaskPushNotificationConfig{TaskID: taskID}
+	manager.mu.Unlock()
 
 	// Clean the task
 	err = handler.CleanTask(&taskID)
@@ -195,6 +200,15 @@ func TestMemoryTaskHandler_CleanTask(t *testing.T) {
 	_, err = handler.GetTask(&taskID)
 	if err == nil {
 		t.Error("Expected error when getting cleaned task, but got none")
+	}
+
+	// Verify the push notification config was cleaned too (no leak on the
+	// manual cleanup path).
+	manager.mu.RLock()
+	_, pushExists := manager.PushNotifications[taskID]
+	manager.mu.RUnlock()
+	if pushExists {
+		t.Error("Expected push notification config to be cleaned, but it still exists")
 	}
 }
 

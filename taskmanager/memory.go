@@ -22,7 +22,12 @@ import (
 const defaultMaxHistoryLength = 100
 const defaultCleanupInterval = 30 * time.Second
 const defaultConversationTTL = 1 * time.Hour
-const defaultTaskTTL = 0
+
+// defaultTaskTTL bounds how long a task in a terminal state is retained before
+// it is reaped automatically. A non-zero default means forgetting to call
+// TaskHandler.CleanTask bounds memory instead of leaking it, mirroring the
+// redis backend's key expiration. Set WithTaskTTL(0) to disable.
+const defaultTaskTTL = 1 * time.Hour
 const defaultSubscriberBufferSize = 1024
 
 // ConversationHistory stores conversation history information

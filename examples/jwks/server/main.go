@@ -98,7 +98,7 @@ func (p *pushNotificationMessageProcessor) ProcessMessage(
 	}
 
 	// Start asynchronous processing
-	go p.processTaskAsync(ctx, taskID, payload, subscriber)
+	go p.processTaskAsync(ctx, handle, taskID, payload, subscriber)
 
 	return &taskmanager.MessageProcessingResult{
 		StreamingEvents: subscriber,
@@ -129,6 +129,7 @@ func (p *pushNotificationMessageProcessor) processDirectly(
 // processTaskAsync handles the actual task processing in a separate goroutine.
 func (p *pushNotificationMessageProcessor) processTaskAsync(
 	ctx context.Context,
+	handle taskmanager.TaskHandler,
 	taskID string,
 	payload map[string]interface{},
 	subscriber taskmanager.TaskSubscriber,
@@ -137,6 +138,12 @@ func (p *pushNotificationMessageProcessor) processTaskAsync(
 		if subscriber != nil {
 			subscriber.Close()
 		}
+		// Release the task now that async processing is complete. This example
+		// drives status through the subscriber instead of UpdateTaskState, so
+		// the stored task never reaches a terminal state and the TaskTTL reaper
+		// (terminal-only) would not collect it — explicit cleanup is required
+		// here to avoid leaking the task.
+		handle.CleanTask(&taskID)
 	}()
 
 	log.Infof("Starting async processing of task: %s", taskID)

@@ -8,7 +8,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -134,30 +133,10 @@ func (p *reimbursementProcessor) ProcessMessage(
 		[]protocol.Part{protocol.NewTextPart(result)},
 	)
 
-	// Create result with potential artifact for completed requests
-	processingResult := &taskmanager.MessageProcessingResult{
+	// Return the reimbursement result as a message.
+	return &taskmanager.MessageProcessingResult{
 		Result: &responseMessage,
-	}
-
-	// Add artifact for completed reimbursement requests
-	if len(missing) == 0 {
-		// Build task to get artifact support
-		task, err := handle.BuildTask(nil, nil)
-		if err == nil {
-			// Create reimbursement details artifact
-			reimbursementJSON, _ := json.Marshal(reimbursement)
-			artifact := protocol.Artifact{
-				ArtifactID:  fmt.Sprintf("reimb-%s", reimbursement["request_id"]),
-				Name:        stringPtr("Reimbursement Details"),
-				Description: stringPtr(fmt.Sprintf("Processed reimbursement request %s", reimbursement["request_id"])),
-				Parts:       []protocol.Part{protocol.NewTextPart(string(reimbursementJSON))},
-			}
-
-			_ = handle.AddArtifact(&task, artifact, true, false)
-		}
-	}
-
-	return processingResult, nil
+	}, nil
 }
 
 // newReimbursementProcessor creates a new reimbursement processor

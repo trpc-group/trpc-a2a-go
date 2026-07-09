@@ -277,7 +277,11 @@ func (h *memoryTaskHandler) BuildTask(specificTaskID *string, contextID *string)
 	return actualTaskID, nil
 }
 
-// CancelTask cancels the task.
+// CleanTask removes the task and all resources associated with it: the task
+// entry, its subscribers, and any push notification config. It should be called
+// when the task is no longer needed. Terminal tasks are also reaped
+// automatically after the configured TaskTTL, so a missed CleanTask bounds
+// memory rather than leaking it.
 func (h *memoryTaskHandler) CleanTask(taskID *string) error {
 	if taskID == nil || *taskID == "" {
 		return fmt.Errorf("taskID cannot be nil or empty")
@@ -294,13 +298,24 @@ func (h *memoryTaskHandler) CleanTask(taskID *string) error {
 	task.Cancel()
 	delete(h.manager.Tasks, *taskID)
 
-	// Clean up subscribers while holding the lock to avoid another lock acquisition
-	for _, sub := range h.manager.Subscribers[*taskID] {
-		sub.Close()
-	}
+	// Collect subscribers under the lock but close them after releasing it, so a
+	// stuck blocking send can never wedge taskMu (mirrors cleanExpiredTasks).
+	subsToClose := h.manager.Subscribers[*taskID]
 	delete(h.manager.Subscribers, *taskID)
 
 	h.manager.taskMu.Unlock()
+
+	for _, sub := range subsToClose {
+		sub.Close()
+	}
+
+	// Drop any push notification config for the task. Guarded by the
+	// manager-wide mu, consistent with OnPushNotificationSet/Get and
+	// cleanExpiredTasks. Without this the config leaks even on the manual
+	// cleanup path.
+	h.manager.mu.Lock()
+	delete(h.manager.PushNotifications, *taskID)
+	h.manager.mu.Unlock()
 
 	return nil
 }

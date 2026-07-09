@@ -1042,8 +1042,11 @@ func TestMemoryTaskManager_Close_Idempotent(t *testing.T) {
 func TestWithTaskTTL(t *testing.T) {
 	opts := DefaultMemoryTaskManagerOptions()
 
-	if opts.TaskTTL != 0 {
-		t.Errorf("Expected default TaskTTL=0 (disabled), got %v", opts.TaskTTL)
+	if opts.TaskTTL != time.Hour {
+		t.Errorf("Expected default TaskTTL=1h, got %v", opts.TaskTTL)
+	}
+	if !opts.EnableCleanup {
+		t.Error("Expected default options to enable cleanup so the default TaskTTL takes effect")
 	}
 
 	// A positive TTL also enables the cleanup goroutine, mirroring WithConversationTTL.
