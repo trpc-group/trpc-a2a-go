@@ -7,8 +7,7 @@
 // Package main runs an A2A server whose work takes a little time, so a client
 // can send a message, get the task id back immediately (returnImmediately), and
 // then collect the result later via tasks/get (polling) or tasks/resubscribe
-// (streaming). The processing logic is a mock agent (examples/util) whose
-// interface mirrors trpc-agent-go's agent.Agent.
+// (streaming). The processing logic is a mock agent (examples/util).
 package main
 
 import (

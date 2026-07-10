@@ -4,10 +4,9 @@ Demonstrates collecting a task's result **after** a non-blocking send: the
 client sends a message with `returnImmediately=true`, gets the task id back
 right away while the agent keeps working, and then fetches the result two ways.
 
-The server's processing logic is a mock agent from [`examples/util`](../util),
-whose interface mirrors trpc-agent-go's `agent.Agent`. It uppercases the input
-and streams it in chunks over a few seconds, so the task stays in the working
-state long enough to observe the collection flow.
+The server's processing logic is a mock agent from [`examples/util`](../util).
+It uppercases the input and streams it in chunks over a few seconds, so the
+task stays in the working state long enough to observe the collection flow.
 
 ## Run
 

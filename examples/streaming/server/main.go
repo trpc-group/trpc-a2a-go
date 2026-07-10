@@ -5,12 +5,11 @@
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
 // Package main implements a streaming A2A server example. The processing logic
-// is a mock agent (examples/util) whose interface mirrors trpc-agent-go's
-// agent.Agent: it splits the input into chunks, reverses each, and emits them
-// with a delay to simulate real-time streaming. util.NewMessageProcessor maps
-// that event stream onto the task lifecycle, so the same code serves
-// message/send (which waits for the final snapshot) and message/stream (which
-// relays every chunk as it happens).
+// is a mock agent (examples/util): it splits the input into chunks, reverses
+// each, and emits them with a delay to simulate real-time streaming.
+// util.NewMessageProcessor maps that event stream onto the task lifecycle, so
+// the same code serves message/send (which waits for the final snapshot) and
+// message/stream (which relays every chunk as it happens).
 package main
 
 import (

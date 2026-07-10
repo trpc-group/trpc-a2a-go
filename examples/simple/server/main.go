@@ -5,11 +5,10 @@
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
 // Package main implements a simple A2A server example. Instead of hand-writing a
-// MessageProcessor, it drives the server from a mock agent (examples/util) whose
-// interface mirrors trpc-agent-go's agent.Agent: util.NewMessageProcessor adapts
-// the agent's event stream onto the A2A task lifecycle, and the framework owns
-// task creation, persistence and fan-out. One code path serves both
-// message/send and message/stream.
+// MessageProcessor, it drives the server from a mock agent (examples/util):
+// util.NewMessageProcessor adapts the agent's event stream onto the A2A task
+// lifecycle, and the framework owns task creation, persistence and fan-out.
+// One code path serves both message/send and message/stream.
 package main
 
 import (

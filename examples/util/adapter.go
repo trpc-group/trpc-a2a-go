@@ -22,8 +22,7 @@ import (
 //     a working-state progress update, and the final event becomes an artifact
 //     plus a completed status carrying the full reply.
 //
-// This is the reusable bridge the examples use to drive A2A from an agent — the
-// same shape a real trpc-agent-go adapter would take.
+// This is the reusable bridge the examples use to drive A2A from an agent.
 func NewMessageProcessor(agent Agent) taskmanager.MessageProcessor {
 	return &agentProcessor{agent: agent}
 }
