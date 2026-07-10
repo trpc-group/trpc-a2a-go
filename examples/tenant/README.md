@@ -104,9 +104,9 @@ func (p *multiAgentProcessor) ProcessMessage(
     defer handle.Close()
     switch ec.Tenant {
     case "chatAgent":
-        handle.Reply(taskmanager.ReplyText("Hello from chat agent!"))
+        handle.Reply(protocol.NewAgentText("Hello from chat agent!"))
     case "workerAgent":
-        handle.Reply(taskmanager.ReplyText("Hello from worker agent!"))
+        handle.Reply(protocol.NewAgentText("Hello from worker agent!"))
     default:
         return nil, fmt.Errorf("no such tenant %q", ec.Tenant)
     }
