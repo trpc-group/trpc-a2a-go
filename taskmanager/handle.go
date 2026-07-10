@@ -155,15 +155,39 @@ func (h *TaskHandle) emit(event protocol.StreamEvent) error {
 	}
 }
 
+// UpdateOption configures a status event emitted by UpdateTaskState.
+type UpdateOption func(*updateOptions)
+
+// updateOptions holds the optional fields UpdateTaskState may set on the event.
+type updateOptions struct {
+	metadata map[string]any
+}
+
+// WithStatusMetadata attaches metadata to the emitted TaskStatusUpdateEvent.
+// The A2A TaskStatus itself carries no metadata field (only state/message/
+// timestamp), so status-level metadata belongs on the event; this is the
+// supported way to set it without hand-building the event on the raw channel.
+func WithStatusMetadata(metadata map[string]any) UpdateOption {
+	return func(o *updateOptions) { o.metadata = metadata }
+}
+
 // UpdateTaskState emits a status event for this round's task
 // (former TaskHandler.UpdateTaskState; no taskID argument — one round drives
 // exactly its own task, and the framework stamps the IDs). The state drives
 // the round's lifecycle: completed/failed/canceled/rejected are terminal, and
 // input-required/auth-required suspend the task awaiting a follow-up message
 // (the framework calls ProcessMessage again with ExecContext.Task set).
-func (h *TaskHandle) UpdateTaskState(state protocol.TaskState, message *protocol.Message) error {
+//
+// Options attach event-level fields such as metadata (see WithStatusMetadata);
+// callers that need none pass no options.
+func (h *TaskHandle) UpdateTaskState(state protocol.TaskState, message *protocol.Message, opts ...UpdateOption) error {
+	var o updateOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	return h.emit(&protocol.TaskStatusUpdateEvent{
-		Status: protocol.TaskStatus{State: state, Message: message},
+		Status:   protocol.TaskStatus{State: state, Message: message},
+		Metadata: o.metadata,
 	})
 }
 

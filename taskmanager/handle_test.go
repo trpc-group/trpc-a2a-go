@@ -179,3 +179,40 @@ func TestTaskHandle_EmitSucceedsAfterCancel(t *testing.T) {
 		t.Fatalf("buffered live emit after cancel must succeed, got %v", err)
 	}
 }
+
+// WithStatusMetadata attaches metadata to the emitted status event; omitting it
+// leaves the event's metadata nil (backward compatible).
+func TestTaskHandle_UpdateTaskStateMetadata(t *testing.T) {
+	h := NewTaskHandle(context.Background(), &ExecContext{TaskID: "task-1"})
+	md := map[string]any{"progress": 0.5, "stage": "retrieval"}
+	if err := h.UpdateTaskState(protocol.TaskStateWorking, nil, WithStatusMetadata(md)); err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	if err := h.UpdateTaskState(protocol.TaskStateCompleted, nil); err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	events := h.Events()
+	h.Close()
+
+	var withMD, withoutMD *protocol.TaskStatusUpdateEvent
+	for event := range events {
+		su, ok := event.(*protocol.TaskStatusUpdateEvent)
+		if !ok {
+			continue
+		}
+		if su.Status.State == protocol.TaskStateWorking {
+			withMD = su
+		} else {
+			withoutMD = su
+		}
+	}
+	if withMD == nil || withoutMD == nil {
+		t.Fatalf("expected both status events, got %v / %v", withMD, withoutMD)
+	}
+	if withMD.Metadata["progress"] != 0.5 || withMD.Metadata["stage"] != "retrieval" {
+		t.Errorf("status event metadata = %v, want %v", withMD.Metadata, md)
+	}
+	if withoutMD.Metadata != nil {
+		t.Errorf("expected nil metadata without the option, got %v", withoutMD.Metadata)
+	}
+}
