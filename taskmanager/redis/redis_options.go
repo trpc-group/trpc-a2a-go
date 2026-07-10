@@ -31,6 +31,14 @@ type TaskManagerOptions struct {
 	// enabled by either a Sender for automatic delivery or ManualDelivery for
 	// application-owned delivery.
 	Push push.Config
+
+	// ResubscribeStreaming, when true, mirrors each task's events onto a per-task
+	// Redis stream and serves OnResubscribe by tailing that stream. This makes
+	// tasks/resubscribe work across instances (a reconnect landing on a different
+	// node than the one running the task), at the cost of one XADD per event.
+	// When false (default) resubscribe is served from the in-process subscriber
+	// map only — correct for single-instance deployments.
+	ResubscribeStreaming bool
 }
 
 // DefaultRedisTaskManagerOptions returns the default configuration options.
@@ -88,5 +96,15 @@ func WithTaskSubscriberBlockingSend(blockingSend bool) TaskManagerOption {
 func WithPushNotifications(cfg push.Config) TaskManagerOption {
 	return func(opts *TaskManagerOptions) {
 		opts.Push = cfg
+	}
+}
+
+// WithResubscribeStreaming enables cross-instance tasks/resubscribe by mirroring
+// each task's events onto a per-task Redis stream. Enable it when multiple server
+// instances share one Redis and a resubscribe may land on a different instance
+// than the one running the task.
+func WithResubscribeStreaming(enabled bool) TaskManagerOption {
+	return func(opts *TaskManagerOptions) {
+		opts.ResubscribeStreaming = enabled
 	}
 }

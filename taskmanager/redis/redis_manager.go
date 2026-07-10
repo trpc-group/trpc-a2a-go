@@ -33,6 +33,16 @@ const (
 	conversationPrefix     = "conv:"
 	taskPrefix             = "task:"
 	pushNotificationPrefix = "push:"
+	// streamPrefix keys the per-task event stream used for cross-node resubscribe.
+	streamPrefix = "stream:"
+	// streamField is the single XADD field carrying the JSON-encoded StreamResponse.
+	streamField = "e"
+	// streamMaxLen caps each task's event stream (XADD MAXLEN ~).
+	streamMaxLen = 10000
+	// streamReadCount caps entries returned per XREAD.
+	streamReadCount = 64
+	// streamBlockTimeout bounds one XREAD BLOCK slice so tailers re-check context.
+	streamBlockTimeout = 5 * time.Second
 
 	// Default expiration time for Redis keys (1 hour).
 	defaultExpiration = 1 * time.Hour
@@ -102,6 +112,13 @@ type TaskManager struct {
 	// nil when push is disabled or the agent selected manual delivery.
 	pushDispatcher *pushdispatch.Dispatcher
 
+	// tailerWg counts cross-node resubscribe tailer goroutines so Close joins
+	// them before closing the Redis client. baseCtx is canceled by Close to
+	// unpark a tailer parked in a blocking XREAD.
+	tailerWg   sync.WaitGroup
+	baseCtx    context.Context
+	baseCancel context.CancelFunc
+
 	// options
 	options *TaskManagerOptions
 }
@@ -152,6 +169,7 @@ func NewTaskManager(
 			manager.isCurrentPushRegistration,
 		)
 	}
+	manager.baseCtx, manager.baseCancel = context.WithCancel(context.Background())
 
 	return manager, nil
 }
@@ -693,6 +711,9 @@ func (m *TaskManager) OnResubscribe(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (<-chan protocol.StreamResponse, error) {
+	if m.options.ResubscribeStreaming {
+		return m.onResubscribeStreaming(ctx, params)
+	}
 	// The snapshot read happens OUTSIDE subMu: getTaskInternal is a network
 	// round-trip and subMu sits on every broadcast's fan-out path — holding it
 	// across a slow Redis call would stall every stream in the process.
@@ -759,6 +780,160 @@ func (m *TaskManager) OnResubscribe(
 	}()
 
 	return subscriber.Channel(), nil
+}
+
+// onResubscribeStreaming is the cross-node resubscribe path (opt-in via
+// WithResubscribeStreaming). The first frame is the current snapshot; a tailer
+// then replays the task's Redis event stream from the pre-snapshot cursor, so it
+// works even when the task's live execution runs on another instance.
+func (m *TaskManager) onResubscribeStreaming(
+	ctx context.Context,
+	params protocol.TaskIDParams,
+) (<-chan protocol.StreamResponse, error) {
+	// Capture the stream cursor BEFORE the snapshot so their union is gap-free:
+	// persist-before-publish means any event at or before this cursor is already
+	// in the snapshot, and any later one is replayed by the tailer.
+	startID := m.streamStartID(ctx, params.ID)
+
+	task, err := m.getTaskInternal(ctx, params.ID)
+	if err != nil {
+		return nil, err
+	}
+	// v1.0: subscribing to an already-terminal task is an error.
+	if isFinalState(task.Status.State) {
+		return nil, taskmanager.ErrUnsupportedOperation(
+			fmt.Sprintf("subscribe to task %s in terminal state %s", params.ID, task.Status.State))
+	}
+
+	subscriber := newTaskSubscriber(
+		params.ID,
+		m.options.TaskSubscriberBufSize,
+		m.options.TaskSubscriberBlockingSend,
+	)
+	// v1.0: the first stream event must be the current Task snapshot.
+	if err := subscriber.Send(protocol.NewStreamResponseTask(task)); err != nil {
+		subscriber.Close()
+		return nil, err
+	}
+
+	// The subscriber is NOT registered in the local map: the Redis stream is its
+	// only source, whose producer may be another instance. If the task went
+	// terminal between the cursor and the snapshot, its terminal frame is after
+	// the cursor, so the tailer delivers it and then closes.
+	m.tailerWg.Add(1)
+	go m.tailStream(ctx, params.ID, startID, subscriber)
+
+	return subscriber.Channel(), nil
+}
+
+// streamStartID captures the current tail of a task's event stream. Returns "0"
+// (from the beginning) for an empty/absent stream.
+func (m *TaskManager) streamStartID(ctx context.Context, taskID string) string {
+	msgs, err := m.client.XRevRangeN(ctx, streamPrefix+taskID, "+", "-", 1).Result()
+	if err != nil || len(msgs) == 0 {
+		return "0"
+	}
+	return msgs[0].ID
+}
+
+// tailStream feeds a resubscriber from the task's Redis event stream, reading
+// strictly after startID. It closes the subscriber and returns on the terminal
+// status frame, when the request ends, or when the manager closes.
+func (m *TaskManager) tailStream(ctx context.Context, taskID, startID string, sub *taskSubscriber) {
+	defer m.tailerWg.Done()
+	defer sub.Close()
+
+	// Cancel the blocking XREAD, and unblock a parked blocking-send via Close,
+	// when the request ends or the manager closes.
+	readCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	tailerDone := make(chan struct{})
+	defer close(tailerDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-m.baseCtx.Done():
+		case <-tailerDone:
+			return
+		}
+		cancel()
+		sub.Close()
+	}()
+
+	key := streamPrefix + taskID
+	for {
+		// A blocking XREAD is not interrupted mid-flight by context cancellation
+		// (only Close, via the client, unblocks it), so re-check between slices:
+		// on client disconnect this bounds teardown to one streamBlockTimeout.
+		select {
+		case <-readCtx.Done():
+			return
+		default:
+		}
+		res, err := m.client.XRead(readCtx, &redis.XReadArgs{
+			Streams: []string{key, startID},
+			Block:   streamBlockTimeout,
+			Count:   streamReadCount,
+		}).Result()
+		if errors.Is(err, redis.Nil) {
+			continue // BLOCK slice timed out with nothing new.
+		}
+		if err != nil {
+			return // readCtx canceled, client closed, or a Redis error.
+		}
+		for _, stream := range res {
+			for _, entry := range stream.Messages {
+				startID = entry.ID
+				raw, ok := entry.Values[streamField].(string)
+				if !ok {
+					continue
+				}
+				var event protocol.StreamResponse
+				if err := json.Unmarshal([]byte(raw), &event); err != nil {
+					log.Warnf("RedisTaskManager: discarding malformed stream entry for task %s: %v", taskID, err)
+					continue
+				}
+				if err := sub.Send(event); err != nil {
+					return // consumer gone.
+				}
+				// Terminate on a terminal STATUS frame only — an artifact's
+				// lastChunk (also IsFinal on the artifact) ends an artifact, not
+				// the task.
+				if su := event.GetStatusUpdate(); su != nil && su.IsFinal() {
+					return
+				}
+			}
+		}
+	}
+}
+
+// publishStream mirrors an already-persisted, already-locally-broadcast event
+// onto the task's Redis stream for cross-instance resubscribers. No-op unless
+// ResubscribeStreaming is enabled. It uses a background context (like storeTask)
+// so a request-scoped cancellation cannot drop the mirror after the event is
+// durable, and bounds the stream with MAXLEN + the same TTL as the task key.
+func (m *TaskManager) publishStream(taskID string, event protocol.StreamResponse) {
+	if !m.options.ResubscribeStreaming {
+		return
+	}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		log.Errorf("RedisTaskManager: failed to marshal stream event for task %s: %v", taskID, err)
+		return
+	}
+	key := streamPrefix + taskID
+	ctx := context.Background()
+	pipe := m.client.Pipeline()
+	pipe.XAdd(ctx, &redis.XAddArgs{
+		Stream: key,
+		MaxLen: streamMaxLen,
+		Approx: true,
+		Values: map[string]interface{}{streamField: payload},
+	})
+	pipe.Expire(ctx, key, m.expiration)
+	if _, err := pipe.Exec(ctx); err != nil {
+		log.Errorf("RedisTaskManager: failed to publish stream event for task %s: %v", taskID, err)
+	}
 }
 
 // taskChanged reports whether two snapshots of the same task differ in what a
@@ -1096,6 +1271,12 @@ func (m *TaskManager) cleanSubscribers(taskID string) {
 
 // notifySubscribers notifies all subscribers of a task.
 func (m *TaskManager) notifySubscribers(taskID string, event protocol.StreamResponse) {
+	// Mirror onto the task's Redis stream first so a resubscriber on another
+	// instance sees the same events. This is the sole fan-out convergence point
+	// (both broadcast and cancelWithoutLiveRun reach here), so no producer path
+	// is missed. No-op unless ResubscribeStreaming is enabled.
+	m.publishStream(taskID, event)
+
 	// Deliver push notifications independently of live SSE subscribers: reaching
 	// clients that are not currently streaming is the whole point of push.
 	m.dispatchPush(taskID, event)
@@ -1234,7 +1415,13 @@ func (m *TaskManager) Close() error {
 		// CANCELED) must land while the Redis client is still usable.
 		m.engineWg.Wait()
 
+		// Stop cross-node resubscribe tailers. A blocking XREAD is not aborted by
+		// context alone, so closing the client is what unparks it; baseCancel
+		// stops any tailer between slices from re-reading. Join after, so no
+		// tailer goroutine outlives Close.
+		m.baseCancel()
 		m.closeErr = m.client.Close()
+		m.tailerWg.Wait()
 	})
 	return m.closeErr
 }
