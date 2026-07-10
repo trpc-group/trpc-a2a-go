@@ -56,7 +56,7 @@ func TestTaskHandle_FlushPreservesOrder(t *testing.T) {
 	if err := h.UpdateTaskState(protocol.TaskStateWorking, nil); err != nil {
 		t.Fatalf("queued emit failed: %v", err)
 	}
-	if err := h.AddArtifact(protocol.Artifact{ArtifactID: "art-1"}, false); err != nil {
+	if err := h.AddArtifact(protocol.Artifact{ArtifactID: "art-1"}, false, false); err != nil {
 		t.Fatalf("queued emit failed: %v", err)
 	}
 	events := h.Events()

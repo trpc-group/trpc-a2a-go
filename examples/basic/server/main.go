@@ -144,7 +144,7 @@ func (p *basicMessageProcessor) processCommand(
 			"processedAt":  time.Now().UTC().Format(time.RFC3339),
 			"contextID":    contextID,
 		},
-	}, true)
+	}, false, true)
 	handle.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText(result))
 }
 
@@ -186,7 +186,7 @@ func (p *basicMessageProcessor) continueMultiTurnSession(
 				"sessionStage": session.stage,
 				"contextID":    contextID,
 			},
-		}, true)
+		}, false, true)
 		handle.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText(result))
 	}
 }

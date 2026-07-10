@@ -262,10 +262,11 @@ func TestOnSendMessage_TaskCompleted(t *testing.T) {
 	if got := statusMessageText(task); got != "done" {
 		t.Errorf("Expected status message %q, got %q", "done", got)
 	}
-	// historyLength unset -> the response task carries the full conversation
-	// (here: the stored user message).
-	if len(task.History) != 1 {
-		t.Errorf("Expected 1 history message in the response task, got %d", len(task.History))
+	// historyLength unset -> the response task carries the full conversation:
+	// the stored user message plus the completed status message, which is now
+	// folded into history so a later turn still sees the agent's reply.
+	if len(task.History) != 2 {
+		t.Errorf("Expected 2 history messages in the response task, got %d", len(task.History))
 	}
 
 	got, err := manager.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: task.ID})
@@ -435,8 +436,13 @@ func TestEngine_InputRequiredSuspendsAndContinues(t *testing.T) {
 		t.Errorf("Continuation must inherit the task's contextID: %s vs %s",
 			contexts[1].ContextID, contexts[0].ContextID)
 	}
-	if len(contexts[1].History) < 2 {
-		t.Errorf("Continuation history must contain both user turns, got %d messages", len(contexts[1].History))
+	// The input-required question is folded into history, so the continuation
+	// sees it between the two user turns (it was lost before the fold).
+	if len(contexts[1].History) != 3 {
+		t.Fatalf("Continuation history: want 3 (two user turns + the agent question), got %d", len(contexts[1].History))
+	}
+	if contexts[1].History[1].Role != protocol.MessageRoleAgent {
+		t.Errorf("Expected the agent question at history[1], got role %s", contexts[1].History[1].Role)
 	}
 }
 
@@ -999,6 +1005,84 @@ func TestEngine_ArtifactLazilyCreatesTask(t *testing.T) {
 	}
 }
 
+// Artifact chunks sharing an ArtifactID reassemble into a single artifact:
+// AddArtifact with appendChunk=true extends the earlier chunk's parts rather
+// than adding a second entry (covers the append flag on the handle and the
+// engine-side merge together).
+func TestEngine_ArtifactChunksMergeByID(t *testing.T) {
+	processor := funcExecutor(
+		func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
+			h := taskmanager.NewTaskHandle(ctx, ec)
+			go func() {
+				defer h.Close()
+				h.AddArtifact(protocol.Artifact{
+					ArtifactID: "doc",
+					Parts:      []*protocol.Part{protocol.NewTextPart("Hello ")},
+				}, false, false)
+				h.AddArtifact(protocol.Artifact{
+					ArtifactID: "doc",
+					Parts:      []*protocol.Part{protocol.NewTextPart("world")},
+				}, true, true)
+				h.UpdateTaskState(protocol.TaskStateCompleted, nil)
+			}()
+			return h.Events(), nil
+		})
+	manager := newTestManager(t, processor)
+
+	response, err := manager.OnSendMessage(context.Background(), userParams("stream"))
+	if err != nil {
+		t.Fatalf("OnSendMessage failed: %v", err)
+	}
+	task := response.GetTask()
+	if task == nil {
+		t.Fatalf("Expected a Task result, got %+v", response)
+	}
+	if len(task.Artifacts) != 1 {
+		t.Fatalf("Expected the two chunks to merge into 1 artifact, got %d", len(task.Artifacts))
+	}
+	if got := len(task.Artifacts[0].Parts); got != 2 {
+		t.Fatalf("Expected 2 concatenated parts, got %d", got)
+	}
+	if a, b := task.Artifacts[0].Parts[0].TextContent(), task.Artifacts[0].Parts[1].TextContent(); a != "Hello " || b != "world" {
+		t.Errorf("Parts out of order or mismatched: %q, %q", a, b)
+	}
+}
+
+// A single message object reused as both a reply and a completed status message
+// is folded into history only once, not duplicated.
+func TestEngine_StatusMessageReusedAsReplyStoredOnce(t *testing.T) {
+	msg := protocol.NewMessage(protocol.MessageRoleAgent, []*protocol.Part{protocol.NewTextPart("final")})
+	processor := funcExecutor(
+		func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
+			h := taskmanager.NewTaskHandle(ctx, ec)
+			go func() {
+				defer h.Close()
+				h.Reply(&msg)
+				h.UpdateTaskState(protocol.TaskStateCompleted, &msg) // same object
+			}()
+			return h.Events(), nil
+		})
+	manager := newTestManager(t, processor)
+
+	response, err := manager.OnSendMessage(context.Background(), userParams("go"))
+	if err != nil {
+		t.Fatalf("OnSendMessage failed: %v", err)
+	}
+	task := response.GetTask()
+	if task == nil {
+		t.Fatalf("Expected a Task result, got %+v", response)
+	}
+	agentMsgs := 0
+	for _, m := range task.History {
+		if m.Role == protocol.MessageRoleAgent {
+			agentMsgs++
+		}
+	}
+	if agentMsgs != 1 {
+		t.Errorf("the reused agent message must appear once in history, got %d", agentMsgs)
+	}
+}
+
 // =============================================================================
 // Resubscribe fan-out
 // =============================================================================
@@ -1118,7 +1202,7 @@ func TestEngine_TaskHandleFacade(t *testing.T) {
 				h.AddArtifact(protocol.Artifact{
 					ArtifactID: "art-1",
 					Parts:      []*protocol.Part{protocol.NewTextPart("data")},
-				}, true)
+				}, false, true)
 				h.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText("done"))
 			}()
 			return h.Events(), nil

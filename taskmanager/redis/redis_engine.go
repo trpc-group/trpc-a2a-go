@@ -94,6 +94,10 @@ type execution struct {
 	// lastMessage is the most recent Message event (the unary result when no
 	// task ever came into existence).
 	lastMessage *protocol.Message
+	// lastStatusMsg is the most recent status message folded into the
+	// conversation, compared by identity, so a message reused across several
+	// status updates in this round is not appended to the history more than once.
+	lastStatusMsg *protocol.Message
 	// finalTask is the task snapshot taken after the close rules ran; it is
 	// safe to read once done is closed.
 	finalTask *protocol.Task
@@ -470,6 +474,34 @@ func (ex *execution) processMessageEvent(msg *protocol.Message) {
 	ex.broadcast(protocol.NewStreamResponseMessage(msg))
 }
 
+// rollStatusMessage folds a status update's message into the conversation
+// history so a later GetMessageHistory / GetTask includes it — the reference
+// SDKs append status.message (e.g. an input-required question) to task history,
+// otherwise it would vanish from the next round's context. It stores a stamped
+// copy (agent role, context/task IDs, generated ID if absent) rather than
+// mutating the processor's message, so the persisted task and the broadcast
+// event keep the message exactly as the processor emitted it. It skips a message
+// object this round already stored — as the reply or as the preceding status
+// update — so reusing one across events does not multiply it in the history.
+func (ex *execution) rollStatusMessage(message *protocol.Message) {
+	if message == nil || message == ex.lastStatusMsg || message == ex.lastMessage {
+		return
+	}
+	ex.lastStatusMsg = message
+	contextID := ex.ec.ContextID
+	stored := *message
+	stored.ContextID = &contextID
+	stored.Role = protocol.MessageRoleAgent
+	if stored.MessageID == "" {
+		stored.MessageID = protocol.GenerateMessageID()
+	}
+	if stored.TaskID == nil || *stored.TaskID == "" {
+		taskID := ex.ec.TaskID
+		stored.TaskID = &taskID
+	}
+	ex.manager.storeMessage(context.Background(), stored)
+}
+
 // processStatusEvent applies a status update to the task (lazily creating it
 // on the first task event), persists it, and only then broadcasts it: at any
 // moment GetTask reads a state >= what the stream has delivered. Terminal
@@ -519,6 +551,10 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		log.Errorf("RedisTaskManager: failed to store task %s status %s: %v", ev.TaskID, status.State, err)
 		return
 	}
+	// Fold the status message into the conversation so a later round's
+	// GetMessageHistory / GetTask includes it (e.g. an input-required question),
+	// matching the reference SDKs. A message-less status is a no-op.
+	ex.rollStatusMessage(ev.Status.Message)
 	// Immediate result first: a returnImmediately waiter must never be stalled behind
 	// a slow subscriber in the fan-out below.
 	ex.offerImmediateTask()
@@ -563,7 +599,7 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		})
 	}
-	ex.task.Artifacts = append(ex.task.Artifacts, ev.Artifact)
+	ex.task.Artifacts = protocol.AppendArtifact(ex.task.Artifacts, ev.Artifact, ev.Append != nil && *ev.Append)
 	ex.taskTouched = true
 	// Persist before broadcast (consistency order).
 	if err := ex.manager.storeTask(context.Background(), ex.task); err != nil {

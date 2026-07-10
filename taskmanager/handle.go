@@ -38,7 +38,7 @@ const liveBuffer = 8
 //		defer h.Close()
 //		h.UpdateTaskState(protocol.TaskStateWorking, nil)
 //		// ... work ...
-//		h.AddArtifact(artifact, true)
+//		h.AddArtifact(artifact, false, true)
 //		h.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText("done"))
 //		return h.Events(), nil
 //	}
@@ -168,10 +168,27 @@ func (h *TaskHandle) UpdateTaskState(state protocol.TaskState, message *protocol
 }
 
 // AddArtifact emits an artifact event for this round's task
-// (former TaskHandler.AddArtifact; lastChunk marks the artifact's final chunk).
-func (h *TaskHandle) AddArtifact(artifact protocol.Artifact, lastChunk bool) error {
+// (former TaskHandler.AddArtifact).
+//
+// appendChunk sets the event's Append flag, which controls how these parts are
+// reconciled with what was already streamed, keyed by artifact.ArtifactID — the
+// flag does NOT stand alone:
+//   - appendChunk=false starts a new artifact under that ArtifactID (or replaces
+//     an existing one with the same ID).
+//   - appendChunk=true continues an artifact: these parts are concatenated onto
+//     the artifact already streamed under the SAME ArtifactID.
+//
+// So a chunked artifact is streamed by reusing one ArtifactID across calls —
+// appendChunk=false on the first chunk, appendChunk=true on every later chunk —
+// and the framework reassembles them into a single artifact. Give each call a
+// fresh ArtifactID (or keep appendChunk=false) to emit independent artifacts
+// instead. For a single, self-contained artifact, pass appendChunk=false.
+//
+// lastChunk marks the final chunk of the artifact; it is orthogonal to appendChunk.
+func (h *TaskHandle) AddArtifact(artifact protocol.Artifact, appendChunk, lastChunk bool) error {
 	return h.emit(&protocol.TaskArtifactUpdateEvent{
 		Artifact:  artifact,
+		Append:    &appendChunk,
 		LastChunk: &lastChunk,
 	})
 }

@@ -76,6 +76,9 @@ func (p *streamingMessageProcessor) ProcessMessage(
 		chunks := splitTextIntoChunks(text, 5) // Split into chunks of about 5 characters
 		totalChunks := len(chunks)
 
+		// One streaming artifact, reassembled from per-chunk appends.
+		artifactID := uuid.New().String()
+
 		// Process each chunk with a small delay to simulate real-time processing
 		for i, chunk := range chunks {
 			// Check for cancellation: closing without a terminal state after a
@@ -96,16 +99,18 @@ func (p *streamingMessageProcessor) ProcessMessage(
 				return
 			}
 
-			// Create an artifact for this chunk
+			// Append each processed chunk to a single streaming artifact: same
+			// ArtifactID, append=true after the first chunk, lastChunk on the
+			// final one — the framework reassembles them into one artifact.
 			isLastChunk := (i == totalChunks-1)
 			chunkArtifact := protocol.Artifact{
-				ArtifactID:  uuid.New().String(),
-				Name:        stringPtr(fmt.Sprintf("Chunk %d of %d", i+1, totalChunks)),
-				Description: stringPtr("Streaming chunk of processed data"),
+				ArtifactID:  artifactID,
+				Name:        stringPtr("Processed data"),
+				Description: stringPtr("Streaming processed data"),
 				Parts:       []*protocol.Part{protocol.NewTextPart(processedChunk)},
 			}
 
-			if err := handle.AddArtifact(chunkArtifact, isLastChunk); err != nil {
+			if err := handle.AddArtifact(chunkArtifact, i > 0, isLastChunk); err != nil {
 				log.Errorf("Failed to add artifact: %v", err)
 				return
 			}

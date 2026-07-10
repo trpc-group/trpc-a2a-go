@@ -71,22 +71,22 @@ func (p *proc) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) 
     defer h.Close()
     h.UpdateTaskState(protocol.TaskStateWorking, nil)
     result := doWork(ec.Message)
-    h.AddArtifact(result.Artifact, true)                              // lastChunk = true
+    h.AddArtifact(result.Artifact, false, true)                       // appendChunk=false, lastChunk=true
     h.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("done"))
     return h.Events(), nil
 }
 ```
 
-动词:`UpdateTaskState(state, message)`、`AddArtifact(artifact, lastChunk)`、`Reply(message)`,以及读取 `TaskID()`、`GetContextID()`、`GetTask()`、`GetMessageHistory()`。`taskmanager.ReplyText(text)` 构造一条 agent 消息。
+动词:`UpdateTaskState(state, message)`、`AddArtifact(artifact, appendChunk, lastChunk)`、`Reply(message)`,以及读取 `TaskID()`、`GetContextID()`、`GetTask()`、`GetMessageHistory()`。`taskmanager.ReplyText(text)` 构造一条 agent 消息。共享同一 `ArtifactID` 且 `appendChunk=true` 的分块会被合并成一个 artifact。
 
-**`TaskHandle` 底层就是 channel 操作。** 真正的契约是你返回的 `<-chan protocol.StreamEvent`:`UpdateTaskState` 发一个 `*protocol.TaskStatusUpdateEvent`,`AddArtifact` 发一个 `*protocol.TaskArtifactUpdateEvent`,`Reply` 发一个 `*protocol.Message`,`Close` 关闭 channel。你很少需要,但可以自己构造并发送这些事件——这也是够到 `TaskHandle` 不暴露的字段的唯一办法,比如分块流式的 artifact `Append` 标志:
+**`TaskHandle` 底层就是 channel 操作。** 真正的契约是你返回的 `<-chan protocol.StreamEvent`:`UpdateTaskState` 发一个 `*protocol.TaskStatusUpdateEvent`,`AddArtifact` 发一个 `*protocol.TaskArtifactUpdateEvent`,`Reply` 发一个 `*protocol.Message`,`Close` 关闭 channel。你很少需要,但可以自己构造并发送这些事件——这也是够到 `TaskHandle` 不暴露的字段的唯一办法:
 
 ```go
 out := make(chan protocol.StreamEvent, 4)
 go func() {
     defer close(out)
     out <- &protocol.TaskStatusUpdateEvent{Status: protocol.TaskStatus{State: protocol.TaskStateWorking}}
-    out <- &protocol.TaskArtifactUpdateEvent{Artifact: art, Append: &appendFlag, LastChunk: &done}
+    out <- &protocol.TaskArtifactUpdateEvent{Artifact: art, LastChunk: &done, Metadata: map[string]any{"seq": 1}}
     out <- &protocol.TaskStatusUpdateEvent{Status: protocol.TaskStatus{State: protocol.TaskStateCompleted}}
 }()
 return out, nil

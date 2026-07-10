@@ -404,8 +404,13 @@ func TestInputRequiredContinuation(t *testing.T) {
 	if round2EC.TaskID != task1.ID {
 		t.Errorf("ec.TaskID = %s, want %s", round2EC.TaskID, task1.ID)
 	}
-	if len(round2EC.History) != 2 {
-		t.Errorf("expected both user messages in history, got %d", len(round2EC.History))
+	// The input-required question is now folded into history, so the
+	// continuation sees it between the two user messages (it was lost before).
+	if len(round2EC.History) != 3 {
+		t.Fatalf("expected 3 history messages (two user + the agent question), got %d", len(round2EC.History))
+	}
+	if round2EC.History[1].Role != protocol.MessageRoleAgent {
+		t.Errorf("expected the agent input-required question at history[1], got role %s", round2EC.History[1].Role)
 	}
 }
 

@@ -89,6 +89,10 @@ type engine struct {
 	// answers with the last Message, not the untouched task snapshot.
 	taskTouched bool
 	lastMessage *protocol.Message
+	// lastStatusMsg is the most recent status message folded into the
+	// conversation, compared by identity, so a message reused across several
+	// status updates in this round is not appended to the history more than once.
+	lastStatusMsg *protocol.Message
 
 	// immediateResult carries the immediate result (first persisted task snapshot
 	// or first Message) to a returnImmediately waiter. Buffered with 1 slot and
@@ -437,6 +441,35 @@ func (eng *engine) handleMessage(message *protocol.Message) {
 	}
 }
 
+// rollStatusMessage folds a status update's message into the conversation
+// history so a later GetMessageHistory / GetTask includes it — the reference
+// SDKs append status.message (e.g. an input-required question) to task history,
+// otherwise it would vanish from the next round's context. It stores a stamped
+// copy (agent role, context/task IDs, generated ID if absent) rather than
+// mutating the processor's message — the original is already published on the
+// task and on the wire event, so mutating it here would race a concurrent
+// GetTask. It skips a message object this round already stored — as the reply
+// or as the preceding status update — so reusing one across events does not
+// multiply it in the history.
+func (eng *engine) rollStatusMessage(message *protocol.Message) {
+	if message == nil || message == eng.lastStatusMsg || message == eng.lastMessage {
+		return
+	}
+	eng.lastStatusMsg = message
+	contextID := eng.ec.ContextID
+	stored := *message
+	stored.ContextID = &contextID
+	stored.Role = protocol.MessageRoleAgent
+	if stored.MessageID == "" {
+		stored.MessageID = protocol.GenerateMessageID()
+	}
+	if stored.TaskID == nil || *stored.TaskID == "" {
+		taskID := eng.ec.TaskID
+		stored.TaskID = &taskID
+	}
+	eng.manager.storeMessage(stored)
+}
+
 // handleStatus persists a status update and then broadcasts it. The first task
 // event materializes the task (§3.2 lazy creation). A terminal state closes
 // the fan-out subscribers but the channel keeps being drained.
@@ -481,6 +514,11 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 		eng.yieldSnapshot = copyTask(task)
 	}
 	m.taskMu.Unlock()
+
+	// Fold the status message into the conversation so a later round's
+	// GetMessageHistory / GetTask includes it (e.g. an input-required question),
+	// matching the reference SDKs. A message-less status is a no-op.
+	eng.rollStatusMessage(event.Status.Message)
 
 	// Then broadcast: any subscriber that sees this event is guaranteed to
 	// find the store at least as fresh via GetTask.
@@ -535,7 +573,7 @@ func (eng *engine) handleArtifact(event *protocol.TaskArtifactUpdateEvent) {
 		})
 		m.tasks[eng.ec.TaskID] = task
 	}
-	task.Artifacts = append(task.Artifacts, event.Artifact)
+	task.Artifacts = protocol.AppendArtifact(task.Artifacts, event.Artifact, event.Append != nil && *event.Append)
 	eng.taskTouched = true
 	snapshot := eng.immediateSnapshotLocked(task)
 	m.taskMu.Unlock()

@@ -105,6 +105,56 @@ type Artifact struct {
 	Extensions  []string       `json:"extensions,omitempty"`
 }
 
+// AppendArtifact reconciles an incoming artifact event with the artifacts
+// already collected on a task, following the A2A streaming rules so that chunks
+// sharing an ArtifactID reassemble into a single Artifact instead of
+// accumulating as separate entries. appendChunk is the event's Append flag:
+//
+//   - appendChunk=false: the incoming artifact starts a new entry, or replaces
+//     the existing entry with the same ArtifactID (the first frame of a stream).
+//   - appendChunk=true: the incoming Parts are concatenated onto the existing
+//     artifact with the same ArtifactID and its Metadata is merged in, while
+//     Name, Description and Extensions stay as the first frame set them.
+//
+// If appendChunk=true but no artifact with that ArtifactID exists yet, the A2A
+// spec treats it as a producer error; we are lenient and add it as a new
+// artifact rather than dropping the data. The returned slice must be assigned
+// back to the caller's field.
+func AppendArtifact(arts []Artifact, incoming Artifact, appendChunk bool) []Artifact {
+	for i := range arts {
+		if arts[i].ArtifactID != incoming.ArtifactID {
+			continue
+		}
+		if !appendChunk {
+			// First frame for this ArtifactID: replace the entry wholesale.
+			arts[i] = incoming
+			return arts
+		}
+		// Continuation: concatenate parts and merge metadata. Build fresh
+		// containers instead of mutating the existing artifact's slice/map in
+		// place — an earlier frame may still be aliased by a handed-out task
+		// snapshot or an in-flight wire event, and mutating shared state (a map
+		// especially) would race that reader. The old containers stay frozen;
+		// the stored entry swaps to the new ones under the caller's lock.
+		parts := make([]*Part, 0, len(arts[i].Parts)+len(incoming.Parts))
+		parts = append(parts, arts[i].Parts...)
+		parts = append(parts, incoming.Parts...)
+		arts[i].Parts = parts
+		if len(incoming.Metadata) > 0 {
+			merged := make(map[string]any, len(arts[i].Metadata)+len(incoming.Metadata))
+			for k, v := range arts[i].Metadata {
+				merged[k] = v
+			}
+			for k, v := range incoming.Metadata {
+				merged[k] = v
+			}
+			arts[i].Metadata = merged
+		}
+		return arts
+	}
+	return append(arts, incoming)
+}
+
 // TaskStatus represents the current status of a task.
 type TaskStatus struct {
 	State     TaskState `json:"state"`

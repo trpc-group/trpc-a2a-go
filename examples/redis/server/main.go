@@ -186,7 +186,7 @@ func (p *ToLowerProcessor) processText(ctx context.Context, inputText string, ha
 	}
 
 	// Add artifact to task
-	if err := handle.AddArtifact(artifact, true); err != nil {
+	if err := handle.AddArtifact(artifact, false, true); err != nil {
 		log.Printf("Failed to add artifact: %v", err)
 	}
 

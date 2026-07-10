@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### A2A v1.0 conformance fixes
+
+- **Streaming artifact chunks reassemble by `ArtifactID`.** Artifact events (and `TaskHandle.AddArtifact`) sharing an `ArtifactID` now merge into a single artifact — `appendChunk=true` concatenates parts onto the existing one, `appendChunk=false` replaces it — instead of accumulating as separate fragments. `tasks/get` and the final task snapshot return one merged artifact per streamed deliverable, matching the spec and reference SDKs. Applies to the in-memory and Redis task managers; the per-chunk SSE frames are unchanged.
+- **`TaskHandle.AddArtifact` exposes the `append` flag** (signature change): `AddArtifact(artifact, appendChunk, lastChunk bool)` (was `AddArtifact(artifact, lastChunk bool)`), so a processor can stream a multi-chunk artifact through the handle without dropping to the raw channel.
+- **Status messages fold into conversation history.** A `TaskStatusUpdateEvent` carrying a `status.message` (e.g. the question on `input-required`, or a completion message) is appended to the conversation, so the next round's `GetMessageHistory` and `tasks/get` history include it instead of losing it. Matches the reference SDKs; applies to both task managers. These messages now count toward the manager's history-length window.
+
 ## 2.0.0-alpha.1 (2026-07-07)
 
 ### A2A Specification Upgrade ([a2a spec v0.2.x](https://github.com/a2aproject/A2A/releases/tag/v0.2.0) -> [a2a spec v1.0](https://github.com/a2aproject/A2A/releases/tag/v1.0.0))
@@ -33,7 +41,7 @@ This is a breaking release: the module path moves to `/v2`, the JSON-RPC wire mo
     + TaskHandler (interface): removed — replaced by TaskHandle, a concrete helper over the returned channel (NewTaskHandle(ctx, ec))
     + TaskHandler.BuildTask / .SubscribeTask / .CleanTask / .GetMetadata: removed
     + TaskHandler.UpdateTaskState(taskID, state, msg): now TaskHandle.UpdateTaskState(state, msg) — no taskID argument
-    + TaskHandler.AddArtifact(taskID, artifact, isFinal, needMoreData): now TaskHandle.AddArtifact(artifact, lastChunk) — needMoreData/append dropped
+    + TaskHandler.AddArtifact(taskID, artifact, isFinal, needMoreData): now TaskHandle.AddArtifact(artifact, appendChunk, lastChunk) — needMoreData maps to appendChunk, isFinal to lastChunk
     + TaskHandler.GetTask(taskID): now TaskHandle.GetTask() — this round's continuation snapshot only, arbitrary-task reads removed
     + TaskSubscriber, CancellableTask (and .Cancel): removed
     + redis.NewTaskManager: argument order is now (processor, rdb, opts...)

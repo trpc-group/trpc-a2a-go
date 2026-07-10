@@ -141,7 +141,7 @@ func (p *reimbursementProcessor) ProcessMessage(
 		Name:        stringPtr("Reimbursement Details"),
 		Description: stringPtr(fmt.Sprintf("Processed reimbursement request %s", requestID)),
 		Parts:       []*protocol.Part{protocol.NewTextPart(string(reimbursementJSON))},
-	}, true)
+	}, false, true)
 
 	handle.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText(result))
 	return handle.Events(), nil
