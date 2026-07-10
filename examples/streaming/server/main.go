@@ -55,7 +55,7 @@ func (p *streamingMessageProcessor) ProcessMessage(
 		log.Errorf("Message processing failed: %s", errMsg)
 
 		// A pure message reply: no task comes into existence this round.
-		handle.Reply(taskmanager.ReplyText(errMsg))
+		handle.Reply(protocol.NewAgentText(errMsg))
 		handle.Close()
 		return handle.Events(), nil
 	}
@@ -67,7 +67,7 @@ func (p *streamingMessageProcessor) ProcessMessage(
 		defer handle.Close()
 
 		if err := handle.UpdateTaskState(protocol.TaskStateWorking,
-			taskmanager.ReplyText("Starting to process your streaming data...")); err != nil {
+			protocol.NewAgentText("Starting to process your streaming data...")); err != nil {
 			log.Errorf("Failed to send working event: %v", err)
 			return
 		}
@@ -91,7 +91,7 @@ func (p *streamingMessageProcessor) ProcessMessage(
 				i+1, totalChunks, chunk, processedChunk)
 
 			if err := handle.UpdateTaskState(protocol.TaskStateWorking,
-				taskmanager.ReplyText(progressMsg)); err != nil {
+				protocol.NewAgentText(progressMsg)); err != nil {
 				log.Errorf("Failed to send working event: %v", err)
 				return
 			}
@@ -121,7 +121,7 @@ func (p *streamingMessageProcessor) ProcessMessage(
 
 		// Final completion status ends the round; the message/send caller
 		// receives this final task snapshot (with its artifacts).
-		if err := handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText(
+		if err := handle.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText(
 			fmt.Sprintf("Completed processing all %d chunks successfully!", totalChunks))); err != nil {
 			log.Errorf("Failed to update task state: %v", err)
 			return

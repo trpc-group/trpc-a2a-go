@@ -74,7 +74,7 @@ func (p *basicMessageProcessor) ProcessMessage(
 	text := extractText(ec.Message)
 	if text == "" {
 		// A pure message reply: no task comes into existence this round.
-		handle.Reply(taskmanager.ReplyText("input message must contain text"))
+		handle.Reply(protocol.NewAgentText("input message must contain text"))
 		return handle.Events(), nil
 	}
 
@@ -100,7 +100,7 @@ func (p *basicMessageProcessor) ProcessMessage(
 		// Suspend the task awaiting the processing mode: the follow-up
 		// message arrives as a new round with ExecContext.Task set.
 		p.multiTurnSessions[contextID] = multiTurnSession{stage: 1}
-		handle.UpdateTaskState(protocol.TaskStateInputRequired, taskmanager.ReplyText(
+		handle.UpdateTaskState(protocol.TaskStateInputRequired, protocol.NewAgentText(
 			"This is a multi-step interaction. Please select a processing mode:\n"+
 				"- reverse: Reverses the text\n"+
 				"- uppercase: Converts text to uppercase\n"+
@@ -109,10 +109,10 @@ func (p *basicMessageProcessor) ProcessMessage(
 	case modeInputExample:
 		p.multiTurnSessions[contextID] = multiTurnSession{stage: 2, mode: modeReverse}
 		handle.UpdateTaskState(protocol.TaskStateInputRequired,
-			taskmanager.ReplyText("Please provide more information to continue:"))
+			protocol.NewAgentText("Please provide more information to continue:"))
 	case modeHelp:
 		// Plain answers need no task either.
-		handle.Reply(taskmanager.ReplyText(p.processTextWithMode(content, command)))
+		handle.Reply(protocol.NewAgentText(p.processTextWithMode(content, command)))
 	default:
 		p.processCommand(handle, contextID, command, content)
 	}
@@ -145,7 +145,7 @@ func (p *basicMessageProcessor) processCommand(
 			"contextID":    contextID,
 		},
 	}, true)
-	handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText(result))
+	handle.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText(result))
 }
 
 // continueMultiTurnSession processes the next step of a multi-turn interaction.
@@ -164,7 +164,7 @@ func (p *basicMessageProcessor) continueMultiTurnSession(
 
 		// Ask for the text to process
 		handle.UpdateTaskState(protocol.TaskStateInputRequired,
-			taskmanager.ReplyText("Please enter the text you want to process:"))
+			protocol.NewAgentText("Please enter the text you want to process:"))
 	case 2:
 		// Second response received - this is the text to process
 		session.text = text
@@ -187,7 +187,7 @@ func (p *basicMessageProcessor) continueMultiTurnSession(
 				"contextID":    contextID,
 			},
 		}, true)
-		handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText(result))
+		handle.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText(result))
 	}
 }
 

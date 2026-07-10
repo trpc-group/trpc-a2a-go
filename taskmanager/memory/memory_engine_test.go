@@ -1119,7 +1119,7 @@ func TestEngine_TaskHandleFacade(t *testing.T) {
 					ArtifactID: "art-1",
 					Parts:      []*protocol.Part{protocol.NewTextPart("data")},
 				}, true)
-				h.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("done"))
+				h.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText("done"))
 			}()
 			return h.Events(), nil
 		})
@@ -1145,7 +1145,7 @@ func TestEngine_SynchronousTaskHandle(t *testing.T) {
 		func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
 			h := taskmanager.NewTaskHandle(ctx, ec)
 			defer h.Close()
-			h.Reply(taskmanager.ReplyText("sync answer"))
+			h.Reply(protocol.NewAgentText("sync answer"))
 			return h.Events(), nil
 		})
 	manager := newTestManager(t, processor)

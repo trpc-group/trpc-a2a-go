@@ -95,7 +95,7 @@ func TestTaskHandle_DeferClosePattern(t *testing.T) {
 		h := NewTaskHandle(context.Background(), &ExecContext{TaskID: "task-1"})
 		defer h.Close()
 		h.UpdateTaskState(protocol.TaskStateWorking, nil)
-		h.UpdateTaskState(protocol.TaskStateCompleted, ReplyText("done"))
+		h.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText("done"))
 		return h.Events()
 	}
 
@@ -170,7 +170,7 @@ func TestTaskHandle_EmitSucceedsAfterCancel(t *testing.T) {
 	h := NewTaskHandle(ctx, &ExecContext{TaskID: "task-1"})
 
 	// Pre-Events emits always succeed, canceled or not.
-	if err := h.UpdateTaskState(protocol.TaskStateCompleted, ReplyText("done")); err != nil {
+	if err := h.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText("done")); err != nil {
 		t.Fatalf("queued emit after cancel must succeed (terminal wins), got %v", err)
 	}
 	// Live emits with buffer space succeed too.

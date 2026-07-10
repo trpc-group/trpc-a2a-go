@@ -39,7 +39,7 @@ const liveBuffer = 8
 //		h.UpdateTaskState(protocol.TaskStateWorking, nil)
 //		// ... work ...
 //		h.AddArtifact(artifact, true)
-//		h.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("done"))
+//		h.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText("done"))
 //		return h.Events(), nil
 //	}
 //
@@ -179,14 +179,4 @@ func (h *TaskHandle) AddArtifact(artifact protocol.Artifact, lastChunk bool) err
 // Reply emits a direct message reply (the former pure-Message result path).
 func (h *TaskHandle) Reply(message *protocol.Message) error {
 	return h.emit(message)
-}
-
-// ReplyText builds an agent text message, for Reply or as the message
-// attached to UpdateTaskState.
-func ReplyText(text string) *protocol.Message {
-	message := protocol.NewMessage(
-		protocol.MessageRoleAgent,
-		[]*protocol.Part{protocol.NewTextPart(text)},
-	)
-	return &message
 }

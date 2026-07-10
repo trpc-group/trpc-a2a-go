@@ -81,7 +81,7 @@ func (p *ToLowerProcessor) ProcessMessage(
 	if inputText == "" {
 		// A pure message reply: no task comes into existence this round.
 		defer handle.Close()
-		handle.Reply(taskmanager.ReplyText("Error: No text found in message"))
+		handle.Reply(protocol.NewAgentText("Error: No text found in message"))
 		return handle.Events(), nil
 	}
 
@@ -121,7 +121,7 @@ func extractTextFromMessage(message protocol.Message) string {
 // without a terminal state, letting the framework persist CANCELED.
 func (p *ToLowerProcessor) processText(ctx context.Context, inputText string, handle *taskmanager.TaskHandle) {
 	// Step 1: Starting processing
-	err := handle.UpdateTaskState(protocol.TaskStateWorking, taskmanager.ReplyText(msgStarting))
+	err := handle.UpdateTaskState(protocol.TaskStateWorking, protocol.NewAgentText(msgStarting))
 	if err != nil {
 		log.Printf("Failed to update task state: %v", err)
 		return
@@ -134,7 +134,7 @@ func (p *ToLowerProcessor) processText(ctx context.Context, inputText string, ha
 
 	// Step 2: Analysis phase
 	err = handle.UpdateTaskState(protocol.TaskStateWorking,
-		taskmanager.ReplyText(fmt.Sprintf(msgAnalyzing, len(inputText))))
+		protocol.NewAgentText(fmt.Sprintf(msgAnalyzing, len(inputText))))
 	if err != nil {
 		log.Printf("Failed to update task state: %v", err)
 		return
@@ -146,7 +146,7 @@ func (p *ToLowerProcessor) processText(ctx context.Context, inputText string, ha
 	}
 
 	// Step 3: Processing phase
-	err = handle.UpdateTaskState(protocol.TaskStateWorking, taskmanager.ReplyText(msgProcessing))
+	err = handle.UpdateTaskState(protocol.TaskStateWorking, protocol.NewAgentText(msgProcessing))
 	if err != nil {
 		log.Printf("Failed to update task state: %v", err)
 		return
@@ -161,7 +161,7 @@ func (p *ToLowerProcessor) processText(ctx context.Context, inputText string, ha
 	result := strings.ToLower(inputText)
 
 	// Step 4: Creating artifact
-	err = handle.UpdateTaskState(protocol.TaskStateWorking, taskmanager.ReplyText(msgArtifact))
+	err = handle.UpdateTaskState(protocol.TaskStateWorking, protocol.NewAgentText(msgArtifact))
 	if err != nil {
 		log.Printf("Failed to update task state: %v", err)
 		return
@@ -197,7 +197,7 @@ func (p *ToLowerProcessor) processText(ctx context.Context, inputText string, ha
 	// round terminal replaces the former CleanTask: the framework owns the
 	// task lifecycle (set redis.WithExpireTime to bound retention).
 	err = handle.UpdateTaskState(protocol.TaskStateCompleted,
-		taskmanager.ReplyText(fmt.Sprintf(msgCompleted, inputText, result)))
+		protocol.NewAgentText(fmt.Sprintf(msgCompleted, inputText, result)))
 	if err != nil {
 		log.Printf("Failed to complete task: %v", err)
 	}

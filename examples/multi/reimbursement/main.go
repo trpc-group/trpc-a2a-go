@@ -47,7 +47,7 @@ func (p *reimbursementProcessor) ProcessMessage(
 		log.Error("Message processing failed: %s", errMsg)
 
 		// Reply with the error message directly
-		handle.Reply(taskmanager.ReplyText(errMsg))
+		handle.Reply(protocol.NewAgentText(errMsg))
 		return handle.Events(), nil
 	}
 
@@ -109,7 +109,7 @@ func (p *reimbursementProcessor) ProcessMessage(
 
 		// Reply with the request for more information; no task comes into
 		// existence for an incomplete request.
-		handle.Reply(taskmanager.ReplyText(result))
+		handle.Reply(protocol.NewAgentText(result))
 		return handle.Events(), nil
 	}
 
@@ -143,7 +143,7 @@ func (p *reimbursementProcessor) ProcessMessage(
 		Parts:       []*protocol.Part{protocol.NewTextPart(string(reimbursementJSON))},
 	}, true)
 
-	handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText(result))
+	handle.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText(result))
 	return handle.Events(), nil
 }
 

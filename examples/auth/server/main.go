@@ -348,7 +348,7 @@ func (p *echoMessageProcessor) ProcessMessage(
 	}
 
 	// A pure message reply: no task comes into existence this round.
-	handle.Reply(taskmanager.ReplyText(fmt.Sprintf("Echo: %s", responseText)))
+	handle.Reply(protocol.NewAgentText(fmt.Sprintf("Echo: %s", responseText)))
 	return handle.Events(), nil
 }
 

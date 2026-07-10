@@ -82,7 +82,7 @@ func (p *pushNotificationMessageProcessor) ProcessMessage(
 	// Move the task to working before returning: this persisted snapshot
 	// answers a returnImmediately unary call while processing continues below.
 	if err := handle.UpdateTaskState(protocol.TaskStateWorking,
-		taskmanager.ReplyText("Task queued for processing...")); err != nil {
+		protocol.NewAgentText("Task queued for processing...")); err != nil {
 		log.Errorf("Failed to send working event: %v", err)
 	}
 
@@ -121,7 +121,7 @@ func (p *pushNotificationMessageProcessor) processTaskAsync(
 	}
 
 	if err := handle.UpdateTaskState(protocol.TaskStateCompleted,
-		taskmanager.ReplyText(completeMsg)); err != nil {
+		protocol.NewAgentText(completeMsg)); err != nil {
 		log.Errorf("Failed to send completed event: %v", err)
 		return
 	}

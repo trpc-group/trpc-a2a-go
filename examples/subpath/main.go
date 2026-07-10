@@ -32,7 +32,7 @@ func (p *simpleProcessor) ProcessMessage(
 	defer handle.Close()
 
 	// Simply return a text response: a pure message reply, no task materializes.
-	handle.Reply(taskmanager.ReplyText("Hello from subpath agent!"))
+	handle.Reply(protocol.NewAgentText("Hello from subpath agent!"))
 	return handle.Events(), nil
 }
 
