@@ -1,8 +1,8 @@
 # Push notifications
 
-Two self-contained programs showing the two ways an agent delivers push
-notifications. Each runs server, webhook receiver, and client in one process —
-just `go run .` in the subdirectory.
+Two examples show the ways an agent can deliver push notifications. Each keeps
+the A2A server and webhook client in separate programs so their responsibilities
+and logs are easy to follow.
 
 Both wire a signing `pushauth.Notifier` into the TaskManager (as the Sender) and
 pass its identity to the server (`WithPushNotificationAuthenticator`), which then
@@ -25,5 +25,23 @@ difference is who decides when to deliver.
   manager's store, so an agent that must honor those too needs the TaskManager
   reference (`OnPushNotificationList`).
 
-See [`../jwks`](../jwks) for a two-process (separate client) variant, and
+## Run
+
+Start one mode's server first, then its client in another terminal:
+
+```bash
+# Automatic delivery
+go run ./auto/server
+go run ./auto/client
+
+# Manual delivery
+go run ./manual/server
+go run ./manual/client
+```
+
+Both modes use the agent at `http://localhost:8000` and the client webhook at
+`http://localhost:8001/notify` by default. Use `-port` on a server or
+`-agent-url`, `-webhook-listen`, and `-webhook-url` on a client to override them.
+
+See [`../jwks`](../jwks) for a larger JWT/JWKS example, and
 `docs/mkdocs/*/server.md` for the full wiring reference.
