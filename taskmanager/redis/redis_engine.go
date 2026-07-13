@@ -474,15 +474,14 @@ func (ex *execution) processMessageEvent(msg *protocol.Message) {
 	ex.broadcast(protocol.NewStreamResponseMessage(msg))
 }
 
-// rollStatusMessage folds a status update's message into the conversation
-// history so a later GetMessageHistory / GetTask includes it — the reference
-// SDKs append status.message (e.g. an input-required question) to task history,
-// otherwise it would vanish from the next round's context. It stores a stamped
-// copy (agent role, context/task IDs, generated ID if absent) rather than
-// mutating the processor's message, so the persisted task and the broadcast
-// event keep the message exactly as the processor emitted it. It skips a message
-// object this round already stored — as the reply or as the preceding status
-// update — so reusing one across events does not multiply it in the history.
+// rollStatusMessage folds a non-terminal status message (e.g. an input-required
+// question) into the conversation history so it survives into the next round's
+// context instead of vanishing. It stores a stamped copy (agent role, context/
+// task IDs, generated ID if absent) rather than mutating the processor's message,
+// so the persisted task and the broadcast event keep it as emitted. It skips a
+// message object this round already stored — as the reply or as the preceding
+// status update — and storeMessage is idempotent by MessageID, so reusing one
+// across events (or re-emitting the same ID) never multiplies it in the history.
 func (ex *execution) rollStatusMessage(message *protocol.Message) {
 	if message == nil || message == ex.lastStatusMsg || message == ex.lastMessage {
 		return
@@ -551,10 +550,13 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		log.Errorf("RedisTaskManager: failed to store task %s status %s: %v", ev.TaskID, status.State, err)
 		return
 	}
-	// Fold the status message into the conversation so a later round's
-	// GetMessageHistory / GetTask includes it (e.g. an input-required question),
-	// matching the reference SDKs. A message-less status is a no-op.
-	ex.rollStatusMessage(ev.Status.Message)
+	// Fold a NON-terminal status message into the conversation (e.g. an
+	// input-required question) so a later round sees it. A terminal message
+	// stays on status.Message only, not duplicated into history. A message-less
+	// status is a no-op.
+	if !final {
+		ex.rollStatusMessage(ev.Status.Message)
+	}
 	// Immediate result first: a returnImmediately waiter must never be stalled behind
 	// a slow subscriber in the fan-out below.
 	ex.offerImmediateTask()
@@ -599,7 +601,12 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		})
 	}
-	ex.task.Artifacts = protocol.AppendArtifact(ex.task.Artifacts, ev.Artifact, ev.Append != nil && *ev.Append)
+	var appendedAsNew bool
+	ex.task.Artifacts, appendedAsNew = protocol.AppendArtifact(ex.task.Artifacts, ev.Artifact, ev.Append != nil && *ev.Append)
+	if appendedAsNew {
+		log.Warnf("RedisTaskManager: artifact %s for task %s used append=true with no prior chunk; stored as a new artifact",
+			ev.Artifact.ArtifactID, ex.ec.TaskID)
+	}
 	ex.taskTouched = true
 	// Persist before broadcast (consistency order).
 	if err := ex.manager.storeTask(context.Background(), ex.task); err != nil {

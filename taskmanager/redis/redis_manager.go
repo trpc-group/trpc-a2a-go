@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -547,11 +548,16 @@ func (m *TaskManager) OnResubscribe(
 }
 
 // taskChanged reports whether two snapshots of the same task differ in what a
-// stream conveys: status or artifact count.
+// stream conveys: status or artifacts. It deep-compares Artifacts rather than
+// counting them — an append=true chunk merges into an existing artifact without
+// growing the slice, so a length check would miss it and the registration-race
+// compensation in OnResubscribe would drop that chunk from the stream.
+// Resubscribe is a low-frequency control op, so the deep compare is cheap, and
+// an occasional redundant snapshot is already documented as acceptable.
 func taskChanged(before, after *protocol.Task) bool {
 	return before.Status.State != after.Status.State ||
 		before.Status.Timestamp != after.Status.Timestamp ||
-		len(before.Artifacts) != len(after.Artifacts)
+		!reflect.DeepEqual(before.Artifacts, after.Artifacts)
 }
 
 // =============================================================================
@@ -592,6 +598,16 @@ func (m *TaskManager) storeMessage(ctx context.Context, message protocol.Message
 	if message.ContextID != nil {
 		contextID := *message.ContextID
 		convKey := conversationPrefix + contextID
+
+		// Idempotent by MessageID: the same message may reach storeMessage from
+		// both the reply path and a status roll (or be re-emitted); indexing it
+		// twice would duplicate it in history. Skip the append when it is already
+		// present. (If LPos is unavailable the error path falls through to RPush,
+		// preserving the previous append-only behavior.)
+		if _, err := m.client.LPos(ctx, convKey, message.MessageID, redis.LPosArgs{}).Result(); err == nil {
+			m.client.Expire(ctx, convKey, m.expiration)
+			return
+		}
 
 		// Add message ID to conversation history using Redis list.
 		if err := m.client.RPush(ctx, convKey, message.MessageID).Err(); err != nil {

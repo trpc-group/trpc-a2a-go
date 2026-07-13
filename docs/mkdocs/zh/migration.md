@@ -153,7 +153,7 @@ func (p *myProcessor) ProcessMessage(
 | `TaskHandler`（接口） | 移除——读取来自 `ec`，写入走返回的 channel（或 `TaskHandle`） |
 | `BuildTask(...)` | 移除——任务在首个任务事件时懒创建；ID 是 `ec.TaskID` / `handle.TaskID()` |
 | `UpdateTaskState(taskID, state, msg)` | `handle.UpdateTaskState(state, msg)`（或在 raw channel 上发 `*protocol.TaskStatusUpdateEvent`）——不带 `taskID` 参数 |
-| `AddArtifact(taskID, artifact, isFinal, needMoreData)` | `handle.AddArtifact(artifact, lastChunk)`——`isFinal` 映射为 `lastChunk`；`append` 标志不再暴露（详见下文「生命周期与轮次」） |
+| `AddArtifact(taskID, artifact, isFinal, needMoreData)` | `handle.AddArtifact(artifact, appendChunk, lastChunk)`——`needMoreData` 映射为 `appendChunk`、`isFinal` 映射为 `lastChunk`；共享同一 `ArtifactID` 且 `appendChunk=true` 的分块会被合并成一个 artifact |
 | `SubscribeTask(taskID)` | 移除——返回的 channel 就是流；订阅者扇出归框架所有 |
 | `GetTask(taskID)` | `handle.GetTask()`——仅本轮的续跑快照，首轮为 `nil`；任意任务读取已取消 |
 | `CleanTask(taskID)` | 移除——框架持有任务生命周期；默认不删除任何任务（设 `memory.WithTaskTTL` 以回收终态任务） |
@@ -218,7 +218,7 @@ v1.0 的 JSON-RPC 绑定使用 PascalCase 方法名。斜杠分隔的名字是 v
 - **一个轮次恰好驱动一个任务**（`ec.TaskID`）。携带其他任务 ID 的事件是违规，会让该轮任务失败。v0.x 一次调用可 `BuildTask` 多个任务。→ *该怎么做：* 让一个轮次守着它自己的任务；不同任务用不同的 send。
 - **发 `*protocol.Task` 现在是违规。** 把任务快照作为流事件发出在 v0.x 是合法的；现在框架自己物化快照。→ *该怎么做：* 发 `TaskStatusUpdateEvent` /`TaskArtifactUpdateEvent`，绝不发 `*protocol.Task`。
 - **`tasks/cancel` 返回取消前的快照**（可能仍是 `working`）；终态 `CANCELED` 在该轮收尾时落库。对已终态任务取消返回 `-32002`。→ *该怎么做：* 别假设 cancel 响应就是终态；再读一次任务、或观察流，以获取尘埃落定后的状态。
-- **`AddArtifact` 去掉了 `needMoreData`/`append` 标志。** `TaskHandle.AddArtifact` 只收 `lastChunk`。→ *该怎么做：* 依赖 `append` 的分块追加 artifact 流，需要在 raw channel 上发带 `Append` 的 `protocol.TaskArtifactUpdateEvent`。
+- **`AddArtifact` 签名改为 `(artifact, appendChunk, lastChunk)`。** `needMoreData` 映射为 `appendChunk`、`isFinal` 映射为 `lastChunk`。→ *该怎么做：* 继续把原来的 `append` 作为 `appendChunk` 传入；共享同一 `ArtifactID` 且 `appendChunk=true` 的分块现在会被合并成一个 artifact。
 
 ### 多轮与续跑
 
@@ -264,7 +264,7 @@ agent 本身只写一次，基于 v1.0 的 `MessageProcessor` 契约；compat ha
 - [ ] 把 `ProcessMessage` 签名改为 `(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error)`。
 - [ ] 从 `ec` 上读消息与选项（`ec.Message`、`ec.AcceptedOutputModes`、`ec.Tenant`、`ec.PushConfig`、`ec.History`）。
 - [ ] 去掉 `BuildTask`——任务在首个任务事件时懒创建；用 `ec.TaskID` /`handle.TaskID()`。
-- [ ] 从 `UpdateTaskState` / `AddArtifact` 去掉 `taskID` 参数，并把 `isFinal` →`lastChunk`（把任何 `needMoreData`/`append` 流改写到 raw`TaskArtifactUpdateEvent` 上）。
+- [ ] 从 `UpdateTaskState` / `AddArtifact` 去掉 `taskID` 参数，并在 `AddArtifact(artifact, appendChunk, lastChunk)` 里把 `needMoreData` → `appendChunk`、`isFinal` → `lastChunk`。
 - [ ] 用 `return handle.Events(), nil` 取代 `SubscribeTask` +`MessageProcessingResult{StreamingEvents}`；用 `handle.Reply(&msg)` 取代 `MessageProcessingResult{Result: &msg}`。
 - [ ] 由发事件的 goroutine 关闭 channel（`defer handle.Close()`），且始终在终态或挂起态下关闭——绝不把轮次停在 `submitted`/`working`。
 - [ ] 回应 `input-required` 时回带 `taskId`，并由续跑轮交付完成。

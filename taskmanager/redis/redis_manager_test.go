@@ -1307,3 +1307,47 @@ func TestStorageTTL(t *testing.T) {
 		t.Errorf("message TTL = %v, want %v", got, expire)
 	}
 }
+
+// taskChanged deep-compares Artifacts, so an append=true chunk that merges into
+// an existing artifact (growing its Parts without growing the slice) is still
+// detected — the OnResubscribe registration-race compensation depends on this.
+func TestTaskChanged_DetectsMergedArtifactChunk(t *testing.T) {
+	before := &protocol.Task{
+		Status:    protocol.TaskStatus{State: protocol.TaskStateWorking, Timestamp: "t"},
+		Artifacts: []protocol.Artifact{{ArtifactID: "a", Parts: []*protocol.Part{protocol.NewTextPart("p1")}}},
+	}
+	// Same status, same artifact count — only the merged artifact's Parts grew.
+	after := &protocol.Task{
+		Status: protocol.TaskStatus{State: protocol.TaskStateWorking, Timestamp: "t"},
+		Artifacts: []protocol.Artifact{{ArtifactID: "a", Parts: []*protocol.Part{
+			protocol.NewTextPart("p1"), protocol.NewTextPart("p2"),
+		}}},
+	}
+	if !taskChanged(before, after) {
+		t.Fatal("taskChanged must detect a same-ID append chunk that grew an artifact's Parts")
+	}
+	if taskChanged(before, before) {
+		t.Error("taskChanged must be false for identical snapshots")
+	}
+}
+
+// storeMessage is idempotent by MessageID: the same message re-stored (e.g. from
+// both the reply path and a status roll) appears in the conversation only once.
+func TestStoreMessage_IdempotentByMessageID(t *testing.T) {
+	m, _ := setupTest(t, scriptedExecutor())
+	ctx := context.Background()
+	cid := "ctx-idem"
+	msg := protocol.NewMessage(protocol.MessageRoleAgent, []*protocol.Part{protocol.NewTextPart("x")})
+	msg.ContextID = &cid
+
+	m.storeMessage(ctx, msg)
+	m.storeMessage(ctx, msg) // same MessageID again
+
+	hist, err := m.getConversationHistory(ctx, cid, 100)
+	if err != nil {
+		t.Fatalf("getConversationHistory: %v", err)
+	}
+	if len(hist) != 1 {
+		t.Errorf("a message stored twice under the same MessageID must appear once, got %d", len(hist))
+	}
+}

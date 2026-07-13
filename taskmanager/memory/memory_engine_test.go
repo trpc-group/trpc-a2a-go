@@ -262,11 +262,11 @@ func TestOnSendMessage_TaskCompleted(t *testing.T) {
 	if got := statusMessageText(task); got != "done" {
 		t.Errorf("Expected status message %q, got %q", "done", got)
 	}
-	// historyLength unset -> the response task carries the full conversation:
-	// the stored user message plus the completed status message, which is now
-	// folded into history so a later turn still sees the agent's reply.
-	if len(task.History) != 2 {
-		t.Errorf("Expected 2 history messages in the response task, got %d", len(task.History))
+	// historyLength unset -> the response carries the full conversation: just the
+	// stored user message. The completed status message stays on status.Message
+	// and is NOT folded into history (only non-terminal status messages are).
+	if len(task.History) != 1 {
+		t.Errorf("Expected 1 history message in the response task, got %d", len(task.History))
 	}
 
 	got, err := manager.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: task.ID})
@@ -1048,17 +1048,21 @@ func TestEngine_ArtifactChunksMergeByID(t *testing.T) {
 	}
 }
 
-// A single message object reused as both a reply and a completed status message
-// is folded into history only once, not duplicated.
-func TestEngine_StatusMessageReusedAsReplyStoredOnce(t *testing.T) {
-	msg := protocol.NewMessage(protocol.MessageRoleAgent, []*protocol.Part{protocol.NewTextPart("final")})
+// A message reused (as a reply and then as a non-terminal status message) is
+// folded into history only once — including the case where the two carry the
+// SAME MessageID on DIFFERENT objects, which the pointer dedup alone would miss
+// and only storeMessage's MessageID idempotency catches.
+func TestEngine_StatusMessageDedupByID(t *testing.T) {
+	reply := protocol.NewMessage(protocol.MessageRoleAgent, []*protocol.Part{protocol.NewTextPart("hold on")})
+	status := reply // value copy: same MessageID, different address
 	processor := funcExecutor(
 		func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
 			h := taskmanager.NewTaskHandle(ctx, ec)
 			go func() {
 				defer h.Close()
-				h.Reply(&msg)
-				h.UpdateTaskState(protocol.TaskStateCompleted, &msg) // same object
+				h.Reply(&reply)
+				// Non-terminal so it is rolled; same MessageID as the reply.
+				h.UpdateTaskState(protocol.TaskStateInputRequired, &status)
 			}()
 			return h.Events(), nil
 		})
@@ -1079,7 +1083,7 @@ func TestEngine_StatusMessageReusedAsReplyStoredOnce(t *testing.T) {
 		}
 	}
 	if agentMsgs != 1 {
-		t.Errorf("the reused agent message must appear once in history, got %d", agentMsgs)
+		t.Errorf("the reused agent message (same MessageID) must appear once in history, got %d", agentMsgs)
 	}
 }
 

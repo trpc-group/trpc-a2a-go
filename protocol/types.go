@@ -118,9 +118,10 @@ type Artifact struct {
 //
 // If appendChunk=true but no artifact with that ArtifactID exists yet, the A2A
 // spec treats it as a producer error; we are lenient and add it as a new
-// artifact rather than dropping the data. The returned slice must be assigned
-// back to the caller's field.
-func AppendArtifact(arts []Artifact, incoming Artifact, appendChunk bool) []Artifact {
+// artifact rather than dropping the data, and return appendedAsNew=true so the
+// caller can surface the anomaly (e.g. log a warning). The returned slice must
+// be assigned back to the caller's field.
+func AppendArtifact(arts []Artifact, incoming Artifact, appendChunk bool) (result []Artifact, appendedAsNew bool) {
 	for i := range arts {
 		if arts[i].ArtifactID != incoming.ArtifactID {
 			continue
@@ -128,7 +129,7 @@ func AppendArtifact(arts []Artifact, incoming Artifact, appendChunk bool) []Arti
 		if !appendChunk {
 			// First frame for this ArtifactID: replace the entry wholesale.
 			arts[i] = incoming
-			return arts
+			return arts, false
 		}
 		// Continuation: concatenate parts and merge metadata. Build fresh
 		// containers instead of mutating the existing artifact's slice/map in
@@ -150,9 +151,12 @@ func AppendArtifact(arts []Artifact, incoming Artifact, appendChunk bool) []Arti
 			}
 			arts[i].Metadata = merged
 		}
-		return arts
+		return arts, false
 	}
-	return append(arts, incoming)
+	// No matching ArtifactID. With appendChunk=true this is a producer error
+	// (the spec requires a prior append=false frame); add it anyway (lenient) but
+	// report it so the engine can warn.
+	return append(arts, incoming), appendChunk
 }
 
 // TaskStatus represents the current status of a task.

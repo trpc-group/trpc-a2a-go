@@ -237,7 +237,7 @@ func TestAppendArtifact(t *testing.T) {
 	part := func(text string) *Part { return NewTextPart(text) }
 
 	t.Run("append extends the parts of the same artifact id", func(t *testing.T) {
-		got := AppendArtifact(
+		got, _ := AppendArtifact(
 			[]Artifact{{ArtifactID: "a", Parts: []*Part{part("Hello ")}}},
 			Artifact{ArtifactID: "a", Parts: []*Part{part("world")}},
 			true,
@@ -249,7 +249,7 @@ func TestAppendArtifact(t *testing.T) {
 	})
 
 	t.Run("non-append replaces the same artifact id", func(t *testing.T) {
-		got := AppendArtifact(
+		got, _ := AppendArtifact(
 			[]Artifact{{ArtifactID: "a", Parts: []*Part{part("stale")}}},
 			Artifact{ArtifactID: "a", Parts: []*Part{part("fresh")}},
 			false,
@@ -260,7 +260,7 @@ func TestAppendArtifact(t *testing.T) {
 	})
 
 	t.Run("distinct artifact ids accumulate", func(t *testing.T) {
-		got := AppendArtifact(
+		got, _ := AppendArtifact(
 			[]Artifact{{ArtifactID: "a", Parts: []*Part{part("one")}}},
 			Artifact{ArtifactID: "b", Parts: []*Part{part("two")}},
 			false,
@@ -270,14 +270,15 @@ func TestAppendArtifact(t *testing.T) {
 		assert.Equal(t, "b", got[1].ArtifactID)
 	})
 
-	t.Run("append with no existing id adds as new", func(t *testing.T) {
-		got := AppendArtifact(nil, Artifact{ArtifactID: "a", Parts: []*Part{part("one")}}, true)
+	t.Run("append with no existing id adds as new and flags it", func(t *testing.T) {
+		got, appendedAsNew := AppendArtifact(nil, Artifact{ArtifactID: "a", Parts: []*Part{part("one")}}, true)
 		require.Len(t, got, 1)
 		assert.Equal(t, "a", got[0].ArtifactID)
+		assert.True(t, appendedAsNew, "append=true with no prior artifact must be flagged")
 	})
 
 	t.Run("append merges metadata and keeps the first frame's descriptors", func(t *testing.T) {
-		got := AppendArtifact(
+		got, _ := AppendArtifact(
 			[]Artifact{{
 				ArtifactID: "a", Name: stringPtr("Report"), Description: stringPtr("desc"),
 				Extensions: []string{"ext"}, Parts: []*Part{part("one")},
@@ -305,7 +306,7 @@ func TestAppendArtifact(t *testing.T) {
 		firstMeta := map[string]any{"seq": 1}
 		arts := []Artifact{{ArtifactID: "a", Parts: firstParts, Metadata: firstMeta}}
 
-		arts = AppendArtifact(arts, Artifact{ArtifactID: "a", Parts: []*Part{part("two")}, Metadata: map[string]any{"seq": 2}}, true)
+		arts, _ = AppendArtifact(arts, Artifact{ArtifactID: "a", Parts: []*Part{part("two")}, Metadata: map[string]any{"seq": 2}}, true)
 
 		// The captured (aliased) containers are untouched...
 		assert.Len(t, firstParts, 1, "prior Parts backing slice must not be extended in place")

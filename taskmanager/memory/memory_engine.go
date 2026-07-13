@@ -441,16 +441,15 @@ func (eng *engine) handleMessage(message *protocol.Message) {
 	}
 }
 
-// rollStatusMessage folds a status update's message into the conversation
-// history so a later GetMessageHistory / GetTask includes it — the reference
-// SDKs append status.message (e.g. an input-required question) to task history,
-// otherwise it would vanish from the next round's context. It stores a stamped
-// copy (agent role, context/task IDs, generated ID if absent) rather than
-// mutating the processor's message — the original is already published on the
-// task and on the wire event, so mutating it here would race a concurrent
-// GetTask. It skips a message object this round already stored — as the reply
-// or as the preceding status update — so reusing one across events does not
-// multiply it in the history.
+// rollStatusMessage folds a non-terminal status message (e.g. an input-required
+// question) into the conversation history so it survives into the next round's
+// context instead of vanishing. It stores a stamped copy (agent role, context/
+// task IDs, generated ID if absent) rather than mutating the processor's message
+// — the original is already published on the task and on the wire event, so
+// mutating it here would race a concurrent GetTask. It skips a message object
+// this round already stored — as the reply or as the preceding status update —
+// and storeMessage is idempotent by MessageID, so reusing one across events (or
+// re-emitting the same ID) never multiplies it in the history.
 func (eng *engine) rollStatusMessage(message *protocol.Message) {
 	if message == nil || message == eng.lastStatusMsg || message == eng.lastMessage {
 		return
@@ -515,10 +514,15 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 	}
 	m.taskMu.Unlock()
 
-	// Fold the status message into the conversation so a later round's
-	// GetMessageHistory / GetTask includes it (e.g. an input-required question),
-	// matching the reference SDKs. A message-less status is a no-op.
-	eng.rollStatusMessage(event.Status.Message)
+	// Fold a NON-terminal status message into the conversation so a later round's
+	// GetMessageHistory / GetTask includes it (e.g. an input-required question).
+	// A terminal message is left on status.Message only, not duplicated into
+	// history: a2a-python likewise rolls the PREVIOUS status message on the next
+	// transition, so a final message never enters history. A message-less status
+	// is a no-op.
+	if !final {
+		eng.rollStatusMessage(event.Status.Message)
+	}
 
 	// Then broadcast: any subscriber that sees this event is guaranteed to
 	// find the store at least as fresh via GetTask.
@@ -573,7 +577,12 @@ func (eng *engine) handleArtifact(event *protocol.TaskArtifactUpdateEvent) {
 		})
 		m.tasks[eng.ec.TaskID] = task
 	}
-	task.Artifacts = protocol.AppendArtifact(task.Artifacts, event.Artifact, event.Append != nil && *event.Append)
+	var appendedAsNew bool
+	task.Artifacts, appendedAsNew = protocol.AppendArtifact(task.Artifacts, event.Artifact, event.Append != nil && *event.Append)
+	if appendedAsNew {
+		log.Warnf("memory TaskManager: artifact %s for task %s used append=true with no prior chunk; stored as a new artifact",
+			event.Artifact.ArtifactID, eng.ec.TaskID)
+	}
 	eng.taskTouched = true
 	snapshot := eng.immediateSnapshotLocked(task)
 	m.taskMu.Unlock()

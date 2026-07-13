@@ -174,7 +174,7 @@ channel underneath is the actual contract, shown in
 | `TaskHandler` (interface) | removed — reads come from `ec`, writes go through the returned channel (or `TaskHandle`) |
 | `BuildTask(...)` | removed — tasks are created lazily on the first task event; the ID is `ec.TaskID` / `handle.TaskID()` |
 | `UpdateTaskState(taskID, state, msg)` | `handle.UpdateTaskState(state, msg)` (or emit `*protocol.TaskStatusUpdateEvent` on the raw channel) — no `taskID` argument |
-| `AddArtifact(taskID, artifact, isFinal, needMoreData)` | `handle.AddArtifact(artifact, lastChunk)` — `isFinal` maps to `lastChunk`; the `append` flag is not exposed (see [note](#lifecycle-and-the-round)) |
+| `AddArtifact(taskID, artifact, isFinal, needMoreData)` | `handle.AddArtifact(artifact, appendChunk, lastChunk)` — `needMoreData` maps to `appendChunk`, `isFinal` to `lastChunk`; chunks sharing an `ArtifactID` with `appendChunk=true` reassemble into one artifact |
 | `SubscribeTask(taskID)` | removed — the returned channel is the stream; the framework owns subscriber fan-out |
 | `GetTask(taskID)` | `handle.GetTask()` — this round's continuation snapshot only, `nil` on a fresh round; arbitrary-task reads are gone |
 | `CleanTask(taskID)` | removed — the framework owns the task lifecycle; nothing deletes tasks by default (set `memory.WithTaskTTL` to collect terminal tasks) |
@@ -272,10 +272,10 @@ These compile fine but behave differently from v0.x. Each ends with a one-line
   down. Canceling an already-terminal task returns `-32002`. → *What to do:*
   don't assume the cancel response is terminal; read the task again, or watch
   the stream, for the settled state.
-- **`AddArtifact` dropped the `needMoreData`/`append` flag.** `TaskHandle.AddArtifact`
-  takes only `lastChunk`. → *What to do:* chunked-append artifact streams that
-  relied on `append` must emit `protocol.TaskArtifactUpdateEvent` on the raw
-  channel with `Append` set.
+- **`AddArtifact` signature changed to `(artifact, appendChunk, lastChunk)`.**
+  `needMoreData` maps to `appendChunk`, `isFinal` to `lastChunk`. → *What to do:*
+  keep passing your `append` flag as `appendChunk`; chunks sharing an
+  `ArtifactID` with `appendChunk=true` now reassemble into one artifact.
 
 ### Multi-turn and continuations
 
@@ -348,8 +348,8 @@ for a runnable server and legacy-wire client.
 - [ ] Drop `BuildTask` — the task is created lazily on the first task event;
       use `ec.TaskID` / `handle.TaskID()`.
 - [ ] Remove the `taskID` argument from `UpdateTaskState` / `AddArtifact`, and
-      map `isFinal` → `lastChunk` (rework any `needMoreData`/`append` streams
-      onto the raw `TaskArtifactUpdateEvent`).
+      map `needMoreData` → `appendChunk`, `isFinal` → `lastChunk` in
+      `AddArtifact(artifact, appendChunk, lastChunk)`.
 - [ ] Replace `SubscribeTask` + `MessageProcessingResult{StreamingEvents}` with
       `return handle.Events(), nil`; replace `MessageProcessingResult{Result: &msg}`
       with `handle.Reply(&msg)`.
