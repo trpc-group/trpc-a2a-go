@@ -33,7 +33,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 
@@ -291,55 +290,40 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	tokenString := parts[1]
 
-	// Verify JWT signature using JWKS
-	token, err := h.verifyJWT(tokenString, body)
-	if err != nil {
+	// Verify the JWT signature (+ payload hash + freshness) using JWKS.
+	if _, err := h.verifyJWT(tokenString, body); err != nil {
 		log.Infof("JWT verification failed: %v", err)
 		http.Error(w, "Invalid token", http.StatusUnauthorized)
 		return
 	}
 
-	// Parse notification
-	var notification map[string]interface{}
+	// Parse the notification body: the framework delivers an A2A StreamResponse.
+	var notification protocol.StreamResponse
 	if err := json.Unmarshal(body, &notification); err != nil {
 		log.Infof("Failed to parse notification: %v", err)
 		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
 
-	// Extract and validate task ID from payload
-	taskID, ok := notification["task_id"].(string)
-	if !ok {
-		log.Infof("Notification missing task_id field")
+	// Extract the task ID and state from the StreamResponse union.
+	var taskID, status string
+	if su := notification.GetStatusUpdate(); su != nil {
+		taskID, status = su.TaskID, string(su.Status.State)
+	} else if task := notification.GetTask(); task != nil {
+		taskID, status = task.ID, string(task.Status.State)
+	}
+	if taskID == "" {
+		log.Infof("Notification carries no task ID")
 		http.Error(w, "Invalid notification format", http.StatusBadRequest)
 		return
 	}
 
-	// Extract task ID from JWT payload
-	jwtPayload, err := token.AsMap(context.Background())
-	if err != nil {
-		log.Infof("Failed to extract JWT payload: %v", err)
-		http.Error(w, "Invalid token", http.StatusUnauthorized)
-		return
-	}
-
-	// Verify task_id in the payload if present in the JWT
-	if payloadObj, ok := jwtPayload["payload"].(map[string]interface{}); ok {
-		if jwtTaskID, ok := payloadObj["task_id"].(string); ok && jwtTaskID != taskID {
-			log.Infof("Task ID mismatch: JWT=%v vs Notification=%s", jwtTaskID, taskID)
-			http.Error(w, "Task ID mismatch", http.StatusUnauthorized)
-			return
-		}
-	}
-
-	// Update task status in our tracking map
-	status, _ := notification["status"].(string)
+	// Update task status in our tracking map.
 	h.tasks.UpdateTaskStatus(taskID, status)
 
-	// Log verification success
+	// Log verification success.
 	log.Infof("★★★ Verified notification for task %s: Status = %s ★★★", taskID, status)
-	prettyJSON, _ := json.MarshalIndent(notification, "", "  ")
-	log.Infof("Notification details: %s", string(prettyJSON))
+	log.Infof("Notification details: %s", string(body))
 
 	// Respond with success
 	w.WriteHeader(http.StatusOK)
@@ -454,33 +438,11 @@ func (h *WebhookHandler) verifyJWT(tokenString string, payload []byte) (jwt.Toke
 	// Parse with options
 	token, err = jwt.Parse([]byte(tokenString), opts...)
 	if err != nil {
+		// A validation failure (bad signature, expired, unknown key id, ...) is
+		// terminal. Do NOT fall back to trying every key without kid matching —
+		// that defeats the purpose of verifying the token.
 		log.Errorf("Token validation failed: %v", err)
-
-		// Try a more lenient verification approach as fallback
-		log.Infof("Attempting more lenient verification...")
-
-		// Try verification without key ID matching
-		for i := 0; i < keyset.Len(); i++ {
-			key, _ := keyset.Key(i)
-
-			var pubKey interface{}
-			err := key.Raw(&pubKey)
-			if err != nil {
-				log.Warnf("Failed to extract public key: %v", err)
-				continue
-			}
-
-			// Try direct verification with this key
-			token, err = jwt.Parse([]byte(tokenString), jwt.WithKey(jwa.RS256, pubKey))
-			if err == nil {
-				log.Infof("Token verified successfully with key #%d", i)
-				break
-			} else {
-				log.Warnf("Verification with key #%d failed: %v", i, err)
-			}
-		}
-		// If all verification attempts failed
-		return nil, err
+		return nil, fmt.Errorf("token validation failed: %w", err)
 	}
 	log.Infof("JWT token validation successful at %v. Token ID: %v.",
 		time.Now().Format(time.RFC3339), token.JwtID())
@@ -518,7 +480,7 @@ func (h *WebhookHandler) verifyJWT(tokenString string, payload []byte) (jwt.Toke
 				currentTime.Format(time.RFC3339), iatTime.Format(time.RFC3339),
 				tokenAge.Round(time.Millisecond), (jwtMaxAge * 2).Round(time.Millisecond))
 
-			if tokenAge > jwtMaxAge*2 { // More lenient timeout for testing
+			if tokenAge > jwtMaxAge {
 				return nil, fmt.Errorf("token has expired (age: %v)", tokenAge)
 			}
 		} else {
@@ -538,8 +500,9 @@ func (h *WebhookHandler) verifyJWT(tokenString string, payload []byte) (jwt.Toke
 				log.Warnf("Payload hash mismatch: expected %s, got %s",
 					expectedPayloadHash[:min(8, len(expectedPayloadHash))]+"...",
 					hashStr[:min(8, len(hashStr))]+"...")
-				// Don't fail on hash mismatch during testing
-				// return nil, fmt.Errorf("payload hash mismatch")
+				// A body that does not match the signed hash was tampered with
+				// in transit — reject it instead of only warning.
+				return nil, fmt.Errorf("payload hash mismatch")
 			} else {
 				log.Infof("Payload hash verified successfully. Size: %d bytes", len(payload))
 			}

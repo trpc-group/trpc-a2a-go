@@ -37,7 +37,7 @@ srv.Start(":8080")   // 在 "/" 服务 JSON-RPC，在 /.well-known/agent-card.js
 | `WithTenantCard(tenant, card)` / `WithTenantCardProvider(fn)` | 注册按租户解析的 card，多租户时使用。 |
 | `WithAuthenticatedExtendedCardHandler(fn)` | 开启鉴权后的 extended agent card。 |
 | `WithAuthProvider(p)` | 要求 JSON-RPC 请求鉴权。 |
-| `WithJWKSEndpoint(enabled, path)` + `WithPushNotificationAuthenticator(a)` | 签名推送通知并发布 JWKS 公钥。 |
+| `WithJWKSEndpoint(false, "")` | 逃生口:签名推送但公钥在别处发布。签名身份用 `WithPushNotificationAuthenticator` 显式配。 |
 | `WithBasePath(prefix)` | 挂载到子路径。 |
 | `WithJSONRPCEndpoint(path)` | 自定义 JSON-RPC endpoint。通常优先用 `WithBasePath`。 |
 | `WithCompatHandler(h)` | 同时服务 legacy v0.2.x wire。 |
@@ -248,20 +248,25 @@ srv, _ := server.NewA2AServer(tm,
 
 ## 推送通知
 
-用于离线运行:客户端注册 webhook,服务端随任务进展回调它。框架用 JWT 签名每次回调,并在 JWKS 端点发布校验公钥。
+用于离线运行:客户端注册 webhook,框架随任务进展**自动**回调它。投递是 opt-in 的——给 TaskManager 一个 `push.Sender`,任务每到达显著状态(终态、input-required、auth-required,或任何携带 message 的更新)时,框架就把 `StreamResponse` POST 到该任务注册的每个 webhook。
 
 ```go
-authr := auth.NewPushNotificationAuthenticator()
-authr.GenerateKeyPair()
-srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
-    server.WithJWKSEndpoint(true, "/.well-known/jwks.json"),
-    server.WithPushNotificationAuthenticator(authr),
+// 一个 Notifier 承载完整能力:JWT 签名 + 投递。
+// (生产多副本用 pushauth.WithJWTKey(key, kid) 共享同一把私钥。)
+notifier, _ := pushauth.NewNotifier(pushauth.WithJWT())
+
+// TaskManager:Sender 开启自动投递;server 从它发现 push 能力并在 card 上声明。
+tm, _ := memory.NewTaskManager(processor,
+    memory.WithPushNotifications(notifier),
 )
+
+// Server:把签名身份传进去,server 据此发布配套 JWKS。
+// notifier.Authenticator() 就是 notifier 签名用的那个身份。
+srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
+    server.WithPushNotificationAuthenticator(notifier.Authenticator()))
 ```
 
-配置经 `CreateTaskPushNotificationConfig` 入库，也可以通过 `ListTaskPushNotificationConfigs` / `DeleteTaskPushNotificationConfig` 管理。请求内联的 `configuration.taskPushNotificationConfig` 不会自动注册，而是作为 `ec.PushConfig` 传给你的 processor；是否兑现由 agent 逻辑决定。
-
-服务端发送 webhook 时复用同一个 `PushNotificationAuthenticator` 签名 payload，接收方再从 JWKS 端点取公钥校验。→ [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks)。
+客户端经 `CreateTaskPushNotificationConfig` 注册配置(用 `ListTaskPushNotificationConfigs` / `DeleteTaskPushNotificationConfig` 管理)。**不注入 sender = 不支持 push**:config RPC 返回 `-32003 PushNotificationNotSupported`(与官方 SDK 一致)。想保留注册、由 agent 自己掌控投递,用 `WithPushNotificationsConfig(push.Config{Sender: notifier, ManualDelivery: true})`——自动投递关闭,注册/JWKS 发现/能力声明照常;要过滤/攒批,自定义 Sender 并**嵌入** `*pushauth.Notifier`(嵌入保留签名身份供 server 发现)。请求内联的 `configuration.taskPushNotificationConfig` 同样视为注册:未启用时拒绝,启用时落库(可查询、自动投递),并照旧作为 `ec.PushConfig` 传给 processor。自定义 header / tracing:`push.WithRequestDecorator`。→ [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks)。
 
 ## 多租户托管
 
