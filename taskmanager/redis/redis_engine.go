@@ -252,6 +252,24 @@ func (m *TaskManager) prepareExecution(
 	if cfg := request.Configuration; cfg != nil {
 		ex.ec.AcceptedOutputModes = cfg.AcceptedOutputModes
 		ex.ec.PushConfig = cfg.PushConfig
+		// An inline push config registers the webhook for this task, mirroring an
+		// explicit tasks/pushNotificationConfig/set. Gate it like the RPC (no
+		// Sender configured -> push unsupported) and persist before the processor
+		// runs so the first dispatched event already finds it.
+		if cfg.PushConfig != nil {
+			if m.pushSender == nil {
+				m.releaseExecution(taskID, ex.live)
+				cancel()
+				return nil, taskmanager.ErrPushNotificationNotSupported()
+			}
+			pc := *cfg.PushConfig
+			pc.TaskID = taskID
+			if err := m.storePushConfig(context.Background(), pc); err != nil {
+				m.releaseExecution(taskID, ex.live)
+				cancel()
+				return nil, err
+			}
+		}
 	}
 
 	events, err := m.processor.ProcessMessage(execCtx, ex.ec)

@@ -19,6 +19,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
@@ -70,6 +71,18 @@ type TaskManager struct {
 	closeOnce sync.Once
 	closeErr  error
 
+	// pushSender delivers task updates to registered webhooks as events occur;
+	// nil disables push (the config RPCs return PushNotificationNotSupported).
+	pushSender push.Sender
+	// pushWg counts in-flight push deliveries so Close waits for them before it
+	// closes the Redis client (a delivery reads its config through that client).
+	pushWg sync.WaitGroup
+	// pushCtx bounds every push delivery; pushCancel is called in Close so a slow
+	// or hung webhook cannot stall shutdown — the in-flight send (and its config
+	// read) is cancelled rather than awaited to its full timeout.
+	pushCtx    context.Context
+	pushCancel context.CancelFunc
+
 	// options
 	options *TaskManagerOptions
 }
@@ -99,6 +112,9 @@ func NewTaskManager(
 	for _, opt := range opts {
 		opt(options)
 	}
+	if options.Push.ManualDelivery && options.Push.Sender == nil {
+		return nil, errors.New("push.Config.ManualDelivery requires a Sender")
+	}
 
 	manager := &TaskManager{
 		processor:   processor,
@@ -106,8 +122,10 @@ func NewTaskManager(
 		expiration:  options.ExpireTime,
 		subscribers: make(map[string][]*taskSubscriber),
 		executions:  make(map[string]*liveExecution),
+		pushSender:  options.Push.Sender,
 		options:     options,
 	}
+	manager.pushCtx, manager.pushCancel = context.WithCancel(context.Background())
 
 	return manager, nil
 }
@@ -348,23 +366,16 @@ func (m *TaskManager) OnPushNotificationSet(
 	ctx context.Context,
 	params protocol.TaskPushNotificationConfig,
 ) (*protocol.TaskPushNotificationConfig, error) {
+	if m.pushSender == nil {
+		return nil, taskmanager.ErrPushNotificationNotSupported()
+	}
 	// Check if task exists.
-	_, err := m.getTaskInternal(ctx, params.TaskID)
-	if err != nil {
+	if _, err := m.getTaskInternal(ctx, params.TaskID); err != nil {
 		return nil, err
 	}
-
-	// Store the push notification configuration.
-	pushKey := pushNotificationPrefix + params.TaskID
-	configBytes, err := json.Marshal(params)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize push notification config: %w", err)
+	if err := m.storePushConfig(ctx, params); err != nil {
+		return nil, err
 	}
-
-	if err := m.client.Set(ctx, pushKey, configBytes, m.expiration).Err(); err != nil {
-		return nil, fmt.Errorf("failed to store push notification config: %w", err)
-	}
-
 	log.Debugf("RedisTaskManager: Push notification config set for task %s", params.TaskID)
 	return &params, nil
 }
@@ -374,6 +385,9 @@ func (m *TaskManager) OnPushNotificationGet(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (*protocol.TaskPushNotificationConfig, error) {
+	if m.pushSender == nil {
+		return nil, taskmanager.ErrPushNotificationNotSupported()
+	}
 	// Check if task exists.
 	_, err := m.getTaskInternal(ctx, params.ID)
 	if err != nil {
@@ -440,6 +454,9 @@ func (m *TaskManager) OnPushNotificationList(
 	ctx context.Context,
 	params protocol.ListTaskPushNotificationConfigsParams,
 ) (*protocol.ListTaskPushNotificationConfigsResult, error) {
+	if m.pushSender == nil {
+		return nil, taskmanager.ErrPushNotificationNotSupported()
+	}
 	// Check if task exists.
 	if _, err := m.getTaskInternal(ctx, params.TaskID); err != nil {
 		return nil, err
@@ -466,11 +483,117 @@ func (m *TaskManager) OnPushNotificationDelete(
 	ctx context.Context,
 	params protocol.DeleteTaskPushNotificationConfigParams,
 ) error {
+	if m.pushSender == nil {
+		return taskmanager.ErrPushNotificationNotSupported()
+	}
 	if err := m.client.Del(ctx, pushNotificationPrefix+params.TaskID).Err(); err != nil {
 		return fmt.Errorf("failed to delete push notification config: %w", err)
 	}
 	log.Debugf("RedisTaskManager: Push notification config deleted for task %s", params.TaskID)
 	return nil
+}
+
+// PushSender returns the Sender configured via WithPushNotifications, or nil
+// when push is not enabled. The A2AServer probes this accessor to advertise the
+// pushNotifications capability on served agent cards when a Sender is present.
+// (The JWKS signing identity is configured separately, via the server's
+// WithPushNotificationAuthenticator.)
+func (m *TaskManager) PushSender() push.Sender {
+	return m.pushSender
+}
+
+// storePushConfig persists cfg under the task's push key with the manager TTL.
+// The Redis manager keeps at most one config per task, so a later Set for the
+// same task overwrites the earlier one.
+func (m *TaskManager) storePushConfig(ctx context.Context, cfg protocol.TaskPushNotificationConfig) error {
+	configBytes, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to serialize push notification config: %w", err)
+	}
+	if err := m.client.Set(ctx, pushNotificationPrefix+cfg.TaskID, configBytes, m.expiration).Err(); err != nil {
+		return fmt.Errorf("failed to store push notification config: %w", err)
+	}
+	return nil
+}
+
+// readPushConfigs returns the push configs registered for taskID. The Redis
+// manager stores at most one per task, so the result holds zero or one; a
+// missing key is not an error.
+func (m *TaskManager) readPushConfigs(
+	ctx context.Context, taskID string,
+) ([]protocol.TaskPushNotificationConfig, error) {
+	configBytes, err := m.client.Get(ctx, pushNotificationPrefix+taskID).Bytes()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var config protocol.TaskPushNotificationConfig
+	if err := json.Unmarshal(configBytes, &config); err != nil {
+		return nil, fmt.Errorf("failed to deserialize push notification config: %w", err)
+	}
+	return []protocol.TaskPushNotificationConfig{config}, nil
+}
+
+// dispatchPush delivers event to the webhook registered for taskID. It is a
+// no-op unless a Sender is configured and the event is worth pushing, and
+// stays silent in manual delivery mode (the agent pushes on its own schedule).
+// The config read and the webhook POST run in the background and best-effort:
+// they must not block task-event processing, and a slow or failing webhook
+// never fails the task.
+func (m *TaskManager) dispatchPush(taskID string, event protocol.StreamResponse) {
+	if m.pushSender == nil || m.options.Push.ManualDelivery || !pushWorthy(event) {
+		return
+	}
+	// Reserve the delivery on pushWg under the lock that guards m.closed, which
+	// Close sets before it waits: once shutdown has begun no new delivery can
+	// race that Wait (dispatch is also reached from the OnCancelTask RPC path,
+	// which engineWg does not track).
+	m.cancelMu.Lock()
+	if m.closed {
+		m.cancelMu.Unlock()
+		return
+	}
+	m.pushWg.Add(1)
+	m.cancelMu.Unlock()
+
+	go func() {
+		defer m.pushWg.Done()
+		configs, err := m.readPushConfigs(m.pushCtx, taskID)
+		if err != nil {
+			log.Warnf("RedisTaskManager: push dispatch: load config for task %s: %v", taskID, err)
+			return
+		}
+		for _, cfg := range configs {
+			if err := m.pushSender.SendPush(m.pushCtx, cfg, event); err != nil {
+				log.Warnf("RedisTaskManager: push dispatch: send to %s for task %s: %v", cfg.URL, taskID, err)
+			}
+		}
+	}()
+}
+
+// pushWorthy reports whether an event is worth delivering as a push
+// notification. A status update carrying a message is always delivered;
+// content-less working/submitted heartbeats are skipped to avoid webhook
+// storms; terminal, input-required and auth-required transitions, and task,
+// message and artifact events, are delivered.
+//
+// Keep in sync with the memory manager's pushWorthy: both encode one delivery
+// policy that could later be lifted into the push package.
+func pushWorthy(event protocol.StreamResponse) bool {
+	if su := event.GetStatusUpdate(); su != nil {
+		if su.Status.Message != nil {
+			return true
+		}
+		switch su.Status.State {
+		case protocol.TaskStateWorking, protocol.TaskStateSubmitted, protocol.TaskStateUnspecified:
+			return false
+		default:
+			return true
+		}
+	}
+	return true
 }
 
 // OnResubscribe handles tasks/resubscribe requests.
@@ -794,6 +917,10 @@ func (m *TaskManager) cleanSubscribers(taskID string) {
 
 // notifySubscribers notifies all subscribers of a task.
 func (m *TaskManager) notifySubscribers(taskID string, event protocol.StreamResponse) {
+	// Deliver push notifications independently of live SSE subscribers: reaching
+	// clients that are not currently streaming is the whole point of push.
+	m.dispatchPush(taskID, event)
+
 	m.subMu.RLock()
 	subs, exists := m.subscribers[taskID]
 	if !exists || len(subs) == 0 {
@@ -918,6 +1045,12 @@ func (m *TaskManager) Close() error {
 		// Wait for the detached engines: their final persists (close-rule
 		// CANCELED) must land while the Redis client is still usable.
 		m.engineWg.Wait()
+
+		// Cancel and drain in-flight push deliveries: cancelling first means a slow
+		// webhook (or config read) cannot stall shutdown, and draining keeps the
+		// Redis client open until every delivery goroutine has returned.
+		m.pushCancel()
+		m.pushWg.Wait()
 
 		m.closeErr = m.client.Close()
 	})

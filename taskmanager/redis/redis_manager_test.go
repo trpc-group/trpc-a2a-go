@@ -1203,7 +1203,7 @@ func TestOnListTasks(t *testing.T) {
 // =============================================================================
 
 func TestPushNotificationCRUD(t *testing.T) {
-	m, mr := setupTest(t, scriptedExecutor())
+	m, mr := setupTest(t, scriptedExecutor(), WithPushNotifications(&recordingSender{}))
 	storedTask(t, m, "task-push", "ctx-push", protocol.TaskStateWorking)
 
 	config := protocol.TaskPushNotificationConfig{
