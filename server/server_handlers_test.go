@@ -24,6 +24,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push/pushauth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
@@ -268,8 +269,12 @@ func TestA2AServer_PushNotifications(t *testing.T) {
 	mockTM := newMockTaskManager()
 	agentCard := defaultAgentCard()
 
-	// Create server with JWKS enabled - fix function name
-	a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard), WithJWKSEndpoint(true, ""))
+	// mockTM cannot be probed for a push Sender, so use the explicit overrides:
+	// a signing identity plus an explicitly enabled JWKS endpoint.
+	authr := pushauth.NewAuthenticator()
+	require.NoError(t, authr.GenerateKeyPair())
+	a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard),
+		WithJWKSEndpoint(true, ""), WithPushNotificationAuthenticator(authr))
 	require.NoError(t, err)
 
 	// Create test server with the full handler
@@ -559,4 +564,14 @@ func newTestServer(t *testing.T, tm taskmanager.TaskManager) *httptest.Server {
 	srv, err := NewA2AServer(tm, WithAgentCard(defaultAgentCard()))
 	require.NoError(t, err)
 	return httptest.NewServer(srv.Handler())
+}
+
+// TestNewA2AServer_JWKSRequiresSigningIdentity: enabling the JWKS endpoint
+// without a signing identity must fail at construction (a JWKS nothing signs
+// with can never verify a push).
+func TestNewA2AServer_JWKSRequiresSigningIdentity(t *testing.T) {
+	_, err := NewA2AServer(newMockTaskManager(), WithAgentCard(defaultAgentCard()),
+		WithJWKSEndpoint(true, ""))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "signing identity")
 }

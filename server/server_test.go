@@ -24,10 +24,10 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
 
-	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/sse"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push/pushauth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
@@ -815,7 +815,7 @@ func (p *shutdownAwareMeterProvider) Shutdown(context.Context) error {
 // Test for push notification authenticator integration
 func TestServer_WithPushNotificationAuthenticator(t *testing.T) {
 	// Create authenticator
-	authenticator := auth.NewPushNotificationAuthenticator()
+	authenticator := pushauth.NewAuthenticator()
 	err := authenticator.GenerateKeyPair()
 	require.NoError(t, err)
 

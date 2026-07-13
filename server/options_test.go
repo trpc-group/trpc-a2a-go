@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push/pushauth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry/metrics"
 )
 
@@ -87,7 +88,7 @@ func TestWithJWKSEndpoint(t *testing.T) {
 
 // Test for WithPushNotificationAuthenticator option
 func TestWithPushNotificationAuthenticator(t *testing.T) {
-	authenticator := auth.NewPushNotificationAuthenticator()
+	authenticator := pushauth.NewAuthenticator()
 	require.NoError(t, authenticator.GenerateKeyPair())
 
 	serverOptions := &A2AServer{}

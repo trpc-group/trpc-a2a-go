@@ -52,9 +52,13 @@ type ExecContext struct {
 	AcceptedOutputModes []string
 
 	// PushConfig is the push-notification configuration carried inline on the
-	// send request (configuration.pushNotificationConfig), when provided. The
-	// framework passes it through without registering it: honoring it is the
-	// MessageProcessor's decision.
+	// send request (configuration.pushNotificationConfig), when provided. It is
+	// an informational copy: the manager has already registered it for the task
+	// (or rejected the request with PushNotificationNotSupported when push is
+	// not configured), exactly as an explicit tasks/pushNotificationConfig/set
+	// would. A MessageProcessor delivering manually (push.Config.ManualDelivery)
+	// can use it as the webhook to push to; configs registered via the RPC live
+	// in the manager's store and are not surfaced here.
 	PushConfig *protocol.TaskPushNotificationConfig
 }
 

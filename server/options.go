@@ -16,6 +16,7 @@ import (
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push/pushauth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry/metrics"
 )
@@ -154,12 +155,17 @@ func WithAuthProvider(provider auth.Provider) Option {
 	}
 }
 
-// WithJWKSEndpoint enables the JWKS endpoint for push notification authentication.
-// This is used for providing public keys for JWT verification.
+// WithJWKSEndpoint explicitly controls the JWKS endpoint for push notification
+// verification. Most servers do not need it: when a signing identity is
+// configured (WithPushNotificationAuthenticator), the server publishes the JWKS
+// automatically. Use this option to override that default — in particular,
+// WithJWKSEndpoint(false, "") is the sanctioned way to sign pushes while
+// publishing the public keys elsewhere (e.g. a gateway or CDN serves them).
 // The path defaults to "/.well-known/jwks.json".
 func WithJWKSEndpoint(enabled bool, path string) Option {
 	return func(s *A2AServer) {
 		s.jwksEnabled = enabled
+		s.jwksSet = true
 		if path != "" {
 			s.jwksEndpoint = path
 			s.pathsExplicitlySet = true
@@ -167,10 +173,13 @@ func WithJWKSEndpoint(enabled bool, path string) Option {
 	}
 }
 
-// WithPushNotificationAuthenticator sets a custom authenticator for push notifications.
-// This allows reusing the same authenticator instance throughout the application
-// ensuring that the same keys are used for signing and verification.
-func WithPushNotificationAuthenticator(authenticator *auth.PushNotificationAuthenticator) Option {
+// WithPushNotificationAuthenticator sets the signing identity whose JWKS the
+// server publishes. Pass the identity from the sender that signs deliveries —
+// typically notifier.Authenticator() — so the published keys match the
+// signatures. This is required for signed push: without it deliveries are
+// unsigned and no JWKS is published (the pushNotifications capability is still
+// advertised whenever the TaskManager exposes a Sender).
+func WithPushNotificationAuthenticator(authenticator *pushauth.Authenticator) Option {
 	return func(s *A2AServer) {
 		s.pushAuth = authenticator
 	}

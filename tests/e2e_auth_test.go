@@ -25,6 +25,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/client"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push/pushauth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
@@ -241,7 +242,7 @@ func TestPushNotificationAuthentication(t *testing.T) {
 	// Setup agent side (sender)
 	// -----------------------
 	agentTaskMgr := newMockTaskManager(nil)
-	agentAuthenticator := auth.NewPushNotificationAuthenticator()
+	agentAuthenticator := pushauth.NewAuthenticator()
 	err := agentAuthenticator.GenerateKeyPair()
 	require.NoError(t, err, "Agent failed to generate key pair")
 
@@ -261,6 +262,7 @@ func TestPushNotificationAuthentication(t *testing.T) {
 		agentTaskMgr,
 		server.WithAgentCard(agentCard),
 		server.WithJWKSEndpoint(true, "/.well-known/jwks.json"),
+		server.WithPushNotificationAuthenticator(agentAuthenticator),
 	)
 	require.NoError(t, err, "Failed to create agent server")
 
@@ -292,7 +294,7 @@ func TestPushNotificationAuthentication(t *testing.T) {
 	// Setup client side (receiver)
 	// --------------------------
 	// Create client authenticator for verification
-	clientAuthenticator := auth.NewPushNotificationAuthenticator()
+	clientAuthenticator := pushauth.NewAuthenticator()
 	clientAuthenticator.SetJWKSClient(agentJWKSURL)
 
 	// Channel to track if authentication succeeded

@@ -79,6 +79,11 @@ func GenerateRPCID() string {
 	return uuid.New().String()
 }
 
+// GeneratePushConfigID generates a new unique push-notification config ID.
+func GeneratePushConfigID() string {
+	return "push-" + uuid.New().String()
+}
+
 // ---------------------------------------------------------------------------
 // Core data types (v1.0 — no "kind" fields, Part is a struct, not interface)
 // ---------------------------------------------------------------------------
@@ -242,7 +247,10 @@ type TaskPushNotificationConfig struct {
 	URL            string              `json:"url"`
 	Token          string              `json:"token,omitempty"`
 	Authentication *AuthenticationInfo `json:"authentication,omitempty"`
-	Metadata       map[string]any      `json:"metadata,omitempty"`
+	// CreatedAt is the RFC3339 time the config was created (v1.0 field). It is
+	// set by the store on Save and is read-only from the client's perspective.
+	CreatedAt string         `json:"createdAt,omitempty"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
 // Details returns the delivery details of this config as a PushNotificationConfig

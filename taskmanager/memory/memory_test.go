@@ -195,7 +195,7 @@ func TestTaskManager_OnGetTask(t *testing.T) {
 }
 
 func TestTaskManager_PushNotifications(t *testing.T) {
-	manager := newTestManager(t, echoExecutor())
+	manager := newTestManager(t, echoExecutor(), WithPushNotifications(noopSender()))
 	ctx := context.Background()
 
 	tests := []struct {
@@ -521,9 +521,9 @@ func TestTaskManager_TaskTTLCleanupGoroutine(t *testing.T) {
 	manager.subscribers[taskID] = []*taskSubscriber{sub}
 	manager.taskMu.Unlock()
 
-	manager.mu.Lock()
-	manager.pushNotifications[taskID] = protocol.TaskPushNotificationConfig{TaskID: taskID}
-	manager.mu.Unlock()
+	if _, err := manager.pushStore.save(protocol.TaskPushNotificationConfig{TaskID: taskID}); err != nil {
+		t.Fatalf("Failed to seed push config: %v", err)
+	}
 
 	deadline := time.After(500 * time.Millisecond)
 	ticker := time.NewTicker(5 * time.Millisecond)
@@ -535,9 +535,8 @@ func TestTaskManager_TaskTTLCleanupGoroutine(t *testing.T) {
 		_, subsExists := manager.subscribers[taskID]
 		manager.taskMu.RUnlock()
 
-		manager.mu.RLock()
-		_, pushExists := manager.pushNotifications[taskID]
-		manager.mu.RUnlock()
+		pushConfigs := manager.pushStore.list(taskID)
+		pushExists := len(pushConfigs) > 0
 
 		if !taskExists && !subsExists && !pushExists && sub.Closed() {
 			return
@@ -723,7 +722,7 @@ func TestTaskManager_OnListTasks(t *testing.T) {
 
 // TestTaskManager_PushNotificationListDelete covers the v1.0 list/delete push-config methods.
 func TestTaskManager_PushNotificationListDelete(t *testing.T) {
-	manager := newTestManager(t, echoExecutor())
+	manager := newTestManager(t, echoExecutor(), WithPushNotifications(noopSender()))
 	ctx := context.Background()
 
 	if _, err := manager.OnPushNotificationSet(ctx, protocol.TaskPushNotificationConfig{

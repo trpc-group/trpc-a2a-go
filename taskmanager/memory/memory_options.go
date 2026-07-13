@@ -10,6 +10,8 @@ package memory
 
 import (
 	"time"
+
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 )
 
 // TaskManagerOptions contains configuration options for TaskManager.
@@ -36,6 +38,11 @@ type TaskManagerOptions struct {
 
 	// TaskSubscriberBlockingSend enables blocking send for task subscribers.
 	TaskSubscriberBlockingSend bool
+
+	// Push configures push-notification delivery (see push.Config). A nil
+	// Push.Sender means push is not supported: the config RPCs return
+	// PushNotificationNotSupported.
+	Push push.Config
 }
 
 // DefaultTaskManagerOptions returns the default configuration options.
@@ -103,4 +110,30 @@ func WithTaskSubscriberBlockingSend(blockingSend bool) TaskManagerOption {
 	return func(opts *TaskManagerOptions) {
 		opts.TaskSubscriberBlockingSend = blockingSend
 	}
+}
+
+// WithPushNotificationsConfig enables push notifications from the given config:
+// as task events occur, the manager delivers them to every webhook registered
+// for the task via cfg.Sender. Without a Sender, push is not supported — the
+// config RPCs return PushNotificationNotSupported (-32003). Set
+// cfg.ManualDelivery to keep registration open while the agent controls delivery
+// itself; for filtering/batching, embed *pushauth.Notifier in a custom Sender.
+//
+//	notifier, _ := pushauth.NewNotifier(pushauth.WithJWT())
+//	tm, _ := memory.NewTaskManager(proc, memory.WithPushNotificationsConfig(push.Config{
+//	    Sender:         notifier,
+//	    ManualDelivery: true,
+//	}))
+//	// later, in agent code: notifier.SendPush(ctx, cfg, event)
+func WithPushNotificationsConfig(cfg push.Config) TaskManagerOption {
+	return func(opts *TaskManagerOptions) {
+		opts.Push = cfg
+	}
+}
+
+// WithPushNotifications is shorthand for WithPushNotificationsConfig with a
+// Sender and automatic delivery — the common case. Use
+// WithPushNotificationsConfig for manual delivery or other push settings.
+func WithPushNotifications(sender push.Sender) TaskManagerOption {
+	return WithPushNotificationsConfig(push.Config{Sender: sender})
 }
