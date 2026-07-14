@@ -269,9 +269,9 @@ registered for a task as the task reaches a significant state — terminal,
 input-required, auth-required, or any update carrying a message.
 
 ```go
-// One Notifier carries the whole capability: JWT signing + delivery.
+// One SignedSender carries the whole capability: JWT signing + delivery.
 // (Production replicas share one key via pushauth.WithJWTKey(key, kid).)
-notifier, _ := pushauth.NewNotifier(pushauth.WithJWT())
+notifier, _ := pushauth.NewSignedSender(pushauth.WithJWT())
 
 // TaskManager: the Sender enables automatic delivery. The server discovers the
 // push capability from it and advertises pushNotifications on the card.
@@ -291,7 +291,7 @@ return `-32003 PushNotificationNotSupported`, matching the official SDK. To keep
 registration open while the agent controls delivery itself, set
 `WithPushNotificationsConfig(push.Config{Sender: notifier, ManualDelivery: true})`
 — automatic dispatch turns off while registration and the capability stay on; for
-filtering/batching, wrap `*pushauth.Notifier` in a custom Sender. An inline
+filtering/batching, wrap `*pushauth.SignedSender` in a custom Sender. An inline
 `configuration.taskPushNotificationConfig` is a registration too: it is rejected
 when push is unsupported and persisted (queryable, auto-delivered) when enabled —
 it also reaches your processor as `ec.PushConfig`. Custom headers/tracing:

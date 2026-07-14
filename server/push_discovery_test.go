@@ -66,7 +66,7 @@ func fetchDefaultCard(t *testing.T, ts *httptest.Server) AgentCard {
 // via WithPushNotificationAuthenticator, the server publishes the JWKS, and it
 // advertises the push capability automatically from the TaskManager's Sender.
 func TestNewA2AServer_PublishesConfiguredIdentity(t *testing.T) {
-	notifier, err := pushauth.NewNotifier(pushauth.WithJWT())
+	notifier, err := pushauth.NewSignedSender(pushauth.WithJWT())
 	require.NoError(t, err)
 	tm := newDiscoveryTM(t, memory.WithPushNotifications(notifier))
 
@@ -91,7 +91,7 @@ func TestNewA2AServer_PublishesConfiguredIdentity(t *testing.T) {
 // TestNewA2AServer_UnsignedPush: an identity-less Sender enables push (capability
 // auto-set) but publishes no JWKS, and construction succeeds.
 func TestNewA2AServer_UnsignedPush(t *testing.T) {
-	notifier, err := pushauth.NewNotifier() // no signing identity
+	notifier, err := pushauth.NewSignedSender() // no signing identity
 	require.NoError(t, err)
 	tm := newDiscoveryTM(t, memory.WithPushNotifications(notifier))
 
@@ -115,7 +115,7 @@ func TestNewA2AServer_UnsignedPush(t *testing.T) {
 // sanctioned escape hatch — an identity is configured but the endpoint stays
 // off, e.g. when a gateway serves the keys.
 func TestNewA2AServer_JWKSExplicitDisable(t *testing.T) {
-	notifier, err := pushauth.NewNotifier(pushauth.WithJWT())
+	notifier, err := pushauth.NewSignedSender(pushauth.WithJWT())
 	require.NoError(t, err)
 	tm := newDiscoveryTM(t, memory.WithPushNotifications(notifier))
 
@@ -136,7 +136,7 @@ func TestNewA2AServer_JWKSExplicitDisable(t *testing.T) {
 // TestFinalizePushCapability_RespectsExplicitAndSigned: an explicit capability
 // value is never overridden, and a signed card is immutable.
 func TestFinalizePushCapability_RespectsExplicitAndSigned(t *testing.T) {
-	notifier, err := pushauth.NewNotifier(pushauth.WithJWT())
+	notifier, err := pushauth.NewSignedSender(pushauth.WithJWT())
 	require.NoError(t, err)
 	tm := newDiscoveryTM(t, memory.WithPushNotifications(notifier))
 
@@ -173,7 +173,7 @@ func TestFinalizePushCapability_RespectsExplicitAndSigned(t *testing.T) {
 // Sender. Without one, the card must not claim pushNotifications, and no JWKS is
 // published (which would otherwise contradict config RPCs returning -32003).
 func TestNewA2AServer_IdentityWithoutSenderNoCapability(t *testing.T) {
-	notifier, err := pushauth.NewNotifier(pushauth.WithJWT())
+	notifier, err := pushauth.NewSignedSender(pushauth.WithJWT())
 	require.NoError(t, err)
 	tm := newDiscoveryTM(t) // NO push sender wired.
 

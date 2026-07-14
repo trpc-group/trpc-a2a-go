@@ -31,7 +31,7 @@ func completedEvent(taskID string) protocol.StreamResponse {
 	})
 }
 
-func TestNotifier_NoIdentity(t *testing.T) {
+func TestSignedSender_NoIdentity(t *testing.T) {
 	var gotAuth string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -39,9 +39,9 @@ func TestNotifier_NoIdentity(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	n, err := NewNotifier()
+	n, err := NewSignedSender()
 	if err != nil {
-		t.Fatalf("NewNotifier: %v", err)
+		t.Fatalf("NewSignedSender: %v", err)
 	}
 	if n.Authenticator() != nil {
 		t.Error("expected no signing identity without a JWT option")
@@ -54,10 +54,10 @@ func TestNotifier_NoIdentity(t *testing.T) {
 	}
 }
 
-func TestNotifier_WithJWT_EndToEnd(t *testing.T) {
-	n, err := NewNotifier(WithJWT())
+func TestSignedSender_WithJWT_EndToEnd(t *testing.T) {
+	n, err := NewSignedSender(WithJWT())
 	if err != nil {
-		t.Fatalf("NewNotifier: %v", err)
+		t.Fatalf("NewSignedSender: %v", err)
 	}
 	if n.Authenticator() == nil {
 		t.Fatal("expected a signing identity with WithJWT")
@@ -85,22 +85,22 @@ func TestNotifier_WithJWT_EndToEnd(t *testing.T) {
 	}
 }
 
-// TestNotifier_WithJWTKey_SharedAcrossReplicas is the multi-replica scenario:
+// TestSignedSender_WithJWTKey_SharedAcrossReplicas is the multi-replica scenario:
 // two notifiers (two server replicas) share one private key, so a receiver that
 // fetched the JWKS from either replica verifies deliveries from both.
-func TestNotifier_WithJWTKey_SharedAcrossReplicas(t *testing.T) {
+func TestSignedSender_WithJWTKey_SharedAcrossReplicas(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("GenerateKey: %v", err)
 	}
 
-	replicaA, err := NewNotifier(WithJWTKey(key, "shared-key"))
+	replicaA, err := NewSignedSender(WithJWTKey(key, "shared-key"))
 	if err != nil {
-		t.Fatalf("NewNotifier A: %v", err)
+		t.Fatalf("NewSignedSender A: %v", err)
 	}
-	replicaB, err := NewNotifier(WithJWTKey(key, "shared-key"))
+	replicaB, err := NewSignedSender(WithJWTKey(key, "shared-key"))
 	if err != nil {
-		t.Fatalf("NewNotifier B: %v", err)
+		t.Fatalf("NewSignedSender B: %v", err)
 	}
 
 	// Receiver fetched the JWKS from replica A only.
@@ -126,13 +126,13 @@ func TestNotifier_WithJWTKey_SharedAcrossReplicas(t *testing.T) {
 	}
 }
 
-func TestNotifier_WithJWTKey_RequiresKey(t *testing.T) {
-	if _, err := NewNotifier(WithJWTKey(nil, "kid")); err == nil {
+func TestSignedSender_WithJWTKey_RequiresKey(t *testing.T) {
+	if _, err := NewSignedSender(WithJWTKey(nil, "kid")); err == nil {
 		t.Error("expected an error for a nil private key")
 	}
 }
 
-func TestNotifier_WithSenderOptions(t *testing.T) {
+func TestSignedSender_WithSenderOptions(t *testing.T) {
 	var gotHeader string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotHeader = r.Header.Get("X-Custom")
@@ -140,11 +140,11 @@ func TestNotifier_WithSenderOptions(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	n, err := NewNotifier(WithSenderOptions(push.WithRequestDecorator(func(r *http.Request) {
+	n, err := NewSignedSender(WithSenderOptions(push.WithRequestDecorator(func(r *http.Request) {
 		r.Header.Set("X-Custom", "v1")
 	})))
 	if err != nil {
-		t.Fatalf("NewNotifier: %v", err)
+		t.Fatalf("NewSignedSender: %v", err)
 	}
 	if err := n.SendPush(context.Background(), testCfg(ts.URL), completedEvent("t1")); err != nil {
 		t.Fatalf("SendPush: %v", err)

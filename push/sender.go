@@ -69,7 +69,7 @@ func WithHTTPClient(c *http.Client) SenderOption {
 
 // WithAuthorizationHeader makes the sender set each notification's Authorization
 // header from fn — the signing seam. For JWT/JWKS signing use
-// pushauth.NewNotifier, which wires its authenticator in through this option.
+// pushauth.NewSignedSender, which wires its authenticator in through this option.
 func WithAuthorizationHeader(fn AuthHeaderFunc) SenderOption {
 	return func(s *HTTPSender) { s.authHeader = fn }
 }

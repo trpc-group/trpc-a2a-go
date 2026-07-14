@@ -27,7 +27,7 @@ const defaultPort = 8000
 // worker sends notifications itself at moments chosen by the agent. The
 // TaskManager runs with automatic delivery disabled.
 type worker struct {
-	notifier *pushauth.Notifier
+	notifier *pushauth.SignedSender
 }
 
 func (p *worker) ProcessMessage(
@@ -78,7 +78,7 @@ func main() {
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
-	notifier, err := pushauth.NewNotifier(pushauth.WithJWT())
+	notifier, err := pushauth.NewSignedSender(pushauth.WithJWT())
 	if err != nil {
 		log.Fatalf("create notifier: %v", err)
 	}

@@ -85,7 +85,7 @@ func WithTaskSubscriberBlockingSend(blockingSend bool) TaskManagerOption {
 // the task via cfg.Sender. Without a Sender, push is not supported — the config
 // RPCs return PushNotificationNotSupported (-32003). Set cfg.ManualDelivery to
 // keep registration open while the agent controls delivery itself; for
-// filtering/batching, embed *pushauth.Notifier in a custom Sender. See push.Config
+// filtering/batching, embed *pushauth.SignedSender in a custom Sender. See push.Config
 // for the full field reference.
 func WithPushNotificationsConfig(cfg push.Config) TaskManagerOption {
 	return func(opts *TaskManagerOptions) {

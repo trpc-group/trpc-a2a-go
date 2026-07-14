@@ -5,7 +5,7 @@
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
 // Package pushauth is the JWT/JWKS trust layer for A2A push notifications. It
-// holds the signing identity (Authenticator) and the signed Notifier, and is the
+// holds the signing identity (Authenticator) and the signed SignedSender, and is the
 // only package that depends on the JWT/JWKS libraries — so a task manager that
 // only needs the push.Sender interface (e.g. the redis manager) never inherits
 // those dependencies.
@@ -24,12 +24,12 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 )
 
-// Notifier bundles the whole agent-side push-notification capability behind one
+// SignedSender bundles the whole agent-side push-notification capability behind one
 // object: delivery (a push.HTTPSender) plus an optional signing identity (an
 // Authenticator). Wire the delivery into the TaskManager and the identity into
 // the server:
 //
-//	notifier, _ := pushauth.NewNotifier(pushauth.WithJWT())
+//	notifier, _ := pushauth.NewSignedSender(pushauth.WithJWT())
 //	tm, _  := memory.NewTaskManager(proc, memory.WithPushNotifications(notifier))
 //	srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 //	    server.WithPushNotificationAuthenticator(notifier.Authenticator()))
@@ -37,16 +37,16 @@ import (
 //
 // Passing notifier.Authenticator() (the same identity it signs with) keeps the
 // "signer and JWKS must match" invariant by construction.
-type Notifier struct {
+type SignedSender struct {
 	sender *push.HTTPSender
 	auth   *Authenticator
 }
 
-var _ push.Sender = (*Notifier)(nil)
+var _ push.Sender = (*SignedSender)(nil)
 
-// notifierConfig collects the options; key material is resolved in NewNotifier
+// signedSenderConfig collects the options; key material is resolved in NewSignedSender
 // so option application itself cannot fail.
-type notifierConfig struct {
+type signedSenderConfig struct {
 	generateJWT bool
 	useKey      bool
 	privateKey  *rsa.PrivateKey
@@ -54,24 +54,24 @@ type notifierConfig struct {
 	senderOpts  []push.SenderOption
 }
 
-// NotifierOption configures a Notifier.
-type NotifierOption func(*notifierConfig)
+// SignedSenderOption configures a SignedSender.
+type SignedSenderOption func(*signedSenderConfig)
 
 // WithJWT gives the notifier a signing identity with a freshly generated RSA
 // key pair: every delivery is signed with a JWT that receivers verify against
 // the JWKS the server publishes. The key lives for this process only — for
 // deployments that restart or run replicas behind a load balancer, share one
 // key via WithJWTKey instead.
-func WithJWT() NotifierOption {
-	return func(c *notifierConfig) { c.generateJWT = true }
+func WithJWT() SignedSenderOption {
+	return func(c *signedSenderConfig) { c.generateJWT = true }
 }
 
 // WithJWTKey gives the notifier a signing identity backed by an existing RSA
 // private key, so the identity survives restarts and can be shared across
 // replicas (each replica signs with the same key the JWKS advertises). An empty
 // keyID gets a generated one.
-func WithJWTKey(privateKey *rsa.PrivateKey, keyID string) NotifierOption {
-	return func(c *notifierConfig) {
+func WithJWTKey(privateKey *rsa.PrivateKey, keyID string) SignedSenderOption {
+	return func(c *signedSenderConfig) {
 		c.useKey = true
 		c.privateKey = privateKey
 		c.keyID = keyID
@@ -80,21 +80,21 @@ func WithJWTKey(privateKey *rsa.PrivateKey, keyID string) NotifierOption {
 
 // WithSenderOptions forwards options to the notifier's underlying push.HTTPSender
 // (e.g. push.WithHTTPClient, push.WithRequestDecorator).
-func WithSenderOptions(opts ...push.SenderOption) NotifierOption {
-	return func(c *notifierConfig) { c.senderOpts = append(c.senderOpts, opts...) }
+func WithSenderOptions(opts ...push.SenderOption) SignedSenderOption {
+	return func(c *signedSenderConfig) { c.senderOpts = append(c.senderOpts, opts...) }
 }
 
-// NewNotifier creates the agent-side push-notification capability. Without a JWT
+// NewSignedSender creates the agent-side push-notification capability. Without a JWT
 // option it delivers unsigned notifications (the config's static credentials
 // still apply); with WithJWT or WithJWTKey it signs every delivery and exposes
 // the matching JWKS via Authenticator().
-func NewNotifier(opts ...NotifierOption) (*Notifier, error) {
-	var cfg notifierConfig
+func NewSignedSender(opts ...SignedSenderOption) (*SignedSender, error) {
+	var cfg signedSenderConfig
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 
-	n := &Notifier{}
+	n := &SignedSender{}
 	switch {
 	case cfg.useKey:
 		// The caller asked for a key-backed identity: a nil key is a configuration
@@ -126,7 +126,7 @@ func NewNotifier(opts ...NotifierOption) (*Notifier, error) {
 }
 
 // SendPush delivers event to the webhook described by cfg (see push.Sender).
-func (n *Notifier) SendPush(
+func (n *SignedSender) SendPush(
 	ctx context.Context, cfg protocol.TaskPushNotificationConfig, event protocol.StreamResponse,
 ) error {
 	return n.sender.SendPush(ctx, cfg, event)
@@ -135,6 +135,6 @@ func (n *Notifier) SendPush(
 // Authenticator returns the notifier's signing identity, or nil when the
 // notifier was built without a JWT option. The server uses it to publish the
 // JWKS; a receiver-side process can use it to verify notifications.
-func (n *Notifier) Authenticator() *Authenticator {
+func (n *SignedSender) Authenticator() *Authenticator {
 	return n.auth
 }

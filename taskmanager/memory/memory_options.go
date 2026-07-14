@@ -117,9 +117,9 @@ func WithTaskSubscriberBlockingSend(blockingSend bool) TaskManagerOption {
 // for the task via cfg.Sender. Without a Sender, push is not supported — the
 // config RPCs return PushNotificationNotSupported (-32003). Set
 // cfg.ManualDelivery to keep registration open while the agent controls delivery
-// itself; for filtering/batching, embed *pushauth.Notifier in a custom Sender.
+// itself; for filtering/batching, embed *pushauth.SignedSender in a custom Sender.
 //
-//	notifier, _ := pushauth.NewNotifier(pushauth.WithJWT())
+//	notifier, _ := pushauth.NewSignedSender(pushauth.WithJWT())
 //	tm, _ := memory.NewTaskManager(proc, memory.WithPushNotificationsConfig(push.Config{
 //	    Sender:         notifier,
 //	    ManualDelivery: true,

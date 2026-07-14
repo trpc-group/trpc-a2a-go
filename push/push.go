@@ -14,7 +14,7 @@
 //
 // Signing is an optional, dependency-free seam: HTTPSender takes an
 // AuthHeaderFunc (WithAuthorizationHeader) to compute the Authorization header.
-// The JWT/JWKS trust layer (the Authenticator and the signed Notifier) lives in
+// The JWT/JWKS trust layer (the Authenticator and the signed SignedSender) lives in
 // the sub-package push/pushauth, which is the only one that pulls in the JWT
 // libraries — so a task manager that needs only the Sender interface stays free
 // of them.
@@ -28,7 +28,7 @@ import (
 
 // Sender delivers a task update to a single push-notification endpoint.
 //
-// Implementations must be safe for concurrent use. Wrapping a signing Notifier
+// Implementations must be safe for concurrent use. Wrapping a signing SignedSender
 // with custom delivery policy is fine — a field or an embed both work, since the
 // server's JWKS identity is configured explicitly (see the server's
 // WithPushNotificationAuthenticator) rather than probed off the Sender.

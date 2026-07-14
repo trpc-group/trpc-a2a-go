@@ -251,9 +251,9 @@ srv, _ := server.NewA2AServer(tm,
 用于离线运行:客户端注册 webhook,框架随任务进展**自动**回调它。投递是 opt-in 的——给 TaskManager 一个 `push.Sender`,任务每到达显著状态(终态、input-required、auth-required,或任何携带 message 的更新)时,框架就把 `StreamResponse` POST 到该任务注册的每个 webhook。
 
 ```go
-// 一个 Notifier 承载完整能力:JWT 签名 + 投递。
+// 一个 SignedSender 承载完整能力:JWT 签名 + 投递。
 // (生产多副本用 pushauth.WithJWTKey(key, kid) 共享同一把私钥。)
-notifier, _ := pushauth.NewNotifier(pushauth.WithJWT())
+notifier, _ := pushauth.NewSignedSender(pushauth.WithJWT())
 
 // TaskManager:Sender 开启自动投递;server 从它发现 push 能力并在 card 上声明。
 tm, _ := memory.NewTaskManager(processor,
@@ -266,7 +266,7 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
     server.WithPushNotificationAuthenticator(notifier.Authenticator()))
 ```
 
-客户端经 `CreateTaskPushNotificationConfig` 注册配置(用 `ListTaskPushNotificationConfigs` / `DeleteTaskPushNotificationConfig` 管理)。**不注入 sender = 不支持 push**:config RPC 返回 `-32003 PushNotificationNotSupported`(与官方 SDK 一致)。想保留注册、由 agent 自己掌控投递,用 `WithPushNotificationsConfig(push.Config{Sender: notifier, ManualDelivery: true})`——自动投递关闭,注册/JWKS 发现/能力声明照常;要过滤/攒批,自定义 Sender 并**嵌入** `*pushauth.Notifier`(嵌入保留签名身份供 server 发现)。请求内联的 `configuration.taskPushNotificationConfig` 同样视为注册:未启用时拒绝,启用时落库(可查询、自动投递),并照旧作为 `ec.PushConfig` 传给 processor。自定义 header / tracing:`push.WithRequestDecorator`。→ [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks)。
+客户端经 `CreateTaskPushNotificationConfig` 注册配置(用 `ListTaskPushNotificationConfigs` / `DeleteTaskPushNotificationConfig` 管理)。**不注入 sender = 不支持 push**:config RPC 返回 `-32003 PushNotificationNotSupported`(与官方 SDK 一致)。想保留注册、由 agent 自己掌控投递,用 `WithPushNotificationsConfig(push.Config{Sender: notifier, ManualDelivery: true})`——自动投递关闭,注册/JWKS 发现/能力声明照常;要过滤/攒批,自定义 Sender 并**嵌入** `*pushauth.SignedSender`(嵌入保留签名身份供 server 发现)。请求内联的 `configuration.taskPushNotificationConfig` 同样视为注册:未启用时拒绝,启用时落库(可查询、自动投递),并照旧作为 `ec.PushConfig` 传给 processor。自定义 header / tracing:`push.WithRequestDecorator`。→ [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks)。
 
 ## 多租户托管
 

@@ -4,7 +4,7 @@ Two examples show the ways an agent can deliver push notifications. Each keeps
 the A2A server and webhook client in separate programs so their responsibilities
 and logs are easy to follow.
 
-Both wire a signing `pushauth.Notifier` into the TaskManager (as the Sender) and
+Both wire a signing `pushauth.SignedSender` into the TaskManager (as the Sender) and
 pass its identity to the server (`WithPushNotificationAuthenticator`), which then
 publishes the JWKS; the webhook verifies every notification against it. The only
 difference is who decides when to deliver.
@@ -16,7 +16,7 @@ difference is who decides when to deliver.
 
 - **auto** — the processor just completes the task; the framework POSTs the
   terminal `StreamResponse` to every registered webhook.
-- **manual** — automatic dispatch is off; the processor calls the Notifier
+- **manual** — automatic dispatch is off; the processor calls the SignedSender
   itself, here pushing a mid-task milestone and the final result. Registration,
   the JWKS endpoint, and the advertised capability all still work (the identity
   is passed to the server the same way). Caveat: the processor only sees

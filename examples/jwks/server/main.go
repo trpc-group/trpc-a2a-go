@@ -163,10 +163,10 @@ func main() {
 		},
 	}
 
-	// One Notifier carries the whole push capability: JWT signing + delivery.
+	// One SignedSender carries the whole push capability: JWT signing + delivery.
 	// WithJWT generates a fresh key; production replicas share one key via
 	// pushauth.WithJWTKey so every instance signs with the key the JWKS advertises.
-	notifier, err := pushauth.NewNotifier(pushauth.WithJWT())
+	notifier, err := pushauth.NewSignedSender(pushauth.WithJWT())
 	if err != nil {
 		log.Fatalf("failed to create push notifier: %v", err)
 	}
