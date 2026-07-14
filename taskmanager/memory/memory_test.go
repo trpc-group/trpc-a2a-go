@@ -203,7 +203,7 @@ func TestTaskManager_PushNotifications(t *testing.T) {
 		action    string // "set" or "get"
 		taskID    string
 		config    *protocol.TaskPushNotificationConfig
-		getParams *protocol.TaskIDParams
+		getParams *protocol.GetTaskPushNotificationConfigParams
 		validate  func(*testing.T, interface{}, error)
 	}{
 		{
@@ -228,8 +228,8 @@ func TestTaskManager_PushNotifications(t *testing.T) {
 			name:   "get push notification",
 			action: "get",
 			taskID: "test-task-id",
-			getParams: &protocol.TaskIDParams{
-				ID: "test-task-id",
+			getParams: &protocol.GetTaskPushNotificationConfigParams{
+				TaskID: "test-task-id",
 			},
 			validate: func(t *testing.T, result interface{}, err error) {
 				if err != nil {
@@ -254,8 +254,8 @@ func TestTaskManager_PushNotifications(t *testing.T) {
 			name:   "get non-existent push notification",
 			action: "get",
 			taskID: "non-existent-task",
-			getParams: &protocol.TaskIDParams{
-				ID: "non-existent-task",
+			getParams: &protocol.GetTaskPushNotificationConfigParams{
+				TaskID: "non-existent-task",
 			},
 			validate: func(t *testing.T, result interface{}, err error) {
 				if err == nil {

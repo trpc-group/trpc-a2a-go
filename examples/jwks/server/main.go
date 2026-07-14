@@ -145,7 +145,6 @@ func main() {
 		Version:     "1.0.0",
 		Capabilities: server.AgentCapabilities{
 			Streaming:              boolPtr(true),
-			PushNotifications:      boolPtr(true),
 			StateTransitionHistory: boolPtr(true),
 		},
 		DefaultInputModes:  []string{"text"},
@@ -163,10 +162,10 @@ func main() {
 		},
 	}
 
-	// One SignedSender carries the whole push capability: JWT signing + delivery.
-	// WithJWT generates a fresh key; production replicas share one key via
-	// pushauth.WithJWTKey so every instance signs with the key the JWKS advertises.
-	signedSender, err := pushauth.NewSignedSender(pushauth.WithJWT())
+	// A SignedSender generates a signing key by default. Production replicas can
+	// share one key via pushauth.WithJWTKey so every instance signs with a key
+	// published through JWKS.
+	signedSender, err := pushauth.NewSignedSender()
 	if err != nil {
 		log.Fatalf("failed to create signed push sender: %v", err)
 	}
@@ -180,11 +179,10 @@ func main() {
 		log.Fatalf("failed to create task manager: %v", err)
 	}
 
-	// Server: configure the signing identity so it publishes the matching JWKS
-	// endpoint. signedSender.Authenticator() is the same identity it signs with.
+	// Server: publish the sender's verification keys at the standard JWKS path.
 	a2aServer, err := server.NewA2AServer(tm,
 		server.WithAgentCard(agentCard),
-		server.WithPushNotificationAuthenticator(signedSender.Authenticator()),
+		server.WithPushNotificationJWKSHandler(signedSender.JWKSHandler()),
 	)
 	if err != nil {
 		log.Fatalf("failed to create A2A server: %v", err)

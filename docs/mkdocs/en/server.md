@@ -32,7 +32,8 @@ srv.Start(":8080")   // serves JSON-RPC at "/" and the card at /.well-known/agen
 | `WithAgentCard(card)` | The public agent card (single-agent server). |
 | `WithTenantCard(tenant, card)` / `WithTenantCardProvider(fn)` | Per-tenant cards (multi-tenant, below). |
 | `WithAuthProvider(p)` | Require authentication (below). |
-| `WithJWKSEndpoint(false, "")` | Escape hatch: sign pushes but publish the keys elsewhere. The signing identity is set via `WithPushNotificationAuthenticator`. |
+| `WithPushNotificationJWKSHandler(handler)` | Publish a push sender's verification keys. Pass `sender.JWKSHandler()` for `SignedSender`, or any custom `http.Handler`. |
+| `WithJWKSEndpoint(false, "")` | Disable the built-in JWKS route when verification keys are published elsewhere; a non-empty path changes the route. |
 | `WithBasePath(prefix)` | Mount under a subpath. |
 | `WithCompatHandler(h)` | Also serve the legacy v0.2.x wire. |
 | `WithMiddleware(mw...)` | Wrap the HTTP handler chain. |
@@ -269,9 +270,9 @@ registered for a task as the task reaches a significant state — terminal,
 input-required, auth-required, or any update carrying a message.
 
 ```go
-// One SignedSender carries the whole capability: JWT signing + delivery.
-// (Production replicas share one key via pushauth.WithJWTKey(key, kid).)
-sender, _ := pushauth.NewSignedSender(pushauth.WithJWT())
+// A SignedSender generates a temporary signing key by default. Production
+// replicas share one key via pushauth.WithJWTKey(key, kid).
+sender, _ := pushauth.NewSignedSender()
 
 // TaskManager: the Sender enables automatic delivery. The server discovers the
 // push capability from it and advertises pushNotifications on the card.
@@ -279,24 +280,28 @@ tm, _ := memory.NewTaskManager(processor,
     memory.WithPushNotifications(sender),
 )
 
-// Server: pass the signing identity so it publishes the matching JWKS.
-// sender.Authenticator() is the same identity the sender signs with.
+// Server: publish the sender's verification keys at the JWKS endpoint.
 srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
-    server.WithPushNotificationAuthenticator(sender.Authenticator()))
+    server.WithPushNotificationJWKSHandler(sender.JWKSHandler()))
 ```
 
 Clients register configs via `CreateTaskPushNotificationConfig` (manage them with
 `List`/`Delete`). **Without a sender, push is unsupported**: the config RPCs
 return `-32003 PushNotificationNotSupported`, matching the official SDK. To keep
 registration open while the agent controls delivery itself, set
-`WithPushNotificationsConfig(push.Config{Sender: sender, ManualDelivery: true})`
+`WithPushConfig(push.Config{Sender: sender, ManualDelivery: true})`
 — automatic dispatch turns off while registration and the capability stay on; for
-filtering/batching, wrap `*pushauth.SignedSender` in a custom Sender. An inline
+filtering or batching, a custom `push.Sender` can hold and delegate to the
+`SignedSender`; embedding it is not required. An inline
 `configuration.taskPushNotificationConfig` is a registration too: it is rejected
 when push is unsupported and persisted (queryable, auto-delivered) when enabled —
 it also reaches your processor as `ec.PushConfig`. Custom headers/tracing:
 `push.WithRequestDecorator`.
 → [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks).
+
+`SignedSender` honors a scheme and credentials declared by the client (such as
+Basic or Bearer) and uses its JWT identity as a fallback. If callbacks must be unsigned, use
+`push.NewHTTPSender()` and omit `WithPushNotificationJWKSHandler`.
 
 ## Multi-tenant hosting
 

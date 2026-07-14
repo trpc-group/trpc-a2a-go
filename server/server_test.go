@@ -27,6 +27,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/sse"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push/pushauth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
@@ -661,7 +662,7 @@ func (m *mockTaskManager) OnPushNotificationSet(
 
 // OnPushNotificationGet implements the TaskManager interface for push notifications.
 func (m *mockTaskManager) OnPushNotificationGet(
-	ctx context.Context, params protocol.TaskIDParams,
+	ctx context.Context, params protocol.GetTaskPushNotificationConfigParams,
 ) (*protocol.TaskPushNotificationConfig, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -675,8 +676,11 @@ func (m *mockTaskManager) OnPushNotificationGet(
 	}
 
 	// Default not found response
-	return nil, fmt.Errorf("push notification config not found for task %s", params.ID)
+	return nil, fmt.Errorf("push notification config not found for task %s", params.TaskID)
 }
+
+// PushSender implements the TaskManager interface.
+func (m *mockTaskManager) PushSender() push.Sender { return nil }
 
 // OnListTasks implements the TaskManager interface (v1.0 ListTasks).
 func (m *mockTaskManager) OnListTasks(
@@ -812,8 +816,7 @@ func (p *shutdownAwareMeterProvider) Shutdown(context.Context) error {
 	return nil
 }
 
-// Test for push notification authenticator integration
-func TestServer_WithPushNotificationAuthenticator(t *testing.T) {
+func TestServer_WithPushNotificationJWKSHandler(t *testing.T) {
 	// Create authenticator
 	authenticator := pushauth.NewAuthenticator()
 	err := authenticator.GenerateKeyPair()
@@ -824,7 +827,9 @@ func TestServer_WithPushNotificationAuthenticator(t *testing.T) {
 	tm, err := memory.NewTaskManager(processor)
 	require.NoError(t, err)
 
-	// Create server with authenticator
+	jwksHandler := http.HandlerFunc(authenticator.HandleJWKS)
+
+	// Create server with a JWKS handler.
 	card := AgentCard{
 		Name:    "Test Agent",
 		Version: "1.0.0",
@@ -833,25 +838,19 @@ func TestServer_WithPushNotificationAuthenticator(t *testing.T) {
 	server, err := NewA2AServer(
 		tm,
 		WithAgentCard(card),
-		WithPushNotificationAuthenticator(authenticator),
+		WithPushNotificationJWKSHandler(jwksHandler),
 	)
 	require.NoError(t, err)
 
-	// Verify the server has the authenticator configured
-	assert.Equal(t, authenticator, server.pushAuth)
+	// Verify the server has the JWKS handler configured.
+	assert.NotNil(t, server.pushJWKSHandler)
 
 	// Test JWKS endpoint by creating a test server
 	server.jwksEnabled = true
 	server.jwksEndpoint = "/.well-known/jwks.json"
 
-	// Create a test HTTP server
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/.well-known/jwks.json" {
-			authenticator.HandleJWKS(w, r)
-			return
-		}
-		http.NotFound(w, r)
-	}))
+	// Create a test HTTP server using the actual A2A router.
+	testServer := httptest.NewServer(server.Handler())
 	defer testServer.Close()
 
 	// Test that the JWKS endpoint works

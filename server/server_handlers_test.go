@@ -269,12 +269,12 @@ func TestA2AServer_PushNotifications(t *testing.T) {
 	mockTM := newMockTaskManager()
 	agentCard := defaultAgentCard()
 
-	// mockTM cannot be probed for a push Sender, so use the explicit overrides:
-	// a signing identity plus an explicitly enabled JWKS endpoint.
+	// Explicitly enable a JWKS endpoint backed by a configured handler.
 	authr := pushauth.NewAuthenticator()
 	require.NoError(t, authr.GenerateKeyPair())
 	a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard),
-		WithJWKSEndpoint(true, ""), WithPushNotificationAuthenticator(authr))
+		WithJWKSEndpoint(true, ""),
+		WithPushNotificationJWKSHandler(http.HandlerFunc(authr.HandleJWKS)))
 	require.NoError(t, err)
 
 	// Create test server with the full handler
@@ -566,12 +566,11 @@ func newTestServer(t *testing.T, tm taskmanager.TaskManager) *httptest.Server {
 	return httptest.NewServer(srv.Handler())
 }
 
-// TestNewA2AServer_JWKSRequiresSigningIdentity: enabling the JWKS endpoint
-// without a signing identity must fail at construction (a JWKS nothing signs
-// with can never verify a push).
-func TestNewA2AServer_JWKSRequiresSigningIdentity(t *testing.T) {
+// TestNewA2AServer_JWKSRequiresHandler verifies that explicitly enabling the
+// endpoint without a handler fails at construction.
+func TestNewA2AServer_JWKSRequiresHandler(t *testing.T) {
 	_, err := NewA2AServer(newMockTaskManager(), WithAgentCard(defaultAgentCard()),
 		WithJWKSEndpoint(true, ""))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "signing identity")
+	assert.Contains(t, err.Error(), "without a handler")
 }

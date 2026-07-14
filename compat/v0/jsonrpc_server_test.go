@@ -20,6 +20,7 @@ import (
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/sse"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 )
 
 // fakeTaskManager is a minimal v1 TaskManager that records the converted
@@ -32,6 +33,8 @@ type fakeTaskManager struct {
 	task          *protocol.Task
 	pushConfig    *protocol.TaskPushNotificationConfig
 }
+
+func (f *fakeTaskManager) PushSender() push.Sender { return nil }
 
 func (f *fakeTaskManager) OnSendMessage(
 	ctx context.Context, p protocol.SendMessageParams,
@@ -78,7 +81,7 @@ func (f *fakeTaskManager) OnPushNotificationSet(
 }
 
 func (f *fakeTaskManager) OnPushNotificationGet(
-	ctx context.Context, p protocol.TaskIDParams,
+	ctx context.Context, p protocol.GetTaskPushNotificationConfigParams,
 ) (*protocol.TaskPushNotificationConfig, error) {
 	return f.pushConfig, nil
 }

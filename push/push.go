@@ -30,8 +30,8 @@ import (
 //
 // Implementations must be safe for concurrent use. Wrapping a SignedSender
 // with custom delivery policy is fine — a field or an embed both work, since the
-// server's JWKS identity is configured explicitly (see the server's
-// WithPushNotificationAuthenticator) rather than probed off the Sender.
+// server's JWKS handler is configured explicitly (see the server's
+// WithPushNotificationJWKSHandler) rather than probed off the Sender.
 type Sender interface {
 	// SendPush delivers event to the webhook described by cfg. It returns nil once
 	// the notification is accepted (a 2xx response), or a non-nil error describing
@@ -57,7 +57,7 @@ func (f SenderFunc) SendPush(
 }
 
 // Config configures a task manager's push-notification delivery. It is handed to
-// the manager once (e.g. memory.WithPushNotificationsConfig) and lives in this
+// the manager once (e.g. memory.WithPushConfig) and lives in this
 // package so every task manager — including third-party ones — shares a single
 // vocabulary for enabling push.
 type Config struct {

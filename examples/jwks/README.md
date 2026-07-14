@@ -24,18 +24,17 @@ This pattern is ideal for:
 The example consists of two primary components:
 
 ### Server Component
-- Generates RSA key pairs for JWT signing
+- Creates a `SignedSender`, which generates an RSA signing key by default
 - Exposes a JWKS endpoint (`.well-known/jwks.json`) to share public keys
 - Processes tasks asynchronously in separate goroutines
-- Signs notifications with JWT (includes task ID, timestamp, and payload hash)
+- Signs notifications with a short-lived JWT that binds the request body
 - Sends authenticated push notifications for task status changes
 
 ### Client Component
 - Hosts a webhook server to receive push notifications
-- Fetches and caches public keys from the server's JWKS endpoint
-- Verifies JWT signatures on incoming notifications
-- Includes fallback verification for improved compatibility
-- Validates payload hash to prevent tampering
+- Uses `pushauth.Authenticator` and the SDK's cached `JWKSClient`
+- Verifies JWT signatures, freshness, and the payload hash with
+  `VerifyPushNotification`
 - Tracks and displays task status changes
 
 ## Security Features
@@ -45,7 +44,7 @@ The example consists of two primary components:
 - **Key ID Support**: Allows for seamless key rotation
 - **Payload Hash Verification**: Prevents notification content tampering
 - **Token Expiration Checking**: Prevents replay attacks
-- **Automatic Key Refresh**: Periodically updates JWKS from the server
+- **Cached Key Retrieval**: The SDK fetches and caches keys from the JWKS endpoint
 
 ## Running the Example
 
@@ -75,36 +74,28 @@ go run client/main.go -server-host localhost -server-port 8000 -webhook-host loc
 
 1. **Key Generation**: Server generates RSA key pairs and assigns key IDs
 2. **JWKS Publication**: Server exposes public keys via JWKS endpoint
-3. **Task Registration**: Client registers webhook URL and sends a task
-4. **Task Processing**: Server processes task asynchronously
-5. **Notification Signing**: Server signs notification with private key and includes:
-   - Task ID and status
-   - Timestamp
-   - Payload hash (SHA-256)
-   - Key ID in JWT header
-6. **JWT Verification**: Client verifies signature using public key from JWKS
-7. **Payload Verification**: Client verifies payload hash matches content
-
-## Advanced Features
-
-- **Flexible Verification**: Multiple verification methods for compatibility
-- **Debug Logging**: Comprehensive logging for debugging JWT issues
-- **Periodic Key Refresh**: Background refresh of JWKS to handle key rotation
-- **Task Status Tracking**: Client-side tracking of task state transitions
-- **Enhanced Error Handling**: Detailed error reporting for authentication issues
+3. **Task Creation**: Client sends a task with `returnImmediately=true`
+4. **Webhook Registration**: Client calls `SetPushNotification` with the task ID
+5. **Task Processing**: Server processes the task asynchronously
+6. **Notification Signing**: Server signs the serialized `StreamResponse` with
+   an issued-at time, expiry, payload hash, and key ID
+7. **Verification**: Client uses the matching JWKS key to verify the signature,
+   token freshness, and payload hash
 
 ## API Usage
 
 The example demonstrates these A2A API features:
 
 - `server.NewA2AServer()` - Create an A2A server
-- `pushauth.NewSignedSender()` - Create a sender that signs push deliveries
+- `pushauth.NewSignedSender()` - Create a signing sender with a generated key
 - `memory.WithPushNotifications()` - Enable automatic delivery to registered webhooks
-- `server.WithPushNotificationAuthenticator()` - Publish the sender's signing keys through JWKS
+- `server.WithPushNotificationJWKSHandler()` - Publish the sender's verification keys
+- `pushauth.NewAuthenticator()` / `SetJWKSClient()` - Configure webhook verification
+- `pushauth.Authenticator.VerifyPushNotification()` - Verify a callback against JWKS
 - `a2aClient.SendMessage()` - Send message via non-streaming API (with
   `returnImmediately=true` so the call returns before the task completes)
-- `protocol.SendMessageConfiguration.PushConfig` - Register the webhook inline
-  with the message request
+- `a2aClient.SetPushNotification()` - Explicitly register the webhook after the
+  server returns a task ID
 
 ## License
 

@@ -453,28 +453,30 @@ func (m *TaskManager) OnPushNotificationSet(
 // OnPushNotificationGet handles tasks/pushNotificationConfig/get requests
 func (m *TaskManager) OnPushNotificationGet(
 	ctx context.Context,
-	params protocol.TaskIDParams,
+	params protocol.GetTaskPushNotificationConfigParams,
 ) (*protocol.TaskPushNotificationConfig, error) {
 	if m.pushSender == nil {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
-	// The TaskManager interface addresses Get by task ID only, so return the
-	// task's first registered config. Per-config-ID Get needs the v1.0
-	// GetTaskPushNotificationConfigParams and is a separate interface change.
-	configs := m.pushStore.list(params.ID)
-	if len(configs) == 0 {
-		// Distinguish "task does not exist" from "task exists but has no config":
-		// reporting -32001 for the latter would falsely tell the client the task
-		// vanished.
+	var config protocol.TaskPushNotificationConfig
+	var found bool
+	if params.ID != "" {
+		config, found = m.pushStore.get(params.TaskID, params.ID)
+	} else {
+		configs := m.pushStore.list(params.TaskID)
+		if len(configs) > 0 {
+			config, found = configs[0], true
+		}
+	}
+	if !found {
 		m.taskMu.RLock()
-		_, taskExists := m.tasks[params.ID]
+		_, taskExists := m.tasks[params.TaskID]
 		m.taskMu.RUnlock()
 		if !taskExists {
-			return nil, taskmanager.ErrTaskNotFound(params.ID)
+			return nil, taskmanager.ErrTaskNotFound(params.TaskID)
 		}
-		return nil, taskmanager.ErrPushConfigNotFound(params.ID)
+		return nil, taskmanager.ErrPushConfigNotFound(params.TaskID)
 	}
-	config := configs[0]
 	return &config, nil
 }
 
@@ -725,12 +727,9 @@ func nowTimestamp() string {
 	return time.Now().UTC().Format(time.RFC3339)
 }
 
-// PushSender returns the Sender configured via WithPushNotifications, or nil
-// when push is not enabled. The A2AServer probes this accessor to advertise the
-// pushNotifications capability on served agent cards when a Sender is present.
-// (The JWKS signing identity is configured separately, via the server's
-// WithPushNotificationAuthenticator.) A decorator TaskManager wrapping this one
-// must forward this method, or the server cannot see the push configuration.
+// PushSender returns the Sender configured via WithPushNotifications or
+// WithPushConfig, or nil when push is not enabled. The A2AServer uses it to keep
+// the advertised pushNotifications capability aligned with delivery support.
 func (m *TaskManager) PushSender() push.Sender {
 	return m.pushSender
 }

@@ -477,7 +477,7 @@ func (p *pushNotificationSender) maybeSendStatusPushNotification(
 ) {
 	// Get the push notification configuration for this task
 	config, err := p.TaskManager.OnPushNotificationGet(
-		ctx, protocol.TaskIDParams{ID: taskID},
+		ctx, protocol.GetTaskPushNotificationConfigParams{TaskID: taskID},
 	)
 	if err != nil {
 		// No configuration found or error occurred - no notification to send

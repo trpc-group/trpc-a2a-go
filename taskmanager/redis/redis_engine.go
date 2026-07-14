@@ -264,7 +264,10 @@ func (m *TaskManager) prepareExecution(
 			}
 			pc := *cfg.PushConfig
 			pc.TaskID = taskID
-			if err := m.storePushConfig(context.Background(), pc); err != nil {
+			if pc.ID == "" {
+				pc.ID = taskID
+			}
+			if _, err := m.storePushConfig(context.Background(), pc); err != nil {
 				m.releaseExecution(taskID, ex.live)
 				cancel()
 				return nil, err

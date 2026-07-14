@@ -48,7 +48,7 @@ func main() {
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
-	sender, err := pushauth.NewSignedSender(pushauth.WithJWT())
+	sender, err := pushauth.NewSignedSender()
 	if err != nil {
 		log.Fatalf("create signed sender: %v", err)
 	}
@@ -62,7 +62,7 @@ func main() {
 	card := server.AgentCard{Name: "auto-notify", URL: agentURL, Version: "1.0.0"}
 	srv, err := server.NewA2AServer(tm,
 		server.WithAgentCard(card),
-		server.WithPushNotificationAuthenticator(sender.Authenticator()),
+		server.WithPushNotificationJWKSHandler(sender.JWKSHandler()),
 	)
 	if err != nil {
 		log.Fatalf("create server: %v", err)

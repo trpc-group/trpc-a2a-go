@@ -8,9 +8,11 @@ package pushauth
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,8 +51,8 @@ var (
 //     VerifyPushNotification checks a received notification's signature, payload
 //     hash, and freshness.
 //
-// It does not deliver notifications — that is HTTPSender's job (wire the two
-// together with WithAuthenticator).
+// It does not deliver notifications; use SignedSender for agent-side delivery
+// with JWT signing, or HTTPSender for transport without a signing identity.
 type Authenticator struct {
 	// For sending notifications (agent side).
 	privateKey *rsa.PrivateKey
@@ -81,19 +83,24 @@ func (a *Authenticator) GenerateKeyPair() error {
 // and publishes its public half in the JWKS key set. Use it instead of
 // GenerateKeyPair when the key must survive restarts or be shared across
 // replicas (so every instance signs with the same key the JWKS advertises).
-// An empty keyID gets a generated one.
+// When keyID is empty, a stable ID is derived from the public key according to
+// RFC 7638. Replicas using the same key therefore publish and sign with the same
+// key ID.
 func (a *Authenticator) UseKeyPair(privateKey *rsa.PrivateKey, keyID string) error {
 	if privateKey == nil {
 		return errors.New("private key is required")
 	}
-	if keyID == "" {
-		keyID = fmt.Sprintf("key-%d", time.Now().Unix())
-	}
-
 	// Create a JWK from the private key
 	key, err := jwk.FromRaw(privateKey.Public())
 	if err != nil {
 		return fmt.Errorf("failed to create JWK from public key: %w", err)
+	}
+	if keyID == "" {
+		thumbprint, err := key.Thumbprint(crypto.SHA256)
+		if err != nil {
+			return fmt.Errorf("failed to derive key ID: %w", err)
+		}
+		keyID = base64.RawURLEncoding.EncodeToString(thumbprint)
 	}
 
 	// Set key ID

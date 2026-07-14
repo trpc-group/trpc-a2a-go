@@ -80,22 +80,22 @@ func WithTaskSubscriberBlockingSend(blockingSend bool) TaskManagerOption {
 	}
 }
 
-// WithPushNotificationsConfig enables push notifications from the given config:
-// as task events occur, the manager delivers them to the webhook registered for
-// the task via cfg.Sender. Without a Sender, push is not supported — the config
-// RPCs return PushNotificationNotSupported (-32003). Set cfg.ManualDelivery to
-// keep registration open while the agent controls delivery itself; for
-// filtering/batching, embed *pushauth.SignedSender in a custom Sender. See push.Config
-// for the full field reference.
-func WithPushNotificationsConfig(cfg push.Config) TaskManagerOption {
+// WithPushConfig enables push notifications from the given config:
+// as task events occur, the manager delivers them to every webhook registered
+// for the task via cfg.Sender. Without a Sender, push is not supported — the
+// config RPCs return PushNotificationNotSupported (-32003). Set
+// cfg.ManualDelivery to keep registration open while the agent controls delivery
+// itself; for filtering or batching, wrap the configured Sender with a custom
+// push.Sender implementation.
+func WithPushConfig(cfg push.Config) TaskManagerOption {
 	return func(opts *TaskManagerOptions) {
 		opts.Push = cfg
 	}
 }
 
-// WithPushNotifications is shorthand for WithPushNotificationsConfig with a
-// Sender and automatic delivery — the common case. Use
-// WithPushNotificationsConfig for manual delivery or other push settings.
+// WithPushNotifications is shorthand for WithPushConfig with a Sender and
+// automatic delivery — the common case. Use WithPushConfig for manual delivery
+// or other push settings.
 func WithPushNotifications(sender push.Sender) TaskManagerOption {
-	return WithPushNotificationsConfig(push.Config{Sender: sender})
+	return WithPushConfig(push.Config{Sender: sender})
 }

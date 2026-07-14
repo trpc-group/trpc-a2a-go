@@ -25,6 +25,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/client"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push/pushauth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
@@ -262,21 +263,12 @@ func TestPushNotificationAuthentication(t *testing.T) {
 		agentTaskMgr,
 		server.WithAgentCard(agentCard),
 		server.WithJWKSEndpoint(true, "/.well-known/jwks.json"),
-		server.WithPushNotificationAuthenticator(agentAuthenticator),
+		server.WithPushNotificationJWKSHandler(http.HandlerFunc(agentAuthenticator.HandleJWKS)),
 	)
 	require.NoError(t, err, "Failed to create agent server")
 
-	// Set the authenticator in the agent server
-	agentServerHandler := http.NewServeMux()
-
-	// Add the JWKS endpoint handler
-	agentServerHandler.HandleFunc("/.well-known/jwks.json", agentAuthenticator.HandleJWKS)
-
-	// Add all other A2A API handlers
-	agentServerHandler.Handle("/", agentServer.Handler())
-
 	// Start the agent server
-	agentHTTPServer := httptest.NewServer(agentServerHandler)
+	agentHTTPServer := httptest.NewServer(agentServer.Handler())
 	defer agentHTTPServer.Close()
 	agentURL := agentHTTPServer.URL
 	agentJWKSURL := fmt.Sprintf("%s/.well-known/jwks.json", agentURL)
@@ -471,6 +463,8 @@ type mockTaskManager struct {
 
 var _ taskmanager.TaskManager = (*mockTaskManager)(nil)
 
+func (m *mockTaskManager) PushSender() push.Sender { return nil }
+
 // newMockTaskManager creates a new mock task manager.
 func newMockTaskManager(processor taskmanager.MessageProcessor) *mockTaskManager {
 	return &mockTaskManager{
@@ -543,19 +537,19 @@ func (m *mockTaskManager) OnPushNotificationSet(
 
 // OnPushNotificationGet gets a push notification configuration for a task.
 func (m *mockTaskManager) OnPushNotificationGet(
-	ctx context.Context, params protocol.TaskIDParams,
+	ctx context.Context, params protocol.GetTaskPushNotificationConfigParams,
 ) (*protocol.TaskPushNotificationConfig, error) {
-	_, err := m.Task(params.ID)
+	_, err := m.Task(params.TaskID)
 	if err != nil {
 		return nil, err
 	}
 
-	config, ok := m.pushConfigs[params.ID]
+	config, ok := m.pushConfigs[params.TaskID]
 	if !ok {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
 
-	config.TaskID = params.ID
+	config.TaskID = params.TaskID
 	return &config, nil
 }
 

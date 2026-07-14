@@ -110,8 +110,8 @@ func TestRedisPushInlineConfigDelivered(t *testing.T) {
 	}
 }
 
-// TestRedisPushRegisteredConfigDelivered covers the RPC registration path: a
-// config set via OnPushNotificationSet is delivered when a later continuation
+// TestRedisPushRegisteredConfigDelivered covers the RPC registration path:
+// every config registered for a task is delivered when a later continuation
 // round drives the task to a terminal state.
 func TestRedisPushRegisteredConfigDelivered(t *testing.T) {
 	sender := &recordingSender{}
@@ -124,9 +124,18 @@ func TestRedisPushRegisteredConfigDelivered(t *testing.T) {
 	const webhook = "https://example.com/reg"
 	if _, err := m.OnPushNotificationSet(context.Background(), protocol.TaskPushNotificationConfig{
 		TaskID: task.ID,
+		ID:     "primary",
 		URL:    webhook,
 	}); err != nil {
 		t.Fatalf("OnPushNotificationSet: %v", err)
+	}
+	const secondWebhook = "https://example.com/reg-secondary"
+	if _, err := m.OnPushNotificationSet(context.Background(), protocol.TaskPushNotificationConfig{
+		TaskID: task.ID,
+		ID:     "secondary",
+		URL:    secondWebhook,
+	}); err != nil {
+		t.Fatalf("OnPushNotificationSet second config: %v", err)
 	}
 
 	// A continuation message targeting the task drives the Completed event.
@@ -138,13 +147,20 @@ func TestRedisPushRegisteredConfigDelivered(t *testing.T) {
 		t.Fatalf("OnSendMessage continuation: %v", err)
 	}
 
-	waitPushCount(t, sender, 1)
+	waitPushCount(t, sender, 2)
 	calls := sender.snapshot()
-	if su := calls[0].event.GetStatusUpdate(); su == nil || su.Status.State != protocol.TaskStateCompleted {
-		t.Fatalf("want Completed push, got %+v", calls[0].event)
+	if len(calls) != 2 {
+		t.Fatalf("want one delivery per registered config, got %d", len(calls))
 	}
-	if calls[0].cfg.URL != webhook {
-		t.Fatalf("want webhook %q, got %q", webhook, calls[0].cfg.URL)
+	gotURLs := map[string]bool{}
+	for _, call := range calls {
+		if su := call.event.GetStatusUpdate(); su == nil || su.Status.State != protocol.TaskStateCompleted {
+			t.Fatalf("want Completed push, got %+v", call.event)
+		}
+		gotURLs[call.cfg.URL] = true
+	}
+	if !gotURLs[webhook] || !gotURLs[secondWebhook] {
+		t.Fatalf("deliveries did not cover both configs: %+v", gotURLs)
 	}
 }
 
@@ -176,7 +192,7 @@ func TestRedisPushManualSuppresses(t *testing.T) {
 	sender := &recordingSender{}
 	m, _ := setupTest(t, scriptedExecutor(
 		statusEvent(protocol.TaskStateCompleted, agentReply("done")),
-	), WithPushNotificationsConfig(push.Config{Sender: sender, ManualDelivery: true}))
+	), WithPushConfig(push.Config{Sender: sender, ManualDelivery: true}))
 	defer m.Close()
 
 	task := storedTask(t, m, "task-manual", "ctx-manual", protocol.TaskStateWorking)
@@ -222,7 +238,7 @@ func TestRedisManualWithoutSenderFails(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	defer client.Close()
 	if _, err := NewTaskManager(scriptedExecutor(), client,
-		WithPushNotificationsConfig(push.Config{ManualDelivery: true})); err == nil {
+		WithPushConfig(push.Config{ManualDelivery: true})); err == nil {
 		t.Fatal("ManualDelivery without a Sender must fail construction")
 	}
 }

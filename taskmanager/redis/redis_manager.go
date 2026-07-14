@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -369,44 +370,51 @@ func (m *TaskManager) OnPushNotificationSet(
 	if m.pushSender == nil {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
-	// Check if task exists.
-	if _, err := m.getTaskInternal(ctx, params.TaskID); err != nil {
+	if params.ID == "" {
+		params.ID = params.TaskID
+	}
+	stored, err := m.storePushConfig(ctx, params)
+	if err != nil {
 		return nil, err
 	}
-	if err := m.storePushConfig(ctx, params); err != nil {
-		return nil, err
-	}
-	log.Debugf("RedisTaskManager: Push notification config set for task %s", params.TaskID)
-	return &params, nil
+	log.Debugf("RedisTaskManager: Push notification config %s set for task %s", stored.ID, stored.TaskID)
+	return &stored, nil
 }
 
 // OnPushNotificationGet handles tasks/pushNotificationConfig/get requests.
 func (m *TaskManager) OnPushNotificationGet(
 	ctx context.Context,
-	params protocol.TaskIDParams,
+	params protocol.GetTaskPushNotificationConfigParams,
 ) (*protocol.TaskPushNotificationConfig, error) {
 	if m.pushSender == nil {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
-	// Check if task exists.
-	_, err := m.getTaskInternal(ctx, params.ID)
-	if err != nil {
+	if params.ID != "" {
+		configBytes, err := m.client.HGet(ctx, pushNotificationPrefix+params.TaskID, params.ID).Bytes()
+		if err == nil {
+			var config protocol.TaskPushNotificationConfig
+			if err := json.Unmarshal(configBytes, &config); err != nil {
+				return nil, fmt.Errorf("failed to deserialize push notification config: %w", err)
+			}
+			return &config, nil
+		} else if !errors.Is(err, redis.Nil) {
+			return nil, fmt.Errorf("failed to read push notification config: %w", err)
+		}
+	} else {
+		configs, err := m.readPushConfigs(ctx, params.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		if len(configs) > 0 {
+			config := configs[0]
+			return &config, nil
+		}
+	}
+
+	if _, err := m.getTaskInternal(ctx, params.TaskID); err != nil {
 		return nil, err
 	}
-
-	// Retrieve the push notification configuration.
-	pushKey := pushNotificationPrefix + params.ID
-	configBytes, err := m.client.Get(ctx, pushKey).Bytes()
-	if err != nil {
-		return nil, fmt.Errorf("push notification config not found for task: %s", params.ID)
-	}
-
-	var config protocol.TaskPushNotificationConfig
-	if err := json.Unmarshal(configBytes, &config); err != nil {
-		return nil, fmt.Errorf("failed to deserialize push notification config: %w", err)
-	}
-
-	return &config, nil
+	return nil, taskmanager.ErrPushConfigNotFound(params.TaskID)
 }
 
 // unlimitedHistoryLength is used to request the full conversation history when
@@ -448,8 +456,7 @@ func (m *TaskManager) OnListTasks(
 }
 
 // OnPushNotificationList handles the v1.0 ListTaskPushNotificationConfigs request.
-// The Redis manager stores at most one configuration per task, so the result
-// contains zero or one entries.
+// It returns every push-notification config registered for the task.
 func (m *TaskManager) OnPushNotificationList(
 	ctx context.Context,
 	params protocol.ListTaskPushNotificationConfigsParams,
@@ -457,24 +464,12 @@ func (m *TaskManager) OnPushNotificationList(
 	if m.pushSender == nil {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
-	// Check if task exists.
-	if _, err := m.getTaskInternal(ctx, params.TaskID); err != nil {
+
+	configs, err := m.readPushConfigs(ctx, params.TaskID)
+	if err != nil {
 		return nil, err
 	}
-
-	result := &protocol.ListTaskPushNotificationConfigsResult{
-		Configs: []protocol.TaskPushNotificationConfig{},
-	}
-	configBytes, err := m.client.Get(ctx, pushNotificationPrefix+params.TaskID).Bytes()
-	if err != nil {
-		return result, nil // No config registered.
-	}
-	var config protocol.TaskPushNotificationConfig
-	if err := json.Unmarshal(configBytes, &config); err != nil {
-		return nil, fmt.Errorf("failed to deserialize push notification config: %w", err)
-	}
-	result.Configs = append(result.Configs, config)
-	return result, nil
+	return &protocol.ListTaskPushNotificationConfigsResult{Configs: configs}, nil
 }
 
 // OnPushNotificationDelete handles the v1.0 DeleteTaskPushNotificationConfig request.
@@ -486,54 +481,106 @@ func (m *TaskManager) OnPushNotificationDelete(
 	if m.pushSender == nil {
 		return taskmanager.ErrPushNotificationNotSupported()
 	}
-	if err := m.client.Del(ctx, pushNotificationPrefix+params.TaskID).Err(); err != nil {
+	pushKey := pushNotificationPrefix + params.TaskID
+	if params.ID != "" {
+		if err := m.client.HDel(ctx, pushKey, params.ID).Err(); err != nil {
+			return fmt.Errorf("failed to delete push notification config: %w", err)
+		}
+		log.Debugf("RedisTaskManager: Push notification config %s deleted for task %s", params.ID, params.TaskID)
+		return nil
+	}
+	if err := m.client.Del(ctx, pushKey).Err(); err != nil {
 		return fmt.Errorf("failed to delete push notification config: %w", err)
 	}
-	log.Debugf("RedisTaskManager: Push notification config deleted for task %s", params.TaskID)
+	log.Debugf("RedisTaskManager: All push notification configs deleted for task %s", params.TaskID)
 	return nil
 }
 
-// PushSender returns the Sender configured via WithPushNotifications, or nil
-// when push is not enabled. The A2AServer probes this accessor to advertise the
-// pushNotifications capability on served agent cards when a Sender is present.
-// (The JWKS signing identity is configured separately, via the server's
-// WithPushNotificationAuthenticator.)
+// PushSender returns the Sender configured for push notifications, or nil when
+// push is not enabled.
 func (m *TaskManager) PushSender() push.Sender {
 	return m.pushSender
 }
 
-// storePushConfig persists cfg under the task's push key with the manager TTL.
-// The Redis manager keeps at most one config per task, so a later Set for the
-// same task overwrites the earlier one.
-func (m *TaskManager) storePushConfig(ctx context.Context, cfg protocol.TaskPushNotificationConfig) error {
-	configBytes, err := json.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to serialize push notification config: %w", err)
+// storePushConfig persists cfg as one field in the task's push-config hash.
+// CreatedAt is server-authoritative: it is set on create and preserved when an
+// existing config ID is updated. The transaction also refreshes the hash TTL.
+func (m *TaskManager) storePushConfig(
+	ctx context.Context, cfg protocol.TaskPushNotificationConfig,
+) (protocol.TaskPushNotificationConfig, error) {
+	if cfg.TaskID == "" {
+		return protocol.TaskPushNotificationConfig{}, errors.New("push config store: taskId is required")
 	}
-	if err := m.client.Set(ctx, pushNotificationPrefix+cfg.TaskID, configBytes, m.expiration).Err(); err != nil {
-		return fmt.Errorf("failed to store push notification config: %w", err)
+	if cfg.ID == "" {
+		cfg.ID = cfg.TaskID
 	}
-	return nil
+	pushKey := pushNotificationPrefix + cfg.TaskID
+	for {
+		stored := cfg
+		err := m.client.Watch(ctx, func(tx *redis.Tx) error {
+			existingBytes, err := tx.HGet(ctx, pushKey, cfg.ID).Bytes()
+			switch {
+			case err == nil:
+				var existing protocol.TaskPushNotificationConfig
+				if err := json.Unmarshal(existingBytes, &existing); err != nil {
+					return fmt.Errorf("failed to deserialize push notification config: %w", err)
+				}
+				if existing.CreatedAt != "" {
+					stored.CreatedAt = existing.CreatedAt
+				} else {
+					stored.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+				}
+			case errors.Is(err, redis.Nil):
+				stored.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+			default:
+				return fmt.Errorf("failed to read push notification config: %w", err)
+			}
+
+			configBytes, err := json.Marshal(stored)
+			if err != nil {
+				return fmt.Errorf("failed to serialize push notification config: %w", err)
+			}
+			_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				pipe.HSet(ctx, pushKey, cfg.ID, configBytes)
+				pipe.Expire(ctx, pushKey, m.expiration)
+				return nil
+			})
+			return err
+		}, pushKey)
+		if errors.Is(err, redis.TxFailedErr) {
+			continue
+		}
+		if err != nil {
+			return protocol.TaskPushNotificationConfig{}, fmt.Errorf("failed to store push notification config: %w", err)
+		}
+		return stored, nil
+	}
 }
 
-// readPushConfigs returns the push configs registered for taskID. The Redis
-// manager stores at most one per task, so the result holds zero or one; a
-// missing key is not an error.
+// readPushConfigs returns all push configs registered for taskID, ordered by
+// CreatedAt then ID. A missing hash is represented by a non-nil empty slice.
 func (m *TaskManager) readPushConfigs(
 	ctx context.Context, taskID string,
 ) ([]protocol.TaskPushNotificationConfig, error) {
-	configBytes, err := m.client.Get(ctx, pushNotificationPrefix+taskID).Bytes()
+	entries, err := m.client.HGetAll(ctx, pushNotificationPrefix+taskID).Result()
 	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			return nil, nil
+		return nil, fmt.Errorf("failed to read push notification configs: %w", err)
+	}
+	configs := make([]protocol.TaskPushNotificationConfig, 0, len(entries))
+	for _, configJSON := range entries {
+		var config protocol.TaskPushNotificationConfig
+		if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
+			return nil, fmt.Errorf("failed to deserialize push notification config: %w", err)
 		}
-		return nil, err
+		configs = append(configs, config)
 	}
-	var config protocol.TaskPushNotificationConfig
-	if err := json.Unmarshal(configBytes, &config); err != nil {
-		return nil, fmt.Errorf("failed to deserialize push notification config: %w", err)
-	}
-	return []protocol.TaskPushNotificationConfig{config}, nil
+	sort.Slice(configs, func(i, j int) bool {
+		if configs[i].CreatedAt != configs[j].CreatedAt {
+			return configs[i].CreatedAt < configs[j].CreatedAt
+		}
+		return configs[i].ID < configs[j].ID
+	})
+	return configs, nil
 }
 
 // dispatchPush delivers event to the webhook registered for taskID. It is a

@@ -98,7 +98,7 @@ func TestTaskManager_PushRejectedWithoutSender(t *testing.T) {
 		t.Fatalf("expected PushNotificationNotSupported from List, got %v", err)
 	}
 	if _, err := manager.OnPushNotificationGet(ctx,
-		protocol.TaskIDParams{ID: "no-sender-task"}); !errors.Is(err, taskmanager.ErrPushNotificationNotSupportedSentinel) {
+		protocol.GetTaskPushNotificationConfigParams{TaskID: "no-sender-task"}); !errors.Is(err, taskmanager.ErrPushNotificationNotSupportedSentinel) {
 		t.Fatalf("expected PushNotificationNotSupported from Get, got %v", err)
 	}
 	if err := manager.OnPushNotificationDelete(ctx,
@@ -181,6 +181,16 @@ func TestOnPushNotificationSet_ReplacesDefaultConfig(t *testing.T) {
 	if len(list.Configs) != 2 {
 		t.Fatalf("expected 2 configs with distinct IDs, got %d", len(list.Configs))
 	}
+	got, err := manager.OnPushNotificationGet(ctx, protocol.GetTaskPushNotificationConfigParams{
+		TaskID: taskID,
+		ID:     "extra",
+	})
+	if err != nil {
+		t.Fatalf("Get explicit config: %v", err)
+	}
+	if got.ID != "extra" || got.URL != "https://c" {
+		t.Fatalf("Get explicit config = %+v, want ID extra and URL https://c", got)
+	}
 }
 
 // TestManualPushDelivery demonstrates the manual-push pattern: with
@@ -201,7 +211,7 @@ func TestManualPushDelivery(t *testing.T) {
 
 	// ManualDelivery keeps push enabled (registration, config RPCs) while
 	// the framework delivers nothing — the agent pushes on its own schedule.
-	manager := newTestManager(t, echoExecutor(), WithPushNotificationsConfig(push.Config{
+	manager := newTestManager(t, echoExecutor(), WithPushConfig(push.Config{
 		Sender:         push.NewHTTPSender(),
 		ManualDelivery: true,
 	}))
@@ -258,12 +268,14 @@ func TestOnPushNotificationGet_DistinguishesConfigNotFound(t *testing.T) {
 		Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
 	})
 
-	_, err := manager.OnPushNotificationGet(ctx, protocol.TaskIDParams{ID: "task-without-config"})
+	_, err := manager.OnPushNotificationGet(ctx,
+		protocol.GetTaskPushNotificationConfigParams{TaskID: "task-without-config"})
 	if !errors.Is(err, taskmanager.ErrPushConfigNotFoundSentinel) {
 		t.Errorf("expected PushConfigNotFound for an existing task without config, got %v", err)
 	}
 
-	_, err = manager.OnPushNotificationGet(ctx, protocol.TaskIDParams{ID: "no-such-task"})
+	_, err = manager.OnPushNotificationGet(ctx,
+		protocol.GetTaskPushNotificationConfigParams{TaskID: "no-such-task"})
 	if !errors.Is(err, taskmanager.ErrTaskNotFoundSentinel) {
 		t.Errorf("expected TaskNotFound for a missing task, got %v", err)
 	}
@@ -336,7 +348,7 @@ func TestPushSenderAccessor(t *testing.T) {
 // a Sender is a construction error, not silence.
 func TestManualWithoutSenderFails(t *testing.T) {
 	if _, err := NewTaskManager(echoExecutor(),
-		WithPushNotificationsConfig(push.Config{ManualDelivery: true})); err == nil {
+		WithPushConfig(push.Config{ManualDelivery: true})); err == nil {
 		t.Fatal("ManualDelivery without a Sender must fail construction")
 	}
 }

@@ -16,7 +16,6 @@ import (
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/push/pushauth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry/metrics"
 )
@@ -156,16 +155,16 @@ func WithAuthProvider(provider auth.Provider) Option {
 }
 
 // WithJWKSEndpoint explicitly controls the JWKS endpoint for push notification
-// verification. Most servers do not need it: when a signing identity is
-// configured (WithPushNotificationAuthenticator), the server publishes the JWKS
-// automatically. Use this option to override that default — in particular,
-// WithJWKSEndpoint(false, "") is the sanctioned way to sign pushes while
-// publishing the public keys elsewhere (e.g. a gateway or CDN serves them).
+// verification. Most servers do not need it: when a JWKS handler is configured
+// with WithPushNotificationJWKSHandler, the server publishes it automatically.
+// Use this option to override that default — in particular,
+// WithJWKSEndpoint(false, "") disables local publication when a gateway or CDN
+// serves the keys instead.
 // The path defaults to "/.well-known/jwks.json".
 func WithJWKSEndpoint(enabled bool, path string) Option {
 	return func(s *A2AServer) {
 		s.jwksEnabled = enabled
-		s.jwksSet = true
+		s.jwksExplicitlySet = true
 		if path != "" {
 			s.jwksEndpoint = path
 			s.pathsExplicitlySet = true
@@ -173,15 +172,16 @@ func WithJWKSEndpoint(enabled bool, path string) Option {
 	}
 }
 
-// WithPushNotificationAuthenticator sets the signing identity whose JWKS the
-// server publishes. Pass the identity from the sender that signs deliveries —
-// typically sender.Authenticator() — so the published keys match the
-// signatures. This is required for signed push: without it deliveries are
-// unsigned and no JWKS is published (the pushNotifications capability is still
-// advertised whenever the TaskManager exposes a Sender).
-func WithPushNotificationAuthenticator(authenticator *pushauth.Authenticator) Option {
+// WithPushNotificationJWKSHandler sets the HTTP handler that publishes keys for
+// verifying signed push notifications. Typically pass sender.JWKSHandler() so
+// the published keys match that SignedSender's identity. Custom signing and key
+// publication implementations can pass any http.Handler.
+//
+// This option controls only JWKS publication; client-declared webhook
+// authentication is handled by the configured push Sender.
+func WithPushNotificationJWKSHandler(handler http.Handler) Option {
 	return func(s *A2AServer) {
-		s.pushAuth = authenticator
+		s.pushJWKSHandler = handler
 	}
 }
 

@@ -79,6 +79,15 @@ func (s *pushConfigStore) list(taskID string) []protocol.TaskPushNotificationCon
 	return out
 }
 
+// get returns the config identified by taskID and configID.
+func (s *pushConfigStore) get(taskID, configID string) (protocol.TaskPushNotificationConfig, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	byID := s.configs[taskID]
+	cfg, ok := byID[configID]
+	return cfg, ok
+}
+
 // remove deletes a single config by ID; a missing config is a no-op.
 func (s *pushConfigStore) remove(taskID, configID string) {
 	s.mu.Lock()
