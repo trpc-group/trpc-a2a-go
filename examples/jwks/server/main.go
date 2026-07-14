@@ -166,25 +166,25 @@ func main() {
 	// One SignedSender carries the whole push capability: JWT signing + delivery.
 	// WithJWT generates a fresh key; production replicas share one key via
 	// pushauth.WithJWTKey so every instance signs with the key the JWKS advertises.
-	notifier, err := pushauth.NewSignedSender(pushauth.WithJWT())
+	signedSender, err := pushauth.NewSignedSender(pushauth.WithJWT())
 	if err != nil {
-		log.Fatalf("failed to create push notifier: %v", err)
+		log.Fatalf("failed to create signed push sender: %v", err)
 	}
 
 	// TaskManager: automatic delivery on significant task states.
 	processor := &pushNotificationMessageProcessor{}
 	tm, err := memory.NewTaskManager(processor,
-		memory.WithPushNotifications(notifier),
+		memory.WithPushNotifications(signedSender),
 	)
 	if err != nil {
 		log.Fatalf("failed to create task manager: %v", err)
 	}
 
 	// Server: configure the signing identity so it publishes the matching JWKS
-	// endpoint. notifier.Authenticator() is the same identity it signs with.
+	// endpoint. signedSender.Authenticator() is the same identity it signs with.
 	a2aServer, err := server.NewA2AServer(tm,
 		server.WithAgentCard(agentCard),
-		server.WithPushNotificationAuthenticator(notifier.Authenticator()),
+		server.WithPushNotificationAuthenticator(signedSender.Authenticator()),
 	)
 	if err != nil {
 		log.Fatalf("failed to create A2A server: %v", err)

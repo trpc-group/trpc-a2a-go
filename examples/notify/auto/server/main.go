@@ -48,11 +48,11 @@ func main() {
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
-	notifier, err := pushauth.NewSignedSender(pushauth.WithJWT())
+	sender, err := pushauth.NewSignedSender(pushauth.WithJWT())
 	if err != nil {
-		log.Fatalf("create notifier: %v", err)
+		log.Fatalf("create signed sender: %v", err)
 	}
-	tm, err := memory.NewTaskManager(worker{}, memory.WithPushNotifications(notifier))
+	tm, err := memory.NewTaskManager(worker{}, memory.WithPushNotifications(sender))
 	if err != nil {
 		log.Fatalf("create task manager: %v", err)
 	}
@@ -62,7 +62,7 @@ func main() {
 	card := server.AgentCard{Name: "auto-notify", URL: agentURL, Version: "1.0.0"}
 	srv, err := server.NewA2AServer(tm,
 		server.WithAgentCard(card),
-		server.WithPushNotificationAuthenticator(notifier.Authenticator()),
+		server.WithPushNotificationAuthenticator(sender.Authenticator()),
 	)
 	if err != nil {
 		log.Fatalf("create server: %v", err)

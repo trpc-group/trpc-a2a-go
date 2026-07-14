@@ -27,7 +27,7 @@ const defaultPort = 8000
 // worker sends notifications itself at moments chosen by the agent. The
 // TaskManager runs with automatic delivery disabled.
 type worker struct {
-	notifier *pushauth.SignedSender
+	sender *pushauth.SignedSender
 }
 
 func (p *worker) ProcessMessage(
@@ -68,7 +68,7 @@ func (p *worker) send(
 		TaskID: taskID,
 		Status: protocol.TaskStatus{State: state, Message: protocol.NewAgentText(note)},
 	})
-	if err := p.notifier.SendPush(ctx, *cfg, event); err != nil {
+	if err := p.sender.SendPush(ctx, *cfg, event); err != nil {
 		log.Printf("manual push failed: %v", err)
 	}
 }
@@ -78,13 +78,13 @@ func main() {
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
-	notifier, err := pushauth.NewSignedSender(pushauth.WithJWT())
+	sender, err := pushauth.NewSignedSender(pushauth.WithJWT())
 	if err != nil {
-		log.Fatalf("create notifier: %v", err)
+		log.Fatalf("create signed sender: %v", err)
 	}
-	tm, err := memory.NewTaskManager(&worker{notifier: notifier},
+	tm, err := memory.NewTaskManager(&worker{sender: sender},
 		memory.WithPushNotificationsConfig(push.Config{
-			Sender:         notifier,
+			Sender:         sender,
 			ManualDelivery: true,
 		}),
 	)
@@ -97,7 +97,7 @@ func main() {
 	card := server.AgentCard{Name: "manual-notify", URL: agentURL, Version: "1.0.0"}
 	srv, err := server.NewA2AServer(tm,
 		server.WithAgentCard(card),
-		server.WithPushNotificationAuthenticator(notifier.Authenticator()),
+		server.WithPushNotificationAuthenticator(sender.Authenticator()),
 	)
 	if err != nil {
 		log.Fatalf("create server: %v", err)

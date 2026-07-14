@@ -98,14 +98,14 @@ go run client/main.go -server-host localhost -server-port 8000 -webhook-host loc
 The example demonstrates these A2A API features:
 
 - `server.NewA2AServer()` - Create an A2A server
-- `server.WithJWKSEndpoint()` - Enable JWKS endpoint
-- `server.WithPushNotificationAuthenticator()` - Configure JWT authentication
+- `pushauth.NewSignedSender()` - Create a sender that signs push deliveries
+- `memory.WithPushNotifications()` - Enable automatic delivery to registered webhooks
+- `server.WithPushNotificationAuthenticator()` - Publish the sender's signing keys through JWKS
 - `a2aClient.SendMessage()` - Send message via non-streaming API (with
-  `returnImmediately=true` for the v0-style non-blocking behavior)
-- `a2aClient.SetPushNotification()` - Register webhook for notifications
-- `taskmanager.TaskManager.OnPushNotificationGet()` - Resolve the registered
-  webhook for a task before sending the signed notification
+  `returnImmediately=true` so the call returns before the task completes)
+- `protocol.SendMessageConfiguration.PushConfig` - Register the webhook inline
+  with the message request
 
 ## License
 
-This example is released under the Apache License Version 2.0, the same license as the trpc-a2a-go project. 
+This example is released under the Apache License Version 2.0, the same license as the trpc-a2a-go project.

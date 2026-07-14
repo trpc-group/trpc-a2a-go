@@ -11,8 +11,8 @@ difference is who decides when to deliver.
 
 | | wiring | who delivers |
 | --- | --- | --- |
-| [`auto/`](auto) | `memory.WithPushNotifications(notifier)` | the framework, on each significant task state |
-| [`manual/`](manual) | `memory.WithPushNotificationsConfig(push.Config{Sender: notifier, ManualDelivery: true})` | the agent, from inside the processor, on its own schedule |
+| [`auto/`](auto) | `memory.WithPushNotifications(sender)` | the framework, on each significant task state |
+| [`manual/`](manual) | `memory.WithPushNotificationsConfig(push.Config{Sender: sender, ManualDelivery: true})` | the agent, from inside the processor, on its own schedule |
 
 - **auto** — the processor just completes the task; the framework POSTs the
   terminal `StreamResponse` to every registered webhook.
