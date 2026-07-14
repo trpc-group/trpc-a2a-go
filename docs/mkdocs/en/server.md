@@ -271,25 +271,25 @@ input-required, auth-required, or any update carrying a message.
 ```go
 // One SignedSender carries the whole capability: JWT signing + delivery.
 // (Production replicas share one key via pushauth.WithJWTKey(key, kid).)
-notifier, _ := pushauth.NewSignedSender(pushauth.WithJWT())
+sender, _ := pushauth.NewSignedSender(pushauth.WithJWT())
 
 // TaskManager: the Sender enables automatic delivery. The server discovers the
 // push capability from it and advertises pushNotifications on the card.
 tm, _ := memory.NewTaskManager(processor,
-    memory.WithPushNotifications(notifier),
+    memory.WithPushNotifications(sender),
 )
 
 // Server: pass the signing identity so it publishes the matching JWKS.
-// notifier.Authenticator() is the same identity the notifier signs with.
+// sender.Authenticator() is the same identity the sender signs with.
 srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
-    server.WithPushNotificationAuthenticator(notifier.Authenticator()))
+    server.WithPushNotificationAuthenticator(sender.Authenticator()))
 ```
 
 Clients register configs via `CreateTaskPushNotificationConfig` (manage them with
 `List`/`Delete`). **Without a sender, push is unsupported**: the config RPCs
 return `-32003 PushNotificationNotSupported`, matching the official SDK. To keep
 registration open while the agent controls delivery itself, set
-`WithPushNotificationsConfig(push.Config{Sender: notifier, ManualDelivery: true})`
+`WithPushNotificationsConfig(push.Config{Sender: sender, ManualDelivery: true})`
 — automatic dispatch turns off while registration and the capability stay on; for
 filtering/batching, wrap `*pushauth.SignedSender` in a custom Sender. An inline
 `configuration.taskPushNotificationConfig` is a registration too: it is rejected

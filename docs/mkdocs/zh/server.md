@@ -253,20 +253,20 @@ srv, _ := server.NewA2AServer(tm,
 ```go
 // 一个 SignedSender 承载完整能力:JWT 签名 + 投递。
 // (生产多副本用 pushauth.WithJWTKey(key, kid) 共享同一把私钥。)
-notifier, _ := pushauth.NewSignedSender(pushauth.WithJWT())
+sender, _ := pushauth.NewSignedSender(pushauth.WithJWT())
 
 // TaskManager:Sender 开启自动投递;server 从它发现 push 能力并在 card 上声明。
 tm, _ := memory.NewTaskManager(processor,
-    memory.WithPushNotifications(notifier),
+    memory.WithPushNotifications(sender),
 )
 
 // Server:把签名身份传进去,server 据此发布配套 JWKS。
-// notifier.Authenticator() 就是 notifier 签名用的那个身份。
+// sender.Authenticator() 就是 sender 签名用的那个身份。
 srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
-    server.WithPushNotificationAuthenticator(notifier.Authenticator()))
+    server.WithPushNotificationAuthenticator(sender.Authenticator()))
 ```
 
-客户端经 `CreateTaskPushNotificationConfig` 注册配置(用 `ListTaskPushNotificationConfigs` / `DeleteTaskPushNotificationConfig` 管理)。**不注入 sender = 不支持 push**:config RPC 返回 `-32003 PushNotificationNotSupported`(与官方 SDK 一致)。想保留注册、由 agent 自己掌控投递,用 `WithPushNotificationsConfig(push.Config{Sender: notifier, ManualDelivery: true})`——自动投递关闭,注册/JWKS 发现/能力声明照常;要过滤/攒批,自定义 Sender 并**嵌入** `*pushauth.SignedSender`(嵌入保留签名身份供 server 发现)。请求内联的 `configuration.taskPushNotificationConfig` 同样视为注册:未启用时拒绝,启用时落库(可查询、自动投递),并照旧作为 `ec.PushConfig` 传给 processor。自定义 header / tracing:`push.WithRequestDecorator`。→ [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks)。
+客户端经 `CreateTaskPushNotificationConfig` 注册配置(用 `ListTaskPushNotificationConfigs` / `DeleteTaskPushNotificationConfig` 管理)。**不注入 sender = 不支持 push**:config RPC 返回 `-32003 PushNotificationNotSupported`(与官方 SDK 一致)。想保留注册、由 agent 自己掌控投递,用 `WithPushNotificationsConfig(push.Config{Sender: sender, ManualDelivery: true})`——自动投递关闭,注册/JWKS 发现/能力声明照常;要过滤/攒批,自定义 Sender 并**嵌入** `*pushauth.SignedSender`(嵌入保留签名身份供 server 发现)。请求内联的 `configuration.taskPushNotificationConfig` 同样视为注册:未启用时拒绝,启用时落库(可查询、自动投递),并照旧作为 `ec.PushConfig` 传给 processor。自定义 header / tracing:`push.WithRequestDecorator`。→ [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks)。
 
 ## 多租户托管
 

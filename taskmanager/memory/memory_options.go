@@ -119,12 +119,12 @@ func WithTaskSubscriberBlockingSend(blockingSend bool) TaskManagerOption {
 // cfg.ManualDelivery to keep registration open while the agent controls delivery
 // itself; for filtering/batching, embed *pushauth.SignedSender in a custom Sender.
 //
-//	notifier, _ := pushauth.NewSignedSender(pushauth.WithJWT())
+//	sender, _ := pushauth.NewSignedSender(pushauth.WithJWT())
 //	tm, _ := memory.NewTaskManager(proc, memory.WithPushNotificationsConfig(push.Config{
-//	    Sender:         notifier,
+//	    Sender:         sender,
 //	    ManualDelivery: true,
 //	}))
-//	// later, in agent code: notifier.SendPush(ctx, cfg, event)
+//	// later, in agent code: sender.SendPush(ctx, cfg, event)
 func WithPushNotificationsConfig(cfg push.Config) TaskManagerOption {
 	return func(opts *TaskManagerOptions) {
 		opts.Push = cfg

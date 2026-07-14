@@ -81,12 +81,12 @@ func TestSignedSender_WithJWT_EndToEnd(t *testing.T) {
 		t.Fatalf("SendPush: %v", err)
 	}
 	if verifyErr != nil {
-		t.Errorf("receiver failed to verify the notifier's delivery: %v", verifyErr)
+		t.Errorf("receiver failed to verify the sender's delivery: %v", verifyErr)
 	}
 }
 
 // TestSignedSender_WithJWTKey_SharedAcrossReplicas is the multi-replica scenario:
-// two notifiers (two server replicas) share one private key, so a receiver that
+// two senders (two server replicas) share one private key, so a receiver that
 // fetched the JWKS from either replica verifies deliveries from both.
 func TestSignedSender_WithJWTKey_SharedAcrossReplicas(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)

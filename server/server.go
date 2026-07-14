@@ -176,7 +176,7 @@ func (s *A2AServer) resolvePushPosture(taskManager taskmanager.TaskManager) erro
 		log.Infof("push: enabled, signed, JWKS publication disabled by option")
 	case s.pushEnabled:
 		log.Infof("push: enabled, UNSIGNED — no signing identity configured; pass " +
-			"server.WithPushNotificationAuthenticator(notifier.Authenticator()) to sign and publish JWKS")
+			"server.WithPushNotificationAuthenticator(sender.Authenticator()) to sign and publish JWKS")
 	default:
 		log.Debugf("push: disabled")
 	}
@@ -193,7 +193,7 @@ func (s *A2AServer) resolvePushPosture(taskManager taskmanager.TaskManager) erro
 	// instead of serving unverifiable pushes.
 	if s.jwksEnabled && s.pushAuth == nil {
 		return fmt.Errorf("JWKS endpoint enabled without a push signing identity: " +
-			"pass server.WithPushNotificationAuthenticator (e.g. notifier.Authenticator()), " +
+			"pass server.WithPushNotificationAuthenticator (e.g. sender.Authenticator()), " +
 			"or disable publication with server.WithJWKSEndpoint(false, \"\")")
 	}
 	return nil

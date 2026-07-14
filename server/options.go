@@ -175,7 +175,7 @@ func WithJWKSEndpoint(enabled bool, path string) Option {
 
 // WithPushNotificationAuthenticator sets the signing identity whose JWKS the
 // server publishes. Pass the identity from the sender that signs deliveries —
-// typically notifier.Authenticator() — so the published keys match the
+// typically sender.Authenticator() — so the published keys match the
 // signatures. This is required for signed push: without it deliveries are
 // unsigned and no JWKS is published (the pushNotifications capability is still
 // advertised whenever the TaskManager exposes a Sender).
