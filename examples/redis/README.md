@@ -152,6 +152,23 @@ Test 2: Streaming conversion with task updates
 - **Command Line Interface**: Modern flag-based parameter handling
 - **Code Standards**: Clean code structure with constants and proper naming conventions
 
+### Multiple Server Replicas
+
+When several server replicas share Redis, enable cross-node resubscribe on
+every replica:
+
+```go
+taskManager, err := redisTaskManager.NewTaskManager(
+    processor,
+    rdb,
+    redisTaskManager.WithCrossNodeResubscribe(true),
+)
+```
+
+This lets a reconnecting `SubscribeToTask` request land on a different replica.
+It does not distribute continuation, cancel, or task execution requests; those
+still require a separate execution-coordination design.
+
 ## Command Line Options
 
 **Server Options:**
@@ -232,4 +249,4 @@ Examples:
 
 **Streaming Effects Not Visible:**
 - Use `--streaming --verbose` for maximum visual effect
-- Ensure you're testing the streaming mode only 
+- Ensure you're testing the streaming mode only

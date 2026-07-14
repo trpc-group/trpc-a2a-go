@@ -200,6 +200,12 @@ tm, _ := redistm.NewTaskManager(proc, redisClient,   // 注意参数序:(process
 )
 ```
 
+多副本部署时，请在共享 Redis 的**每个**副本上增加
+`redistm.WithCrossNodeResubscribe(true)`。它把 Task 更新与每任务 Redis Stream
+事件原子写入，使 `SubscribeToTask` 可经其他节点接回；它不负责跨节点路由
+continuation、live cancel 或执行请求。每个 Task Stream 约保留最新 10,000 个事件；
+落后超过该窗口的客户端可能错过中间事件。
+
 → [examples/redis](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis)。实现 `taskmanager.TaskManager` 接口即可自带后端。
 
 留存:
@@ -210,7 +216,8 @@ tm, _ := redistm.NewTaskManager(proc, redisClient,   // 注意参数序:(process
 | 终态任务 | **默认永久保留**(`TaskTTL`=0)——生产环境请设置 `memory.WithTaskTTL` | key TTL(默认 1h,`WithExpireTime`) |
 | 挂起任务 | 永不回收(清理器只收终态)——请让 client 恢复或取消它们 | 随 key TTL 过期 |
 
-没有按任务的删除 API;A2A 未定义此类接口。Redis 后端上,实时事件扇出是进程内的(快照共享)。
+没有按任务的删除 API；A2A 未定义此类接口。Redis 实时事件扇出默认仍在进程内；所有副本一致开启
+`WithCrossNodeResubscribe(true)` 后，`SubscribeToTask` 的观察面由 Redis 承担。
 
 ## 鉴权
 
@@ -344,7 +351,7 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 | 需求 | 推荐配置 | 注意事项 |
 | --- | --- | --- |
 | 本地开发、单进程 demo | `taskmanager/memory` | 默认终态任务永久保留；生产请设置 `memory.WithTaskTTL`。 |
-| 重启后保留任务、多个进程共享快照 | `taskmanager/redis` | 实时 SSE 事件扇出仍是进程内；断线后用快照恢复。 |
+| 重启后保留任务、跨节点接回订阅 | `taskmanager/redis` + `WithCrossNodeResubscribe(true)` | 所有共享 Redis 的副本都要开启；只覆盖 `SubscribeToTask`，不路由 continuation/cancel/执行。 |
 | 用户在线等结果 | `SendMessage` 或 `SendStreamingMessage` | v1.0 `SendMessage` 默认阻塞。 |
 | 用户离线等待回调 | push notification + JWKS | 需要 agent card 声明 push 能力，服务端负责发送 webhook。 |
 | 一个 agent 一个进程 | `WithAgentCard` | 最简单，card 直接代表该 agent。 |

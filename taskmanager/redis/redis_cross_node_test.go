@@ -8,7 +8,10 @@ package redis
 
 import (
 	"context"
+	"errors"
+	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,22 +25,59 @@ import (
 // twoNodeManagers builds two RedisTaskManagers sharing one miniredis, both with
 // cross-node resubscribe streaming enabled: nodeA runs procA, nodeB is a
 // bystander instance a resubscribe may land on.
-func twoNodeManagers(t *testing.T, procA taskmanager.MessageProcessor) (*TaskManager, *TaskManager) {
+func twoNodeManagers(
+	t *testing.T,
+	procA taskmanager.MessageProcessor,
+	opts ...TaskManagerOption,
+) (*TaskManager, *TaskManager) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	ca := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	cb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { ca.Close(); cb.Close() })
-	a, err := NewTaskManager(procA, ca, WithResubscribeStreaming(true))
+	managerOpts := append([]TaskManagerOption{WithCrossNodeResubscribe(true)}, opts...)
+	a, err := NewTaskManager(procA, ca, managerOpts...)
 	if err != nil {
 		t.Fatalf("nodeA NewTaskManager: %v", err)
 	}
-	b, err := NewTaskManager(scriptedExecutor(), cb, WithResubscribeStreaming(true))
+	b, err := NewTaskManager(scriptedExecutor(), cb, managerOpts...)
 	if err != nil {
 		t.Fatalf("nodeB NewTaskManager: %v", err)
 	}
 	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
 	return a, b
+}
+
+// blockAfterCommandHook pauses one successful command after Redis has executed
+// it, allowing lifecycle tests to hold an RPC between storage and admission.
+type blockAfterCommandHook struct {
+	name    string
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (h *blockAfterCommandHook) DialHook(next redis.DialHook) redis.DialHook {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return next(ctx, network, addr)
+	}
+}
+
+func (h *blockAfterCommandHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		err := next(ctx, cmd)
+		if err == nil && cmd.Name() == h.name {
+			h.once.Do(func() {
+				close(h.entered)
+				<-h.release
+			})
+		}
+		return err
+	}
+}
+
+func (h *blockAfterCommandHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
 }
 
 func recvTimeout(t *testing.T, ch <-chan protocol.StreamResponse) (protocol.StreamResponse, bool) {
@@ -74,8 +114,8 @@ func drainForState(t *testing.T, ch <-chan protocol.StreamResponse, wantState pr
 }
 
 // A resubscribe landing on a different instance than the one running the task
-// receives the current snapshot and every subsequent event via the shared Redis
-// stream, and its stream closes on the terminal frame.
+// receives the current snapshot and subsequent events within the bounded Redis
+// stream retention, and its stream closes on the terminal frame.
 func TestCrossNode_ResubscribeReceivesSubsequentEvents(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -125,24 +165,30 @@ func TestCrossNode_ResubscribeReceivesSubsequentEvents(t *testing.T) {
 	if !drainForState(t, chB, protocol.TaskStateCompleted) {
 		t.Fatal("cross-node resubscriber never received the completed event before the stream closed")
 	}
+	if got, err := nodeA.client.XLen(context.Background(), streamKey(taskA.ID)).Result(); err != nil || got != 2 {
+		t.Fatalf("each status must be appended exactly once: xlen=%d err=%v", got, err)
+	}
 }
 
-// An event published right after resubscribe (in the window between the cursor
-// capture and the tailer's first read) is still delivered. This guards the
-// synchronous pre-snapshot cursor against the gap a "$" cursor would leave.
+// An event published right after the atomic snapshot/cursor read, before the
+// tailer's first XREAD, is still delivered.
 func TestCrossNode_DeliversEventPublishedRightAfterResubscribe(t *testing.T) {
 	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor())
 	task := storedTask(t, nodeA, "task-gap", "ctx-gap", protocol.TaskStateWorking)
-	nodeA.publishStream(task.ID, protocol.NewStreamResponseStatusUpdate(
-		statusEvent(protocol.TaskStateWorking, agentReply("w1"))))
+	if err := nodeA.appendStreamEvent(context.Background(), task.ID, protocol.NewStreamResponseStatusUpdate(
+		statusEvent(protocol.TaskStateWorking, agentReply("w1")))); err != nil {
+		t.Fatalf("append working event: %v", err)
+	}
 
 	chB, err := nodeB.OnResubscribe(context.Background(), protocol.TaskIDParams{ID: task.ID})
 	if err != nil {
 		t.Fatalf("OnResubscribe: %v", err)
 	}
 	// Publish the terminal event immediately after resubscribe.
-	nodeA.publishStream(task.ID, protocol.NewStreamResponseStatusUpdate(
-		statusEvent(protocol.TaskStateCompleted, agentReply("done"))))
+	if err := nodeA.appendStreamEvent(context.Background(), task.ID, protocol.NewStreamResponseStatusUpdate(
+		statusEvent(protocol.TaskStateCompleted, agentReply("done")))); err != nil {
+		t.Fatalf("append completed event: %v", err)
+	}
 
 	first, _ := recvTimeout(t, chB)
 	if first.GetTask() == nil {
@@ -153,9 +199,8 @@ func TestCrossNode_DeliversEventPublishedRightAfterResubscribe(t *testing.T) {
 	}
 }
 
-// A cancel of a task with no live run persists CANCELED and notifies via
-// notifySubscribers, bypassing broadcast. The stream seam sits at
-// notifySubscribers, so a cross-node resubscriber still sees the CANCELED frame.
+// A cancel of a task with no live run atomically persists CANCELED with its
+// event, so a cross-node resubscriber sees the terminal frame.
 func TestCrossNode_CancelWithoutLiveRunReachesResubscriber(t *testing.T) {
 	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor())
 	task := storedTask(t, nodeA, "task-cancel", "ctx-cancel", protocol.TaskStateWorking)
@@ -177,9 +222,9 @@ func TestCrossNode_CancelWithoutLiveRunReachesResubscriber(t *testing.T) {
 	}
 }
 
-// With streaming disabled (default) no per-task stream key is created and the
-// resubscribe path is unchanged.
-func TestResubscribeStreaming_Disabled_NoStreamKey(t *testing.T) {
+// With cross-node resubscribe disabled (default), no per-task stream key is
+// created and the single-node resubscribe path is unchanged.
+func TestCrossNodeResubscribe_Disabled_NoStreamKey(t *testing.T) {
 	mgr, mr := setupTest(t, scriptedExecutor(
 		statusEvent(protocol.TaskStateWorking, agentReply("w")),
 		statusEvent(protocol.TaskStateCompleted, agentReply("done")),
@@ -189,7 +234,7 @@ func TestResubscribeStreaming_Disabled_NoStreamKey(t *testing.T) {
 	}
 	for _, k := range mr.Keys() {
 		if strings.HasPrefix(k, streamPrefix) {
-			t.Fatalf("stream key %q created while ResubscribeStreaming is off", k)
+			t.Fatalf("stream key %q created while cross-node resubscribe is off", k)
 		}
 	}
 }
@@ -240,5 +285,273 @@ func TestCrossNode_CloseJoinsActiveTailer(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close hung with an active resubscribe tailer")
+	}
+}
+
+// A task event committed before the atomic snapshot/cursor read is represented
+// by the snapshot only. A later event is represented by the stream only.
+func TestCrossNode_AtomicSnapshotCursorHasNoOverlapOrGap(t *testing.T) {
+	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor())
+	task := storedTask(t, nodeA, "task-atomic", "ctx-atomic", protocol.TaskStateWorking)
+
+	first := artifactEvent("artifact", "part-one")
+	first.TaskID = task.ID
+	first.ContextID = task.ContextID
+	task.Artifacts, _ = protocol.AppendArtifact(task.Artifacts, first.Artifact, false)
+	if err := nodeA.storeTaskEvent(
+		context.Background(), task, protocol.NewStreamResponseArtifactUpdate(first),
+	); err != nil {
+		t.Fatalf("store first task event: %v", err)
+	}
+
+	snapshot, cursor, err := nodeB.loadTaskAndCursor(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("loadTaskAndCursor: %v", err)
+	}
+	if len(snapshot.Artifacts) != 1 {
+		t.Fatalf("snapshot must contain the committed artifact exactly once, got %+v", snapshot)
+	}
+	if duplicate, err := nodeB.client.XRead(context.Background(), &redis.XReadArgs{
+		Streams: []string{streamKey(task.ID), cursor},
+		Count:   1,
+		Block:   -1,
+	}).Result(); !errors.Is(err, redis.Nil) {
+		t.Fatalf("event already represented by snapshot was replayed: events=%+v err=%v", duplicate, err)
+	}
+
+	second := artifactEvent("artifact", "part-two")
+	second.TaskID = task.ID
+	second.ContextID = task.ContextID
+	appendChunk := true
+	second.Append = &appendChunk
+	task.Artifacts, _ = protocol.AppendArtifact(task.Artifacts, second.Artifact, true)
+	if err := nodeA.storeTaskEvent(
+		context.Background(), task, protocol.NewStreamResponseArtifactUpdate(second),
+	); err != nil {
+		t.Fatalf("store second task event: %v", err)
+	}
+	streams, err := nodeB.client.XRead(context.Background(), &redis.XReadArgs{
+		Streams: []string{streamKey(task.ID), cursor},
+		Count:   2,
+		Block:   -1,
+	}).Result()
+	if err != nil || len(streams) != 1 || len(streams[0].Messages) != 1 {
+		t.Fatalf("event committed after snapshot was not delivered once: streams=%+v err=%v", streams, err)
+	}
+}
+
+// input-required ends one execution round, not the task subscription. The
+// cross-node stream must remain open for a later continuation's terminal event.
+func TestCrossNode_InputRequiredDoesNotCloseResubscribe(t *testing.T) {
+	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor())
+	task := storedTask(t, nodeA, "task-input", "ctx-input", protocol.TaskStateWorking)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream, err := nodeB.OnResubscribe(ctx, protocol.TaskIDParams{ID: task.ID})
+	if err != nil {
+		t.Fatalf("OnResubscribe: %v", err)
+	}
+	if frame, ok := recvTimeout(t, stream); !ok || frame.GetTask() == nil {
+		t.Fatalf("expected initial snapshot, got %+v", frame)
+	}
+
+	input := statusEvent(protocol.TaskStateInputRequired, agentReply("need input"))
+	input.TaskID = task.ID
+	input.ContextID = task.ContextID
+	task.Status = input.Status
+	if err := nodeA.storeTaskEvent(
+		context.Background(), task, protocol.NewStreamResponseStatusUpdate(input),
+	); err != nil {
+		t.Fatalf("store input-required: %v", err)
+	}
+	if frame, ok := recvTimeout(t, stream); !ok || frame.GetStatusUpdate() == nil ||
+		frame.GetStatusUpdate().Status.State != protocol.TaskStateInputRequired {
+		t.Fatalf("expected input-required event, got %+v", frame)
+	}
+	completed := statusEvent(protocol.TaskStateCompleted, agentReply("done"))
+	completed.TaskID = task.ID
+	completed.ContextID = task.ContextID
+	task.Status = completed.Status
+	if err := nodeA.storeTaskEvent(
+		context.Background(), task, protocol.NewStreamResponseStatusUpdate(completed),
+	); err != nil {
+		t.Fatalf("store completed: %v", err)
+	}
+	if !drainForState(t, stream, protocol.TaskStateCompleted) {
+		t.Fatal("resubscribe did not receive the terminal event after input-required")
+	}
+}
+
+// The Redis tailer is an independent reader, so it uses cancelable blocking
+// backpressure instead of treating a temporarily full output buffer as EOF.
+func TestCrossNode_SlowConsumerDoesNotLoseStream(t *testing.T) {
+	nodeA, nodeB := twoNodeManagers(
+		t,
+		scriptedExecutor(),
+		WithTaskSubscriberBufferSize(1),
+	)
+	task := storedTask(t, nodeA, "task-slow", "ctx-slow", protocol.TaskStateWorking)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream, err := nodeB.OnResubscribe(ctx, protocol.TaskIDParams{ID: task.ID})
+	if err != nil {
+		t.Fatalf("OnResubscribe: %v", err)
+	}
+	const updates = 4
+	for i := 0; i < updates; i++ {
+		update := protocol.NewStreamResponseStatusUpdate(
+			statusEvent(protocol.TaskStateWorking, agentReply("still working")),
+		)
+		if err := nodeA.appendStreamEvent(context.Background(), task.ID, update); err != nil {
+			t.Fatalf("append stream event %d: %v", i, err)
+		}
+	}
+
+	if frame, ok := recvTimeout(t, stream); !ok || frame.GetTask() == nil {
+		t.Fatalf("expected initial snapshot, got %+v", frame)
+	}
+	for i := 0; i < updates; i++ {
+		if frame, ok := recvTimeout(t, stream); !ok || frame.GetStatusUpdate() == nil {
+			t.Fatalf("slow consumer lost queued update %d, got %+v", i, frame)
+		}
+		// Keep the size-one buffer full between reads. A non-blocking tailer would
+		// evict the subscriber before all queued Redis events are delivered.
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Storage/cursor errors are surfaced. A malformed stream key must neither be
+// treated as an empty stream nor allow a Task update to commit by itself.
+func TestCrossNode_WrongTypeStreamFailsAtomically(t *testing.T) {
+	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor())
+	task := storedTask(t, nodeA, "task-wrongtype", "ctx-wrongtype", protocol.TaskStateWorking)
+	if err := nodeA.client.Set(context.Background(), streamKey(task.ID), "not-a-stream", 0).Err(); err != nil {
+		t.Fatalf("seed wrong-type stream key: %v", err)
+	}
+
+	stream, err := nodeB.OnResubscribe(context.Background(), protocol.TaskIDParams{ID: task.ID})
+	if err == nil || stream != nil {
+		t.Fatalf("wrong-type cursor read must fail: stream=%v err=%v", stream, err)
+	}
+	if _, err := nodeA.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: task.ID}); err == nil {
+		t.Fatal("cancel unexpectedly committed Task without its stream event")
+	}
+	stored, err := nodeA.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: task.ID})
+	if err != nil {
+		t.Fatalf("OnGetTask after failed cancel: %v", err)
+	}
+	if stored.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("failed atomic commit changed Task state to %s", stored.Status.State)
+	}
+}
+
+// A Message emitted for an existing Task is not reported to the RPC or local
+// subscribers unless its cross-node stream append succeeds.
+func TestCrossNode_MessageAppendFailureIsNotExposedAsSuccess(t *testing.T) {
+	manager, _ := setupTest(
+		t,
+		scriptedExecutor(agentReply("reply")),
+		WithCrossNodeResubscribe(true),
+	)
+	task := storedTask(t, manager, "task-message-fail", "ctx-message-fail", protocol.TaskStateWorking)
+	if err := manager.client.Set(context.Background(), streamKey(task.ID), "not-a-stream", 0).Err(); err != nil {
+		t.Fatalf("seed wrong-type stream key: %v", err)
+	}
+	subscriber := newTaskSubscriber(task.ID, 1, false)
+	manager.subMu.Lock()
+	manager.subscribers[task.ID] = []*taskSubscriber{subscriber}
+	manager.subMu.Unlock()
+	defer manager.cleanupFailedSubscribers(task.ID, []*taskSubscriber{subscriber})
+
+	params := sendParams("continue", task.ContextID)
+	params.Message.TaskID = &task.ID
+	if response, err := manager.OnSendMessage(context.Background(), params); err == nil {
+		t.Fatalf("message append failure was exposed as success: %+v", response)
+	}
+	if buffered := len(subscriber.Channel()); buffered != 0 {
+		t.Fatalf("message append failure reached local subscriber: buffered=%d", buffered)
+	}
+}
+
+// Lua PX arguments must retain the same one-millisecond lower bound that
+// go-redis applies to ordinary SET expirations.
+func TestCrossNode_SubMillisecondExpirationIsClamped(t *testing.T) {
+	manager, _ := setupTest(
+		t,
+		scriptedExecutor(),
+		WithCrossNodeResubscribe(true),
+		WithExpireTime(time.Nanosecond),
+	)
+	if manager.expiration != time.Millisecond {
+		t.Fatalf("expiration = %s, want %s", manager.expiration, time.Millisecond)
+	}
+	task := storedTask(t, manager, "task-short-ttl", "ctx-short-ttl", protocol.TaskStateWorking)
+	update := statusEvent(protocol.TaskStateWorking, agentReply("working"))
+	update.TaskID = task.ID
+	update.ContextID = task.ContextID
+	task.Status = update.Status
+	if err := manager.storeTaskEvent(
+		context.Background(), task, protocol.NewStreamResponseStatusUpdate(update),
+	); err != nil {
+		t.Fatalf("storeTaskEvent with sub-millisecond configured TTL: %v", err)
+	}
+	if got, err := manager.client.XLen(context.Background(), streamKey(task.ID)).Result(); err != nil || got != 1 {
+		t.Fatalf("stream event missing after clamped TTL: xlen=%d err=%v", got, err)
+	}
+}
+
+// A resubscribe that finishes its storage read after Close must be rejected;
+// it cannot add a tailer after Close has already waited for all admitted ones.
+func TestCrossNode_CloseRejectsTailerAfterSnapshotRead(t *testing.T) {
+	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor())
+	task := storedTask(t, nodeA, "task-close-admission", "ctx-close-admission", protocol.TaskStateWorking)
+	if _, _, err := nodeB.loadTaskAndCursor(context.Background(), task.ID); err != nil {
+		t.Fatalf("warm loadTaskAndCursor script: %v", err)
+	}
+	hook := &blockAfterCommandHook{
+		name:    "evalsha",
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseHook := func() { releaseOnce.Do(func() { close(hook.release) }) }
+	defer releaseHook()
+	nodeB.client.AddHook(hook)
+
+	type result struct {
+		stream <-chan protocol.StreamResponse
+		err    error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		stream, err := nodeB.OnResubscribe(context.Background(), protocol.TaskIDParams{ID: task.ID})
+		resultCh <- result{stream: stream, err: err}
+	}()
+	select {
+	case <-hook.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resubscribe did not reach the post-read hook")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- nodeB.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close waited for a tailer that was not admitted")
+	}
+	releaseHook()
+	select {
+	case got := <-resultCh:
+		if got.err == nil || got.stream != nil {
+			t.Fatalf("resubscribe admitted after Close: stream=%v err=%v", got.stream, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("resubscribe did not return after storage hook was released")
 	}
 }

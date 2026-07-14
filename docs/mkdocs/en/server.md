@@ -237,6 +237,13 @@ tm, _ := redistm.NewTaskManager(proc, redisClient,   // note: (processor, client
 )
 ```
 
+For a multi-replica service, add `redistm.WithCrossNodeResubscribe(true)` on
+**every** replica sharing Redis. It lets `SubscribeToTask` reconnect through a
+different node by atomically storing Task updates with a per-task Redis Stream.
+It does not route continuation, live-cancel, or execution requests between
+nodes. Each task stream retains approximately the latest 10,000 events; clients
+that lag beyond that bound may miss intermediate events.
+
 → [examples/redis](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis).
 Implement the `taskmanager.TaskManager` interface for a custom backend.
 
@@ -248,8 +255,9 @@ Retention:
 | Terminal tasks | **kept forever by default** (`TaskTTL` = 0) — set `memory.WithTaskTTL` in production | key TTL (default 1h, `WithExpireTime`) |
 | Suspended tasks | never collected (cleaner is terminal-only) — have clients resume or cancel them | expire with the key TTL |
 
-There is no per-task delete API; A2A defines none. On the Redis backend, live
-event fan-out is per-process (snapshots are shared).
+There is no per-task delete API; A2A defines none. Redis live event fan-out is
+per-process by default; `WithCrossNodeResubscribe(true)` moves resubscribe
+observation to Redis when enabled consistently across replicas.
 
 ## Authentication
 

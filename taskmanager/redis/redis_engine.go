@@ -536,9 +536,16 @@ func (ex *execution) stampTaskEventIDs(taskID, contextID *string) bool {
 func (ex *execution) processMessageEvent(msg *protocol.Message) {
 	contextID := ex.ec.ContextID
 	ex.manager.processReplyMessage(&contextID, msg)
+	response := protocol.NewStreamResponseMessage(msg)
+	if ex.task != nil {
+		if err := ex.manager.appendStreamEvent(context.Background(), ex.ec.TaskID, response); err != nil {
+			log.Errorf("RedisTaskManager: failed to store message event for task %s: %v", ex.ec.TaskID, err)
+			return
+		}
+	}
 	ex.lastMessage = msg
 	ex.offerImmediateResult(sendOutcome{message: msg})
-	ex.broadcast(protocol.NewStreamResponseMessage(msg))
+	ex.broadcast(response)
 }
 
 // storeStatusMessage stores a stamped copy without mutating the processor's
@@ -624,13 +631,14 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 	ex.rollStatusMessage(previousStatusMessage)
 	// Persist before broadcast (consistency order).
 	//
-	// KNOWN LIMITATION: on a Redis SET error the in-memory working copy (ex.task)
+	// KNOWN LIMITATION: on a Redis persistence error the in-memory working copy (ex.task)
 	// has already advanced but the store has not, so the unary result derived
 	// from ex.task can disagree with what GetTask returns until the TTL expires.
 	// A full fix (rollback or finish()-time reconciliation) belongs with the
 	// broader Redis storage-error handling; broadcasting is correctly skipped
 	// here so subscribers never get ahead of the store.
-	if err := ex.manager.storeTask(context.Background(), ex.task); err != nil {
+	response := protocol.NewStreamResponseStatusUpdate(ev)
+	if err := ex.manager.storeTaskEvent(context.Background(), ex.task, response); err != nil {
 		if yielding {
 			ex.manager.abortExecutionYield(ex.ec.TaskID, ex.live)
 		}
@@ -645,7 +653,6 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		ex.failTask("failed to persist inline push config")
 		return
 	}
-	response := protocol.NewStreamResponseStatusUpdate(ev)
 	if yielding {
 		ex.yielded = true
 		// Queue automatic push before exposing the suspend state. A full bounded
@@ -697,7 +704,8 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 	}
 	ex.taskTouched = true
 	// Persist before broadcast (consistency order).
-	if err := ex.manager.storeTask(context.Background(), ex.task); err != nil {
+	response := protocol.NewStreamResponseArtifactUpdate(ev)
+	if err := ex.manager.storeTaskEvent(context.Background(), ex.task, response); err != nil {
 		log.Errorf("RedisTaskManager: failed to store task %s artifact: %v", ev.TaskID, err)
 		return
 	}
@@ -709,7 +717,7 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 	// Immediate result first: a returnImmediately waiter must never be stalled behind
 	// a slow subscriber in the fan-out below.
 	ex.offerImmediateTask()
-	ex.broadcast(protocol.NewStreamResponseArtifactUpdate(ev))
+	ex.broadcast(response)
 }
 
 func (ex *execution) persistInlinePushConfig() error {

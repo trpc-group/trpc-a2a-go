@@ -169,7 +169,7 @@ func (p *myProcessor) ProcessMessage(
 | `taskmanager.CancellableTask`（及 `CancellableTask.Cancel`） | 移除——取消即 `CancelTask` 取消 processor 的 `ctx` |
 | `memory.NewTaskManager(processor, opts...)` | 形状不变 |
 | `redis.NewTaskManager(...)` | `redis.NewTaskManager(processor, rdb, opts...)`——**注意参数顺序**为 `(processor, rdb)` |
-| redis `NewTaskSubscriber` / `WithSubscriberSendHook` / `WithSubscriberBlockingSend` | 移除——跨副本流式不在内置 manager 的范围内 |
+| redis `NewTaskSubscriber` / `WithSubscriberSendHook` / `WithSubscriberBlockingSend` | 移除——fan-out 由 manager 管理；Redis 跨节点 `SubscribeToTask` 可通过 `redis.WithCrossNodeResubscribe(true)` 显式开启 |
 
 ### wire 方法名
 
