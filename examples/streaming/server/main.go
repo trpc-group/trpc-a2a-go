@@ -99,9 +99,8 @@ func (p *streamingMessageProcessor) ProcessMessage(
 				return
 			}
 
-			// Append each processed chunk to a single streaming artifact: same
-			// ArtifactID, append=true after the first chunk, lastChunk on the
-			// final one — the framework reassembles them into one artifact.
+			// Add the first chunk, then update the same ArtifactID with each
+			// continuation chunk. The framework reassembles them into one artifact.
 			isLastChunk := (i == totalChunks-1)
 			chunkArtifact := protocol.Artifact{
 				ArtifactID:  artifactID,
@@ -110,7 +109,13 @@ func (p *streamingMessageProcessor) ProcessMessage(
 				Parts:       []*protocol.Part{protocol.NewTextPart(processedChunk)},
 			}
 
-			if err := handle.AddArtifact(chunkArtifact, i > 0, isLastChunk); err != nil {
+			var err error
+			if i == 0 {
+				err = handle.AddArtifact(chunkArtifact, isLastChunk)
+			} else {
+				err = handle.UpdateArtifact(chunkArtifact, isLastChunk)
+			}
+			if err != nil {
 				log.Errorf("Failed to add artifact: %v", err)
 				return
 			}

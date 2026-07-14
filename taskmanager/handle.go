@@ -22,7 +22,8 @@ var errRoundClosed = errors.New("taskmanager: TaskHandle used after Close")
 const liveBuffer = 8
 
 // TaskHandle keeps the former processor's writing style on top of the MessageProcessor
-// contract: the old TaskHandler verbs (UpdateTaskState/AddArtifact/reads) are
+// contract: the TaskHandler-style verbs (UpdateTaskState/AddArtifact/
+// UpdateArtifact/reads) are
 // expressed over the one event channel, so v0.x processor bodies port with
 // minimal edits and minimal relearning. Everything still flows through the
 // event stream — the framework's persistence, ordering and fan-out guarantees
@@ -38,7 +39,7 @@ const liveBuffer = 8
 //		defer h.Close()
 //		h.UpdateTaskState(protocol.TaskStateWorking, nil)
 //		// ... work ...
-//		h.AddArtifact(artifact, false, true)
+//		h.AddArtifact(artifact, true)
 //		h.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText("done"))
 //		return h.Events(), nil
 //	}
@@ -167,25 +168,22 @@ func (h *TaskHandle) UpdateTaskState(state protocol.TaskState, message *protocol
 	})
 }
 
-// AddArtifact emits an artifact event for this round's task
-// (former TaskHandler.AddArtifact).
-//
-// appendChunk sets the event's Append flag, which controls how these parts are
-// reconciled with what was already streamed, keyed by artifact.ArtifactID — the
-// flag does NOT stand alone:
-//   - appendChunk=false starts a new artifact under that ArtifactID (or replaces
-//     an existing one with the same ID).
-//   - appendChunk=true continues an artifact: these parts are concatenated onto
-//     the artifact already streamed under the SAME ArtifactID.
-//
-// So a chunked artifact is streamed by reusing one ArtifactID across calls —
-// appendChunk=false on the first chunk, appendChunk=true on every later chunk —
-// and the framework reassembles them into a single artifact. Give each call a
-// fresh ArtifactID (or keep appendChunk=false) to emit independent artifacts
-// instead. For a single, self-contained artifact, pass appendChunk=false.
-//
-// lastChunk marks the final chunk of the artifact; it is orthogonal to appendChunk.
-func (h *TaskHandle) AddArtifact(artifact protocol.Artifact, appendChunk, lastChunk bool) error {
+// AddArtifact emits a new artifact (or replaces an existing artifact with the
+// same ArtifactID) for this round's task. Use UpdateArtifact for continuation
+// chunks. lastChunk marks the final chunk of the artifact.
+func (h *TaskHandle) AddArtifact(artifact protocol.Artifact, lastChunk bool) error {
+	return h.emit(&protocol.TaskArtifactUpdateEvent{
+		Artifact:  artifact,
+		LastChunk: &lastChunk,
+	})
+}
+
+// UpdateArtifact appends a continuation chunk to an artifact already emitted
+// with AddArtifact. Reuse the same ArtifactID across calls; the framework
+// concatenates the incoming parts onto the existing artifact. lastChunk marks
+// the final chunk of the artifact.
+func (h *TaskHandle) UpdateArtifact(artifact protocol.Artifact, lastChunk bool) error {
+	appendChunk := true
 	return h.emit(&protocol.TaskArtifactUpdateEvent{
 		Artifact:  artifact,
 		Append:    &appendChunk,

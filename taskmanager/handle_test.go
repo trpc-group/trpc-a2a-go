@@ -56,7 +56,7 @@ func TestTaskHandle_FlushPreservesOrder(t *testing.T) {
 	if err := h.UpdateTaskState(protocol.TaskStateWorking, nil); err != nil {
 		t.Fatalf("queued emit failed: %v", err)
 	}
-	if err := h.AddArtifact(protocol.Artifact{ArtifactID: "art-1"}, false, false); err != nil {
+	if err := h.AddArtifact(protocol.Artifact{ArtifactID: "art-1"}, false); err != nil {
 		t.Fatalf("queued emit failed: %v", err)
 	}
 	events := h.Events()
@@ -84,6 +84,44 @@ func TestTaskHandle_FlushPreservesOrder(t *testing.T) {
 		if kinds[i] != want[i] {
 			t.Fatalf("expected %v, got %v", want, kinds)
 		}
+	}
+}
+
+func TestTaskHandle_ArtifactMethodsSetChunkFlags(t *testing.T) {
+	h := NewTaskHandle(context.Background(), &ExecContext{TaskID: "task-1"})
+
+	if err := h.AddArtifact(protocol.Artifact{ArtifactID: "art-1"}, false); err != nil {
+		t.Fatalf("AddArtifact failed: %v", err)
+	}
+	if err := h.UpdateArtifact(protocol.Artifact{ArtifactID: "art-1"}, true); err != nil {
+		t.Fatalf("UpdateArtifact failed: %v", err)
+	}
+	events := h.Events()
+	h.Close()
+
+	wantLastChunk := []bool{false, true}
+	var i int
+	for event := range events {
+		artifactEvent, ok := event.(*protocol.TaskArtifactUpdateEvent)
+		if !ok {
+			t.Fatalf("expected artifact event, got %T", event)
+		}
+		if i >= len(wantLastChunk) {
+			t.Fatalf("unexpected extra artifact event %d", i)
+		}
+		if i == 0 && artifactEvent.Append != nil {
+			t.Fatalf("AddArtifact: expected append to be omitted, got %v", *artifactEvent.Append)
+		}
+		if i == 1 && (artifactEvent.Append == nil || !*artifactEvent.Append) {
+			t.Fatalf("UpdateArtifact: expected append=true, got %v", artifactEvent.Append)
+		}
+		if artifactEvent.LastChunk == nil || *artifactEvent.LastChunk != wantLastChunk[i] {
+			t.Fatalf("event %d: expected lastChunk=%t, got %v", i, wantLastChunk[i], artifactEvent.LastChunk)
+		}
+		i++
+	}
+	if i != len(wantLastChunk) {
+		t.Fatalf("expected %d artifact events, got %d", len(wantLastChunk), i)
 	}
 }
 

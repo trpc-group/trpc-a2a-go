@@ -64,9 +64,9 @@ continuation round, `nil` on a fresh one), `ContextID`, `Tenant`, `History`
 webhook config, if the client sent one).
 
 Wrap a **`TaskHandle`** — a small helper that carries the familiar verbs
-(`UpdateTaskState`, `AddArtifact`, `Reply`) and hands you the channel to
-return. A synchronous body works as-is; emits before `Events()` never block,
-so no goroutine is required.
+(`UpdateTaskState`, `AddArtifact`, `UpdateArtifact`, `Reply`) and hands you the
+channel to return. A synchronous body works as-is; emits before `Events()`
+never block, so no goroutine is required.
 → [examples/basic](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic)
 
 ```go
@@ -75,19 +75,22 @@ func (p *proc) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) 
     defer h.Close()
     h.UpdateTaskState(protocol.TaskStateWorking, nil)
     result := doWork(ec.Message)
-    h.AddArtifact(result.Artifact, false, true)                       // appendChunk=false, lastChunk=true
+    h.AddArtifact(result.Artifact, true)                              // lastChunk=true
     h.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("done"))
     return h.Events(), nil
 }
 ```
 
-Verbs: `UpdateTaskState(state, message)`, `AddArtifact(artifact, appendChunk, lastChunk)`,
-`Reply(message)`, plus reads `TaskID()`, `GetContextID()`, `GetTask()`,
-`GetMessageHistory()`. `taskmanager.ReplyText(text)` builds an agent message.
+Verbs: `UpdateTaskState(state, message)`, `AddArtifact(artifact, lastChunk)`,
+`UpdateArtifact(artifact, lastChunk)`, `Reply(message)`, plus reads `TaskID()`,
+`GetContextID()`, `GetTask()`, `GetMessageHistory()`. `AddArtifact` starts a
+new artifact (or replaces the same ID); `UpdateArtifact` appends a continuation
+chunk, which must reuse that `ArtifactID`. `taskmanager.ReplyText(text)` builds
+an agent message.
 
 **`TaskHandle` is just channel operations underneath.** The real contract is
 the `<-chan protocol.StreamEvent` you return: `UpdateTaskState` sends a
-`*protocol.TaskStatusUpdateEvent`, `AddArtifact` sends a
+`*protocol.TaskStatusUpdateEvent`, `AddArtifact` and `UpdateArtifact` send a
 `*protocol.TaskArtifactUpdateEvent`, `Reply` sends a `*protocol.Message`, and
 `Close` closes the channel. You rarely need to, but you can build and send
 those events yourself — the only way to reach a field `TaskHandle` doesn't

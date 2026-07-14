@@ -77,7 +77,7 @@ func (p *reverseProcessor) ProcessMessage(
 			ArtifactID: "reversed-" + handle.TaskID(),
 			Name:       stringPtr("Reversed Text"),
 			Parts:      []*protocol.Part{protocol.NewTextPart(result)},
-		}, false, true)
+		}, true)
 		handle.UpdateTaskState(protocol.TaskStateCompleted,
 			protocol.NewAgentText(fmt.Sprintf("Reversed: %s", result)))
 	}()

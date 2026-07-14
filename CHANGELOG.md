@@ -4,8 +4,8 @@
 
 ### A2A v1.0 conformance fixes
 
-- **Streaming artifact chunks reassemble by `ArtifactID`.** Artifact events (and `TaskHandle.AddArtifact`) sharing an `ArtifactID` now merge into a single artifact — `appendChunk=true` concatenates parts onto the existing one, `appendChunk=false` replaces it — instead of accumulating as separate fragments. `tasks/get` and the final task snapshot return one merged artifact per streamed deliverable, matching the spec and reference SDKs. Applies to the in-memory and Redis task managers; the per-chunk SSE frames are unchanged.
-- **`TaskHandle.AddArtifact` exposes the `append` flag** (signature change): `AddArtifact(artifact, appendChunk, lastChunk bool)` (was `AddArtifact(artifact, lastChunk bool)`), so a processor can stream a multi-chunk artifact through the handle without dropping to the raw channel.
+- **Streaming artifact chunks reassemble by `ArtifactID`.** Artifact events sharing an `ArtifactID` now merge into a single artifact — `TaskHandle.AddArtifact` creates or replaces it, while `TaskHandle.UpdateArtifact` appends continuation parts — instead of accumulating as separate fragments. `tasks/get` and the final task snapshot return one merged artifact per streamed deliverable, matching the spec and reference SDKs. Applies to the in-memory and Redis task managers; the per-chunk SSE frames are unchanged.
+- **`TaskHandle.UpdateArtifact(artifact, lastChunk)` adds an explicit artifact-update operation** for streaming continuation chunks without dropping to the raw channel. `TaskHandle.AddArtifact(artifact, lastChunk)` keeps its alpha.1 signature and wire shape.
 - **Non-terminal status messages fold into conversation history.** A `TaskStatusUpdateEvent` carrying a `status.message` in a non-terminal state (e.g. the question on `input-required`) is folded into the conversation, so the next round's `GetMessageHistory` and `tasks/get` history include it instead of losing it. Terminal status messages stay on `status.Message` only and are not duplicated into history — emit an agent's final answer as a `Message` if it must survive into the next round. Applies to both task managers; folded messages count toward the history-length window.
 
 ## 2.0.0-alpha.1 (2026-07-07)
@@ -41,7 +41,7 @@ This is a breaking release: the module path moves to `/v2`, the JSON-RPC wire mo
     + TaskHandler (interface): removed — replaced by TaskHandle, a concrete helper over the returned channel (NewTaskHandle(ctx, ec))
     + TaskHandler.BuildTask / .SubscribeTask / .CleanTask / .GetMetadata: removed
     + TaskHandler.UpdateTaskState(taskID, state, msg): now TaskHandle.UpdateTaskState(state, msg) — no taskID argument
-    + TaskHandler.AddArtifact(taskID, artifact, isFinal, needMoreData): now TaskHandle.AddArtifact(artifact, appendChunk, lastChunk) — needMoreData maps to appendChunk, isFinal to lastChunk
+    + TaskHandler.AddArtifact(taskID, artifact, isFinal, needMoreData): now TaskHandle.AddArtifact(artifact, lastChunk) — needMoreData/append removed, isFinal maps to lastChunk
     + TaskHandler.GetTask(taskID): now TaskHandle.GetTask() — this round's continuation snapshot only, arbitrary-task reads removed
     + TaskSubscriber, CancellableTask (and .Cancel): removed
     + redis.NewTaskManager: argument order is now (processor, rdb, opts...)
@@ -317,4 +317,3 @@ These methods remain functional for backward compatibility but are deprecated in
 - Streaming data client sample.
 - Authentication server demonstration.
 - Redis task management implementation.
-

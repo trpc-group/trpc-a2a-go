@@ -248,7 +248,7 @@ func (p *myMessageProcessor) ProcessMessage(
     handle.AddArtifact(*protocol.NewArtifactWithID(
         stringPtr("Reversed Text"), nil,
         []*protocol.Part{protocol.NewTextPart(result)},
-    ), false, true)
+    ), true)
 
     // A terminal status ends the round; the message/send caller receives
     // this final task snapshot (with its artifacts).
@@ -380,7 +380,7 @@ func (p *myProcessor) ProcessMessage(
     // handle.Events() never block, so no goroutine is required.
     handle.UpdateTaskState(protocol.TaskStateWorking, nil)
     result := doWork(ec.Message)
-    handle.AddArtifact(result.Artifact, false, true)
+    handle.AddArtifact(result.Artifact, true)
     handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("done"))
 
     return handle.Events(), nil
@@ -404,7 +404,7 @@ the native channel style recommended for new code.
 | `ProcessOptions.AcceptedOutputModes` / `.Tenant` | `ExecContext.AcceptedOutputModes` / `.Tenant` |
 | `TaskHandler.BuildTask` | gone — tasks are created lazily on the first task event; the ID is `ExecContext.TaskID` / `TaskHandle.TaskID()` |
 | `TaskHandler.UpdateTaskState(taskID, state, msg)` | `TaskHandle.UpdateTaskState(state, msg)` (or emit a `protocol.TaskStatusUpdateEvent` on the raw channel) |
-| `TaskHandler.AddArtifact(taskID, artifact, isFinal, needMoreData)` | `TaskHandle.AddArtifact(artifact, appendChunk, lastChunk)` — `needMoreData` maps to `appendChunk`, `isFinal` to `lastChunk`; chunks sharing an `ArtifactID` with `appendChunk=true` reassemble into one artifact |
+| `TaskHandler.AddArtifact(taskID, artifact, isFinal, needMoreData)` | call `TaskHandle.AddArtifact(artifact, isFinal)` when `needMoreData=false`, or `TaskHandle.UpdateArtifact(artifact, isFinal)` when `needMoreData=true`; reuse the same `ArtifactID` for continuation chunks |
 | `TaskHandler.SubscribeTask` / `.CleanTask` | removed — the framework owns fan-out and task lifecycle; nothing deletes tasks by default — set `memory.WithTaskTTL` to collect terminal tasks |
 | return an interim `Message` result while a goroutine drives the task (v0 non-blocking) | emit events from a goroutine; unary callers opt in with `returnImmediately=true` — the first persisted event answers the call; multi-turn suspends with `input-required` |
 | `TaskHandler.GetContextID` / `.GetMessageHistory` | same names on `TaskHandle`; `History` is a snapshot taken before the round and truncated to the manager's `MaxHistoryLength` — not a live read |

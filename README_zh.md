@@ -351,7 +351,7 @@ func (p *myProcessor) ProcessMessage(
     // handle.Events() never block, so no goroutine is required.
     handle.UpdateTaskState(protocol.TaskStateWorking, nil)
     result := doWork(ec.Message)
-    handle.AddArtifact(result.Artifact, false, true)
+    handle.AddArtifact(result.Artifact, true)
     handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("done"))
 
     return handle.Events(), nil
@@ -373,7 +373,7 @@ func (p *myProcessor) ProcessMessage(
 | `ProcessOptions.AcceptedOutputModes` / `.Tenant` | `ExecContext.AcceptedOutputModes` / `.Tenant` |
 | `TaskHandler.BuildTask` | 已移除——task 在第一个 task event 时惰性创建；ID 为 `ExecContext.TaskID` / `TaskHandle.TaskID()` |
 | `TaskHandler.UpdateTaskState(taskID, state, msg)` | `TaskHandle.UpdateTaskState(state, msg)`（或在裸 channel 上发出 `protocol.TaskStatusUpdateEvent`） |
-| `TaskHandler.AddArtifact(taskID, artifact, isFinal, needMoreData)` | `TaskHandle.AddArtifact(artifact, appendChunk, lastChunk)` —— `needMoreData` 对应 `appendChunk`、`isFinal` 对应 `lastChunk`；共享同一 `ArtifactID` 且 `appendChunk=true` 的分块会被合并成一个 artifact |
+| `TaskHandler.AddArtifact(taskID, artifact, isFinal, needMoreData)` | `needMoreData=false` 时调用 `TaskHandle.AddArtifact(artifact, isFinal)`，`needMoreData=true` 时调用 `TaskHandle.UpdateArtifact(artifact, isFinal)`；续块必须复用同一个 `ArtifactID` |
 | `TaskHandler.SubscribeTask` / `.CleanTask` | 已移除——框架自行负责 fan-out 与 task 生命周期；默认不会删除任何 task——设置 `memory.WithTaskTTL` 以回收终态 task |
 | 在 goroutine 驱动 task 的同时返回一个临时的 `Message` 结果（v0 非阻塞） | 从 goroutine 发出 event；一元调用方通过 `returnImmediately=true` 选择加入——第一个被持久化的 event 应答该调用；多轮场景以 `input-required` 挂起 |
 | `TaskHandler.GetContextID` / `.GetMessageHistory` | `TaskHandle` 上同名；`History` 是本轮开始前拍下的快照，并截断到 manager 的 `MaxHistoryLength`——不是实时读取 |
