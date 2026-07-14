@@ -174,7 +174,7 @@ channel underneath is the actual contract, shown in
 | `TaskHandler` (interface) | removed — reads come from `ec`, writes go through the returned channel (or `TaskHandle`) |
 | `BuildTask(...)` | removed — tasks are created lazily on the first task event; the ID is `ec.TaskID` / `handle.TaskID()` |
 | `UpdateTaskState(taskID, state, msg)` | `handle.UpdateTaskState(state, msg)` (or emit `*protocol.TaskStatusUpdateEvent` on the raw channel) — no `taskID` argument |
-| `AddArtifact(taskID, artifact, isFinal, needMoreData)` | call `handle.AddArtifact(artifact, isFinal)` when `needMoreData=false`, or `handle.UpdateArtifact(artifact, isFinal)` when `needMoreData=true`; continuation chunks must reuse the same `ArtifactID` |
+| `AddArtifact(taskID, artifact, isFinal, needMoreData)` | call `handle.AddArtifact(artifact, isFinal)` when `needMoreData=false`, or `handle.AppendArtifact(artifact, isFinal)` when `needMoreData=true`; continuation chunks must reuse the same `ArtifactID` |
 | `SubscribeTask(taskID)` | removed — the returned channel is the stream; the framework owns subscriber fan-out |
 | `GetTask(taskID)` | `handle.GetTask()` — this round's continuation snapshot only, `nil` on a fresh round; arbitrary-task reads are gone |
 | `CleanTask(taskID)` | removed — the framework owns the task lifecycle; nothing deletes tasks by default (set `memory.WithTaskTTL` to collect terminal tasks) |
@@ -272,11 +272,11 @@ These compile fine but behave differently from v0.x. Each ends with a one-line
   down. Canceling an already-terminal task returns `-32002`. → *What to do:*
   don't assume the cancel response is terminal; read the task again, or watch
   the stream, for the settled state.
-- **Artifact append is now an explicit `UpdateArtifact` operation.**
+- **Artifact append is now an explicit `AppendArtifact` operation.**
   `AddArtifact(artifact, lastChunk)` starts or replaces an artifact;
-  `UpdateArtifact(artifact, lastChunk)` appends a continuation chunk. → *What
+  `AppendArtifact(artifact, lastChunk)` appends a continuation chunk. → *What
   to do:* map `needMoreData=false` to `AddArtifact`, map `needMoreData=true` to
-  `UpdateArtifact`, and reuse the same `ArtifactID` for all continuation chunks.
+  `AppendArtifact`, and reuse the same `ArtifactID` for all continuation chunks.
 
 ### Multi-turn and continuations
 
@@ -350,7 +350,7 @@ for a runnable server and legacy-wire client.
       use `ec.TaskID` / `handle.TaskID()`.
 - [ ] Remove the `taskID` argument from `UpdateTaskState` / `AddArtifact`.
       Map `needMoreData=false` to `AddArtifact(artifact, isFinal)` and
-      `needMoreData=true` to `UpdateArtifact(artifact, isFinal)`; reuse the
+      `needMoreData=true` to `AppendArtifact(artifact, isFinal)`; reuse the
       same `ArtifactID` for continuation chunks.
 - [ ] Replace `SubscribeTask` + `MessageProcessingResult{StreamingEvents}` with
       `return handle.Events(), nil`; replace `MessageProcessingResult{Result: &msg}`

@@ -111,7 +111,7 @@ func (p *streamingMessageProcessor) ProcessMessage(
 			if i == 0 {
 				err = handle.AddArtifact(chunkArtifact, isLastChunk)
 			} else {
-				err = handle.UpdateArtifact(chunkArtifact, isLastChunk)
+				err = handle.AppendArtifact(chunkArtifact, isLastChunk)
 			}
 			if err != nil {
 				log.Errorf("Failed to add artifact: %v", err)

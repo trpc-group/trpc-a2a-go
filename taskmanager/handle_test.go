@@ -93,8 +93,8 @@ func TestTaskHandle_ArtifactMethodsSetChunkFlags(t *testing.T) {
 	if err := h.AddArtifact(protocol.Artifact{ArtifactID: "art-1"}, false); err != nil {
 		t.Fatalf("AddArtifact failed: %v", err)
 	}
-	if err := h.UpdateArtifact(protocol.Artifact{ArtifactID: "art-1"}, true); err != nil {
-		t.Fatalf("UpdateArtifact failed: %v", err)
+	if err := h.AppendArtifact(protocol.Artifact{ArtifactID: "art-1"}, true); err != nil {
+		t.Fatalf("AppendArtifact failed: %v", err)
 	}
 	events := h.Events()
 	h.Close()
@@ -113,7 +113,7 @@ func TestTaskHandle_ArtifactMethodsSetChunkFlags(t *testing.T) {
 			t.Fatalf("AddArtifact: expected append to be omitted, got %v", *artifactEvent.Append)
 		}
 		if i == 1 && (artifactEvent.Append == nil || !*artifactEvent.Append) {
-			t.Fatalf("UpdateArtifact: expected append=true, got %v", artifactEvent.Append)
+			t.Fatalf("AppendArtifact: expected append=true, got %v", artifactEvent.Append)
 		}
 		if artifactEvent.LastChunk == nil || *artifactEvent.LastChunk != wantLastChunk[i] {
 			t.Fatalf("event %d: expected lastChunk=%t, got %v", i, wantLastChunk[i], artifactEvent.LastChunk)

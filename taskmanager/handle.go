@@ -23,7 +23,7 @@ const liveBuffer = 8
 
 // TaskHandle keeps the former processor's writing style on top of the MessageProcessor
 // contract: the TaskHandler-style verbs (UpdateTaskState/AddArtifact/
-// UpdateArtifact/reads) are
+// AppendArtifact/reads) are
 // expressed over the one event channel, so v0.x processor bodies port with
 // minimal edits and minimal relearning. Everything still flows through the
 // event stream — the framework's persistence, ordering and fan-out guarantees
@@ -169,7 +169,7 @@ func (h *TaskHandle) UpdateTaskState(state protocol.TaskState, message *protocol
 }
 
 // AddArtifact emits a new artifact (or replaces an existing artifact with the
-// same ArtifactID) for this round's task. Use UpdateArtifact for continuation
+// same ArtifactID) for this round's task. Use AppendArtifact for continuation
 // chunks. lastChunk marks the final chunk of the artifact.
 func (h *TaskHandle) AddArtifact(artifact protocol.Artifact, lastChunk bool) error {
 	return h.emit(&protocol.TaskArtifactUpdateEvent{
@@ -178,11 +178,11 @@ func (h *TaskHandle) AddArtifact(artifact protocol.Artifact, lastChunk bool) err
 	})
 }
 
-// UpdateArtifact appends a continuation chunk to an artifact already emitted
+// AppendArtifact appends a continuation chunk to an artifact already emitted
 // with AddArtifact. Reuse the same ArtifactID across calls; the framework
 // concatenates the incoming parts onto the existing artifact. lastChunk marks
 // the final chunk of the artifact.
-func (h *TaskHandle) UpdateArtifact(artifact protocol.Artifact, lastChunk bool) error {
+func (h *TaskHandle) AppendArtifact(artifact protocol.Artifact, lastChunk bool) error {
 	appendChunk := true
 	return h.emit(&protocol.TaskArtifactUpdateEvent{
 		Artifact:  artifact,

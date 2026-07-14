@@ -1006,7 +1006,7 @@ func TestEngine_ArtifactLazilyCreatesTask(t *testing.T) {
 }
 
 // Artifact chunks sharing an ArtifactID reassemble into a single artifact:
-// UpdateArtifact extends the earlier AddArtifact chunk's parts rather than
+// AppendArtifact extends the earlier AddArtifact chunk's parts rather than
 // adding a second entry (covers the append flag on the handle and the
 // engine-side merge together).
 func TestEngine_ArtifactChunksMergeByID(t *testing.T) {
@@ -1019,7 +1019,7 @@ func TestEngine_ArtifactChunksMergeByID(t *testing.T) {
 					ArtifactID: "doc",
 					Parts:      []*protocol.Part{protocol.NewTextPart("Hello ")},
 				}, false)
-				h.UpdateArtifact(protocol.Artifact{
+				h.AppendArtifact(protocol.Artifact{
 					ArtifactID: "doc",
 					Parts:      []*protocol.Part{protocol.NewTextPart("world")},
 				}, true)

@@ -63,7 +63,7 @@ type MessageProcessor interface {
 
 `ExecContext` 携带你应答所需的一切:`Message`(收到的消息)、`TaskID`(预分配)、`Task`(续跑轮的当前快照,首轮为 `nil`)、`ContextID`、`Tenant`、`History`(会话快照)、`AcceptedOutputModes`、`PushConfig`(客户端内联的 webhook 配置,若有)。
 
-推荐包一个 **`TaskHandle`**——一个小的辅助函数,承载熟悉的动词(`UpdateTaskState`、`AddArtifact`、`UpdateArtifact`、`Reply`)并把要返回的 channel 交给你。同步函数体原样可用;`Events()` 之前的 emit 永不阻塞,不需要 goroutine。→ [examples/basic](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic)
+推荐包一个 **`TaskHandle`**——一个小的辅助函数,承载熟悉的动词(`UpdateTaskState`、`AddArtifact`、`AppendArtifact`、`Reply`)并把要返回的 channel 交给你。同步函数体原样可用;`Events()` 之前的 emit 永不阻塞,不需要 goroutine。→ [examples/basic](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic)
 
 ```go
 func (p *proc) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
@@ -77,9 +77,9 @@ func (p *proc) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) 
 }
 ```
 
-动词:`UpdateTaskState(state, message)`、`AddArtifact(artifact, lastChunk)`、`UpdateArtifact(artifact, lastChunk)`、`Reply(message)`,以及读取 `TaskID()`、`GetContextID()`、`GetTask()`、`GetMessageHistory()`。`AddArtifact` 新增 artifact(或替换同 ID 的 artifact),`UpdateArtifact` 追加续块,并且必须复用同一个 `ArtifactID`。`taskmanager.ReplyText(text)` 构造一条 agent 消息。
+动词:`UpdateTaskState(state, message)`、`AddArtifact(artifact, lastChunk)`、`AppendArtifact(artifact, lastChunk)`、`Reply(message)`,以及读取 `TaskID()`、`GetContextID()`、`GetTask()`、`GetMessageHistory()`。`AddArtifact` 新增 artifact(或替换同 ID 的 artifact),`AppendArtifact` 追加续块,并且必须复用同一个 `ArtifactID`。`taskmanager.ReplyText(text)` 构造一条 agent 消息。
 
-**`TaskHandle` 底层就是 channel 操作。** 真正的契约是你返回的 `<-chan protocol.StreamEvent`:`UpdateTaskState` 发一个 `*protocol.TaskStatusUpdateEvent`,`AddArtifact` 和 `UpdateArtifact` 发一个 `*protocol.TaskArtifactUpdateEvent`,`Reply` 发一个 `*protocol.Message`,`Close` 关闭 channel。你很少需要,但可以自己构造并发送这些事件——这也是够到 `TaskHandle` 不暴露的字段的唯一办法:
+**`TaskHandle` 底层就是 channel 操作。** 真正的契约是你返回的 `<-chan protocol.StreamEvent`:`UpdateTaskState` 发一个 `*protocol.TaskStatusUpdateEvent`,`AddArtifact` 和 `AppendArtifact` 发一个 `*protocol.TaskArtifactUpdateEvent`,`Reply` 发一个 `*protocol.Message`,`Close` 关闭 channel。你很少需要,但可以自己构造并发送这些事件——这也是够到 `TaskHandle` 不暴露的字段的唯一办法:
 
 ```go
 out := make(chan protocol.StreamEvent, 4)
