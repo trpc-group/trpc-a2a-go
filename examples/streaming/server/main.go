@@ -4,12 +4,12 @@
 //
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
-// Package main implements a streaming A2A server example.
-// This example demonstrates how to process tasks with streaming responses,
-// breaking large content into chunks and sending them progressively. The
-// processor emits events from a goroutine while the round is live — the same
-// code path serves message/send (which waits for the final event) and
-// message/stream (which relays every event as it happens).
+// Package main implements a streaming A2A server example. The processing logic
+// is a mock agent (examples/util): it splits the input into chunks, reverses
+// each, and emits them with a delay to simulate real-time streaming.
+// util.NewMessageProcessor maps that event stream onto the task lifecycle, so
+// the same code serves message/send (which waits for the final snapshot) and
+// message/stream (which relays every chunk as it happens).
 package main
 
 import (
@@ -18,246 +18,28 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"sort"
-	"strings"
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
-
+	"trpc.group/trpc-go/trpc-a2a-go/v2/examples/util"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
 
-// streamingMessageProcessor implements the MessageProcessor interface for streaming responses.
-// This processor breaks the input text into chunks and sends them back as a stream.
-type streamingMessageProcessor struct{}
-
-// ProcessMessage implements the MessageProcessor interface.
-// It breaks the input text into chunks and sends them back incrementally:
-// the work runs in a goroutine emitting on the handle while the framework
-// consumes the returned event channel live.
-func (p *streamingMessageProcessor) ProcessMessage(
-	ctx context.Context,
-	ec *taskmanager.ExecContext,
-) (<-chan protocol.StreamEvent, error) {
-	log.Infof("Processing streaming message...")
-
-	handle := taskmanager.NewTaskHandle(ctx, ec)
-
-	// Extract text from the incoming message.
-	text := extractText(ec.Message)
-	if text == "" {
-		errMsg := "input message must contain text"
-		log.Errorf("Message processing failed: %s", errMsg)
-
-		// A pure message reply: no task comes into existence this round.
-		handle.Reply(protocol.NewAgentText(errMsg))
-		handle.Close()
-		return handle.Events(), nil
-	}
-
-	// Start streaming processing in a goroutine. The framework creates the
-	// task lazily on the first task event and stamps the IDs from the
-	// ExecContext.
-	go func() {
-		defer handle.Close()
-
-		if err := handle.UpdateTaskState(protocol.TaskStateWorking,
-			protocol.NewAgentText("Starting to process your streaming data...")); err != nil {
-			log.Errorf("Failed to send working event: %v", err)
-			return
-		}
-
-		// Split the text into chunks to simulate streaming processing
-		chunks := splitTextIntoChunks(text, 5) // Split into chunks of about 5 characters
-		totalChunks := len(chunks)
-
-		// Process each chunk with a small delay to simulate real-time processing
-		for i, chunk := range chunks {
-			// Check for cancellation: closing without a terminal state after a
-			// cancel lets the framework persist CANCELED on our behalf.
-			if err := ctx.Err(); err != nil {
-				log.Infof("Task %s cancelled during streaming: %v", handle.TaskID(), err)
-				return
+// newAgent builds the mock agent backing this server: it splits the input into
+// short chunks, reverses each, and streams them ~500ms apart.
+func newAgent() util.Agent {
+	return util.NewMockAgent(
+		func(input string) []string {
+			chunks := util.Chunk(input, 5)
+			for i, c := range chunks {
+				chunks[i] = reverseString(c)
 			}
-
-			// Process the chunk (in this example, just reverse it)
-			processedChunk := reverseString(chunk)
-			progressMsg := fmt.Sprintf("Processing chunk %d of %d: %s -> %s",
-				i+1, totalChunks, chunk, processedChunk)
-
-			if err := handle.UpdateTaskState(protocol.TaskStateWorking,
-				protocol.NewAgentText(progressMsg)); err != nil {
-				log.Errorf("Failed to send working event: %v", err)
-				return
-			}
-
-			// Create an artifact for this chunk
-			isLastChunk := (i == totalChunks-1)
-			chunkArtifact := protocol.Artifact{
-				ArtifactID:  uuid.New().String(),
-				Name:        stringPtr(fmt.Sprintf("Chunk %d of %d", i+1, totalChunks)),
-				Description: stringPtr("Streaming chunk of processed data"),
-				Parts:       []*protocol.Part{protocol.NewTextPart(processedChunk)},
-			}
-
-			if err := handle.AddArtifact(chunkArtifact, isLastChunk); err != nil {
-				log.Errorf("Failed to add artifact: %v", err)
-				return
-			}
-
-			select {
-			case <-ctx.Done():
-				log.Infof("Task %s cancelled during delay: %v", handle.TaskID(), ctx.Err())
-				return
-			case <-time.After(500 * time.Millisecond): // Simulate work with delay
-				// Continue processing
-			}
-		}
-
-		// Final completion status ends the round; the message/send caller
-		// receives this final task snapshot (with its artifacts).
-		if err := handle.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText(
-			fmt.Sprintf("Completed processing all %d chunks successfully!", totalChunks))); err != nil {
-			log.Errorf("Failed to update task state: %v", err)
-			return
-		}
-
-		log.Infof("Task %s streaming completed successfully.", handle.TaskID())
-	}()
-
-	return handle.Events(), nil
-}
-
-// extractText extracts the first text part from a message.
-func extractText(message protocol.Message) string {
-	for _, part := range message.Parts {
-		// Type assert to the concrete TextPart type.
-		if t := part.TextContent(); t != "" {
-			return t
-		}
-	}
-	return ""
-}
-
-// splitTextIntoChunks splits text into chunks of roughly the specified size.
-// Ensures splits happen at word boundaries to avoid breaking words.
-func splitTextIntoChunks(text string, chunkSize int) []string {
-	// If text is short enough, return it as a single chunk
-	if len(text) <= chunkSize {
-		return []string{text}
-	}
-
-	// Split text by words to ensure we don't break words
-	words := strings.Fields(text)
-	if len(words) == 0 {
-		return []string{text}
-	}
-
-	chunks := []string{}
-	currentChunk := ""
-
-	for _, word := range words {
-		// Check if adding this word would exceed the target chunk size
-		if len(currentChunk) > 0 && len(currentChunk)+len(word)+1 > chunkSize && len(currentChunk) > 0 {
-			// Current chunk is full, add it to the list
-			chunks = append(chunks, currentChunk)
-			currentChunk = word
-		} else {
-			// Add word to current chunk with a space if needed
-			if len(currentChunk) > 0 {
-				currentChunk += " "
-			}
-			currentChunk += word
-		}
-	}
-
-	// Add the last chunk if not empty
-	if len(currentChunk) > 0 {
-		chunks = append(chunks, currentChunk)
-	}
-
-	// If we have very few chunks or they're very uneven, try a more balanced approach
-	if len(chunks) < 3 && len(text) > 15 {
-		// Find sentence boundaries or reasonable splitting points
-		return splitAtSentenceBoundaries(text, 3)
-	}
-
-	return chunks
-}
-
-// splitAtSentenceBoundaries tries to split text at sentence boundaries or punctuation
-// to create more natural chunks for streaming.
-func splitAtSentenceBoundaries(text string, targetChunks int) []string {
-	// Common sentence delimiters
-	delimiters := []string{". ", "! ", "? ", "\n\n", "; "}
-
-	// If text is small, don't try to split it too much
-	if len(text) < 30 {
-		return []string{text}
-	}
-
-	// Find all potential split points
-	var splitPoints []int
-	for _, delimiter := range delimiters {
-		idx := 0
-		for {
-			found := strings.Index(text[idx:], delimiter)
-			if found == -1 {
-				break
-			}
-			// Add the position after the delimiter
-			splitPoint := idx + found + len(delimiter)
-			splitPoints = append(splitPoints, splitPoint)
-			idx = splitPoint
-		}
-	}
-
-	// Sort split points
-	sort.Ints(splitPoints)
-
-	// If no good split points found, fall back to even division
-	if len(splitPoints) < targetChunks-1 {
-		chunkSize := len(text) / targetChunks
-		chunks := make([]string, targetChunks)
-		for i := 0; i < targetChunks-1; i++ {
-			chunks[i] = text[i*chunkSize : (i+1)*chunkSize]
-		}
-		chunks[targetChunks-1] = text[(targetChunks-1)*chunkSize:]
-		return chunks
-	}
-
-	// Select evenly spaced split points
-	selectedPoints := make([]int, targetChunks-1)
-	step := len(splitPoints) / targetChunks
-	for i := 0; i < targetChunks-1; i++ {
-		index := min((i+1)*step, len(splitPoints)-1)
-		selectedPoints[i] = splitPoints[index]
-	}
-	sort.Ints(selectedPoints)
-
-	// Create chunks based on selected split points
-	chunks := make([]string, targetChunks)
-	startIdx := 0
-	for i, point := range selectedPoints {
-		chunks[i] = text[startIdx:point]
-		startIdx = point
-	}
-	chunks[targetChunks-1] = text[startIdx:]
-
-	return chunks
-}
-
-// min returns the smaller of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+			return chunks
+		},
+		util.WithChunkDelay(500*time.Millisecond),
+	)
 }
 
 // reverseString reverses a UTF-8 encoded string.
@@ -303,7 +85,7 @@ func main() {
 			{
 				ID:          "streaming_processor",
 				Name:        "Streaming Text Processor",
-				Description: stringPtr("Input: Any text\nOutput: Chunks of reversed text delivered incrementally\n\nExample input: hello world\nOutput chunk 1: oll\nOutput chunk 2: eh\nOutput chunk 3: dlrow"),
+				Description: stringPtr("Input: Any text\nOutput: The text split into chunks, each reversed, delivered incrementally"),
 				Tags:        []string{"text", "stream", "example"},
 				Examples: []string{
 					"The quick brown fox jumps over the lazy dog",
@@ -316,11 +98,8 @@ func main() {
 		},
 	}
 
-	// Create the MessageProcessor (streaming logic)
-	processor := &streamingMessageProcessor{}
-
-	// Create the TaskManager, injecting the processor
-	taskManager, err := memory.NewTaskManager(processor)
+	// Adapt the mock agent into a MessageProcessor and inject it into the TaskManager.
+	taskManager, err := memory.NewTaskManager(util.NewMessageProcessor(newAgent()))
 	if err != nil {
 		log.Fatalf("Failed to create task manager: %v", err)
 	}
