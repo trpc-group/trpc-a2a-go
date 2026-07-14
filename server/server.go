@@ -23,7 +23,6 @@ import (
 
 	"go.opentelemetry.io/otel/metric"
 
-	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
@@ -67,10 +66,12 @@ type A2AServer struct {
 	compatHandler http.Handler
 
 	// Authentication related fields
-	middleWare   []Middleware                        // Authentication middlewares.
-	pushAuth     *auth.PushNotificationAuthenticator // Push notification authenticator.
-	jwksEnabled  bool                                // Flag to enable/disable JWKS endpoint.
-	jwksEndpoint string                              // Path for the JWKS endpoint.
+	middleWare        []Middleware // Authentication middlewares.
+	pushJWKSHandler   http.Handler // Publishes keys for verifying signed push notifications.
+	jwksEnabled       bool         // Flag to enable/disable JWKS endpoint.
+	jwksExplicitlySet bool         // WithJWKSEndpoint was called: an explicit decision wins over discovery.
+	pushEnabled       bool         // Push posture derived from the TaskManager.
+	jwksEndpoint      string       // Path for the JWKS endpoint.
 
 	// Extended card related fields
 	authenticatedCardHandler func(ctx context.Context, baseCard AgentCard) (AgentCard, error) // Dynamic card modifier function.
@@ -136,18 +137,75 @@ func NewA2AServer(taskManager taskmanager.TaskManager, opts ...Option) (*A2AServ
 		}
 	}
 
-	// Initialize push notification authenticator.
-	if server.jwksEnabled {
-		if server.pushAuth == nil {
-			// Only generate a new authenticator if one wasn't supplied
-			server.pushAuth = auth.NewPushNotificationAuthenticator()
-			if err := server.pushAuth.GenerateKeyPair(); err != nil {
-				return nil, fmt.Errorf("failed to generate JWKS key pair: %w", err)
-			}
-		}
+	if err := server.resolvePushPosture(taskManager); err != nil {
+		return nil, err
 	}
 
 	return server, nil
+}
+
+// resolvePushPosture derives the server's push-notification posture from the
+// TaskManager and the configured options: whether push is enabled (a Sender is
+// present), and whether to publish JWKS (a handler is configured and push is
+// enabled, unless WithJWKSEndpoint decided otherwise). It returns an error when
+// a JWKS endpoint was requested without a handler.
+func (s *A2AServer) resolvePushPosture(taskManager taskmanager.TaskManager) error {
+	// Whether push is enabled is discovered from the TaskManager (a non-nil push
+	// Sender) so the advertised capability stays in sync without extra wiring.
+	s.pushEnabled = taskManager.PushSender() != nil
+	// A configured JWKS handler publishes verification keys, but it is NOT by
+	// itself a delivery capability: publishing keys also requires
+	// push to be enabled, so the card never advertises push it cannot honor. An
+	// explicit WithJWKSEndpoint decision still wins.
+	if s.pushJWKSHandler != nil && s.pushEnabled && !s.jwksExplicitlySet {
+		s.jwksEnabled = true
+	}
+
+	// Log the resolved delivery and key-publication posture. The server cannot
+	// infer whether a custom Sender signs its deliveries.
+	switch {
+	case s.pushEnabled && s.pushJWKSHandler != nil && s.jwksEnabled:
+		log.Infof("push: enabled, JWKS at %s", s.jwksEndpoint)
+	case s.pushEnabled && s.pushJWKSHandler != nil:
+		log.Infof("push: enabled, JWKS publication disabled by option")
+	case s.pushEnabled:
+		log.Infof("push: enabled, no JWKS handler configured")
+	default:
+		log.Debugf("push: disabled")
+	}
+
+	// A card that declares push support while the server has no push wiring is a
+	// client-visible lie worth flagging (warn, not error: the agent may deliver
+	// through a path the server cannot see).
+	if !s.pushEnabled {
+		s.warnDeclaredPushWithoutSender()
+	}
+
+	// An enabled JWKS endpoint needs a handler to serve it. Fail at construction
+	// instead of silently leaving the advertised endpoint unavailable.
+	if s.jwksEnabled && s.pushJWKSHandler == nil {
+		return fmt.Errorf("JWKS endpoint enabled without a handler: " +
+			"pass server.WithPushNotificationJWKSHandler (e.g. sender.JWKSHandler()), " +
+			"or disable publication with server.WithJWKSEndpoint(false, \"\")")
+	}
+	return nil
+}
+
+// warnDeclaredPushWithoutSender logs a warning for each served card that
+// declares pushNotifications=true while no push Sender is configured.
+func (s *A2AServer) warnDeclaredPushWithoutSender() {
+	warn := func(name string, c AgentCard) {
+		if c.Capabilities.PushNotifications != nil && *c.Capabilities.PushNotifications {
+			log.Warnf("agent card %s declares pushNotifications=true but no push Sender is configured; "+
+				"clients registering webhooks will receive PushNotificationNotSupported", name)
+		}
+	}
+	if s.agentCardSet {
+		warn("(default)", s.agentCard)
+	}
+	for tenant, c := range s.tenantCards {
+		warn(tenant, c)
+	}
 }
 
 // Start begins listening for HTTP requests on the specified network address.
@@ -272,9 +330,9 @@ func (s *A2AServer) Handler() http.Handler {
 	router.Handle(s.agentCardPath, http.HandlerFunc(s.handleAgentCard))
 	router.Handle(s.oldAgentCardPath, http.HandlerFunc(s.handleAgentCard))
 
-	// JWKS endpoint for JWT authentication if enabled.
-	if s.jwksEnabled && s.pushAuth != nil {
-		router.Handle(s.jwksEndpoint, http.HandlerFunc(s.pushAuth.HandleJWKS))
+	// JWKS endpoint for push-notification verification if enabled.
+	if s.jwksEnabled && s.pushJWKSHandler != nil {
+		router.Handle(s.jwksEndpoint, s.pushJWKSHandler)
 	}
 
 	// Default JSON-RPC transport (configurable path). When a compat handler is
@@ -350,6 +408,21 @@ func (s *A2AServer) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// finalizePushCapability fills a served card's push capability from the server's
+// resolved push posture. It runs on the by-value copy every card path returns,
+// so stored and user-owned cards are never mutated. Rules: only a nil (unset)
+// capability is filled, an explicit user value is never overridden, and signed
+// cards are immutable (filling a field would invalidate the JWS) so they pass
+// through untouched.
+func (s *A2AServer) finalizePushCapability(card AgentCard) AgentCard {
+	if !s.pushEnabled || card.Capabilities.PushNotifications != nil || len(card.Signatures) > 0 {
+		return card
+	}
+	enabled := true
+	card.Capabilities.PushNotifications = &enabled
+	return card
+}
+
 // resolveAgentCard returns the AgentCard for the given tenant (from "?tenant=").
 // An empty tenant yields the default card. On a multi-tenant server (WithTenantCard
 // / WithTenantCardProvider) an unknown tenant yields ok=false (404).
@@ -359,17 +432,17 @@ func (s *A2AServer) resolveAgentCard(ctx context.Context, tenant string) (AgentC
 		if !s.agentCardSet {
 			return AgentCard{}, false
 		}
-		return s.agentCard, true
+		return s.finalizePushCapability(s.agentCard), true
 	}
 	if c, ok := s.tenantCards[tenant]; ok {
-		return c, true
+		return s.finalizePushCapability(c), true
 	}
 	if s.tenantCardProvider != nil {
 		c, err := s.tenantCardProvider(ctx, tenant)
 		if err != nil {
 			return AgentCard{}, false
 		}
-		return c, true
+		return s.finalizePushCapability(c), true
 	}
 	if len(s.tenantCards) > 0 {
 		// Multi-tenant server, but no such tenant.
@@ -379,7 +452,7 @@ func (s *A2AServer) resolveAgentCard(ctx context.Context, tenant string) (AgentC
 	if !s.agentCardSet {
 		return AgentCard{}, false
 	}
-	return s.agentCard, true
+	return s.finalizePushCapability(s.agentCard), true
 }
 
 // handleJSONRPC is the main handler for all JSON-RPC 2.0 requests.
@@ -697,8 +770,18 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("push notification URL is required"))
 		return
 	}
-	// Inject the JWKS URL so the agent can publish the key used to sign push notifications.
-	if s.jwksEnabled && s.pushAuth != nil {
+	// Reject obviously invalid webhook URLs early. NOTE: this is a minimal
+	// well-formedness check, not full SSRF protection. Before trusting
+	// client-supplied callback URLs in production, operators still need domain
+	// allowlisting, ownership verification, and egress network controls.
+	if u, err := url.Parse(params.URL); err != nil ||
+		(u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		s.writeJSONRPCError(w, request.ID,
+			jsonrpc.ErrInvalidParams("push notification URL must be a valid http(s) URL"))
+		return
+	}
+	// Publish the configured verification-key URL to push-notification clients.
+	if s.jwksEnabled && s.pushJWKSHandler != nil {
 		if params.Metadata == nil {
 			params.Metadata = make(map[string]interface{})
 		}
@@ -756,11 +839,8 @@ func (s *A2AServer) handleTasksPushNotificationGet(
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
 		return
 	}
-	result, err := s.taskManager.OnPushNotificationGet(ctx, protocol.TaskIDParams{
-		RPCID:    params.RPCID,
-		ID:       taskID,
-		Metadata: nil,
-	})
+	params.TaskID = taskID
+	result, err := s.taskManager.OnPushNotificationGet(ctx, params)
 	if err != nil {
 		s.handleTaskManagerError(w, request.ID, err, "OnPushNotificationGet", taskID)
 		return
@@ -1005,6 +1085,7 @@ func (s *A2AServer) handleAgentGetAuthenticatedExtendedCard(
 		}
 	}
 
+	cardToServe = s.finalizePushCapability(cardToServe)
 	log.Debugf("Serving authenticated extended card (Request ID: %v)", request.ID)
 	s.writeJSONRPCResponse(w, request.ID, cardToServe)
 }

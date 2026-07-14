@@ -60,6 +60,8 @@ var (
 	ErrExtensionSupportRequiredSentinel = errors.New("extension support required")
 	// ErrVersionNotSupportedSentinel is a sentinel error for an unsupported A2A protocol version
 	ErrVersionNotSupportedSentinel = errors.New("version not supported")
+	// ErrPushConfigNotFoundSentinel is a sentinel error for a missing push notification config
+	ErrPushConfigNotFoundSentinel = errors.New("push notification config not found")
 )
 
 // A2A specific error functions
@@ -92,6 +94,19 @@ func ErrPushNotificationNotSupported() *jsonrpc.Error {
 		Message: "Push Notification is not supported",
 		Data:    "This agent does not support push notifications",
 	}).WithWrappedError(ErrPushNotificationNotSupportedSentinel)
+}
+
+// ErrPushConfigNotFound creates a JSON-RPC error for a task that exists but has
+// no push notification config. It deliberately does NOT reuse ErrCodeTaskNotFound
+// (-32001, reserved for a missing task); the A2A error set defines no dedicated
+// code for a missing config, so InvalidParams is used.
+// The returned error wraps ErrPushConfigNotFoundSentinel for use with errors.Is().
+func ErrPushConfigNotFound(taskID string) *jsonrpc.Error {
+	return (&jsonrpc.Error{
+		Code:    ErrCodeInvalidParams,
+		Message: "Push notification config not found",
+		Data:    fmt.Sprintf("Task '%s' has no push notification config.", taskID),
+	}).WithWrappedError(ErrPushConfigNotFoundSentinel)
 }
 
 // ErrUnsupportedOperation creates a JSON-RPC error for unsupported operations.

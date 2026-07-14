@@ -153,6 +153,27 @@ func (m *TaskManager) prepareExecContext(
 		acceptedOutputModes = request.Configuration.AcceptedOutputModes
 		pushConfig = request.Configuration.PushConfig
 	}
+	// An inline push config is a registration: reject it when push is not
+	// enabled (the client would otherwise wait on a webhook that can never
+	// fire), and persist it when it is — so it becomes queryable via the
+	// config RPCs and receives automatic deliveries, matching the official
+	// SDK. It still reaches the processor as ec.PushConfig either way.
+	if pushConfig != nil {
+		if m.pushSender == nil {
+			m.releaseExecution(taskID, exec)
+			return nil, taskmanager.ErrPushNotificationNotSupported()
+		}
+		cfg := *pushConfig
+		cfg.TaskID = taskID
+		if cfg.ID == "" {
+			// Same replace-the-default rule as OnPushNotificationSet.
+			cfg.ID = taskID
+		}
+		if _, err := m.pushStore.save(cfg); err != nil {
+			m.releaseExecution(taskID, exec)
+			return nil, err
+		}
+	}
 	return &taskmanager.ExecContext{
 		TaskID:    taskID,
 		Task:      taskCopy,

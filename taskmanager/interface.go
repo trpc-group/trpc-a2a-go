@@ -11,6 +11,7 @@ import (
 	"context"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 )
 
 // ExecContext is the read-only snapshot of one incoming message for a
@@ -52,9 +53,13 @@ type ExecContext struct {
 	AcceptedOutputModes []string
 
 	// PushConfig is the push-notification configuration carried inline on the
-	// send request (configuration.pushNotificationConfig), when provided. The
-	// framework passes it through without registering it: honoring it is the
-	// MessageProcessor's decision.
+	// send request (configuration.pushNotificationConfig), when provided. It is
+	// an informational copy: the manager has already registered it for the task
+	// (or rejected the request with PushNotificationNotSupported when push is
+	// not configured), exactly as an explicit tasks/pushNotificationConfig/set
+	// would. A MessageProcessor delivering manually (push.Config.ManualDelivery)
+	// can use it as the webhook to push to; configs registered via the RPC live
+	// in the manager's store and are not surfaced here.
 	PushConfig *protocol.TaskPushNotificationConfig
 }
 
@@ -123,6 +128,11 @@ type MessageProcessor interface {
 // delegating the agent logic to an injected MessageProcessor.
 // This interface corresponds to the Task Service defined in the A2A Specification.
 type TaskManager interface {
+	// PushSender returns the sender used for push-notification delivery, or nil
+	// when push notifications are not supported. The server uses this capability
+	// to keep the advertised agent-card capability and JWKS publication aligned
+	// with the TaskManager's actual delivery configuration.
+	PushSender() push.Sender
 
 	// OnSendMessage handles a request corresponding to the 'message/send' RPC method.
 	// It invokes the MessageProcessor and derives the result from the emitted events:
@@ -179,7 +189,7 @@ type TaskManager interface {
 	// It retrieves the current push notification configuration for a task.
 	OnPushNotificationGet(
 		ctx context.Context,
-		params protocol.TaskIDParams,
+		params protocol.GetTaskPushNotificationConfigParams,
 	) (*protocol.TaskPushNotificationConfig, error)
 
 	// OnPushNotificationList handles the v1.0 'ListTaskPushNotificationConfigs' RPC method.

@@ -10,6 +10,8 @@ package memory
 
 import (
 	"time"
+
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 )
 
 // TaskManagerOptions contains configuration options for TaskManager.
@@ -36,6 +38,11 @@ type TaskManagerOptions struct {
 
 	// TaskSubscriberBlockingSend enables blocking send for task subscribers.
 	TaskSubscriberBlockingSend bool
+
+	// Push configures push-notification delivery (see push.Config). A nil
+	// Push.Sender means push is not supported: the config RPCs return
+	// PushNotificationNotSupported.
+	Push push.Config
 }
 
 // DefaultTaskManagerOptions returns the default configuration options.
@@ -103,4 +110,31 @@ func WithTaskSubscriberBlockingSend(blockingSend bool) TaskManagerOption {
 	return func(opts *TaskManagerOptions) {
 		opts.TaskSubscriberBlockingSend = blockingSend
 	}
+}
+
+// WithPushConfig enables push notifications from the given config:
+// as task events occur, the manager delivers them to every webhook registered
+// for the task via cfg.Sender. Without a Sender, push is not supported — the
+// config RPCs return PushNotificationNotSupported (-32003). Set
+// cfg.ManualDelivery to keep registration open while the agent controls delivery
+// itself; for filtering or batching, wrap the configured Sender with a custom
+// push.Sender implementation.
+//
+//	sender, _ := pushauth.NewSignedSender()
+//	tm, _ := memory.NewTaskManager(proc, memory.WithPushConfig(push.Config{
+//	    Sender:         sender,
+//	    ManualDelivery: true,
+//	}))
+//	// later, in agent code: sender.SendPush(ctx, cfg, event)
+func WithPushConfig(cfg push.Config) TaskManagerOption {
+	return func(opts *TaskManagerOptions) {
+		opts.Push = cfg
+	}
+}
+
+// WithPushNotifications is shorthand for WithPushConfig with a Sender and
+// automatic delivery — the common case. Use WithPushConfig for manual delivery
+// or other push settings.
+func WithPushNotifications(sender push.Sender) TaskManagerOption {
+	return WithPushConfig(push.Config{Sender: sender})
 }

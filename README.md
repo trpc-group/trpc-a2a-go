@@ -563,27 +563,31 @@ See the [examples/auth/client](examples/auth/client) directory for complete exam
 
 ### Push Notification Authentication
 
-The framework includes support for secure push notifications:
+Use a `SignedSender` to deliver push notifications with JWT authentication and
+publish its verification keys through the server:
 
 ```go
-// Create an authenticator for push notifications
-notifAuth := auth.NewPushNotificationAuthenticator()
-
-// Generate a key pair
-if err := notifAuth.GenerateKeyPair(); err != nil {
+sender, err := pushauth.NewSignedSender()
+if err != nil {
     // Handle error
 }
 
-// Expose JWKS endpoint
-http.HandleFunc("/.well-known/jwks.json", notifAuth.HandleJWKS)
+taskManager, err := memory.NewTaskManager(
+    processor,
+    memory.WithPushNotifications(sender),
+)
 
-// Enable JWKS endpoint when creating the server
 srv, err := server.NewA2AServer(
     taskManager,
     server.WithAgentCard(agentCard),
-    server.WithJWKSEndpoint(true, "/.well-known/jwks.json"),
+    server.WithPushNotificationJWKSHandler(sender.JWKSHandler()),
 )
 ```
+
+If a client declares an authentication scheme and credentials in its push
+configuration (for example, Basic or Bearer), the sender uses them as requested.
+The JWT identity is the fallback when the client does not declare credentials.
+For unsigned delivery, use `push.NewHTTPSender()` and omit the JWKS handler option.
 
 ## Session Management
 

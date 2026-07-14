@@ -4,34 +4,37 @@
 //
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
-package auth
+package pushauth
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 )
 
-// TokenType represents the authentication token type.
-type TokenType string
+// bearerScheme is the Authorization scheme used for push-notification JWTs.
+const bearerScheme = "Bearer"
 
-const (
-	// TokenTypeBearer represents a bearer token.
-	TokenTypeBearer TokenType = "Bearer"
-)
+// pushTokenTTL bounds how long a signed push-notification token stays valid.
+// It is used both to set the token's "exp" claim on the signing side and to
+// bound the "iat" age on the verifying side.
+const pushTokenTTL = 5 * time.Minute
 
-// Authentication errors.
+// Push-notification verification errors.
 var (
 	ErrMissingToken      = errors.New("missing authentication token")
 	ErrInvalidAuthHeader = errors.New("invalid authorization header format")
@@ -39,8 +42,18 @@ var (
 	ErrTokenExpired      = errors.New("token has expired")
 )
 
-// PushNotificationAuthenticator handles authentication for push notifications.
-type PushNotificationAuthenticator struct {
+// Authenticator is the trust layer for push notifications. It plays both sides:
+//
+//   - Agent (signing): GenerateKeyPair creates an RSA key pair, SignPayload /
+//     CreateAuthorizationHeader sign the notification body into a JWT, and
+//     HandleJWKS publishes the public keys as a JWKS endpoint.
+//   - Client (verifying): SetJWKSClient points at the agent's JWKS endpoint and
+//     VerifyPushNotification checks a received notification's signature, payload
+//     hash, and freshness.
+//
+// It does not deliver notifications; use SignedSender for agent-side delivery
+// with JWT signing, or HTTPSender for transport without a signing identity.
+type Authenticator struct {
 	// For sending notifications (agent side).
 	privateKey *rsa.PrivateKey
 	keySet     jwk.Set
@@ -50,32 +63,48 @@ type PushNotificationAuthenticator struct {
 	jwksClient *JWKSClient
 }
 
-// NewPushNotificationAuthenticator creates a new push notification authenticator.
-func NewPushNotificationAuthenticator() *PushNotificationAuthenticator {
-	return &PushNotificationAuthenticator{
+// NewAuthenticator creates a new push notification authenticator.
+func NewAuthenticator() *Authenticator {
+	return &Authenticator{
 		keySet: jwk.NewSet(),
 	}
 }
 
 // GenerateKeyPair generates a new RSA key pair for signing push notifications.
-func (a *PushNotificationAuthenticator) GenerateKeyPair() error {
-	// Generate a new RSA key
+func (a *Authenticator) GenerateKeyPair() error {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return fmt.Errorf("failed to generate RSA key: %w", err)
 	}
+	return a.UseKeyPair(privateKey, "")
+}
 
-	a.privateKey = privateKey
-	a.keyID = fmt.Sprintf("key-%d", time.Now().Unix())
-
+// UseKeyPair installs an existing RSA private key for signing push notifications
+// and publishes its public half in the JWKS key set. Use it instead of
+// GenerateKeyPair when the key must survive restarts or be shared across
+// replicas (so every instance signs with the same key the JWKS advertises).
+// When keyID is empty, a stable ID is derived from the public key according to
+// RFC 7638. Replicas using the same key therefore publish and sign with the same
+// key ID.
+func (a *Authenticator) UseKeyPair(privateKey *rsa.PrivateKey, keyID string) error {
+	if privateKey == nil {
+		return errors.New("private key is required")
+	}
 	// Create a JWK from the private key
 	key, err := jwk.FromRaw(privateKey.Public())
 	if err != nil {
 		return fmt.Errorf("failed to create JWK from public key: %w", err)
 	}
+	if keyID == "" {
+		thumbprint, err := key.Thumbprint(crypto.SHA256)
+		if err != nil {
+			return fmt.Errorf("failed to derive key ID: %w", err)
+		}
+		keyID = base64.RawURLEncoding.EncodeToString(thumbprint)
+	}
 
 	// Set key ID
-	if err := key.Set(jwk.KeyIDKey, a.keyID); err != nil {
+	if err := key.Set(jwk.KeyIDKey, keyID); err != nil {
 		return fmt.Errorf("failed to set key ID: %w", err)
 	}
 
@@ -92,20 +121,26 @@ func (a *PushNotificationAuthenticator) GenerateKeyPair() error {
 	// Add the key to the key set
 	a.keySet.AddKey(key)
 
+	a.privateKey = privateKey
+	a.keyID = keyID
 	return nil
 }
 
 // SignPayload signs a payload for push notification.
-func (a *PushNotificationAuthenticator) SignPayload(payload []byte) (string, error) {
+func (a *Authenticator) SignPayload(payload []byte) (string, error) {
 	if a.privateKey == nil {
 		return "", errors.New("private key not initialized")
 	}
 	// Calculate SHA256 hash of payload.
 	hash := sha256.Sum256(payload)
 	payloadHash := fmt.Sprintf("%x", hash)
-	// Create token with claims.
+	// Create token with claims. "exp" gives the token an explicit expiry that
+	// the standard JWT validator enforces on the receiving side, so a captured
+	// token cannot be replayed indefinitely.
+	now := time.Now()
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
-		"iat":                 time.Now().Unix(),
+		"iat":                 now.Unix(),
+		"exp":                 now.Add(pushTokenTTL).Unix(),
 		"request_body_sha256": payloadHash,
 	})
 	// Set key ID in token header.
@@ -119,7 +154,7 @@ func (a *PushNotificationAuthenticator) SignPayload(payload []byte) (string, err
 }
 
 // HandleJWKS handles requests to the JWKS endpoint.
-func (a *PushNotificationAuthenticator) HandleJWKS(w http.ResponseWriter, r *http.Request) {
+func (a *Authenticator) HandleJWKS(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -152,7 +187,10 @@ func (a *PushNotificationAuthenticator) HandleJWKS(w http.ResponseWriter, r *htt
 
 // JWKSClient retrieves and caches JWKs from a remote endpoint.
 type JWKSClient struct {
-	jwksURL   string
+	jwksURL string
+	// mu guards keySet and lastFetch: a JWKSClient is shared across concurrent
+	// push-notification verifications, each of which may trigger a refresh.
+	mu        sync.RWMutex
 	keySet    jwk.Set
 	lastFetch time.Time
 	cacheTTL  time.Duration
@@ -172,11 +210,15 @@ func NewJWKSClient(jwksURL string, cacheTTL time.Duration) *JWKSClient {
 
 // FetchKeys fetches the JWKs from the remote endpoint.
 func (c *JWKSClient) FetchKeys(ctx context.Context) error {
-	// Check if we need to refresh the keys.
-	if !c.lastFetch.IsZero() && time.Since(c.lastFetch) < c.cacheTTL {
+	// Check if we need to refresh the keys. Read the cache state under the lock
+	// so we never race a concurrent writer swapping the key set below.
+	c.mu.RLock()
+	fresh := !c.lastFetch.IsZero() && time.Since(c.lastFetch) < c.cacheTTL
+	c.mu.RUnlock()
+	if fresh {
 		return nil
 	}
-	// Fetch the JWKs from the remote endpoint.
+	// Fetch the JWKs from the remote endpoint (no lock held during I/O).
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.jwksURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
@@ -209,8 +251,10 @@ func (c *JWKSClient) FetchKeys(ctx context.Context) error {
 		}
 		newKeySet.AddKey(key)
 	}
+	c.mu.Lock()
 	c.keySet = newKeySet
 	c.lastFetch = time.Now()
+	c.mu.Unlock()
 	return nil
 }
 
@@ -219,6 +263,8 @@ func (c *JWKSClient) GetKey(ctx context.Context, keyID string) (jwk.Key, error) 
 	if err := c.FetchKeys(ctx); err != nil {
 		return nil, err
 	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	key, found := c.keySet.LookupKeyID(keyID)
 	if !found {
 		return nil, fmt.Errorf("key with ID %s not found", keyID)
@@ -227,7 +273,7 @@ func (c *JWKSClient) GetKey(ctx context.Context, keyID string) (jwk.Key, error) 
 }
 
 // VerifyPushNotification verifies a push notification JWT and payload.
-func (a *PushNotificationAuthenticator) VerifyPushNotification(r *http.Request, payload []byte) error {
+func (a *Authenticator) VerifyPushNotification(r *http.Request, payload []byte) error {
 	// Initialize the JWKS client if needed.
 	if a.jwksClient == nil {
 		return errors.New("JWKS client not initialized")
@@ -238,7 +284,7 @@ func (a *PushNotificationAuthenticator) VerifyPushNotification(r *http.Request, 
 		return ErrMissingToken
 	}
 	parts := strings.Split(authHeader, " ")
-	if len(parts) != 2 || !strings.EqualFold(parts[0], string(TokenTypeBearer)) {
+	if len(parts) != 2 || !strings.EqualFold(parts[0], bearerScheme) {
 		return ErrInvalidAuthHeader
 	}
 	tokenString := parts[1]
@@ -283,7 +329,7 @@ func (a *PushNotificationAuthenticator) VerifyPushNotification(r *http.Request, 
 	// Verify the token age.
 	if iat, ok := claims["iat"].(float64); ok {
 		tokenAge := time.Since(time.Unix(int64(iat), 0))
-		if tokenAge > 5*time.Minute {
+		if tokenAge > pushTokenTTL {
 			return ErrTokenExpired
 		}
 	} else {
@@ -293,67 +339,15 @@ func (a *PushNotificationAuthenticator) VerifyPushNotification(r *http.Request, 
 }
 
 // SetJWKSClient sets the JWKS client for verifying push notifications.
-func (a *PushNotificationAuthenticator) SetJWKSClient(jwksURL string) {
+func (a *Authenticator) SetJWKSClient(jwksURL string) {
 	a.jwksClient = NewJWKSClient(jwksURL, 1*time.Hour)
 }
 
 // CreateAuthorizationHeader creates an Authorization header for push notifications.
-func (a *PushNotificationAuthenticator) CreateAuthorizationHeader(payload []byte) (string, error) {
+func (a *Authenticator) CreateAuthorizationHeader(payload []byte) (string, error) {
 	token, err := a.SignPayload(payload)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%s %s", TokenTypeBearer, token), nil
-}
-
-// SendPushNotification sends a push notification with JWT authentication.
-// This is a convenience function for sending notifications from the server side.
-func (a *PushNotificationAuthenticator) SendPushNotification(
-	ctx context.Context,
-	url string,
-	payload interface{},
-) error {
-	// Validate inputs
-	if url == "" {
-		return errors.New("push notification URL is required")
-	}
-
-	// Make sure URL starts with http:// or https://
-	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		url = "http://" + url
-	}
-
-	// Marshal payload to JSON
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	// Create authorization header
-	authHeader, err := a.CreateAuthorizationHeader(payloadBytes)
-	if err != nil {
-		return fmt.Errorf("failed to create authorization header: %w", err)
-	}
-
-	// Send push notification
-	req, err := http.NewRequestWithContext(
-		ctx, http.MethodPost, url, strings.NewReader(string(payloadBytes)))
-	if err != nil {
-		return fmt.Errorf("failed to create HTTP request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", authHeader)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send push notification: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("push notification failed with status: %s", resp.Status)
-	}
-
-	return nil
+	return fmt.Sprintf("%s %s", bearerScheme, token), nil
 }

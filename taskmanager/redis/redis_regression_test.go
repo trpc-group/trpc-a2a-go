@@ -274,7 +274,7 @@ func TestSendMessage_PushConfigReachesProcessor(t *testing.T) {
 			close(out)
 			return out, nil
 		})
-	manager, _ := setupTest(t, processor)
+	manager, _ := setupTest(t, processor, WithPushNotifications(&recordingSender{}))
 
 	params := sendParams("hello", "")
 	params.Configuration = &protocol.SendMessageConfiguration{
