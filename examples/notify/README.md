@@ -11,11 +11,11 @@ to deliver.
 
 | | wiring | who delivers |
 | --- | --- | --- |
-| [`auto/`](auto) | `memory.WithPushNotifications(sender)` | the framework, on each significant task state |
+| [`auto/`](auto) | `memory.WithPushNotifications(sender)` | the framework, for each task event |
 | [`manual/`](manual) | `memory.WithPushConfig(push.Config{Sender: sender, ManualDelivery: true})` | the agent, from inside the processor, on its own schedule |
 
-- **auto** — the processor just completes the task; the framework POSTs the
-  terminal `StreamResponse` to every registered webhook.
+- **auto** — the processor just completes the task; the framework POSTs each
+  `StreamResponse` to every registered webhook in per-config order.
 - **manual** — automatic dispatch is off; the processor calls the `SignedSender`
   itself, here pushing a mid-task milestone and the final result. Registration,
   the JWKS endpoint, and the advertised capability all still work. Caveat: the

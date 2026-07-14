@@ -45,7 +45,8 @@ func TestTaskManager_PushDispatchOnTerminalState(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	manager := newTestManager(t, echoExecutor(), WithPushNotifications(push.NewHTTPSender()))
+	manager := newTestManager(t, echoExecutor(), WithPushNotifications(
+		push.NewHTTPSender(push.WithUnsafeAllowPrivateNetworks())))
 
 	taskID := "push-e2e-task"
 	seedTask(manager, protocol.Task{
@@ -107,68 +108,36 @@ func TestTaskManager_PushRejectedWithoutSender(t *testing.T) {
 	}
 }
 
-// TestPushWorthy checks which events are delivered vs suppressed. Content-less
-// working/submitted heartbeats are skipped, but a working update that carries a
-// message payload must still be delivered.
-func TestPushWorthy(t *testing.T) {
-	statusUpdate := func(state protocol.TaskState, msg *protocol.Message) protocol.StreamResponse {
-		return protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{
-			Status: protocol.TaskStatus{State: state, Message: msg},
-		})
-	}
-	msg := &protocol.Message{}
-	cases := []struct {
-		name  string
-		event protocol.StreamResponse
-		want  bool
-	}{
-		{"working heartbeat skipped", statusUpdate(protocol.TaskStateWorking, nil), false},
-		{"submitted heartbeat skipped", statusUpdate(protocol.TaskStateSubmitted, nil), false},
-		{"working with message delivered", statusUpdate(protocol.TaskStateWorking, msg), true},
-		{"completed delivered", statusUpdate(protocol.TaskStateCompleted, nil), true},
-		{"input-required delivered", statusUpdate(protocol.TaskStateInputRequired, nil), true},
-		{"auth-required delivered", statusUpdate(protocol.TaskStateAuthRequired, nil), true},
-		{"artifact delivered", protocol.NewStreamResponseArtifactUpdate(&protocol.TaskArtifactUpdateEvent{}), true},
-		{"task delivered", protocol.NewStreamResponseTask(&protocol.Task{ID: "t1"}), true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := pushWorthy(c.event); got != c.want {
-				t.Errorf("pushWorthy = %v, want %v", got, c.want)
-			}
-		})
-	}
-}
-
-// TestOnPushNotificationSet_ReplacesDefaultConfig verifies that repeated Set
-// without an explicit config ID replaces the task's default config (rather than
-// accumulating duplicates), while a distinct explicit ID registers an additional
-// config.
-func TestOnPushNotificationSet_ReplacesDefaultConfig(t *testing.T) {
+// TestOnPushNotificationSet_GeneratesResourceIDs verifies that each Create
+// without an explicit ID creates a distinct push-config resource.
+func TestOnPushNotificationSet_GeneratesResourceIDs(t *testing.T) {
 	manager := newTestManager(t, echoExecutor(), WithPushNotifications(noopSender()))
 	ctx := context.Background()
 	taskID := "replace-task"
+	seedTask(manager, protocol.Task{ID: taskID, Status: protocol.TaskStatus{State: protocol.TaskStateWorking}})
 
-	if _, err := manager.OnPushNotificationSet(ctx, protocol.TaskPushNotificationConfig{
+	first, err := manager.OnPushNotificationSet(ctx, protocol.TaskPushNotificationConfig{
 		TaskID: taskID, URL: "https://a",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("first Set: %v", err)
 	}
-	if _, err := manager.OnPushNotificationSet(ctx, protocol.TaskPushNotificationConfig{
+	second, err := manager.OnPushNotificationSet(ctx, protocol.TaskPushNotificationConfig{
 		TaskID: taskID, URL: "https://b",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("second Set: %v", err)
+	}
+	if first.ID == "" || second.ID == "" || first.ID == second.ID {
+		t.Fatalf("generated IDs must be distinct: first=%q second=%q", first.ID, second.ID)
 	}
 
 	list, err := manager.OnPushNotificationList(ctx, protocol.ListTaskPushNotificationConfigsParams{TaskID: taskID})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(list.Configs) != 1 {
-		t.Fatalf("expected 1 config after re-Set without ID, got %d", len(list.Configs))
-	}
-	if list.Configs[0].URL != "https://b" {
-		t.Errorf("expected the latest URL to win, got %q", list.Configs[0].URL)
+	if len(list.Configs) != 2 {
+		t.Fatalf("expected 2 configs after two creates without ID, got %d", len(list.Configs))
 	}
 
 	// A distinct explicit ID registers an additional config.
@@ -178,8 +147,8 @@ func TestOnPushNotificationSet_ReplacesDefaultConfig(t *testing.T) {
 		t.Fatalf("explicit-ID Set: %v", err)
 	}
 	list, _ = manager.OnPushNotificationList(ctx, protocol.ListTaskPushNotificationConfigsParams{TaskID: taskID})
-	if len(list.Configs) != 2 {
-		t.Fatalf("expected 2 configs with distinct IDs, got %d", len(list.Configs))
+	if len(list.Configs) != 3 {
+		t.Fatalf("expected 3 configs with distinct IDs, got %d", len(list.Configs))
 	}
 	got, err := manager.OnPushNotificationGet(ctx, protocol.GetTaskPushNotificationConfigParams{
 		TaskID: taskID,
@@ -212,7 +181,7 @@ func TestManualPushDelivery(t *testing.T) {
 	// ManualDelivery keeps push enabled (registration, config RPCs) while
 	// the framework delivers nothing — the agent pushes on its own schedule.
 	manager := newTestManager(t, echoExecutor(), WithPushConfig(push.Config{
-		Sender:         push.NewHTTPSender(),
+		Sender:         push.NewHTTPSender(push.WithUnsafeAllowPrivateNetworks()),
 		ManualDelivery: true,
 	}))
 	ctx := context.Background()
@@ -230,7 +199,7 @@ func TestManualPushDelivery(t *testing.T) {
 
 	// Agent-controlled delivery on its own schedule: reuse the public sender and
 	// the registered configs. Nothing was pushed automatically.
-	sender := push.NewHTTPSender()
+	sender := push.NewHTTPSender(push.WithUnsafeAllowPrivateNetworks())
 	list, err := manager.OnPushNotificationList(ctx, protocol.ListTaskPushNotificationConfigsParams{TaskID: taskID})
 	if err != nil {
 		t.Fatalf("OnPushNotificationList: %v", err)
@@ -269,22 +238,22 @@ func TestOnPushNotificationGet_DistinguishesConfigNotFound(t *testing.T) {
 	})
 
 	_, err := manager.OnPushNotificationGet(ctx,
-		protocol.GetTaskPushNotificationConfigParams{TaskID: "task-without-config"})
+		protocol.GetTaskPushNotificationConfigParams{TaskID: "task-without-config", ID: "missing"})
 	if !errors.Is(err, taskmanager.ErrPushConfigNotFoundSentinel) {
 		t.Errorf("expected PushConfigNotFound for an existing task without config, got %v", err)
 	}
 
 	_, err = manager.OnPushNotificationGet(ctx,
-		protocol.GetTaskPushNotificationConfigParams{TaskID: "no-such-task"})
+		protocol.GetTaskPushNotificationConfigParams{TaskID: "no-such-task", ID: "missing"})
 	if !errors.Is(err, taskmanager.ErrTaskNotFoundSentinel) {
 		t.Errorf("expected TaskNotFound for a missing task, got %v", err)
 	}
 }
 
-// TestInlinePushConfig_GatedAndPersisted: an inline message/send push config is
-// a registration — rejected with -32003 when push is not enabled, persisted
-// (queryable via the config RPCs) when it is.
-func TestInlinePushConfig_GatedAndPersisted(t *testing.T) {
+// TestInlinePushConfigRegistration verifies capability gating and lazy-task
+// registration: pure-Message rounds leave no orphan, while a materialized task
+// persists the config before its first notification is dispatched.
+func TestInlinePushConfigRegistration(t *testing.T) {
 	inlineParams := func() protocol.SendMessageParams {
 		p := userParams("hello")
 		p.Configuration = &protocol.SendMessageConfiguration{
@@ -301,7 +270,7 @@ func TestInlinePushConfig_GatedAndPersisted(t *testing.T) {
 		}
 	})
 
-	t.Run("persisted with sender", func(t *testing.T) {
+	t.Run("message-only leaves no orphan", func(t *testing.T) {
 		var taskID atomic.Pointer[string]
 		processor := funcExecutor(
 			func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
@@ -323,24 +292,45 @@ func TestInlinePushConfig_GatedAndPersisted(t *testing.T) {
 		}
 		list, err := manager.OnPushNotificationList(context.Background(),
 			protocol.ListTaskPushNotificationConfigsParams{TaskID: *id})
-		if err != nil {
-			t.Fatalf("List: %v", err)
+		if !errors.Is(err, taskmanager.ErrTaskNotFoundSentinel) || list != nil {
+			t.Fatalf("message-only round left a queryable config: list=%+v err=%v", list, err)
 		}
-		if len(list.Configs) != 1 || list.Configs[0].URL != "https://example.com/inline-hook" {
-			t.Fatalf("inline config was not persisted, got %+v", list.Configs)
+	})
+
+	t.Run("task event persists config", func(t *testing.T) {
+		var taskID atomic.Pointer[string]
+		processor := funcExecutor(
+			func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
+				id := ec.TaskID
+				taskID.Store(&id)
+				out := make(chan protocol.StreamEvent, 1)
+				out <- statusUpdate(protocol.TaskStateCompleted, nil)
+				close(out)
+				return out, nil
+			})
+		manager := newTestManager(t, processor, WithPushNotifications(noopSender()))
+
+		if _, err := manager.OnSendMessage(context.Background(), inlineParams()); err != nil {
+			t.Fatalf("send failed: %v", err)
+		}
+		id := taskID.Load()
+		list, err := manager.OnPushNotificationList(context.Background(),
+			protocol.ListTaskPushNotificationConfigsParams{TaskID: *id})
+		if err != nil || len(list.Configs) != 1 || list.Configs[0].ID != *id {
+			t.Fatalf("materialized task config: list=%+v err=%v", list, err)
 		}
 	})
 }
 
-// TestPushSenderAccessor: the server probes this accessor for auto-discovery.
-func TestPushSenderAccessor(t *testing.T) {
+// TestSupportsPushNotifications: the server probes this semantic capability.
+func TestSupportsPushNotifications(t *testing.T) {
 	withPush := newTestManager(t, echoExecutor(), WithPushNotifications(noopSender()))
-	if withPush.PushSender() == nil {
-		t.Error("expected a non-nil Sender when push is enabled")
+	if !withPush.SupportsPushNotifications() {
+		t.Error("expected push support when a sender is configured")
 	}
 	without := newTestManager(t, echoExecutor())
-	if without.PushSender() != nil {
-		t.Error("expected a nil Sender when push is not enabled")
+	if without.SupportsPushNotifications() {
+		t.Error("expected push to be unsupported without a sender")
 	}
 }
 

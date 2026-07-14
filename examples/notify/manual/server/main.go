@@ -78,7 +78,9 @@ func main() {
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
-	sender, err := pushauth.NewSignedSender()
+	// This local demo intentionally posts to a loopback client webhook.
+	sender, err := pushauth.NewSignedSender(
+		pushauth.WithSenderOptions(push.WithUnsafeAllowPrivateNetworks()))
 	if err != nil {
 		log.Fatalf("create signed sender: %v", err)
 	}

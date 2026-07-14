@@ -188,7 +188,11 @@ func (h *Handler) handlePushSet(ctx context.Context, w http.ResponseWriter, req 
 		writeError(w, req.ID, jsonrpc.ErrInvalidParams("task ID is required"))
 		return
 	}
-	config, err := h.tm.OnPushNotificationSet(ctx, ToV1PushConfig(params))
+	v1Config := ToV1PushConfig(params)
+	if v1Config.ID == "" {
+		v1Config.ID = v1Config.TaskID
+	}
+	config, err := h.tm.OnPushNotificationSet(ctx, v1Config)
 	if err != nil {
 		writeTaskManagerError(w, req.ID, err, "OnPushNotificationSet")
 		return
@@ -205,6 +209,7 @@ func (h *Handler) handlePushGet(ctx context.Context, w http.ResponseWriter, req 
 	}
 	config, err := h.tm.OnPushNotificationGet(ctx, protocol.GetTaskPushNotificationConfigParams{
 		TaskID: params.ID,
+		ID:     params.ID,
 	})
 	if err != nil {
 		writeTaskManagerError(w, req.ID, err, "OnPushNotificationGet")

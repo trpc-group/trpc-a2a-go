@@ -443,9 +443,10 @@ func TestA2AClient_SetPushNotification(t *testing.T) {
 // TestA2AClient_GetPushNotification tests the GetPushNotification client method.
 func TestA2AClient_GetPushNotification(t *testing.T) {
 	taskID := "client-push-get-1"
-	params := protocol.TaskIDParams{
-		RPCID: taskID,
-		ID:    taskID,
+	params := protocol.GetTaskPushNotificationConfigParams{
+		RPCID:  taskID,
+		TaskID: taskID,
+		ID:     "cfg-1",
 	}
 	paramsBytes, err := json.Marshal(params)
 	require.NoError(t, err)

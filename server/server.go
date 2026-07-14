@@ -26,6 +26,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry/metrics"
@@ -150,9 +151,12 @@ func NewA2AServer(taskManager taskmanager.TaskManager, opts ...Option) (*A2AServ
 // enabled, unless WithJWKSEndpoint decided otherwise). It returns an error when
 // a JWKS endpoint was requested without a handler.
 func (s *A2AServer) resolvePushPosture(taskManager taskmanager.TaskManager) error {
-	// Whether push is enabled is discovered from the TaskManager (a non-nil push
-	// Sender) so the advertised capability stays in sync without extra wiring.
-	s.pushEnabled = taskManager.PushSender() != nil
+	// The server depends only on the manager's semantic capability; a manager may
+	// deliver through HTTP, a queue, or a durable outbox.
+	s.pushEnabled = taskManager.SupportsPushNotifications()
+	if err := s.validateStaticPushCapabilities(); err != nil {
+		return err
+	}
 	// A configured JWKS handler publishes verification keys, but it is NOT by
 	// itself a delivery capability: publishing keys also requires
 	// push to be enabled, so the card never advertises push it cannot honor. An
@@ -174,13 +178,6 @@ func (s *A2AServer) resolvePushPosture(taskManager taskmanager.TaskManager) erro
 		log.Debugf("push: disabled")
 	}
 
-	// A card that declares push support while the server has no push wiring is a
-	// client-visible lie worth flagging (warn, not error: the agent may deliver
-	// through a path the server cannot see).
-	if !s.pushEnabled {
-		s.warnDeclaredPushWithoutSender()
-	}
-
 	// An enabled JWKS endpoint needs a handler to serve it. Fail at construction
 	// instead of silently leaving the advertised endpoint unavailable.
 	if s.jwksEnabled && s.pushJWKSHandler == nil {
@@ -191,21 +188,28 @@ func (s *A2AServer) resolvePushPosture(taskManager taskmanager.TaskManager) erro
 	return nil
 }
 
-// warnDeclaredPushWithoutSender logs a warning for each served card that
-// declares pushNotifications=true while no push Sender is configured.
-func (s *A2AServer) warnDeclaredPushWithoutSender() {
-	warn := func(name string, c AgentCard) {
-		if c.Capabilities.PushNotifications != nil && *c.Capabilities.PushNotifications {
-			log.Warnf("agent card %s declares pushNotifications=true but no push Sender is configured; "+
-				"clients registering webhooks will receive PushNotificationNotSupported", name)
+func (s *A2AServer) validateStaticPushCapabilities() error {
+	validate := func(name string, card AgentCard) error {
+		declared := card.Capabilities.PushNotifications
+		// A card may deliberately disable push for one tenant even when the shared
+		// manager supports it. The unsafe mismatch is advertising true when the
+		// manager cannot honor the operations.
+		if declared != nil && *declared && !s.pushEnabled {
+			return fmt.Errorf("agent card %s declares pushNotifications=true but the task manager does not support push", name)
 		}
+		return nil
 	}
 	if s.agentCardSet {
-		warn("(default)", s.agentCard)
+		if err := validate("(default)", s.agentCard); err != nil {
+			return err
+		}
 	}
 	for tenant, c := range s.tenantCards {
-		warn(tenant, c)
+		if err := validate(tenant, c); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // Start begins listening for HTTP requests on the specified network address.
@@ -455,6 +459,14 @@ func (s *A2AServer) resolveAgentCard(ctx context.Context, tenant string) (AgentC
 	return s.finalizePushCapability(s.agentCard), true
 }
 
+func (s *A2AServer) pushAvailableForTenant(ctx context.Context, tenant string) bool {
+	if !s.pushEnabled {
+		return false
+	}
+	card, ok := s.resolveAgentCard(ctx, tenant)
+	return ok && card.Capabilities.PushNotifications != nil && *card.Capabilities.PushNotifications
+}
+
 // handleJSONRPC is the main handler for all JSON-RPC 2.0 requests.
 // Routes methods like tasks/send, tasks/get, etc., as defined in A2A Spec.
 func (s *A2AServer) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
@@ -627,6 +639,10 @@ func (s *A2AServer) handleTasksPushNotificationList(
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
 		return
 	}
+	if !s.pushAvailableForTenant(ctx, params.Tenant) {
+		s.writeJSONRPCError(w, request.ID, taskmanager.ErrPushNotificationNotSupported())
+		return
+	}
 	result, err := s.taskManager.OnPushNotificationList(ctx, params)
 	if err != nil {
 		s.handleTaskManagerError(w, request.ID, err, "OnPushNotificationList", params.TaskID)
@@ -646,6 +662,15 @@ func (s *A2AServer) handleTasksPushNotificationDelete(
 	}
 	if params.TaskID == "" {
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
+		return
+	}
+	if params.ID == "" {
+		s.writeJSONRPCError(w, request.ID,
+			jsonrpc.ErrInvalidParams("push notification config ID is required"))
+		return
+	}
+	if !s.pushAvailableForTenant(ctx, params.Tenant) {
+		s.writeJSONRPCError(w, request.ID, taskmanager.ErrPushNotificationNotSupported())
 		return
 	}
 	if err := s.taskManager.OnPushNotificationDelete(ctx, params); err != nil {
@@ -762,30 +787,13 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 		s.writeJSONRPCError(w, request.ID, err)
 		return
 	}
-	if params.TaskID == "" {
-		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
+	if err := push.ValidateConfig(params); err != nil {
+		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams(err.Error()))
 		return
 	}
-	if params.URL == "" {
-		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("push notification URL is required"))
+	if !s.pushAvailableForTenant(ctx, params.Tenant) {
+		s.writeJSONRPCError(w, request.ID, taskmanager.ErrPushNotificationNotSupported())
 		return
-	}
-	// Reject obviously invalid webhook URLs early. NOTE: this is a minimal
-	// well-formedness check, not full SSRF protection. Before trusting
-	// client-supplied callback URLs in production, operators still need domain
-	// allowlisting, ownership verification, and egress network controls.
-	if u, err := url.Parse(params.URL); err != nil ||
-		(u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		s.writeJSONRPCError(w, request.ID,
-			jsonrpc.ErrInvalidParams("push notification URL must be a valid http(s) URL"))
-		return
-	}
-	// Publish the configured verification-key URL to push-notification clients.
-	if s.jwksEnabled && s.pushJWKSHandler != nil {
-		if params.Metadata == nil {
-			params.Metadata = make(map[string]interface{})
-		}
-		params.Metadata["jwksUrl"] = s.composeJWKSURL()
 	}
 	result, err := s.taskManager.OnPushNotificationSet(ctx, params)
 	if err != nil {
@@ -793,27 +801,6 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 		return
 	}
 	s.writeJSONRPCResponse(w, request.ID, result)
-}
-
-// composeJWKSURL returns the fully qualified URL to the JWKS endpoint.
-func (s *A2AServer) composeJWKSURL() string {
-	cardURL := s.agentCard.PrimaryURL()
-	if cardURL == "" {
-		// This is a fallback, but ideally the agent card should have a proper URL.
-		log.Warn("Agent card URL is empty, using relative JWKS endpoint")
-		return s.jwksEndpoint
-	}
-
-	// Parse the agent card URL to extract the base (scheme + host + port).
-	parsedURL, err := url.Parse(cardURL)
-	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
-		log.Warnf("Failed to parse agent card URL '%s': %v", cardURL, err)
-		return s.jwksEndpoint
-	}
-
-	// Reconstruct base URL (scheme + host + port) and append the JWKS endpoint path.
-	baseURL := fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
-	return baseURL + s.jwksEndpoint
 }
 
 func (s *A2AServer) handleTasksPushNotificationGet(
@@ -827,22 +814,22 @@ func (s *A2AServer) handleTasksPushNotificationGet(
 		return
 	}
 
-	// v1.0 addresses the task by "taskId"; older clients put the task ID in
-	// "id". Accept both so the config-id field ("id") is not mistaken for the
-	// task ID.
-	taskID := params.TaskID
-	if taskID == "" {
-		taskID = params.ID
-	}
-
-	if taskID == "" {
+	if params.TaskID == "" {
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("task ID is required"))
 		return
 	}
-	params.TaskID = taskID
+	if params.ID == "" {
+		s.writeJSONRPCError(w, request.ID,
+			jsonrpc.ErrInvalidParams("push notification config ID is required"))
+		return
+	}
+	if !s.pushAvailableForTenant(ctx, params.Tenant) {
+		s.writeJSONRPCError(w, request.ID, taskmanager.ErrPushNotificationNotSupported())
+		return
+	}
 	result, err := s.taskManager.OnPushNotificationGet(ctx, params)
 	if err != nil {
-		s.handleTaskManagerError(w, request.ID, err, "OnPushNotificationGet", taskID)
+		s.handleTaskManagerError(w, request.ID, err, "OnPushNotificationGet", params.TaskID)
 		return
 	}
 
@@ -893,6 +880,12 @@ func (s *A2AServer) handleMessageSend(ctx context.Context, w http.ResponseWriter
 		s.writeJSONRPCError(w, request.ID, err)
 		return
 	}
+	if params.Configuration != nil && params.Configuration.PushConfig != nil &&
+		!s.pushAvailableForTenant(ctx, params.Tenant) {
+		tracker.setError("push_notification_not_supported")
+		s.writeJSONRPCError(w, request.ID, taskmanager.ErrPushNotificationNotSupported())
+		return
+	}
 	// Delegate to the task manager.
 	message, err := s.taskManager.OnSendMessage(ctx, params)
 	if err != nil {
@@ -920,6 +913,13 @@ func (s *A2AServer) handleMessageStream(ctx context.Context, w http.ResponseWrit
 		tracker.setError("invalid_params")
 		tracker.record(ctx)
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("message with at least one part is required"))
+		return
+	}
+	if params.Configuration != nil && params.Configuration.PushConfig != nil &&
+		!s.pushAvailableForTenant(ctx, params.Tenant) {
+		tracker.setError("push_notification_not_supported")
+		tracker.record(ctx)
+		s.writeJSONRPCError(w, request.ID, taskmanager.ErrPushNotificationNotSupported())
 		return
 	}
 

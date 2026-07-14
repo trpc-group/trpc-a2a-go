@@ -16,6 +16,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
@@ -106,6 +107,9 @@ type execution struct {
 	// unary result on it: a continuation round that only emits Messages
 	// answers with the last Message, not the untouched task snapshot.
 	taskTouched bool
+	// inlinePushPending defers a fresh task's inline config until the first task
+	// event has been persisted, avoiding orphan configs for pure-Message rounds.
+	inlinePushPending bool
 	// yielded records that this round emitted a suspend state (§3.4) and gave
 	// the task up: a continuation may already own it, so later events from
 	// this round are discarded and the close rules are skipped.
@@ -267,31 +271,15 @@ func (m *TaskManager) prepareExecution(
 		Tenant:    request.Tenant,
 		History:   history,
 	}
-	if cfg := request.Configuration; cfg != nil {
-		ex.ec.AcceptedOutputModes = cfg.AcceptedOutputModes
-		ex.ec.PushConfig = cfg.PushConfig
-		// An inline push config registers the webhook for this task, mirroring an
-		// explicit tasks/pushNotificationConfig/set. Gate it like the RPC (no
-		// Sender configured -> push unsupported) and persist before the processor
-		// runs so the first dispatched event already finds it.
-		if cfg.PushConfig != nil {
-			if m.pushSender == nil {
-				m.releaseExecution(taskID, ex.live)
-				cancel()
-				return nil, taskmanager.ErrPushNotificationNotSupported()
-			}
-			pc := *cfg.PushConfig
-			pc.TaskID = taskID
-			if pc.ID == "" {
-				pc.ID = taskID
-			}
-			if _, err := m.storePushConfig(context.Background(), pc); err != nil {
-				m.releaseExecution(taskID, ex.live)
-				cancel()
-				return nil, err
-			}
-		}
+	ex.ec.AcceptedOutputModes, ex.ec.PushConfig = messageConfigurationValues(request.Configuration)
+	pushConfig, pending, err := m.prepareInlinePushConfig(taskID, task, ex.ec.PushConfig)
+	if err != nil {
+		m.releaseExecution(taskID, ex.live)
+		cancel()
+		return nil, err
 	}
+	ex.ec.PushConfig = pushConfig
+	ex.inlinePushPending = pending
 
 	events, err := m.processor.ProcessMessage(execCtx, ex.ec)
 	if err != nil {
@@ -310,6 +298,46 @@ func (m *TaskManager) prepareExecution(
 		ex.run(events)
 	}()
 	return ex, nil
+}
+
+func messageConfigurationValues(
+	config *protocol.SendMessageConfiguration,
+) ([]string, *protocol.TaskPushNotificationConfig) {
+	if config == nil {
+		return nil, nil
+	}
+	return config.AcceptedOutputModes, config.PushConfig
+}
+
+// prepareInlinePushConfig validates and snapshots an inline registration.
+// Existing tasks persist it immediately; fresh lazy tasks wait for their first
+// task event so a failed start or pure-Message reply cannot leave an orphan.
+func (m *TaskManager) prepareInlinePushConfig(
+	taskID string,
+	task *protocol.Task,
+	config *protocol.TaskPushNotificationConfig,
+) (*protocol.TaskPushNotificationConfig, bool, error) {
+	if config == nil {
+		return nil, false, nil
+	}
+	if m.pushSender == nil {
+		return nil, false, taskmanager.ErrPushNotificationNotSupported()
+	}
+	pushConfig := *config
+	pushConfig.TaskID = taskID
+	if pushConfig.ID == "" {
+		pushConfig.ID = taskID
+	}
+	if err := push.ValidateConfig(pushConfig); err != nil {
+		return nil, false, jsonrpc.ErrInvalidParams(err.Error())
+	}
+	if task != nil {
+		if _, err := m.storePushConfig(context.Background(), pushConfig); err != nil {
+			return nil, false, err
+		}
+		return &pushConfig, false, nil
+	}
+	return &pushConfig, true, nil
 }
 
 // run is the engine loop. It consumes events in order, persisting each task
@@ -592,6 +620,9 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		log.Errorf("RedisTaskManager: failed to store task %s status %s: %v", ev.TaskID, status.State, err)
 		return
 	}
+	if !ex.persistInlinePushConfig() {
+		return
+	}
 	// Immediate result first: a returnImmediately waiter must never be stalled behind
 	// a slow subscriber in the fan-out below.
 	ex.offerImmediateTask()
@@ -648,10 +679,26 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 		log.Errorf("RedisTaskManager: failed to store task %s artifact: %v", ev.TaskID, err)
 		return
 	}
+	if !ex.persistInlinePushConfig() {
+		return
+	}
 	// Immediate result first: a returnImmediately waiter must never be stalled behind
 	// a slow subscriber in the fan-out below.
 	ex.offerImmediateTask()
 	ex.broadcast(protocol.NewStreamResponseArtifactUpdate(ev))
+}
+
+func (ex *execution) persistInlinePushConfig() bool {
+	if !ex.inlinePushPending {
+		return true
+	}
+	ex.inlinePushPending = false
+	if _, err := ex.manager.storePushConfig(context.Background(), *ex.ec.PushConfig); err != nil {
+		log.Errorf("RedisTaskManager: failed to persist inline push config for task %s: %v", ex.ec.TaskID, err)
+		ex.failTask("failed to persist inline push config")
+		return false
+	}
+	return true
 }
 
 // newTask lazily materializes the task on the first task event, seeding the

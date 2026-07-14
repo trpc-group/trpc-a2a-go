@@ -133,38 +133,42 @@ func TestNewA2AServer_JWKSExplicitDisable(t *testing.T) {
 	assert.NotEqual(t, http.StatusOK, resp.StatusCode, "explicit disable wins over discovery")
 }
 
-// TestFinalizePushCapability_RespectsExplicitAndSigned: an explicit capability
-// value is never overridden, and a signed card is immutable.
-func TestFinalizePushCapability_RespectsExplicitAndSigned(t *testing.T) {
+// TestNewA2AServer_CapabilityContract prevents unsupported advertisement while
+// allowing a card to disable a capability supported by the shared manager.
+func TestNewA2AServer_CapabilityContract(t *testing.T) {
 	sender, err := pushauth.NewSignedSender()
 	require.NoError(t, err)
 	tm := newDiscoveryTM(t, memory.WithPushNotifications(sender))
 
-	t.Run("explicit false wins", func(t *testing.T) {
+	t.Run("explicit false disables one card", func(t *testing.T) {
 		card := discoveryCard()
 		f := false
 		card.Capabilities.PushNotifications = &f
 		srv, err := NewA2AServer(tm, WithAgentCard(card))
 		require.NoError(t, err)
-		ts := httptest.NewServer(srv.Handler())
-		defer ts.Close()
-
-		got := fetchDefaultCard(t, ts)
-		require.NotNil(t, got.Capabilities.PushNotifications)
-		assert.False(t, *got.Capabilities.PushNotifications, "explicit false must not be overridden")
+		resolved, ok := srv.resolveAgentCard(context.Background(), "")
+		require.True(t, ok)
+		require.NotNil(t, resolved.Capabilities.PushNotifications)
+		assert.False(t, *resolved.Capabilities.PushNotifications)
 	})
 
-	t.Run("signed card untouched", func(t *testing.T) {
+	t.Run("signed card remains immutable", func(t *testing.T) {
 		card := discoveryCard()
 		card.Signatures = []protocol.AgentCardSignature{{Protected: "hdr", Signature: "sig"}}
 		srv, err := NewA2AServer(tm, WithAgentCard(card))
 		require.NoError(t, err)
-		ts := httptest.NewServer(srv.Handler())
-		defer ts.Close()
+		resolved, ok := srv.resolveAgentCard(context.Background(), "")
+		require.True(t, ok)
+		assert.Nil(t, resolved.Capabilities.PushNotifications)
+	})
 
-		got := fetchDefaultCard(t, ts)
-		assert.Nil(t, got.Capabilities.PushNotifications,
-			"a signed card is immutable: filling a field would invalidate the JWS")
+	t.Run("explicit true without manager support", func(t *testing.T) {
+		card := discoveryCard()
+		v := true
+		card.Capabilities.PushNotifications = &v
+		_, err := NewA2AServer(newDiscoveryTM(t), WithAgentCard(card))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not support push")
 	})
 }
 

@@ -25,7 +25,6 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/client"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push/pushauth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
@@ -243,8 +242,9 @@ func TestPushNotificationAuthentication(t *testing.T) {
 	// Setup agent side (sender)
 	// -----------------------
 	agentTaskMgr := newMockTaskManager(nil)
-	agentAuthenticator := pushauth.NewAuthenticator()
-	err := agentAuthenticator.GenerateKeyPair()
+	agentTaskMgr.pushSupported = true
+	agentJWTSigner := pushauth.NewJWTSigner()
+	err := agentJWTSigner.GenerateKeyPair()
 	require.NoError(t, err, "Agent failed to generate key pair")
 
 	agentCard := server.AgentCard{
@@ -263,7 +263,7 @@ func TestPushNotificationAuthentication(t *testing.T) {
 		agentTaskMgr,
 		server.WithAgentCard(agentCard),
 		server.WithJWKSEndpoint(true, "/.well-known/jwks.json"),
-		server.WithPushNotificationJWKSHandler(http.HandlerFunc(agentAuthenticator.HandleJWKS)),
+		server.WithPushNotificationJWKSHandler(http.HandlerFunc(agentJWTSigner.HandleJWKS)),
 	)
 	require.NoError(t, err, "Failed to create agent server")
 
@@ -285,9 +285,8 @@ func TestPushNotificationAuthentication(t *testing.T) {
 
 	// Setup client side (receiver)
 	// --------------------------
-	// Create client authenticator for verification
-	clientAuthenticator := pushauth.NewAuthenticator()
-	clientAuthenticator.SetJWKSClient(agentJWKSURL)
+	// Create client verifier
+	clientVerifier := pushauth.NewVerifier(agentJWKSURL)
 
 	// Channel to track if authentication succeeded
 	authSuccessCh := make(chan bool, 1)
@@ -306,7 +305,7 @@ func TestPushNotificationAuthentication(t *testing.T) {
 		t.Logf("Client received request body: %s", string(body))
 
 		// Verify the push notification JWT
-		err = clientAuthenticator.VerifyPushNotification(r, body)
+		err = clientVerifier.VerifyPushNotification(r, body)
 		if err != nil {
 			t.Logf("Authentication failed: %v", err)
 			http.Error(w, fmt.Sprintf("Authentication failed: %v", err), http.StatusUnauthorized)
@@ -330,7 +329,7 @@ func TestPushNotificationAuthentication(t *testing.T) {
 	// Create a push notification from agent to client
 	// ----------------------------------------------
 	// Create authorization header for the notification
-	authHeader, err := agentAuthenticator.CreateAuthorizationHeader(payload)
+	authHeader, err := agentJWTSigner.CreateAuthorizationHeader(payload)
 	require.NoError(t, err, "Failed to create authorization header")
 	t.Logf("Authorization header created: %s", authHeader)
 
@@ -455,15 +454,16 @@ func setupAuthServer(t *testing.T, provider auth.Provider) (taskmanager.TaskMana
 
 // mockTaskManager is a simple implementation of the TaskManager interface.
 type mockTaskManager struct {
-	processor   taskmanager.MessageProcessor
-	tasks       map[string]*protocol.Task
-	pushConfigs map[string]protocol.TaskPushNotificationConfig
-	messages    map[string]*protocol.Message
+	processor     taskmanager.MessageProcessor
+	pushSupported bool
+	tasks         map[string]*protocol.Task
+	pushConfigs   map[string]protocol.TaskPushNotificationConfig
+	messages      map[string]*protocol.Message
 }
 
 var _ taskmanager.TaskManager = (*mockTaskManager)(nil)
 
-func (m *mockTaskManager) PushSender() push.Sender { return nil }
+func (m *mockTaskManager) SupportsPushNotifications() bool { return m.pushSupported }
 
 // newMockTaskManager creates a new mock task manager.
 func newMockTaskManager(processor taskmanager.MessageProcessor) *mockTaskManager {

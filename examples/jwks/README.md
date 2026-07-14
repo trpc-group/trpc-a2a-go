@@ -32,7 +32,7 @@ The example consists of two primary components:
 
 ### Client Component
 - Hosts a webhook server to receive push notifications
-- Uses `pushauth.Authenticator` and the SDK's cached `JWKSClient`
+- Uses the SDK's ready-to-use, cached `pushauth.Verifier`
 - Verifies JWT signatures, freshness, and the payload hash with
   `VerifyPushNotification`
 - Tracks and displays task status changes
@@ -90,8 +90,8 @@ The example demonstrates these A2A API features:
 - `pushauth.NewSignedSender()` - Create a signing sender with a generated key
 - `memory.WithPushNotifications()` - Enable automatic delivery to registered webhooks
 - `server.WithPushNotificationJWKSHandler()` - Publish the sender's verification keys
-- `pushauth.NewAuthenticator()` / `SetJWKSClient()` - Configure webhook verification
-- `pushauth.Authenticator.VerifyPushNotification()` - Verify a callback against JWKS
+- `pushauth.NewVerifier()` - Configure webhook verification against JWKS
+- `pushauth.Verifier.VerifyPushNotification()` - Verify a callback against JWKS
 - `a2aClient.SendMessage()` - Send message via non-streaming API (with
   `returnImmediately=true` so the call returns before the task completes)
 - `a2aClient.SetPushNotification()` - Explicitly register the webhook after the

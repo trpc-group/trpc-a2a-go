@@ -461,12 +461,12 @@ func processCommand(
 		return true
 
 	case cmdGetPush:
-		if len(parts) < 2 {
-			fmt.Println("Usage: getpush <task-id>")
+		if len(parts) < 3 {
+			fmt.Println("Usage: getpush <task-id> <config-id>")
 			return true
 		}
 
-		getPushNotification(a2aClient, parts[1], config.Timeout)
+		getPushNotification(a2aClient, parts[1], parts[2], config.Timeout)
 		return true
 
 	case "new":
@@ -519,7 +519,7 @@ func displayHelpMessage() {
 	fmt.Println("  get [task-id] [history]  - Get task details (uses last task ID if not specified)")
 	fmt.Println("  card                     - Fetch and display the agent's capabilities card")
 	fmt.Println("  push <task-id> <url> [token] - Set push notification for a task")
-	fmt.Println("  getpush <task-id>        - Get push notification configuration for a task")
+	fmt.Println("  getpush <task-id> <config-id> - Get a push notification configuration")
 	fmt.Println("  server start             - Start push notification server")
 	fmt.Println("  server stop              - Stop push notification server")
 	fmt.Println("  new                      - Start a new context")
@@ -1043,6 +1043,7 @@ func setPushNotification(
 	// Display success
 	fmt.Println("Push notification set successfully:")
 	fmt.Printf("  Task ID: %s\n", result.TaskID)
+	fmt.Printf("  Config ID: %s\n", result.ID)
 	fmt.Printf("  URL: %s\n", result.URL)
 	if result.Token != "" {
 		fmt.Printf("  Token: %s\n", result.Token)
@@ -1050,19 +1051,19 @@ func setPushNotification(
 }
 
 // getPushNotification gets the push notification configuration for a task
-func getPushNotification(a2aClient *client.A2AClient, taskID string, timeout time.Duration) {
+func getPushNotification(a2aClient *client.A2AClient, taskID, configID string, timeout time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	log.Printf("Getting push notification config for task %s", taskID)
 
-	// Create task ID params
-	taskIDParams := protocol.TaskIDParams{
-		ID: taskID,
+	params := protocol.GetTaskPushNotificationConfigParams{
+		TaskID: taskID,
+		ID:     configID,
 	}
 
 	// Call the client method to get push notification
-	result, err := a2aClient.GetPushNotification(ctx, taskIDParams)
+	result, err := a2aClient.GetPushNotification(ctx, params)
 	if err != nil {
 		log.Printf("ERROR: Failed to get push notification: %v", err)
 		fmt.Printf("Failed to get push notification: %v\n", err)
@@ -1077,11 +1078,4 @@ func getPushNotification(a2aClient *client.A2AClient, taskID string, timeout tim
 		fmt.Printf("  Token: %s\n", result.Token)
 	}
 
-	// Display metadata if present
-	if len(result.Metadata) > 0 {
-		fmt.Println("  Metadata:")
-		for key, value := range result.Metadata {
-			fmt.Printf("    %s: %v\n", key, value)
-		}
-	}
 }

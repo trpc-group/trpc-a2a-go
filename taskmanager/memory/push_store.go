@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"sort"
 	"sync"
-	"time"
 
+	"github.com/google/uuid"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
@@ -24,6 +24,8 @@ import (
 // exported interface then.
 type pushConfigStore struct {
 	mu sync.RWMutex
+	// closed prevents configs from being re-created after manager shutdown.
+	closed bool
 	// configs maps taskID -> configID -> config.
 	configs map[string]map[string]protocol.TaskPushNotificationConfig
 }
@@ -34,9 +36,7 @@ func newPushConfigStore() *pushConfigStore {
 	}
 }
 
-// save stores cfg, generating an ID when absent. CreatedAt is server-authoritative:
-// stamped once on create, preserved across updates, and a client-supplied value
-// is ignored (so it cannot spoof creation time and thus List ordering).
+// save stores cfg, generating a resource ID when absent.
 func (s *pushConfigStore) save(
 	cfg protocol.TaskPushNotificationConfig,
 ) (protocol.TaskPushNotificationConfig, error) {
@@ -45,35 +45,30 @@ func (s *pushConfigStore) save(
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if cfg.ID == "" {
-		cfg.ID = protocol.GeneratePushConfigID()
+	if s.closed {
+		return protocol.TaskPushNotificationConfig{}, fmt.Errorf("push config store is closed")
 	}
+	if cfg.ID == "" {
+		cfg.ID = "push-" + uuid.New().String()
+	}
+	cfg = clonePushConfig(cfg)
 	if s.configs[cfg.TaskID] == nil {
 		s.configs[cfg.TaskID] = make(map[string]protocol.TaskPushNotificationConfig)
 	}
-	if existing, ok := s.configs[cfg.TaskID][cfg.ID]; ok && existing.CreatedAt != "" {
-		cfg.CreatedAt = existing.CreatedAt
-	} else {
-		cfg.CreatedAt = time.Now().UTC().Format(time.RFC3339)
-	}
 	s.configs[cfg.TaskID][cfg.ID] = cfg
-	return cfg, nil
+	return clonePushConfig(cfg), nil
 }
 
-// list returns all configs for taskID, ordered by CreatedAt then ID so callers
-// see a stable ordering across calls (map iteration order is random).
+// list returns all configs for taskID, ordered by ID for stable pagination.
 func (s *pushConfigStore) list(taskID string) []protocol.TaskPushNotificationConfig {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	byID := s.configs[taskID]
 	out := make([]protocol.TaskPushNotificationConfig, 0, len(byID))
 	for _, cfg := range byID {
-		out = append(out, cfg)
+		out = append(out, clonePushConfig(cfg))
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].CreatedAt != out[j].CreatedAt {
-			return out[i].CreatedAt < out[j].CreatedAt
-		}
 		return out[i].ID < out[j].ID
 	})
 	return out
@@ -85,7 +80,17 @@ func (s *pushConfigStore) get(taskID, configID string) (protocol.TaskPushNotific
 	defer s.mu.RUnlock()
 	byID := s.configs[taskID]
 	cfg, ok := byID[configID]
-	return cfg, ok
+	return clonePushConfig(cfg), ok
+}
+
+// clonePushConfig prevents callers from mutating stored credentials after
+// Set/Get/List returns.
+func clonePushConfig(cfg protocol.TaskPushNotificationConfig) protocol.TaskPushNotificationConfig {
+	if cfg.Authentication != nil {
+		auth := *cfg.Authentication
+		cfg.Authentication = &auth
+	}
+	return cfg
 }
 
 // remove deletes a single config by ID; a missing config is a no-op.
@@ -105,4 +110,11 @@ func (s *pushConfigStore) removeAll(taskID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.configs, taskID)
+}
+
+func (s *pushConfigStore) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	s.configs = make(map[string]map[string]protocol.TaskPushNotificationConfig)
 }

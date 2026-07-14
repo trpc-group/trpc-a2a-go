@@ -15,6 +15,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
@@ -93,6 +94,10 @@ type engine struct {
 	// conversation, compared by identity, so a message reused across several
 	// status updates in this round is not appended to the history more than once.
 	lastStatusMsg *protocol.Message
+	// inlinePushPending is true for a fresh request carrying an inline config.
+	// The config is registered only when the first task event materializes the
+	// task, so processor startup failures and pure-Message replies leave no orphan.
+	inlinePushPending bool
 
 	// immediateResult carries the immediate result (first persisted task snapshot
 	// or first Message) to a returnImmediately waiter. Buffered with 1 slot and
@@ -173,9 +178,8 @@ func (m *TaskManager) prepareExecContext(
 	}
 	// An inline push config is a registration: reject it when push is not
 	// enabled (the client would otherwise wait on a webhook that can never
-	// fire), and persist it when it is — so it becomes queryable via the
-	// config RPCs and receives automatic deliveries, matching the official
-	// SDK. It still reaches the processor as ec.PushConfig either way.
+	// fire). For a new lazy task, registration is deferred until the first task
+	// event; a pure-Message exchange must not leave an orphan config behind.
 	if pushConfig != nil {
 		if m.pushSender == nil {
 			m.releaseExecution(taskID, exec)
@@ -184,12 +188,20 @@ func (m *TaskManager) prepareExecContext(
 		cfg := *pushConfig
 		cfg.TaskID = taskID
 		if cfg.ID == "" {
-			// Same replace-the-default rule as OnPushNotificationSet.
+			// Inline registration retains the legacy stable default ID so a
+			// continuation updates the same webhook rather than multiplying it.
 			cfg.ID = taskID
 		}
-		if _, err := m.pushStore.save(cfg); err != nil {
+		if err := push.ValidateConfig(cfg); err != nil {
 			m.releaseExecution(taskID, exec)
-			return nil, err
+			return nil, jsonrpc.ErrInvalidParams(err.Error())
+		}
+		pushConfig = &cfg
+		if taskCopy != nil {
+			if _, err := m.pushStore.save(cfg); err != nil {
+				m.releaseExecution(taskID, exec)
+				return nil, err
+			}
 		}
 	}
 	return &taskmanager.ExecContext{
@@ -292,12 +304,13 @@ func (m *TaskManager) startExecution(
 	}
 
 	eng := &engine{
-		manager:         m,
-		ec:              ec,
-		exec:            exec,
-		pipe:            exec.pipe,
-		immediateResult: make(chan sendOutcome, 1),
-		done:            make(chan struct{}),
+		manager:           m,
+		ec:                ec,
+		exec:              exec,
+		pipe:              exec.pipe,
+		immediateResult:   make(chan sendOutcome, 1),
+		done:              make(chan struct{}),
+		inlinePushPending: ec.PushConfig != nil && ec.Task == nil,
 	}
 	go func() {
 		defer m.engineWg.Done()
@@ -551,6 +564,9 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 		eng.yieldSnapshot = copyTask(task)
 	}
 	m.taskMu.Unlock()
+	if !eng.persistInlinePushConfig() {
+		return
+	}
 
 	// The old status message has now been superseded. Move it to history before
 	// publishing the new status; the new/current message remains only on Status.
@@ -618,8 +634,23 @@ func (eng *engine) handleArtifact(event *protocol.TaskArtifactUpdateEvent) {
 	eng.taskTouched = true
 	snapshot := eng.immediateSnapshotLocked(task)
 	m.taskMu.Unlock()
+	if !eng.persistInlinePushConfig() {
+		return
+	}
 
 	eng.broadcast(protocol.NewStreamResponseArtifactUpdate(event), snapshot)
+}
+
+func (eng *engine) persistInlinePushConfig() bool {
+	if !eng.inlinePushPending {
+		return true
+	}
+	eng.inlinePushPending = false
+	if _, err := eng.manager.pushStore.save(*eng.ec.PushConfig); err != nil {
+		eng.violate(fmt.Sprintf("persist inline push config: %v", err))
+		return false
+	}
+	return true
 }
 
 // newTask materializes the task on its first event (§3.2 lazy creation),

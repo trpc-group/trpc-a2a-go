@@ -12,7 +12,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
-func TestPushConfigStore_SaveGeneratesIDAndCreatedAt(t *testing.T) {
+func TestPushConfigStore_SaveGeneratesID(t *testing.T) {
 	s := newPushConfigStore()
 	got, err := s.save(protocol.TaskPushNotificationConfig{TaskID: "t1", URL: "https://x"})
 	if err != nil {
@@ -20,9 +20,6 @@ func TestPushConfigStore_SaveGeneratesIDAndCreatedAt(t *testing.T) {
 	}
 	if got.ID == "" {
 		t.Error("expected a generated config ID")
-	}
-	if got.CreatedAt == "" {
-		t.Error("expected CreatedAt to be set")
 	}
 }
 
@@ -44,19 +41,22 @@ func TestPushConfigStore_SavePreservesExplicitID(t *testing.T) {
 	}
 }
 
-func TestPushConfigStore_CreatedAtIsServerAuthoritative(t *testing.T) {
+func TestPushConfigStore_ClonesAuthentication(t *testing.T) {
 	s := newPushConfigStore()
-	// Client-supplied CreatedAt is ignored on first write.
-	first, _ := s.save(protocol.TaskPushNotificationConfig{
-		TaskID: "t1", ID: "c1", URL: "https://a", CreatedAt: "1999-01-01T00:00:00Z",
+	auth := &protocol.AuthenticationInfo{Scheme: "Bearer", Credentials: "secret"}
+	_, _ = s.save(protocol.TaskPushNotificationConfig{
+		TaskID: "t1", ID: "c1", URL: "https://a", Authentication: auth,
 	})
-	if first.CreatedAt == "1999-01-01T00:00:00Z" {
-		t.Error("expected server to ignore client-supplied CreatedAt")
+	auth.Credentials = "mutated"
+
+	first, ok := s.get("t1", "c1")
+	if !ok || first.Authentication.Credentials != "secret" {
+		t.Fatalf("caller mutation changed stored config: %+v", first)
 	}
-	// Re-saving (update) preserves the original CreatedAt.
-	second, _ := s.save(protocol.TaskPushNotificationConfig{TaskID: "t1", ID: "c1", URL: "https://b"})
-	if second.CreatedAt != first.CreatedAt {
-		t.Errorf("expected CreatedAt preserved across update: %q vs %q", second.CreatedAt, first.CreatedAt)
+	first.Authentication.Credentials = "returned-mutation"
+	second, _ := s.get("t1", "c1")
+	if second.Authentication.Credentials != "secret" {
+		t.Fatalf("returned value mutation changed stored config: %+v", second)
 	}
 }
 
@@ -97,5 +97,23 @@ func TestPushConfigStore_RemoveAll(t *testing.T) {
 	s.removeAll("t1")
 	if list := s.list("t1"); len(list) != 0 {
 		t.Errorf("expected no configs after removeAll, got %d", len(list))
+	}
+}
+
+func TestPushConfigStore_CloseClearsAndRejectsWrites(t *testing.T) {
+	store := newPushConfigStore()
+	if _, err := store.save(protocol.TaskPushNotificationConfig{
+		TaskID: "task-1", URL: "https://example.com",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.close()
+	if got := store.list("task-1"); len(got) != 0 {
+		t.Fatalf("closed store retained configs: %+v", got)
+	}
+	if _, err := store.save(protocol.TaskPushNotificationConfig{
+		TaskID: "task-1", URL: "https://example.com",
+	}); err == nil {
+		t.Fatal("closed store accepted a write")
 	}
 }

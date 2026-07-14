@@ -35,8 +35,13 @@ func completedEvent(taskID string) protocol.StreamResponse {
 	})
 }
 
+func newTestSignedSender(opts ...SignedSenderOption) (*SignedSender, error) {
+	opts = append(opts, WithSenderOptions(push.WithUnsafeAllowPrivateNetworks()))
+	return NewSignedSender(opts...)
+}
+
 func TestSignedSender_DefaultIdentity_EndToEnd(t *testing.T) {
-	s, err := NewSignedSender()
+	s, err := newTestSignedSender()
 	if err != nil {
 		t.Fatalf("NewSignedSender: %v", err)
 	}
@@ -44,8 +49,7 @@ func TestSignedSender_DefaultIdentity_EndToEnd(t *testing.T) {
 	// The server side would publish this JWKS; a receiver verifies against it.
 	jwks := httptest.NewServer(s.JWKSHandler())
 	defer jwks.Close()
-	verifier := NewAuthenticator()
-	verifier.SetJWKSClient(jwks.URL)
+	verifier := NewVerifier(jwks.URL)
 
 	var verifyErr error
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -72,11 +76,11 @@ func TestSignedSender_WithJWTKey_SharedAcrossReplicas(t *testing.T) {
 		t.Fatalf("GenerateKey: %v", err)
 	}
 
-	replicaA, err := NewSignedSender(WithJWTKey(key, ""))
+	replicaA, err := newTestSignedSender(WithJWTKey(key, ""))
 	if err != nil {
 		t.Fatalf("NewSignedSender A: %v", err)
 	}
-	replicaB, err := NewSignedSender(WithJWTKey(key, ""))
+	replicaB, err := newTestSignedSender(WithJWTKey(key, ""))
 	if err != nil {
 		t.Fatalf("NewSignedSender B: %v", err)
 	}
@@ -90,16 +94,15 @@ func TestSignedSender_WithJWTKey_SharedAcrossReplicas(t *testing.T) {
 		t.Fatalf("derive thumbprint: %v", err)
 	}
 	wantKeyID := base64.RawURLEncoding.EncodeToString(thumbprint)
-	if replicaA.auth.keyID != wantKeyID || replicaB.auth.keyID != wantKeyID {
+	if replicaA.signer.keyID != wantKeyID || replicaB.signer.keyID != wantKeyID {
 		t.Fatalf("key ID must be stable across replicas: A=%q B=%q want=%q",
-			replicaA.auth.keyID, replicaB.auth.keyID, wantKeyID)
+			replicaA.signer.keyID, replicaB.signer.keyID, wantKeyID)
 	}
 
 	// Receiver fetched the JWKS from replica A only.
 	jwks := httptest.NewServer(replicaA.JWKSHandler())
 	defer jwks.Close()
-	verifier := NewAuthenticator()
-	verifier.SetJWKSClient(jwks.URL)
+	verifier := NewVerifier(jwks.URL)
 
 	var verifyErr error
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -132,8 +135,11 @@ func TestSignedSender_WithSenderOptions(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	s, err := NewSignedSender(WithSenderOptions(push.WithRequestDecorator(func(r *http.Request) {
+	s, err := newTestSignedSender(WithSenderOptions(push.WithRequestDecorator(func(
+		_ context.Context, _ protocol.TaskPushNotificationConfig, r *http.Request,
+	) error {
 		r.Header.Set("X-Custom", "v1")
+		return nil
 	})))
 	if err != nil {
 		t.Fatalf("NewSignedSender: %v", err)
@@ -147,8 +153,10 @@ func TestSignedSender_WithSenderOptions(t *testing.T) {
 }
 
 func TestSignedSender_SigningHookCannotBeOverridden(t *testing.T) {
-	s, err := NewSignedSender(WithSenderOptions(push.WithAuthorizationHeader(
-		func(context.Context, []byte) (string, error) { return "Bearer override", nil },
+	s, err := newTestSignedSender(WithSenderOptions(push.WithAuthorizationHeader(
+		func(context.Context, protocol.TaskPushNotificationConfig, []byte) (string, error) {
+			return "Bearer override", nil
+		},
 	)))
 	if err != nil {
 		t.Fatalf("NewSignedSender: %v", err)
@@ -156,8 +164,7 @@ func TestSignedSender_SigningHookCannotBeOverridden(t *testing.T) {
 
 	jwks := httptest.NewServer(s.JWKSHandler())
 	defer jwks.Close()
-	verifier := NewAuthenticator()
-	verifier.SetJWKSClient(jwks.URL)
+	verifier := NewVerifier(jwks.URL)
 
 	var verifyErr error
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -183,7 +190,7 @@ func TestSignedSender_ClientAuthenticationTakesPriority(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	s, err := NewSignedSender()
+	s, err := newTestSignedSender()
 	if err != nil {
 		t.Fatalf("NewSignedSender: %v", err)
 	}

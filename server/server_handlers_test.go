@@ -267,14 +267,15 @@ func TestA2AServer_AuthMiddleware(t *testing.T) {
 // TestA2AServer_PushNotifications tests the push notification endpoints
 func TestA2AServer_PushNotifications(t *testing.T) {
 	mockTM := newMockTaskManager()
+	mockTM.pushSupported = true
 	agentCard := defaultAgentCard()
 
 	// Explicitly enable a JWKS endpoint backed by a configured handler.
-	authr := pushauth.NewAuthenticator()
-	require.NoError(t, authr.GenerateKeyPair())
+	signer := pushauth.NewJWTSigner()
+	require.NoError(t, signer.GenerateKeyPair())
 	a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard),
 		WithJWKSEndpoint(true, ""),
-		WithPushNotificationJWKSHandler(http.HandlerFunc(authr.HandleJWKS)))
+		WithPushNotificationJWKSHandler(http.HandlerFunc(signer.HandleJWKS)))
 	require.NoError(t, err)
 
 	// Create test server with the full handler
@@ -340,8 +341,9 @@ func TestA2AServer_PushNotifications(t *testing.T) {
 		mockTM.pushNotificationGetError = nil
 
 		// Create request
-		params := protocol.TaskIDParams{
-			ID: "test-push-task",
+		params := protocol.GetTaskPushNotificationConfigParams{
+			TaskID: "test-push-task",
+			ID:     "cfg-1",
 		}
 
 		resp := performJSONRPCRequest(
@@ -361,8 +363,9 @@ func TestA2AServer_PushNotifications(t *testing.T) {
 		// Test push notification get with error
 		mockTM.pushNotificationGetError = fmt.Errorf("push notification not found")
 
-		params := protocol.TaskIDParams{
-			ID: "nonexistent-task",
+		params := protocol.GetTaskPushNotificationConfigParams{
+			TaskID: "nonexistent-task",
+			ID:     "cfg-1",
 		}
 
 		resp := performJSONRPCRequest(
@@ -519,6 +522,7 @@ func TestA2AServer_StartStop(t *testing.T) {
 // dispatch and the GetTaskPushNotificationConfig taskId/id parsing.
 func TestA2AServer_V1Operations(t *testing.T) {
 	mockTM := newMockTaskManager()
+	mockTM.pushSupported = true
 	testServer := newTestServer(t, mockTM)
 	defer testServer.Close()
 

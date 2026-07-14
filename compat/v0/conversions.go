@@ -552,9 +552,6 @@ func ToV1TaskIDParams(p TaskIDParams) protocol.TaskIDParams {
 func ToV1PushConfig(c TaskPushNotificationConfig) protocol.TaskPushNotificationConfig {
 	flat := toV1PushDetails(c.PushNotificationConfig, c.TaskID)
 	flat.RPCID = c.RPCID
-	if flat.Metadata == nil {
-		flat.Metadata = c.Metadata
-	}
 	return flat
 }
 
@@ -564,17 +561,15 @@ func FromV1PushConfig(c protocol.TaskPushNotificationConfig) TaskPushNotificatio
 		RPCID:                  c.RPCID,
 		TaskID:                 c.TaskID,
 		PushNotificationConfig: fromV1PushDetails(c),
-		Metadata:               c.Metadata,
 	}
 }
 
 func toV1PushDetails(c PushNotificationConfig, taskID string) protocol.TaskPushNotificationConfig {
 	res := protocol.TaskPushNotificationConfig{
-		ID:       c.ID,
-		TaskID:   taskID,
-		URL:      c.URL,
-		Token:    c.Token,
-		Metadata: c.Metadata,
+		ID:     c.ID,
+		TaskID: taskID,
+		URL:    c.URL,
+		Token:  c.Token,
 	}
 	if c.Authentication != nil {
 		auth := &protocol.AuthenticationInfo{
@@ -594,10 +589,9 @@ func toV1PushDetails(c PushNotificationConfig, taskID string) protocol.TaskPushN
 
 func fromV1PushDetails(c protocol.TaskPushNotificationConfig) PushNotificationConfig {
 	res := PushNotificationConfig{
-		ID:       c.ID,
-		URL:      c.URL,
-		Token:    c.Token,
-		Metadata: c.Metadata,
+		ID:    c.ID,
+		URL:   c.URL,
+		Token: c.Token,
 	}
 	if c.Authentication != nil {
 		auth := &PushNotificationAuthenticationInfo{

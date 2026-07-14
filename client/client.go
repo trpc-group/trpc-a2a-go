@@ -549,7 +549,7 @@ func (c *A2AClient) SetPushNotification(
 // GetPushNotification retrieves the push notification configuration for a task.
 func (c *A2AClient) GetPushNotification(
 	ctx context.Context,
-	params protocol.TaskIDParams,
+	params protocol.GetTaskPushNotificationConfigParams,
 	opts ...RequestOption,
 ) (*protocol.TaskPushNotificationConfig, error) {
 	request := jsonrpc.NewRequest(protocol.MethodTasksPushNotificationConfigGet, params.RPCID)

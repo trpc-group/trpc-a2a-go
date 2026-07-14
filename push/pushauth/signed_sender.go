@@ -5,7 +5,7 @@
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
 // Package pushauth is the JWT/JWKS trust layer for A2A push notifications. It
-// holds the signing identity (Authenticator) and SignedSender, and is the
+// holds the signing identity (JWTSigner) and SignedSender, and is the
 // only package that depends on the JWT/JWKS libraries — so a task manager that
 // only needs the push.Sender interface (e.g. the redis manager) never inherits
 // those dependencies.
@@ -39,7 +39,7 @@ import (
 // "signer and JWKS must match" invariant by construction.
 type SignedSender struct {
 	sender *push.HTTPSender
-	auth   *Authenticator
+	signer *JWTSigner
 }
 
 var _ push.Sender = (*SignedSender)(nil)
@@ -79,24 +79,25 @@ func WithSenderOptions(opts ...push.SenderOption) SignedSenderOption {
 // identities that must survive restarts or be shared by replicas. For unsigned
 // delivery use push.NewHTTPSender instead.
 //
-// The client's cfg.Authentication takes priority, as required by the A2A
-// protocol. The sender's JWT is used only as a fallback when the client did not
-// declare an authentication scheme and credentials.
+// The client's cfg.Authentication is authoritative, as required by the A2A
+// protocol. Static credentials are sent unchanged; a declared scheme without
+// credentials is rejected because SignedSender cannot resolve another scheme.
+// The sender signs with JWT only when the client omitted Authentication.
 func NewSignedSender(opts ...SignedSenderOption) (*SignedSender, error) {
 	var cfg signedSenderConfig
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 
-	s := &SignedSender{auth: NewAuthenticator()}
+	s := &SignedSender{signer: NewJWTSigner()}
 	if cfg.useKey {
 		// The caller asked for a key-backed identity: a nil key is a configuration
 		// bug and must fail loudly rather than silently use a different identity.
-		if err := s.auth.UseKeyPair(cfg.privateKey, cfg.keyID); err != nil {
+		if err := s.signer.UseKeyPair(cfg.privateKey, cfg.keyID); err != nil {
 			return nil, fmt.Errorf("push signed sender: install signing key: %w", err)
 		}
 	} else {
-		if err := s.auth.GenerateKeyPair(); err != nil {
+		if err := s.signer.GenerateKeyPair(); err != nil {
 			return nil, fmt.Errorf("push signed sender: generate signing key: %w", err)
 		}
 	}
@@ -105,9 +106,15 @@ func NewSignedSender(opts ...SignedSenderOption) (*SignedSender, error) {
 	// Apply the signing hook after forwarded sender options so callers cannot
 	// accidentally replace it with push.WithAuthorizationHeader. This is the
 	// only coupling point and keeps JWT/JWK dependencies out of package push.
-	auth := s.auth
-	signHook := func(_ context.Context, payload []byte) (string, error) {
-		return auth.CreateAuthorizationHeader(payload)
+	signer := s.signer
+	signHook := func(
+		_ context.Context, config protocol.TaskPushNotificationConfig, payload []byte,
+	) (string, error) {
+		if config.Authentication != nil {
+			return "", fmt.Errorf("client declared authentication scheme %q without static credentials",
+				config.Authentication.Scheme)
+		}
+		return signer.CreateAuthorizationHeader(payload)
 	}
 	senderOpts = append(senderOpts, push.WithAuthorizationHeader(signHook))
 	s.sender = push.NewHTTPSender(senderOpts...)
@@ -124,5 +131,5 @@ func (s *SignedSender) SendPush(
 // JWKSHandler returns an HTTP handler that publishes the public key matching
 // this sender's signing identity.
 func (s *SignedSender) JWKSHandler() http.Handler {
-	return http.HandlerFunc(s.auth.HandleJWKS)
+	return http.HandlerFunc(s.signer.HandleJWKS)
 }
