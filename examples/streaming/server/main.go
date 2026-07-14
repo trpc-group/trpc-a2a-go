@@ -23,8 +23,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
-
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
@@ -76,6 +74,13 @@ func (p *streamingMessageProcessor) ProcessMessage(
 		chunks := splitTextIntoChunks(text, 5) // Split into chunks of about 5 characters
 		totalChunks := len(chunks)
 
+		// One streaming artifact, reassembled from per-chunk appends.
+		streamingArtifact := protocol.NewArtifactWithID(
+			stringPtr("Processed data"),
+			stringPtr("Streaming processed data"),
+			nil,
+		)
+
 		// Process each chunk with a small delay to simulate real-time processing
 		for i, chunk := range chunks {
 			// Check for cancellation: closing without a terminal state after a
@@ -96,16 +101,19 @@ func (p *streamingMessageProcessor) ProcessMessage(
 				return
 			}
 
-			// Create an artifact for this chunk
+			// Add the first chunk, then update the same ArtifactID with each
+			// continuation chunk. The framework reassembles them into one artifact.
 			isLastChunk := (i == totalChunks-1)
-			chunkArtifact := protocol.Artifact{
-				ArtifactID:  uuid.New().String(),
-				Name:        stringPtr(fmt.Sprintf("Chunk %d of %d", i+1, totalChunks)),
-				Description: stringPtr("Streaming chunk of processed data"),
-				Parts:       []*protocol.Part{protocol.NewTextPart(processedChunk)},
-			}
+			chunkArtifact := *streamingArtifact
+			chunkArtifact.Parts = []*protocol.Part{protocol.NewTextPart(processedChunk)}
 
-			if err := handle.AddArtifact(chunkArtifact, isLastChunk); err != nil {
+			var err error
+			if i == 0 {
+				err = handle.AddArtifact(chunkArtifact, isLastChunk)
+			} else {
+				err = handle.AppendArtifact(chunkArtifact, isLastChunk)
+			}
+			if err != nil {
 				log.Errorf("Failed to add artifact: %v", err)
 				return
 			}

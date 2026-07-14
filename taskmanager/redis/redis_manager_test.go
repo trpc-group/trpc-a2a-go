@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -218,6 +219,35 @@ func TestOnSendMessageWorkingCompleted(t *testing.T) {
 	}
 }
 
+func TestSupersededStatusMessageMovesToHistory(t *testing.T) {
+	working := agentReply("still working")
+	done := agentReply("done")
+	m, _ := setupTest(t, scriptedExecutor(
+		statusEvent(protocol.TaskStateWorking, working),
+		statusEvent(protocol.TaskStateCompleted, done),
+	))
+
+	resp, err := m.OnSendMessage(context.Background(), sendParams("do it", "ctx-status-history"))
+	if err != nil {
+		t.Fatalf("OnSendMessage failed: %v", err)
+	}
+	task := resp.GetTask()
+	if task == nil || task.Status.Message == nil {
+		t.Fatalf("expected a task with a current status message, got %+v", resp.Result)
+	}
+	if len(task.History) != 2 {
+		t.Fatalf("expected user + superseded status message in history, got %d", len(task.History))
+	}
+	if task.History[1].MessageID != working.MessageID {
+		t.Errorf("expected the superseded working message in history, got %s", task.History[1].MessageID)
+	}
+	for _, message := range task.History {
+		if message.MessageID == task.Status.Message.MessageID {
+			t.Fatalf("current status message %s must not also appear in history", message.MessageID)
+		}
+	}
+}
+
 func TestOnSendMessageHistoryLength(t *testing.T) {
 	processor := executorFunc(func(
 		ctx context.Context, ec *taskmanager.ExecContext,
@@ -375,6 +405,23 @@ func TestInputRequiredContinuation(t *testing.T) {
 	if task1 == nil || task1.Status.State != protocol.TaskStateInputRequired {
 		t.Fatalf("expected input-required task, got %+v", resp1.Result)
 	}
+	if task1.Status.Message == nil {
+		t.Fatal("expected the input-required question on task.Status.Message")
+	}
+	storedBeforeFollowUp, err := m.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: task1.ID})
+	if err != nil {
+		t.Fatalf("OnGetTask before continuation failed: %v", err)
+	}
+	for _, snapshot := range []*protocol.Task{task1, storedBeforeFollowUp} {
+		if len(snapshot.History) != 1 {
+			t.Fatalf("current input-required snapshot must contain only the first user turn in history, got %d", len(snapshot.History))
+		}
+		for _, message := range snapshot.History {
+			if message.MessageID == snapshot.Status.Message.MessageID {
+				t.Fatalf("current status message %s must not also appear in history", message.MessageID)
+			}
+		}
+	}
 
 	// Follow-up on the suspended task: the framework passes the current
 	// snapshot via ec.Task.
@@ -401,11 +448,19 @@ func TestInputRequiredContinuation(t *testing.T) {
 	if round2EC.Task.Status.State != protocol.TaskStateInputRequired {
 		t.Errorf("ec.Task state = %s, want input-required", round2EC.Task.Status.State)
 	}
+	if round2EC.Task.Status.Message != nil {
+		t.Error("continuation must move the previous status message into history and clear it from the current status")
+	}
 	if round2EC.TaskID != task1.ID {
 		t.Errorf("ec.TaskID = %s, want %s", round2EC.TaskID, task1.ID)
 	}
-	if len(round2EC.History) != 2 {
-		t.Errorf("expected both user messages in history, got %d", len(round2EC.History))
+	// The input-required question moves into history on follow-up, so the
+	// continuation sees it between the two user messages (it was lost before).
+	if len(round2EC.History) != 3 {
+		t.Fatalf("expected 3 history messages (two user + the agent question), got %d", len(round2EC.History))
+	}
+	if round2EC.History[1].Role != protocol.MessageRoleAgent {
+		t.Errorf("expected the agent input-required question at history[1], got role %s", round2EC.History[1].Role)
 	}
 }
 
@@ -1387,5 +1442,57 @@ func TestStorageTTL(t *testing.T) {
 	}
 	if got := mr.TTL(messageKey); got != expire {
 		t.Errorf("message TTL = %v, want %v", got, expire)
+	}
+}
+
+// taskChanged deep-compares Artifacts, so an append=true chunk that merges into
+// an existing artifact (growing its Parts without growing the slice) is still
+// detected — the OnResubscribe registration-race compensation depends on this.
+func TestTaskChanged_DetectsMergedArtifactChunk(t *testing.T) {
+	before := &protocol.Task{
+		Status:    protocol.TaskStatus{State: protocol.TaskStateWorking, Timestamp: "t"},
+		Artifacts: []protocol.Artifact{{ArtifactID: "a", Parts: []*protocol.Part{protocol.NewTextPart("p1")}}},
+	}
+	// Same status, same artifact count — only the merged artifact's Parts grew.
+	after := &protocol.Task{
+		Status: protocol.TaskStatus{State: protocol.TaskStateWorking, Timestamp: "t"},
+		Artifacts: []protocol.Artifact{{ArtifactID: "a", Parts: []*protocol.Part{
+			protocol.NewTextPart("p1"), protocol.NewTextPart("p2"),
+		}}},
+	}
+	if !taskChanged(before, after) {
+		t.Fatal("taskChanged must detect a same-ID append chunk that grew an artifact's Parts")
+	}
+	if taskChanged(before, before) {
+		t.Error("taskChanged must be false for identical snapshots")
+	}
+}
+
+// storeMessage is atomically idempotent by MessageID: concurrent stores (e.g.
+// from reply and status paths) leave one conversation index entry.
+func TestStoreMessage_IdempotentByMessageID(t *testing.T) {
+	m, _ := setupTest(t, scriptedExecutor())
+	ctx := context.Background()
+	cid := "ctx-idem"
+	msg := protocol.NewMessage(protocol.MessageRoleAgent, []*protocol.Part{protocol.NewTextPart("x")})
+	msg.ContextID = &cid
+
+	const writers = 32
+	var wg sync.WaitGroup
+	wg.Add(writers)
+	for i := 0; i < writers; i++ {
+		go func() {
+			defer wg.Done()
+			m.storeMessage(ctx, msg)
+		}()
+	}
+	wg.Wait()
+
+	hist, err := m.getConversationHistory(ctx, cid, 100)
+	if err != nil {
+		t.Fatalf("getConversationHistory: %v", err)
+	}
+	if len(hist) != 1 {
+		t.Errorf("a message stored twice under the same MessageID must appear once, got %d", len(hist))
 	}
 }

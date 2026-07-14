@@ -7,7 +7,6 @@ replace trpc.group/trpc-go/trpc-a2a-go/v2 => ../
 replace trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/redis => ../taskmanager/redis
 
 require (
-	github.com/google/uuid v1.6.0
 	github.com/lestrrat-go/jwx/v2 v2.1.4
 	github.com/redis/go-redis/v9 v9.10.0
 	golang.org/x/oauth2 v0.26.0
@@ -25,6 +24,7 @@ require (
 	github.com/goccy/go-json v0.10.3 // indirect
 	github.com/golang-jwt/jwt/v5 v5.2.2 // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.19.0 // indirect
 	github.com/lestrrat-go/blackmagic v1.0.2 // indirect
 	github.com/lestrrat-go/httpcc v1.0.1 // indirect

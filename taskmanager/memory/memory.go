@@ -605,23 +605,35 @@ func (m *TaskManager) storeMessage(message protocol.Message) {
 	// If the message has a contextID, add it to conversation history
 	if message.ContextID != nil {
 		contextID := *message.ContextID
-		if _, exists := m.conversations[contextID]; !exists {
-			m.conversations[contextID] = &ConversationHistory{
+		conv, exists := m.conversations[contextID]
+		if !exists {
+			conv = &ConversationHistory{
 				MessageIDs:     make([]string, 0),
 				LastAccessTime: time.Now(),
+			}
+			m.conversations[contextID] = conv
+		}
+		conv.LastAccessTime = time.Now()
+
+		// Idempotent by MessageID: the same message may reach storeMessage from
+		// both the reply path and a status roll (or be re-emitted). Indexing it
+		// twice would show it twice in history AND, worse, let a later window
+		// trim delete the shared m.messages entry that the duplicate index still
+		// references — dropping the message entirely.
+		for _, id := range conv.MessageIDs {
+			if id == message.MessageID {
+				return
 			}
 		}
 
 		// Add message ID to conversation history
-		m.conversations[contextID].MessageIDs = append(m.conversations[contextID].MessageIDs, message.MessageID)
-		// Update last access time
-		m.conversations[contextID].LastAccessTime = time.Now()
+		conv.MessageIDs = append(conv.MessageIDs, message.MessageID)
 
 		// Limit history length
-		if len(m.conversations[contextID].MessageIDs) > m.options.MaxHistoryLength {
+		if len(conv.MessageIDs) > m.options.MaxHistoryLength {
 			// Remove the oldest message
-			removedMsgID := m.conversations[contextID].MessageIDs[0]
-			m.conversations[contextID].MessageIDs = m.conversations[contextID].MessageIDs[1:]
+			removedMsgID := conv.MessageIDs[0]
+			conv.MessageIDs = conv.MessageIDs[1:]
 			// Delete old message from message storage
 			delete(m.messages, removedMsgID)
 		}

@@ -89,6 +89,10 @@ type engine struct {
 	// answers with the last Message, not the untouched task snapshot.
 	taskTouched bool
 	lastMessage *protocol.Message
+	// lastStatusMsg is the most recent superseded status message moved into the
+	// conversation, compared by identity, so a message reused across several
+	// status updates in this round is not appended to the history more than once.
+	lastStatusMsg *protocol.Message
 
 	// immediateResult carries the immediate result (first persisted task snapshot
 	// or first Message) to a returnImmediately waiter. Buffered with 1 slot and
@@ -144,6 +148,20 @@ func (m *TaskManager) prepareExecContext(
 	if message.ContextID == nil || *message.ContextID == "" {
 		contextID := protocol.GenerateContextID()
 		message.ContextID = &contextID
+	}
+	// A current status message remains on Task.Status until the task advances.
+	// A follow-up advances the conversation: move that message into history
+	// before the new user turn, and clear it from the current status so one Task
+	// snapshot never exposes the same message in both places.
+	if taskCopy != nil && taskCopy.Status.Message != nil {
+		statusMessage := taskCopy.Status.Message
+		taskCopy.Status.Message = nil
+		m.taskMu.Lock()
+		if stored, exists := m.tasks[taskID]; exists {
+			stored.Status.Message = nil
+		}
+		m.taskMu.Unlock()
+		m.storeStatusMessage(taskID, *message.ContextID, statusMessage)
 	}
 	m.storeMessage(*message)
 
@@ -458,6 +476,35 @@ func (eng *engine) handleMessage(message *protocol.Message) {
 	}
 }
 
+// storeStatusMessage stores a stamped copy without mutating the processor's
+// message, which may still be visible in an earlier task snapshot or wire event.
+func (m *TaskManager) storeStatusMessage(taskID, contextID string, message *protocol.Message) {
+	if message == nil {
+		return
+	}
+	stored := *message
+	stored.ContextID = &contextID
+	stored.TaskID = &taskID
+	stored.Role = protocol.MessageRoleAgent
+	if stored.MessageID == "" {
+		stored.MessageID = protocol.GenerateMessageID()
+	}
+	m.storeMessage(stored)
+}
+
+// rollStatusMessage moves a superseded status message into conversation
+// history. The current status message stays on Task.Status until the next
+// status transition or follow-up user message, matching the reference SDKs.
+// Pointer checks avoid redundant work within a round; storeMessage provides the
+// final MessageID-based idempotency guard.
+func (eng *engine) rollStatusMessage(message *protocol.Message) {
+	if message == nil || message == eng.lastStatusMsg || message == eng.lastMessage {
+		return
+	}
+	eng.lastStatusMsg = message
+	eng.manager.storeStatusMessage(eng.ec.TaskID, eng.ec.ContextID, message)
+}
+
 // handleStatus persists a status update and then broadcasts it. The first task
 // event materializes the task (§3.2 lazy creation). A terminal state closes
 // the fan-out subscribers but the channel keeps being drained.
@@ -486,10 +533,12 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 		eng.terminal = true
 		return
 	}
+	var previousStatusMessage *protocol.Message
 	if !exists {
 		task = eng.newTask(event.Status)
 		m.tasks[eng.ec.TaskID] = task
 	} else {
+		previousStatusMessage = task.Status.Message
 		task.Status = event.Status
 	}
 	eng.taskTouched = true
@@ -502,6 +551,10 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 		eng.yieldSnapshot = copyTask(task)
 	}
 	m.taskMu.Unlock()
+
+	// The old status message has now been superseded. Move it to history before
+	// publishing the new status; the new/current message remains only on Status.
+	eng.rollStatusMessage(previousStatusMessage)
 
 	// Then broadcast: any subscriber that sees this event is guaranteed to
 	// find the store at least as fresh via GetTask.
@@ -556,7 +609,12 @@ func (eng *engine) handleArtifact(event *protocol.TaskArtifactUpdateEvent) {
 		})
 		m.tasks[eng.ec.TaskID] = task
 	}
-	task.Artifacts = append(task.Artifacts, event.Artifact)
+	var appendedAsNew bool
+	task.Artifacts, appendedAsNew = protocol.AppendArtifact(task.Artifacts, event.Artifact, event.Append != nil && *event.Append)
+	if appendedAsNew {
+		log.Warnf("memory TaskManager: artifact %s for task %s used append=true with no prior chunk; stored as a new artifact",
+			event.Artifact.ArtifactID, eng.ec.TaskID)
+	}
 	eng.taskTouched = true
 	snapshot := eng.immediateSnapshotLocked(task)
 	m.taskMu.Unlock()

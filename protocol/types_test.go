@@ -232,3 +232,87 @@ func TestSendMessageConfigurationIsBlocking(t *testing.T) {
 	assert.False(t, (&SendMessageConfiguration{ReturnImmediately: boolPtr(true)}).IsBlocking())
 	assert.True(t, (&SendMessageConfiguration{ReturnImmediately: boolPtr(false)}).IsBlocking())
 }
+
+func TestAppendArtifact(t *testing.T) {
+	part := func(text string) *Part { return NewTextPart(text) }
+
+	t.Run("append extends the parts of the same artifact id", func(t *testing.T) {
+		got, _ := AppendArtifact(
+			[]Artifact{{ArtifactID: "a", Parts: []*Part{part("Hello ")}}},
+			Artifact{ArtifactID: "a", Parts: []*Part{part("world")}},
+			true,
+		)
+		require.Len(t, got, 1)
+		require.Len(t, got[0].Parts, 2)
+		assert.Equal(t, "Hello ", got[0].Parts[0].TextContent())
+		assert.Equal(t, "world", got[0].Parts[1].TextContent())
+	})
+
+	t.Run("non-append replaces the same artifact id", func(t *testing.T) {
+		got, _ := AppendArtifact(
+			[]Artifact{{ArtifactID: "a", Parts: []*Part{part("stale")}}},
+			Artifact{ArtifactID: "a", Parts: []*Part{part("fresh")}},
+			false,
+		)
+		require.Len(t, got, 1)
+		require.Len(t, got[0].Parts, 1)
+		assert.Equal(t, "fresh", got[0].Parts[0].TextContent())
+	})
+
+	t.Run("distinct artifact ids accumulate", func(t *testing.T) {
+		got, _ := AppendArtifact(
+			[]Artifact{{ArtifactID: "a", Parts: []*Part{part("one")}}},
+			Artifact{ArtifactID: "b", Parts: []*Part{part("two")}},
+			false,
+		)
+		require.Len(t, got, 2)
+		assert.Equal(t, "a", got[0].ArtifactID)
+		assert.Equal(t, "b", got[1].ArtifactID)
+	})
+
+	t.Run("append with no existing id adds as new and flags it", func(t *testing.T) {
+		got, appendedAsNew := AppendArtifact(nil, Artifact{ArtifactID: "a", Parts: []*Part{part("one")}}, true)
+		require.Len(t, got, 1)
+		assert.Equal(t, "a", got[0].ArtifactID)
+		assert.True(t, appendedAsNew, "append=true with no prior artifact must be flagged")
+	})
+
+	t.Run("append merges metadata and keeps the first frame's descriptors", func(t *testing.T) {
+		got, _ := AppendArtifact(
+			[]Artifact{{
+				ArtifactID: "a", Name: stringPtr("Report"), Description: stringPtr("desc"),
+				Extensions: []string{"ext"}, Parts: []*Part{part("one")},
+				Metadata: map[string]any{"k1": "v1", "seq": 1},
+			}},
+			Artifact{ArtifactID: "a", Name: stringPtr("ignored"), Parts: []*Part{part("two")}, Metadata: map[string]any{"seq": 2, "k2": "v2"}},
+			true,
+		)
+		require.Len(t, got, 1)
+		require.Len(t, got[0].Parts, 2)
+		assert.Equal(t, "v1", got[0].Metadata["k1"]) // kept from the first frame
+		assert.Equal(t, "v2", got[0].Metadata["k2"]) // added by the continuation
+		assert.Equal(t, 2, got[0].Metadata["seq"])   // continuation overrides
+		// Name/Description/Extensions come from the first frame, not the chunk.
+		assert.Equal(t, "Report", *got[0].Name)
+		assert.Equal(t, "desc", *got[0].Description)
+		assert.Equal(t, []string{"ext"}, got[0].Extensions)
+	})
+
+	// Guards the copy-on-write merge: a prior frame's Parts/Metadata that a task
+	// snapshot or in-flight wire event may still alias must NOT be mutated when a
+	// later chunk is appended (otherwise a concurrent reader races a map write).
+	t.Run("append does not mutate the prior frame's containers", func(t *testing.T) {
+		firstParts := []*Part{part("one")}
+		firstMeta := map[string]any{"seq": 1}
+		arts := []Artifact{{ArtifactID: "a", Parts: firstParts, Metadata: firstMeta}}
+
+		arts, _ = AppendArtifact(arts, Artifact{ArtifactID: "a", Parts: []*Part{part("two")}, Metadata: map[string]any{"seq": 2}}, true)
+
+		// The captured (aliased) containers are untouched...
+		assert.Len(t, firstParts, 1, "prior Parts backing slice must not be extended in place")
+		assert.Equal(t, 1, firstMeta["seq"], "prior Metadata map must not be mutated in place")
+		// ...while the stored entry carries the merged result.
+		require.Len(t, arts[0].Parts, 2)
+		assert.Equal(t, 2, arts[0].Metadata["seq"])
+	})
+}

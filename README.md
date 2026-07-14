@@ -404,7 +404,7 @@ the native channel style recommended for new code.
 | `ProcessOptions.AcceptedOutputModes` / `.Tenant` | `ExecContext.AcceptedOutputModes` / `.Tenant` |
 | `TaskHandler.BuildTask` | gone — tasks are created lazily on the first task event; the ID is `ExecContext.TaskID` / `TaskHandle.TaskID()` |
 | `TaskHandler.UpdateTaskState(taskID, state, msg)` | `TaskHandle.UpdateTaskState(state, msg)` (or emit a `protocol.TaskStatusUpdateEvent` on the raw channel) |
-| `TaskHandler.AddArtifact(taskID, artifact, isFinal, needMoreData)` | `TaskHandle.AddArtifact(artifact, lastChunk)` — `isFinal` maps to `lastChunk`; the `append` flag is not exposed: chunked streams that relied on it should emit `protocol.TaskArtifactUpdateEvent` on the raw channel with `Append` set |
+| `TaskHandler.AddArtifact(taskID, artifact, isFinal, needMoreData)` | call `TaskHandle.AddArtifact(artifact, isFinal)` when `needMoreData=false`, or `TaskHandle.AppendArtifact(artifact, isFinal)` when `needMoreData=true`; reuse the same `ArtifactID` for continuation chunks |
 | `TaskHandler.SubscribeTask` / `.CleanTask` | removed — the framework owns fan-out and task lifecycle; nothing deletes tasks by default — set `memory.WithTaskTTL` to collect terminal tasks |
 | return an interim `Message` result while a goroutine drives the task (v0 non-blocking) | emit events from a goroutine; unary callers opt in with `returnImmediately=true` — the first persisted event answers the call; multi-turn suspends with `input-required` |
 | `TaskHandler.GetContextID` / `.GetMessageHistory` | same names on `TaskHandle`; `History` is a snapshot taken before the round and truncated to the manager's `MaxHistoryLength` — not a live read |

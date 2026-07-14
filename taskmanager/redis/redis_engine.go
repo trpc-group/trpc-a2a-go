@@ -94,6 +94,10 @@ type execution struct {
 	// lastMessage is the most recent Message event (the unary result when no
 	// task ever came into existence).
 	lastMessage *protocol.Message
+	// lastStatusMsg is the most recent superseded status message moved into the
+	// conversation, compared by identity, so a message reused across several
+	// status updates in this round is not appended to the history more than once.
+	lastStatusMsg *protocol.Message
 	// finalTask is the task snapshot taken after the close rules ran; it is
 	// safe to read once done is closed.
 	finalTask *protocol.Task
@@ -214,10 +218,6 @@ func (m *TaskManager) prepareExecution(
 		return nil, err
 	}
 	if task != nil {
-		// The engine's working copy must not alias ec.Task (the MessageProcessor's
-		// read-only snapshot).
-		ex.task = copyTask(task)
-
 		// A follow-up without an explicit contextId continues the task's
 		// conversation; otherwise ec.History would miss the earlier turns.
 		if (message.ContextID == nil || *message.ContextID == "") && task.ContextID != "" {
@@ -232,8 +232,26 @@ func (m *TaskManager) prepareExecution(
 		contextID := protocol.GenerateContextID()
 		message.ContextID = &contextID
 	}
-	m.storeMessage(context.Background(), *message)
 	contextID := *message.ContextID
+	if task != nil {
+		// A follow-up supersedes the task's current status message. Move it into
+		// history before the new user turn and clear it from Status, matching the
+		// reference SDKs and avoiding the same message in both Task fields.
+		if task.Status.Message != nil {
+			statusMessage := task.Status.Message
+			task.Status.Message = nil
+			if err := m.storeTask(ctx, task); err != nil {
+				m.releaseExecution(taskID, ex.live)
+				cancel()
+				return nil, fmt.Errorf("failed to advance task status history: %w", err)
+			}
+			m.storeStatusMessage(taskID, contextID, statusMessage)
+		}
+		// The engine's working copy must not alias ec.Task (the MessageProcessor's
+		// read-only snapshot).
+		ex.task = copyTask(task)
+	}
+	m.storeMessage(context.Background(), *message)
 
 	// History is the conversation snapshot truncated per the manager
 	// configuration; the request's historyLength only shapes response tasks.
@@ -491,6 +509,35 @@ func (ex *execution) processMessageEvent(msg *protocol.Message) {
 	ex.broadcast(protocol.NewStreamResponseMessage(msg))
 }
 
+// storeStatusMessage stores a stamped copy without mutating the processor's
+// message, which may still be visible in an earlier task snapshot or wire event.
+func (m *TaskManager) storeStatusMessage(taskID, contextID string, message *protocol.Message) {
+	if message == nil {
+		return
+	}
+	stored := *message
+	stored.ContextID = &contextID
+	stored.TaskID = &taskID
+	stored.Role = protocol.MessageRoleAgent
+	if stored.MessageID == "" {
+		stored.MessageID = protocol.GenerateMessageID()
+	}
+	m.storeMessage(context.Background(), stored)
+}
+
+// rollStatusMessage moves a superseded status message into conversation
+// history. The current status message stays on Task.Status until the next
+// status transition or follow-up user message, matching the reference SDKs.
+// Pointer checks avoid redundant work within a round; storeMessage provides the
+// final MessageID-based idempotency guard.
+func (ex *execution) rollStatusMessage(message *protocol.Message) {
+	if message == nil || message == ex.lastStatusMsg || message == ex.lastMessage {
+		return
+	}
+	ex.lastStatusMsg = message
+	ex.manager.storeStatusMessage(ex.ec.TaskID, ex.ec.ContextID, message)
+}
+
 // processStatusEvent applies a status update to the task (lazily creating it
 // on the first task event), persists it, and only then broadcasts it: at any
 // moment GetTask reads a state >= what the stream has delivered. Terminal
@@ -519,15 +566,20 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		Message:   ev.Status.Message,
 		Timestamp: timestamp,
 	}
+	var previousStatusMessage *protocol.Message
 	if ex.task == nil {
 		ex.task = ex.newTask(ev.TaskID, ev.ContextID, status)
 	} else {
+		previousStatusMessage = ex.task.Status.Message
 		ex.task.Status = status
 	}
 	ex.taskTouched = true
 	ev.Status = status
 	final := isFinalState(status.State)
 	ev.Final = final
+	// The old status message has now been superseded. Move it to history before
+	// storing/publishing the new status; the new/current message stays on Status.
+	ex.rollStatusMessage(previousStatusMessage)
 	// Persist before broadcast (consistency order).
 	//
 	// KNOWN LIMITATION: on a Redis SET error the in-memory working copy (ex.task)
@@ -584,7 +636,12 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		})
 	}
-	ex.task.Artifacts = append(ex.task.Artifacts, ev.Artifact)
+	var appendedAsNew bool
+	ex.task.Artifacts, appendedAsNew = protocol.AppendArtifact(ex.task.Artifacts, ev.Artifact, ev.Append != nil && *ev.Append)
+	if appendedAsNew {
+		log.Warnf("RedisTaskManager: artifact %s for task %s used append=true with no prior chunk; stored as a new artifact",
+			ev.Artifact.ArtifactID, ex.ec.TaskID)
+	}
 	ex.taskTouched = true
 	// Persist before broadcast (consistency order).
 	if err := ex.manager.storeTask(context.Background(), ex.task); err != nil {

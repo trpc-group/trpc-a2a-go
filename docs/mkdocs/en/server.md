@@ -65,9 +65,9 @@ continuation round, `nil` on a fresh one), `ContextID`, `Tenant`, `History`
 webhook config, if the client sent one).
 
 Wrap a **`TaskHandle`** — a small helper that carries the familiar verbs
-(`UpdateTaskState`, `AddArtifact`, `Reply`) and hands you the channel to
-return. A synchronous body works as-is; emits before `Events()` never block,
-so no goroutine is required.
+(`UpdateTaskState`, `AddArtifact`, `AppendArtifact`, `Reply`) and hands you the
+channel to return. A synchronous body works as-is; emits before `Events()`
+never block, so no goroutine is required.
 → [examples/basic](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic)
 
 ```go
@@ -76,30 +76,33 @@ func (p *proc) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) 
     defer h.Close()
     h.UpdateTaskState(protocol.TaskStateWorking, nil)
     result := doWork(ec.Message)
-    h.AddArtifact(result.Artifact, true)                              // lastChunk = true
+    h.AddArtifact(result.Artifact, true)                              // lastChunk=true
     h.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("done"))
     return h.Events(), nil
 }
 ```
 
 Verbs: `UpdateTaskState(state, message)`, `AddArtifact(artifact, lastChunk)`,
-`Reply(message)`, plus reads `TaskID()`, `GetContextID()`, `GetTask()`,
-`GetMessageHistory()`. `taskmanager.ReplyText(text)` builds an agent message.
+`AppendArtifact(artifact, lastChunk)`, `Reply(message)`, plus reads `TaskID()`,
+`GetContextID()`, `GetTask()`, `GetMessageHistory()`. `AddArtifact` starts a
+new artifact (or replaces the same ID); `AppendArtifact` appends a continuation
+chunk, which must reuse that `ArtifactID`. `taskmanager.ReplyText(text)` builds
+an agent message.
 
 **`TaskHandle` is just channel operations underneath.** The real contract is
 the `<-chan protocol.StreamEvent` you return: `UpdateTaskState` sends a
-`*protocol.TaskStatusUpdateEvent`, `AddArtifact` sends a
+`*protocol.TaskStatusUpdateEvent`, `AddArtifact` and `AppendArtifact` send a
 `*protocol.TaskArtifactUpdateEvent`, `Reply` sends a `*protocol.Message`, and
 `Close` closes the channel. You rarely need to, but you can build and send
 those events yourself — the only way to reach a field `TaskHandle` doesn't
-expose, such as the artifact `Append` flag for chunked streaming:
+expose, such as event-level `Metadata`:
 
 ```go
 out := make(chan protocol.StreamEvent, 4)
 go func() {
     defer close(out)
     out <- &protocol.TaskStatusUpdateEvent{Status: protocol.TaskStatus{State: protocol.TaskStateWorking}}
-    out <- &protocol.TaskArtifactUpdateEvent{Artifact: art, Append: &appendFlag, LastChunk: &done}
+    out <- &protocol.TaskArtifactUpdateEvent{Artifact: art, LastChunk: &done, Metadata: map[string]any{"seq": 1}}
     out <- &protocol.TaskStatusUpdateEvent{Status: protocol.TaskStatus{State: protocol.TaskStateCompleted}}
 }()
 return out, nil
@@ -127,8 +130,10 @@ is a processor written entirely on the raw channel.)
 - End every round in a terminal or suspend state; closing in `working` marks
   the task `FAILED`.
 - One round drives exactly one task; never emit `*protocol.Task`.
-- Anything worth remembering across rounds must be emitted as a `Message`
-  event (status messages are ephemeral; artifacts never enter history).
+- The current `status.message` stays only on `Task.Status`. When a later status
+  or follow-up user message supersedes it, the previous message moves into
+  history. A terminal status message stays current forever. Emit a final answer
+  worth remembering as a `Message`; artifacts never enter history.
 
 ## The round contract
 
@@ -188,13 +193,15 @@ The exact semantics your agent code lives under and clients observe. A
 
 Storage is two-level: **message bodies by `messageId`**, and per-`contextId`
 **conversation indexes**. What enters the conversation: every round's request
-message, and every **`Message` event** the processor emits — nothing else.
+message, every **`Message` event** the processor emits, and every
+**superseded `status.message`** (e.g. an input-required question once the user
+continues the task).
 
-> **Status messages are ephemeral** (overwritten by the next status, never
-> stored) and **artifacts never enter history**. Anything to remember across
-> rounds — an LLM's final answer above all — must be a `Message` event, or the
-> next round's `ec.History` will hold the user's turns only. (This differs from
-> the official a2a SDKs, which roll each `status.message` into `task.history`.)
+> The **current** `status.message` is not in history. A later status transition
+> or follow-up user message moves the previous one into history before the next
+> turn; a **terminal** status message is never superseded and stays on
+> `status.Message` only. **Artifacts never enter history.** Emit an LLM's final
+> answer as a `Message` event if it must survive into another conversation.
 
 `Task.history` is virtual: filled at response time from the conversation per the
 request's `historyLength`. `ec.History` is a snapshot taken before the round,
