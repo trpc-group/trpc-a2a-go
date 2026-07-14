@@ -40,6 +40,23 @@ const (
 	defaultTaskSubscriberBufferSize = 1024
 )
 
+// appendConversationMessageScript appends a MessageID exactly once, trims the
+// history window, and refreshes its TTL as one atomic Redis operation. It uses
+// only commands available since Redis 2.6, avoiding LPOS's Redis 6.0.6 minimum.
+var appendConversationMessageScript = redis.NewScript(`
+local message_ids = redis.call('LRANGE', KEYS[1], 0, -1)
+for _, message_id in ipairs(message_ids) do
+    if message_id == ARGV[1] then
+        redis.call('PEXPIRE', KEYS[1], ARGV[2])
+        return 0
+    end
+end
+redis.call('RPUSH', KEYS[1], ARGV[1])
+redis.call('LTRIM', KEYS[1], -tonumber(ARGV[3]), -1)
+redis.call('PEXPIRE', KEYS[1], ARGV[2])
+return 1
+`)
+
 // TaskManager provides a concrete, Redis-based implementation of the
 // TaskManager interface. It persists messages, conversations, and tasks in
 // Redis and delegates the agent logic to an injected Processor: the MessageProcessor
@@ -769,28 +786,19 @@ func (m *TaskManager) storeMessage(ctx context.Context, message protocol.Message
 		contextID := *message.ContextID
 		convKey := conversationPrefix + contextID
 
-		// Idempotent by MessageID: the same message may reach storeMessage from
-		// both the reply path and a status roll (or be re-emitted); indexing it
-		// twice would duplicate it in history. Skip the append when it is already
-		// present. (If LPos is unavailable the error path falls through to RPush,
-		// preserving the previous append-only behavior.)
-		if _, err := m.client.LPos(ctx, convKey, message.MessageID, redis.LPosArgs{}).Result(); err == nil {
-			m.client.Expire(ctx, convKey, m.expiration)
-			return
-		}
-
-		// Add message ID to conversation history using Redis list.
-		if err := m.client.RPush(ctx, convKey, message.MessageID).Err(); err != nil {
-			log.Errorf("Failed to add message %s to conversation %s: %v", message.MessageID, contextID, err)
-			return
-		}
-
-		// Set expiration on the conversation list.
-		m.client.Expire(ctx, convKey, m.expiration).Err()
-
-		// Limit history length by trimming the list.
-		if err := m.client.LTrim(ctx, convKey, -int64(m.options.MaxHistoryLength), -1).Err(); err != nil {
-			log.Errorf("Failed to trim conversation %s: %v", contextID, err)
+		// The same MessageID may reach this path concurrently from a reply and a
+		// superseded status. Keep the membership check, append, trim, and TTL
+		// refresh atomic so the conversation index stays idempotent on every
+		// supported Redis version.
+		if _, err := appendConversationMessageScript.Run(
+			ctx,
+			m.client,
+			[]string{convKey},
+			message.MessageID,
+			m.expiration.Milliseconds(),
+			m.options.MaxHistoryLength,
+		).Result(); err != nil {
+			log.Errorf("Failed to index message %s in conversation %s: %v", message.MessageID, contextID, err)
 		}
 	}
 }

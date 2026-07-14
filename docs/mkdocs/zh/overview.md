@@ -93,7 +93,7 @@ sequenceDiagram
 
 - **结果派生**：`SendMessage` 返回最终 `Task` 或直接 `Message`，`SendStreamingMessage` 返回实时事件。
 - **任务生命周期**：任务在首个任务事件时创建；终态、挂起、取消、异常关闭都有固定规则。
-- **会话历史**：请求消息和 processor 发出的 `Message` 事件进入会话历史；status message 和 artifact 不进入历史。
+- **会话历史**：请求消息、processor 发出的 `Message` 事件，以及被后续状态或 follow-up 取代的上一条 status message 进入历史；当前 status message 和 artifact 不进入历史。
 - **agent card 归一化**：同一张 card 同时包含 v1.0 字段和 v0.x 镜像字段，便于两代客户端读取。
 - **兼容层翻译**：`compat/v0` 把 v0.2.x 的斜杠方法名映射到同一个 `TaskManager`。
 - **生产能力封装**：鉴权、CORS、子路径、JWKS、push notification、遥测和多租户都通过 server option 接入。

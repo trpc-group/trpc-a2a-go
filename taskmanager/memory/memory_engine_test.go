@@ -264,7 +264,7 @@ func TestOnSendMessage_TaskCompleted(t *testing.T) {
 	}
 	// historyLength unset -> the response carries the full conversation: just the
 	// stored user message. The completed status message stays on status.Message
-	// and is NOT folded into history (only non-terminal status messages are).
+	// and is NOT moved into history because it is never superseded.
 	if len(task.History) != 1 {
 		t.Errorf("Expected 1 history message in the response task, got %d", len(task.History))
 	}
@@ -279,6 +279,37 @@ func TestOnSendMessage_TaskCompleted(t *testing.T) {
 
 	if n := liveExecutionCount(manager); n != 0 {
 		t.Errorf("Expected the execution to be deregistered, got %d live", n)
+	}
+}
+
+// A status message enters history only after a later status supersedes it. The
+// new/current message remains on Task.Status and is not duplicated in history.
+func TestEngine_SupersededStatusMessageMovesToHistory(t *testing.T) {
+	working := agentReply("still working")
+	done := agentReply("done")
+	manager := newTestManager(t, eventsExecutor(
+		statusUpdate(protocol.TaskStateWorking, working),
+		statusUpdate(protocol.TaskStateCompleted, done),
+	))
+
+	response, err := manager.OnSendMessage(context.Background(), userParams("run"))
+	if err != nil {
+		t.Fatalf("OnSendMessage failed: %v", err)
+	}
+	task := response.GetTask()
+	if task == nil || task.Status.Message == nil {
+		t.Fatalf("Expected a task with a current status message, got %+v", response)
+	}
+	if len(task.History) != 2 {
+		t.Fatalf("Expected user + superseded status message in history, got %d", len(task.History))
+	}
+	if task.History[1].MessageID != working.MessageID {
+		t.Errorf("Expected the superseded working message in history, got %s", task.History[1].MessageID)
+	}
+	for _, message := range task.History {
+		if message.MessageID == task.Status.Message.MessageID {
+			t.Fatalf("Current status message %s must not also appear in history", message.MessageID)
+		}
 	}
 }
 
@@ -394,6 +425,23 @@ func TestEngine_InputRequiredSuspendsAndContinues(t *testing.T) {
 	if firstTask == nil || firstTask.Status.State != protocol.TaskStateInputRequired {
 		t.Fatalf("Expected an INPUT_REQUIRED task, got %+v", firstResponse)
 	}
+	if firstTask.Status.Message == nil {
+		t.Fatal("Expected the input-required question on task.Status.Message")
+	}
+	storedBeforeFollowUp, err := manager.OnGetTask(ctx, protocol.TaskQueryParams{ID: firstTask.ID})
+	if err != nil {
+		t.Fatalf("OnGetTask before continuation failed: %v", err)
+	}
+	for _, snapshot := range []*protocol.Task{firstTask, storedBeforeFollowUp} {
+		if len(snapshot.History) != 1 {
+			t.Fatalf("Current input-required snapshot must contain only the first user turn in history, got %d", len(snapshot.History))
+		}
+		for _, message := range snapshot.History {
+			if message.MessageID == snapshot.Status.Message.MessageID {
+				t.Fatalf("Current status message %s must not also appear in history", message.MessageID)
+			}
+		}
+	}
 	// The close rule must leave the suspended task as-is.
 	if state, _ := storedTaskState(manager, firstTask.ID); state != protocol.TaskStateInputRequired {
 		t.Fatalf("Expected the task to stay INPUT_REQUIRED, got %s", state)
@@ -429,6 +477,9 @@ func TestEngine_InputRequiredSuspendsAndContinues(t *testing.T) {
 	if contexts[1].Task.Status.State != protocol.TaskStateInputRequired {
 		t.Errorf("Continuation snapshot state: got %s", contexts[1].Task.Status.State)
 	}
+	if contexts[1].Task.Status.Message != nil {
+		t.Error("Continuation must move the previous status message into history and clear it from the current status")
+	}
 	if contexts[1].TaskID != firstTask.ID {
 		t.Errorf("Continuation ec.TaskID: expected %s, got %s", firstTask.ID, contexts[1].TaskID)
 	}
@@ -436,7 +487,7 @@ func TestEngine_InputRequiredSuspendsAndContinues(t *testing.T) {
 		t.Errorf("Continuation must inherit the task's contextID: %s vs %s",
 			contexts[1].ContextID, contexts[0].ContextID)
 	}
-	// The input-required question is folded into history, so the continuation
+	// The input-required question moves into history on follow-up, so the continuation
 	// sees it between the two user turns (it was lost before the fold).
 	if len(contexts[1].History) != 3 {
 		t.Fatalf("Continuation history: want 3 (two user turns + the agent question), got %d", len(contexts[1].History))
@@ -1048,10 +1099,9 @@ func TestEngine_ArtifactChunksMergeByID(t *testing.T) {
 	}
 }
 
-// A message reused (as a reply and then as a non-terminal status message) is
-// folded into history only once — including the case where the two carry the
-// SAME MessageID on DIFFERENT objects, which the pointer dedup alone would miss
-// and only storeMessage's MessageID idempotency catches.
+// A message reused as a reply and then as a status message is indexed only once
+// when a later status supersedes it — including DIFFERENT objects carrying the
+// same MessageID, which pointer dedup alone would miss.
 func TestEngine_StatusMessageDedupByID(t *testing.T) {
 	reply := protocol.NewMessage(protocol.MessageRoleAgent, []*protocol.Part{protocol.NewTextPart("hold on")})
 	status := reply // value copy: same MessageID, different address
@@ -1061,8 +1111,9 @@ func TestEngine_StatusMessageDedupByID(t *testing.T) {
 			go func() {
 				defer h.Close()
 				h.Reply(&reply)
-				// Non-terminal so it is rolled; same MessageID as the reply.
-				h.UpdateTaskState(protocol.TaskStateInputRequired, &status)
+				h.UpdateTaskState(protocol.TaskStateWorking, &status)
+				// Supersedes status, causing the same-MessageID copy above to roll.
+				h.UpdateTaskState(protocol.TaskStateInputRequired, agentReply("need input"))
 			}()
 			return h.Events(), nil
 		})

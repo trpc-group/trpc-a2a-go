@@ -130,10 +130,10 @@ is a processor written entirely on the raw channel.)
 - End every round in a terminal or suspend state; closing in `working` marks
   the task `FAILED`.
 - One round drives exactly one task; never emit `*protocol.Task`.
-- A non-terminal `status.message` (e.g. an input-required question) is folded
-  into history; a terminal one stays on `status.Message` only. Emit a final
-  answer worth remembering across rounds as a `Message`; artifacts never enter
-  history.
+- The current `status.message` stays only on `Task.Status`. When a later status
+  or follow-up user message supersedes it, the previous message moves into
+  history. A terminal status message stays current forever. Emit a final answer
+  worth remembering as a `Message`; artifacts never enter history.
 
 ## The round contract
 
@@ -194,14 +194,14 @@ The exact semantics your agent code lives under and clients observe. A
 Storage is two-level: **message bodies by `messageId`**, and per-`contextId`
 **conversation indexes**. What enters the conversation: every round's request
 message, every **`Message` event** the processor emits, and every
-**non-terminal `status.message`** (e.g. an input-required question).
+**superseded `status.message`** (e.g. an input-required question once the user
+continues the task).
 
-> A **non-terminal** `status.message` is folded into history so the next round
-> sees it; a **terminal** status message stays on `status.Message` only, and
-> **artifacts never enter history**. Emit an LLM's final answer as a `Message`
-> event if it must survive into the next round's `ec.History`. (a2a-python
-> likewise keeps the current/final status message out of history, rolling only
-> the *previous* one on the next transition.)
+> The **current** `status.message` is not in history. A later status transition
+> or follow-up user message moves the previous one into history before the next
+> turn; a **terminal** status message is never superseded and stays on
+> `status.Message` only. **Artifacts never enter history.** Emit an LLM's final
+> answer as a `Message` event if it must survive into another conversation.
 
 `Task.history` is virtual: filled at response time from the conversation per the
 request's `historyLength`. `ec.History` is a snapshot taken before the round,

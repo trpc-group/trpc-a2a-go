@@ -94,7 +94,7 @@ type execution struct {
 	// lastMessage is the most recent Message event (the unary result when no
 	// task ever came into existence).
 	lastMessage *protocol.Message
-	// lastStatusMsg is the most recent status message folded into the
+	// lastStatusMsg is the most recent superseded status message moved into the
 	// conversation, compared by identity, so a message reused across several
 	// status updates in this round is not appended to the history more than once.
 	lastStatusMsg *protocol.Message
@@ -218,10 +218,6 @@ func (m *TaskManager) prepareExecution(
 		return nil, err
 	}
 	if task != nil {
-		// The engine's working copy must not alias ec.Task (the MessageProcessor's
-		// read-only snapshot).
-		ex.task = copyTask(task)
-
 		// A follow-up without an explicit contextId continues the task's
 		// conversation; otherwise ec.History would miss the earlier turns.
 		if (message.ContextID == nil || *message.ContextID == "") && task.ContextID != "" {
@@ -236,8 +232,26 @@ func (m *TaskManager) prepareExecution(
 		contextID := protocol.GenerateContextID()
 		message.ContextID = &contextID
 	}
-	m.storeMessage(context.Background(), *message)
 	contextID := *message.ContextID
+	if task != nil {
+		// A follow-up supersedes the task's current status message. Move it into
+		// history before the new user turn and clear it from Status, matching the
+		// reference SDKs and avoiding the same message in both Task fields.
+		if task.Status.Message != nil {
+			statusMessage := task.Status.Message
+			task.Status.Message = nil
+			if err := m.storeTask(ctx, task); err != nil {
+				m.releaseExecution(taskID, ex.live)
+				cancel()
+				return nil, fmt.Errorf("failed to advance task status history: %w", err)
+			}
+			m.storeStatusMessage(taskID, contextID, statusMessage)
+		}
+		// The engine's working copy must not alias ec.Task (the MessageProcessor's
+		// read-only snapshot).
+		ex.task = copyTask(task)
+	}
+	m.storeMessage(context.Background(), *message)
 
 	// History is the conversation snapshot truncated per the manager
 	// configuration; the request's historyLength only shapes response tasks.
@@ -495,31 +509,33 @@ func (ex *execution) processMessageEvent(msg *protocol.Message) {
 	ex.broadcast(protocol.NewStreamResponseMessage(msg))
 }
 
-// rollStatusMessage folds a non-terminal status message (e.g. an input-required
-// question) into the conversation history so it survives into the next round's
-// context instead of vanishing. It stores a stamped copy (agent role, context/
-// task IDs, generated ID if absent) rather than mutating the processor's message,
-// so the persisted task and the broadcast event keep it as emitted. It skips a
-// message object this round already stored — as the reply or as the preceding
-// status update — and storeMessage is idempotent by MessageID, so reusing one
-// across events (or re-emitting the same ID) never multiplies it in the history.
+// storeStatusMessage stores a stamped copy without mutating the processor's
+// message, which may still be visible in an earlier task snapshot or wire event.
+func (m *TaskManager) storeStatusMessage(taskID, contextID string, message *protocol.Message) {
+	if message == nil {
+		return
+	}
+	stored := *message
+	stored.ContextID = &contextID
+	stored.TaskID = &taskID
+	stored.Role = protocol.MessageRoleAgent
+	if stored.MessageID == "" {
+		stored.MessageID = protocol.GenerateMessageID()
+	}
+	m.storeMessage(context.Background(), stored)
+}
+
+// rollStatusMessage moves a superseded status message into conversation
+// history. The current status message stays on Task.Status until the next
+// status transition or follow-up user message, matching the reference SDKs.
+// Pointer checks avoid redundant work within a round; storeMessage provides the
+// final MessageID-based idempotency guard.
 func (ex *execution) rollStatusMessage(message *protocol.Message) {
 	if message == nil || message == ex.lastStatusMsg || message == ex.lastMessage {
 		return
 	}
 	ex.lastStatusMsg = message
-	contextID := ex.ec.ContextID
-	stored := *message
-	stored.ContextID = &contextID
-	stored.Role = protocol.MessageRoleAgent
-	if stored.MessageID == "" {
-		stored.MessageID = protocol.GenerateMessageID()
-	}
-	if stored.TaskID == nil || *stored.TaskID == "" {
-		taskID := ex.ec.TaskID
-		stored.TaskID = &taskID
-	}
-	ex.manager.storeMessage(context.Background(), stored)
+	ex.manager.storeStatusMessage(ex.ec.TaskID, ex.ec.ContextID, message)
 }
 
 // processStatusEvent applies a status update to the task (lazily creating it
@@ -550,15 +566,20 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		Message:   ev.Status.Message,
 		Timestamp: timestamp,
 	}
+	var previousStatusMessage *protocol.Message
 	if ex.task == nil {
 		ex.task = ex.newTask(ev.TaskID, ev.ContextID, status)
 	} else {
+		previousStatusMessage = ex.task.Status.Message
 		ex.task.Status = status
 	}
 	ex.taskTouched = true
 	ev.Status = status
 	final := isFinalState(status.State)
 	ev.Final = final
+	// The old status message has now been superseded. Move it to history before
+	// storing/publishing the new status; the new/current message stays on Status.
+	ex.rollStatusMessage(previousStatusMessage)
 	// Persist before broadcast (consistency order).
 	//
 	// KNOWN LIMITATION: on a Redis SET error the in-memory working copy (ex.task)
@@ -570,13 +591,6 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 	if err := ex.manager.storeTask(context.Background(), ex.task); err != nil {
 		log.Errorf("RedisTaskManager: failed to store task %s status %s: %v", ev.TaskID, status.State, err)
 		return
-	}
-	// Fold a NON-terminal status message into the conversation (e.g. an
-	// input-required question) so a later round sees it. A terminal message
-	// stays on status.Message only, not duplicated into history. A message-less
-	// status is a no-op.
-	if !final {
-		ex.rollStatusMessage(ev.Status.Message)
 	}
 	// Immediate result first: a returnImmediately waiter must never be stalled behind
 	// a slow subscriber in the fan-out below.

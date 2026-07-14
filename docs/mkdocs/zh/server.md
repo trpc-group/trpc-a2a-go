@@ -108,7 +108,7 @@ return out, nil
 - **谁发事件，谁负责关闭。** 如果你在 goroutine 里发事件，就在那个 goroutine 里关闭 channel 或 `TaskHandle`。channel 不关闭，轮次就不会结束，任务也会一直占着执行槽。
 - **每轮都要给出结论。** 正常结束用 `completed` / `failed` / `canceled` / `rejected`；需要用户继续输入时用 `input-required` / `auth-required`。如果还停在 `submitted` 或 `working` 就关闭，框架会把任务标成 `FAILED`。
 - **一轮只属于一个任务。** 事件默认属于 `ec.TaskID`。不要发其他 `taskId` 的事件，也不要自己发 `*protocol.Task` 快照；任务快照只由框架生成。
-- **要让下一轮记住终答，就发 `Message`。** 非终态的 `status.message`（如 `input-required` 的提问）会折入会话历史，下一轮可见；终态的 status message 只留在 `status.Message`、不进历史；artifact 也永不进历史。需要跨轮保留的回答，尤其是 LLM 最终回复，请作为 `Message` 事件发出。
+- **要让后续对话记住终答，就发 `Message`。** 当前 `status.message` 只留在 `Task.Status`；后续状态或 follow-up 用户消息取代它时，上一条 status message 才会移入历史。终态 status message 不会再被取代，只留在 `status.Message`；artifact 也永不进历史。需要保留的回答，尤其是 LLM 最终回复，请作为 `Message` 事件发出。
 
 ## 轮次生命周期
 
@@ -162,11 +162,11 @@ client 断开连接不会自动取消 agent 的工作。框架会让轮次在一
 
 - 每一轮的请求消息；
 - processor 主动发出的 `Message` 事件；
-- **非终态**的 `status.message`（如 `input-required` 的提问），会被折入历史，下一轮可见。
+- 被后续状态或 follow-up 用户消息取代的 **上一条 `status.message`**；例如用户继续 `input-required` 任务时，提问会在新用户消息之前移入历史。
 
 不会进入会话历史的内容也很重要：
 
-- **终态**的 `status.message` 只留在 `status.Message`，不折入历史（下一轮 `ec.History` 里没有它）；
+- **当前** `status.message` 只留在 `Task.Status`，不会同时出现在 history；终态消息不会再被取代，因此始终只留在 `status.Message`；
 - artifact 是任务交付物，只挂在任务上，永不进历史。
 
 所以，如果你希望下一轮还能看到某段内容，例如 LLM 的最终回答、用户确认后的摘要、工具调用后的结论，就把它作为 `Message` 事件发出。否则下一轮的 `ec.History` 可能只有用户输入，看不到 agent 上一轮真正说了什么。
