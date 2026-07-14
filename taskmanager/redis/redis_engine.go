@@ -538,7 +538,7 @@ func (ex *execution) processMessageEvent(msg *protocol.Message) {
 	ex.manager.processReplyMessage(&contextID, msg)
 	response := protocol.NewStreamResponseMessage(msg)
 	if ex.task != nil {
-		if err := ex.manager.appendStreamEvent(context.Background(), ex.ec.TaskID, response); err != nil {
+		if err := ex.manager.appendTaskEvent(context.Background(), ex.ec.TaskID, response); err != nil {
 			log.Errorf("RedisTaskManager: failed to store message event for task %s: %v", ex.ec.TaskID, err)
 			return
 		}
@@ -638,7 +638,7 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 	// broader Redis storage-error handling; broadcasting is correctly skipped
 	// here so subscribers never get ahead of the store.
 	response := protocol.NewStreamResponseStatusUpdate(ev)
-	if err := ex.manager.storeTaskEvent(context.Background(), ex.task, response); err != nil {
+	if err := ex.manager.commitTaskEvent(context.Background(), ex.task, response); err != nil {
 		if yielding {
 			ex.manager.abortExecutionYield(ex.ec.TaskID, ex.live)
 		}
@@ -705,7 +705,7 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 	ex.taskTouched = true
 	// Persist before broadcast (consistency order).
 	response := protocol.NewStreamResponseArtifactUpdate(ev)
-	if err := ex.manager.storeTaskEvent(context.Background(), ex.task, response); err != nil {
+	if err := ex.manager.commitTaskEvent(context.Background(), ex.task, response); err != nil {
 		log.Errorf("RedisTaskManager: failed to store task %s artifact: %v", ev.TaskID, err)
 		return
 	}

@@ -175,7 +175,7 @@ func TestCrossNode_ResubscribeReceivesSubsequentEvents(t *testing.T) {
 func TestCrossNode_DeliversEventPublishedRightAfterResubscribe(t *testing.T) {
 	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor())
 	task := storedTask(t, nodeA, "task-gap", "ctx-gap", protocol.TaskStateWorking)
-	if err := nodeA.appendStreamEvent(context.Background(), task.ID, protocol.NewStreamResponseStatusUpdate(
+	if err := nodeA.appendTaskEvent(context.Background(), task.ID, protocol.NewStreamResponseStatusUpdate(
 		statusEvent(protocol.TaskStateWorking, agentReply("w1")))); err != nil {
 		t.Fatalf("append working event: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestCrossNode_DeliversEventPublishedRightAfterResubscribe(t *testing.T) {
 		t.Fatalf("OnResubscribe: %v", err)
 	}
 	// Publish the terminal event immediately after resubscribe.
-	if err := nodeA.appendStreamEvent(context.Background(), task.ID, protocol.NewStreamResponseStatusUpdate(
+	if err := nodeA.appendTaskEvent(context.Background(), task.ID, protocol.NewStreamResponseStatusUpdate(
 		statusEvent(protocol.TaskStateCompleted, agentReply("done")))); err != nil {
 		t.Fatalf("append completed event: %v", err)
 	}
@@ -298,13 +298,13 @@ func TestCrossNode_AtomicSnapshotCursorHasNoOverlapOrGap(t *testing.T) {
 	first.TaskID = task.ID
 	first.ContextID = task.ContextID
 	task.Artifacts, _ = protocol.AppendArtifact(task.Artifacts, first.Artifact, false)
-	if err := nodeA.storeTaskEvent(
+	if err := nodeA.commitTaskEvent(
 		context.Background(), task, protocol.NewStreamResponseArtifactUpdate(first),
 	); err != nil {
 		t.Fatalf("store first task event: %v", err)
 	}
 
-	snapshot, cursor, err := nodeB.loadTaskAndCursor(context.Background(), task.ID)
+	snapshot, cursor, err := nodeB.eventTransport.LoadTaskAndCursor(context.Background(), task.ID)
 	if err != nil {
 		t.Fatalf("loadTaskAndCursor: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestCrossNode_AtomicSnapshotCursorHasNoOverlapOrGap(t *testing.T) {
 	appendChunk := true
 	second.Append = &appendChunk
 	task.Artifacts, _ = protocol.AppendArtifact(task.Artifacts, second.Artifact, true)
-	if err := nodeA.storeTaskEvent(
+	if err := nodeA.commitTaskEvent(
 		context.Background(), task, protocol.NewStreamResponseArtifactUpdate(second),
 	); err != nil {
 		t.Fatalf("store second task event: %v", err)
@@ -360,7 +360,7 @@ func TestCrossNode_InputRequiredDoesNotCloseResubscribe(t *testing.T) {
 	input.TaskID = task.ID
 	input.ContextID = task.ContextID
 	task.Status = input.Status
-	if err := nodeA.storeTaskEvent(
+	if err := nodeA.commitTaskEvent(
 		context.Background(), task, protocol.NewStreamResponseStatusUpdate(input),
 	); err != nil {
 		t.Fatalf("store input-required: %v", err)
@@ -373,7 +373,7 @@ func TestCrossNode_InputRequiredDoesNotCloseResubscribe(t *testing.T) {
 	completed.TaskID = task.ID
 	completed.ContextID = task.ContextID
 	task.Status = completed.Status
-	if err := nodeA.storeTaskEvent(
+	if err := nodeA.commitTaskEvent(
 		context.Background(), task, protocol.NewStreamResponseStatusUpdate(completed),
 	); err != nil {
 		t.Fatalf("store completed: %v", err)
@@ -404,7 +404,7 @@ func TestCrossNode_SlowConsumerDoesNotLoseStream(t *testing.T) {
 		update := protocol.NewStreamResponseStatusUpdate(
 			statusEvent(protocol.TaskStateWorking, agentReply("still working")),
 		)
-		if err := nodeA.appendStreamEvent(context.Background(), task.ID, update); err != nil {
+		if err := nodeA.appendTaskEvent(context.Background(), task.ID, update); err != nil {
 			t.Fatalf("append stream event %d: %v", i, err)
 		}
 	}
@@ -492,10 +492,10 @@ func TestCrossNode_SubMillisecondExpirationIsClamped(t *testing.T) {
 	update.TaskID = task.ID
 	update.ContextID = task.ContextID
 	task.Status = update.Status
-	if err := manager.storeTaskEvent(
+	if err := manager.commitTaskEvent(
 		context.Background(), task, protocol.NewStreamResponseStatusUpdate(update),
 	); err != nil {
-		t.Fatalf("storeTaskEvent with sub-millisecond configured TTL: %v", err)
+		t.Fatalf("commitTaskEvent with sub-millisecond configured TTL: %v", err)
 	}
 	if got, err := manager.client.XLen(context.Background(), streamKey(task.ID)).Result(); err != nil || got != 1 {
 		t.Fatalf("stream event missing after clamped TTL: xlen=%d err=%v", got, err)
@@ -507,7 +507,7 @@ func TestCrossNode_SubMillisecondExpirationIsClamped(t *testing.T) {
 func TestCrossNode_CloseRejectsTailerAfterSnapshotRead(t *testing.T) {
 	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor())
 	task := storedTask(t, nodeA, "task-close-admission", "ctx-close-admission", protocol.TaskStateWorking)
-	if _, _, err := nodeB.loadTaskAndCursor(context.Background(), task.ID); err != nil {
+	if _, _, err := nodeB.eventTransport.LoadTaskAndCursor(context.Background(), task.ID); err != nil {
 		t.Fatalf("warm loadTaskAndCursor script: %v", err)
 	}
 	hook := &blockAfterCommandHook{

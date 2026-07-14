@@ -21,6 +21,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/pushdispatch"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/taskevent"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
@@ -33,18 +34,6 @@ const (
 	conversationPrefix     = "conv:"
 	taskPrefix             = "task:"
 	pushNotificationPrefix = "push:"
-	// streamPrefix keys the per-task event stream used for cross-node resubscribe.
-	// streamKey adds the task key as a Redis Cluster hash tag so the task and
-	// stream can be read or written atomically by one script.
-	streamPrefix = "stream:"
-	// streamField is the single XADD field carrying the JSON-encoded StreamResponse.
-	streamField = "e"
-	// streamMaxLen caps each task's event stream (XADD MAXLEN ~).
-	streamMaxLen = 10000
-	// streamReadCount caps entries returned per XREAD.
-	streamReadCount = 64
-	// streamBlockTimeout bounds one XREAD BLOCK slice so tailers re-check context.
-	streamBlockTimeout = 5 * time.Second
 
 	// Default expiration time for Redis keys (1 hour).
 	defaultExpiration = 1 * time.Hour
@@ -71,63 +60,6 @@ redis.call('PEXPIRE', KEYS[1], ARGV[2])
 return 1
 `)
 
-// storeTaskEventScript atomically persists a task snapshot and its event. The
-// stream type is checked before either write because Redis scripts are atomic
-// with respect to other clients but do not roll back commands after a runtime
-// error. The task and stream keys share one Redis Cluster slot (see streamKey).
-var storeTaskEventScript = redis.NewScript(`
-local stream_type = redis.call('TYPE', KEYS[2]).ok
-if stream_type ~= 'none' and stream_type ~= 'stream' then
-    return redis.error_reply('task event stream has wrong type')
-end
-local event_id = redis.call(
-    'XADD', KEYS[2], 'MAXLEN', '~', ARGV[3], '*', ARGV[4], ARGV[2]
-)
-redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[5])
-redis.call('PEXPIRE', KEYS[2], ARGV[5])
-return event_id
-`)
-
-// appendStreamEventScript persists an event that does not change the Task
-// snapshot (for example, a Message emitted after the Task exists). Its TTL is
-// capped to the Task's remaining TTL so an event-only write cannot leave an
-// orphan stream after the Task expires.
-var appendStreamEventScript = redis.NewScript(`
-local task_ttl = redis.call('PTTL', KEYS[1])
-if task_ttl == -2 then
-    return redis.error_reply('task does not exist')
-end
-local stream_type = redis.call('TYPE', KEYS[2]).ok
-if stream_type ~= 'none' and stream_type ~= 'stream' then
-    return redis.error_reply('task event stream has wrong type')
-end
-local event_id = redis.call(
-    'XADD', KEYS[2], 'MAXLEN', '~', ARGV[2], '*', ARGV[3], ARGV[1]
-)
-if task_ttl == -1 then
-    redis.call('PERSIST', KEYS[2])
-else
-    redis.call('PEXPIRE', KEYS[2], math.max(1, task_ttl))
-end
-return event_id
-`)
-
-// loadTaskAndCursorScript returns a Task snapshot and the stream tail from one
-// Redis linearization point. A concurrent storeTaskEventScript therefore lands
-// wholly before the snapshot/cursor pair or wholly after it.
-var loadTaskAndCursorScript = redis.NewScript(`
-local task = redis.call('GET', KEYS[1])
-if not task then
-    return {0, '', '0-0'}
-end
-local tail = redis.call('XREVRANGE', KEYS[2], '+', '-', 'COUNT', 1)
-local cursor = '0-0'
-if #tail > 0 then
-    cursor = tail[1][1]
-end
-return {1, task, cursor}
-`)
-
 // TaskManager provides a concrete, Redis-based implementation of the
 // TaskManager interface. It persists messages, conversations, and tasks in
 // Redis and delegates the agent logic to an injected Processor: the MessageProcessor
@@ -141,6 +73,9 @@ type TaskManager struct {
 	client redis.UniversalClient
 	// expiration is the time after which Redis keys expire.
 	expiration time.Duration
+	// eventTransport distributes task events between manager instances. It is
+	// nil when cross-node resubscribe is disabled.
+	eventTransport taskevent.Transport
 
 	// subMu is a mutex for the subscribers map.
 	subMu sync.RWMutex
@@ -173,7 +108,7 @@ type TaskManager struct {
 
 	// tailerWg counts cross-node resubscribe tailer goroutines so Close joins
 	// them before closing the Redis client. baseCtx is canceled by Close to
-	// unpark a tailer parked in a blocking XREAD.
+	// unpark a tailer parked in a blocking transport read.
 	tailerWg   sync.WaitGroup
 	baseCtx    context.Context
 	baseCancel context.CancelFunc
@@ -225,6 +160,9 @@ func NewTaskManager(
 		executions:  make(map[string]*liveExecution),
 		pushEnabled: options.Push.Sender != nil || options.Push.ManualDelivery,
 		options:     options,
+	}
+	if options.CrossNodeResubscribe {
+		manager.eventTransport = newRedisTaskEventTransport(client, expiration)
 	}
 	manager.pushCtx, manager.pushCancel = context.WithCancel(context.Background())
 	if options.Push.Sender != nil && !options.Push.ManualDelivery {
@@ -481,7 +419,7 @@ func (m *TaskManager) cancelWithoutLiveRun(
 	response := protocol.NewStreamResponseStatusUpdate(event)
 	// Persist with a background context (like every engine write): the CANCELED
 	// state must land even if the cancel request's own context is already done.
-	if err := m.storeTaskEvent(context.Background(), task, response); err != nil {
+	if err := m.commitTaskEvent(context.Background(), task, response); err != nil {
 		log.Errorf("Error storing cancelled task %s: %v", params.ID, err)
 		return nil, err
 	}
@@ -777,7 +715,7 @@ func (m *TaskManager) OnResubscribe(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (<-chan protocol.StreamResponse, error) {
-	if m.options.CrossNodeResubscribe {
+	if m.eventTransport != nil {
 		return m.onCrossNodeResubscribe(ctx, params)
 	}
 	// The snapshot read happens OUTSIDE subMu: getTaskInternal is a network
@@ -850,15 +788,15 @@ func (m *TaskManager) OnResubscribe(
 
 // onCrossNodeResubscribe is the cross-node resubscribe path (opt-in via
 // WithCrossNodeResubscribe). The first frame is the current snapshot; a tailer
-// then reads events committed after the snapshot's atomic stream cursor.
+// then reads events committed after the snapshot's atomic event cursor.
 func (m *TaskManager) onCrossNodeResubscribe(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (<-chan protocol.StreamResponse, error) {
-	// The Task and stream tail are read by one Redis script. A concurrent event
-	// commit is therefore either reflected by both values or by neither: the
-	// snapshot and subsequent XREAD contain no gap and no overlapping task event.
-	task, startID, err := m.loadTaskAndCursor(ctx, params.ID)
+	// The transport loads the Task and event cursor at one atomic boundary. A
+	// concurrent task-event commit is therefore either reflected by both values
+	// or by neither: the snapshot and subsequent read contain no gap or overlap.
+	task, startID, err := m.eventTransport.LoadTaskAndCursor(ctx, params.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -879,9 +817,9 @@ func (m *TaskManager) onCrossNodeResubscribe(
 		return nil, err
 	}
 
-	// The subscriber is NOT registered in the local map: the Redis stream is its
-	// only source, whose producer may be another instance. Admit the tailer under
-	// cancelMu so Close cannot begin waiting before this goroutine is counted.
+	// The subscriber is NOT registered in the local map: the event transport is
+	// its only source, whose producer may be another instance. Admit the tailer
+	// under cancelMu so Close cannot wait before this goroutine is counted.
 	m.cancelMu.Lock()
 	if m.closed {
 		m.cancelMu.Unlock()
@@ -890,65 +828,20 @@ func (m *TaskManager) onCrossNodeResubscribe(
 	}
 	m.tailerWg.Add(1)
 	m.cancelMu.Unlock()
-	go m.tailStream(ctx, params.ID, startID, subscriber)
+	go m.tailTaskEvents(ctx, params.ID, startID, subscriber)
 
 	return subscriber.Channel(), nil
 }
 
-// streamKey shares the task key's Redis Cluster slot without changing the
-// existing task key. Redis hashes the full task key and the {...} portion of
-// the stream key, which are the same bytes for manager-generated task IDs.
-func streamKey(taskID string) string {
-	return streamPrefix + "{" + taskPrefix + taskID + "}"
-}
-
-// loadTaskAndCursor atomically loads the current Task and event-stream tail.
-func (m *TaskManager) loadTaskAndCursor(
-	ctx context.Context,
-	taskID string,
-) (*protocol.Task, string, error) {
-	values, err := loadTaskAndCursorScript.Run(
-		ctx,
-		m.client,
-		[]string{taskPrefix + taskID, streamKey(taskID)},
-	).Slice()
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to load task %s and stream cursor: %w", taskID, err)
-	}
-	if len(values) != 3 {
-		return nil, "", fmt.Errorf("failed to load task %s and stream cursor: unexpected result", taskID)
-	}
-	exists, ok := values[0].(int64)
-	if !ok {
-		return nil, "", fmt.Errorf("failed to load task %s and stream cursor: invalid existence flag", taskID)
-	}
-	if exists == 0 {
-		return nil, "", taskmanager.ErrTaskNotFound(taskID)
-	}
-	taskJSON, ok := values[1].(string)
-	if !ok {
-		return nil, "", fmt.Errorf("failed to load task %s and stream cursor: invalid task payload", taskID)
-	}
-	cursor, ok := values[2].(string)
-	if !ok || cursor == "" {
-		return nil, "", fmt.Errorf("failed to load task %s and stream cursor: invalid cursor", taskID)
-	}
-	var task protocol.Task
-	if err := json.Unmarshal([]byte(taskJSON), &task); err != nil {
-		return nil, "", fmt.Errorf("failed to deserialize task: %w", err)
-	}
-	return &task, cursor, nil
-}
-
-// tailStream feeds a resubscriber from the task's Redis event stream, reading
-// strictly after startID. It closes the subscriber and returns on the terminal
-// status frame, when the request ends, or when the manager closes.
-func (m *TaskManager) tailStream(ctx context.Context, taskID, startID string, sub *taskSubscriber) {
+// tailTaskEvents feeds a resubscriber from the configured event transport,
+// reading strictly after startID. It closes the subscriber and returns on the
+// terminal status frame, when the request ends, or when the manager closes.
+func (m *TaskManager) tailTaskEvents(ctx context.Context, taskID, startID string, sub *taskSubscriber) {
 	defer m.tailerWg.Done()
 	defer sub.Close()
 
-	// Cancel the blocking XREAD, and unblock a parked blocking-send via Close,
-	// when the request ends or the manager closes.
+	// Cancel a blocking transport read, and unblock a parked blocking-send via
+	// Close, when the request ends or the manager closes.
 	readCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	tailerDone := make(chan struct{})
@@ -964,79 +857,45 @@ func (m *TaskManager) tailStream(ctx context.Context, taskID, startID string, su
 		sub.Close()
 	}()
 
-	key := streamKey(taskID)
 	for {
-		// A blocking XREAD is not interrupted mid-flight by context cancellation
-		// (only Close, via the client, unblocks it), so re-check between slices:
-		// on client disconnect this bounds teardown to one streamBlockTimeout.
+		// ReadAfter implementations may use bounded blocking reads, so re-check
+		// cancellation between batches.
 		select {
 		case <-readCtx.Done():
 			return
 		default:
 		}
-		res, err := m.client.XRead(readCtx, &redis.XReadArgs{
-			Streams: []string{key, startID},
-			Block:   streamBlockTimeout,
-			Count:   streamReadCount,
-		}).Result()
-		if errors.Is(err, redis.Nil) {
-			continue // BLOCK slice timed out with nothing new.
-		}
+		events, nextID, err := m.eventTransport.ReadAfter(readCtx, taskID, startID)
 		if err != nil {
-			return // readCtx canceled, client closed, or a Redis error.
+			return // read context canceled, transport closed, or a storage error.
 		}
-		for _, stream := range res {
-			for _, entry := range stream.Messages {
-				startID = entry.ID
-				raw, ok := entry.Values[streamField].(string)
-				if !ok {
-					continue
-				}
-				var event protocol.StreamResponse
-				if err := json.Unmarshal([]byte(raw), &event); err != nil {
-					log.Warnf("RedisTaskManager: discarding malformed stream entry for task %s: %v", taskID, err)
-					continue
-				}
-				if err := sub.Send(event); err != nil {
-					return // consumer gone.
-				}
-				// Terminate on a terminal STATUS frame only — an artifact's
-				// lastChunk (also IsFinal on the artifact) ends an artifact, not
-				// the task.
-				if su := event.GetStatusUpdate(); su != nil && isFinalState(su.Status.State) {
-					return
-				}
+		startID = nextID
+		for _, event := range events {
+			if err := sub.Send(event); err != nil {
+				return // consumer gone.
+			}
+			// Terminate on a terminal STATUS frame only — an artifact's
+			// lastChunk (also IsFinal on the artifact) ends an artifact, not
+			// the task.
+			if su := event.GetStatusUpdate(); su != nil && isFinalState(su.Status.State) {
+				return
 			}
 		}
 	}
 }
 
-// appendStreamEvent stores an event that does not modify the Task snapshot.
-// Task-changing events use storeTaskEvent so their snapshot and event share one
-// atomic commit. No-op when cross-node resubscribe is disabled.
-func (m *TaskManager) appendStreamEvent(
+// appendTaskEvent distributes an event that does not modify the Task snapshot.
+// Task-changing events use commitTaskEvent so their snapshot and event share
+// one atomic commit. It is a no-op when no event transport is configured.
+func (m *TaskManager) appendTaskEvent(
 	ctx context.Context,
 	taskID string,
 	event protocol.StreamResponse,
 ) error {
-	if !m.options.CrossNodeResubscribe {
+	if m.eventTransport == nil {
 		return nil
 	}
-	payload, err := json.Marshal(event)
-	if err != nil {
-		return fmt.Errorf("failed to marshal stream event for task %s: %w", taskID, err)
-	}
-	if _, err := appendStreamEventScript.Run(
-		ctx,
-		m.client,
-		[]string{taskPrefix + taskID, streamKey(taskID)},
-		payload,
-		streamMaxLen,
-		streamField,
-	).Result(); err != nil {
-		return fmt.Errorf("failed to append stream event for task %s: %w", taskID, err)
-	}
-	return nil
+	return m.eventTransport.AppendEvent(ctx, taskID, event)
 }
 
 // taskChanged reports whether two snapshots of the same task differ in what a
@@ -1204,38 +1063,18 @@ func (m *TaskManager) storeTask(ctx context.Context, task *protocol.Task) error 
 	return nil
 }
 
-// storeTaskEvent atomically persists a Task snapshot and the event that produced
-// it when cross-node resubscribe is enabled. With the feature disabled it keeps
+// commitTaskEvent atomically persists a Task snapshot and distributes the event
+// that produced it when an event transport is configured. Without one it keeps
 // the original single-key Task persistence path.
-func (m *TaskManager) storeTaskEvent(
+func (m *TaskManager) commitTaskEvent(
 	ctx context.Context,
 	task *protocol.Task,
 	event protocol.StreamResponse,
 ) error {
-	if !m.options.CrossNodeResubscribe {
+	if m.eventTransport == nil {
 		return m.storeTask(ctx, task)
 	}
-	taskBytes, err := json.Marshal(task)
-	if err != nil {
-		return fmt.Errorf("failed to serialize task: %w", err)
-	}
-	eventBytes, err := json.Marshal(event)
-	if err != nil {
-		return fmt.Errorf("failed to serialize task event: %w", err)
-	}
-	if _, err := storeTaskEventScript.Run(
-		ctx,
-		m.client,
-		[]string{taskPrefix + task.ID, streamKey(task.ID)},
-		taskBytes,
-		eventBytes,
-		streamMaxLen,
-		streamField,
-		m.expiration.Milliseconds(),
-	).Result(); err != nil {
-		return fmt.Errorf("failed to store task and event: %w", err)
-	}
-	return nil
+	return m.eventTransport.CommitTaskEvent(ctx, task, event)
 }
 
 // isFinalState checks if a TaskState represents a terminal state.
