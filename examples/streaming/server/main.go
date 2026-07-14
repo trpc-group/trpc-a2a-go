@@ -23,8 +23,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
-
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
@@ -77,7 +75,11 @@ func (p *streamingMessageProcessor) ProcessMessage(
 		totalChunks := len(chunks)
 
 		// One streaming artifact, reassembled from per-chunk appends.
-		artifactID := uuid.New().String()
+		streamingArtifact := protocol.NewArtifactWithID(
+			stringPtr("Processed data"),
+			stringPtr("Streaming processed data"),
+			nil,
+		)
 
 		// Process each chunk with a small delay to simulate real-time processing
 		for i, chunk := range chunks {
@@ -102,12 +104,8 @@ func (p *streamingMessageProcessor) ProcessMessage(
 			// Add the first chunk, then update the same ArtifactID with each
 			// continuation chunk. The framework reassembles them into one artifact.
 			isLastChunk := (i == totalChunks-1)
-			chunkArtifact := protocol.Artifact{
-				ArtifactID:  artifactID,
-				Name:        stringPtr("Processed data"),
-				Description: stringPtr("Streaming processed data"),
-				Parts:       []*protocol.Part{protocol.NewTextPart(processedChunk)},
-			}
+			chunkArtifact := *streamingArtifact
+			chunkArtifact.Parts = []*protocol.Part{protocol.NewTextPart(processedChunk)}
 
 			var err error
 			if i == 0 {
