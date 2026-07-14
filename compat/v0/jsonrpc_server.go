@@ -203,7 +203,9 @@ func (h *Handler) handlePushGet(ctx context.Context, w http.ResponseWriter, req 
 		writeError(w, req.ID, jsonrpc.ErrInvalidParams(fmt.Sprintf("failed to parse params: %v", err)))
 		return
 	}
-	config, err := h.tm.OnPushNotificationGet(ctx, ToV1TaskIDParams(params))
+	config, err := h.tm.OnPushNotificationGet(ctx, protocol.GetTaskPushNotificationConfigParams{
+		TaskID: params.ID,
+	})
 	if err != nil {
 		writeTaskManagerError(w, req.ID, err, "OnPushNotificationGet")
 		return

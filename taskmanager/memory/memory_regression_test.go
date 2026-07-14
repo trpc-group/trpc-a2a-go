@@ -359,7 +359,7 @@ func TestSendMessage_PushConfigReachesProcessor(t *testing.T) {
 			close(out)
 			return out, nil
 		})
-	manager := newTestManager(t, processor)
+	manager := newTestManager(t, processor, WithPushNotifications(noopSender()))
 
 	params := userParams("hello")
 	params.Configuration = &protocol.SendMessageConfiguration{

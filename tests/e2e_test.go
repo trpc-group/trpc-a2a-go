@@ -199,9 +199,9 @@ func (m *testBasicTaskManager) OnPushNotificationSet(
 // OnPushNotificationGet delegates to the composed TaskManager.
 func (m *testBasicTaskManager) OnPushNotificationGet(
 	ctx context.Context,
-	params protocol.TaskIDParams,
+	params protocol.GetTaskPushNotificationConfigParams,
 ) (*protocol.TaskPushNotificationConfig, error) {
-	log.Printf("[Test TM Wrapper] OnPushNotificationGet called for %s, delegating to base.", params.ID)
+	log.Printf("[Test TM Wrapper] OnPushNotificationGet called for %s, delegating to base.", params.TaskID)
 	return m.TaskManager.OnPushNotificationGet(ctx, params)
 }
 

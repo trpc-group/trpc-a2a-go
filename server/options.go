@@ -154,12 +154,17 @@ func WithAuthProvider(provider auth.Provider) Option {
 	}
 }
 
-// WithJWKSEndpoint enables the JWKS endpoint for push notification authentication.
-// This is used for providing public keys for JWT verification.
+// WithJWKSEndpoint explicitly controls the JWKS endpoint for push notification
+// verification. Most servers do not need it: when a JWKS handler is configured
+// with WithPushNotificationJWKSHandler, the server publishes it automatically.
+// Use this option to override that default — in particular,
+// WithJWKSEndpoint(false, "") disables local publication when a gateway or CDN
+// serves the keys instead.
 // The path defaults to "/.well-known/jwks.json".
 func WithJWKSEndpoint(enabled bool, path string) Option {
 	return func(s *A2AServer) {
 		s.jwksEnabled = enabled
+		s.jwksExplicitlySet = true
 		if path != "" {
 			s.jwksEndpoint = path
 			s.pathsExplicitlySet = true
@@ -167,12 +172,16 @@ func WithJWKSEndpoint(enabled bool, path string) Option {
 	}
 }
 
-// WithPushNotificationAuthenticator sets a custom authenticator for push notifications.
-// This allows reusing the same authenticator instance throughout the application
-// ensuring that the same keys are used for signing and verification.
-func WithPushNotificationAuthenticator(authenticator *auth.PushNotificationAuthenticator) Option {
+// WithPushNotificationJWKSHandler sets the HTTP handler that publishes keys for
+// verifying signed push notifications. Typically pass sender.JWKSHandler() so
+// the published keys match that SignedSender's identity. Custom signing and key
+// publication implementations can pass any http.Handler.
+//
+// This option controls only JWKS publication; client-declared webhook
+// authentication is handled by the configured push Sender.
+func WithPushNotificationJWKSHandler(handler http.Handler) Option {
 	return func(s *A2AServer) {
-		s.pushAuth = authenticator
+		s.pushJWKSHandler = handler
 	}
 }
 

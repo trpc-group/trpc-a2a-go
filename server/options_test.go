@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry/metrics"
 )
 
@@ -85,16 +86,13 @@ func TestWithJWKSEndpoint(t *testing.T) {
 	assert.False(t, s.jwksEnabled)
 }
 
-// Test for WithPushNotificationAuthenticator option
-func TestWithPushNotificationAuthenticator(t *testing.T) {
-	authenticator := auth.NewPushNotificationAuthenticator()
-	require.NoError(t, authenticator.GenerateKeyPair())
-
+func TestWithPushNotificationJWKSHandler(t *testing.T) {
+	handler := http.NewServeMux()
 	serverOptions := &A2AServer{}
-	opt := WithPushNotificationAuthenticator(authenticator)
+	opt := WithPushNotificationJWKSHandler(handler)
 	opt(serverOptions)
 
-	assert.Equal(t, authenticator, serverOptions.pushAuth)
+	assert.Same(t, handler, serverOptions.pushJWKSHandler)
 }
 
 type firstTokenPolicyStub struct{}
@@ -376,12 +374,14 @@ func (m *optionsTestTaskManager) OnPushNotificationSet(ctx context.Context, para
 	return &params, nil
 }
 
-func (m *optionsTestTaskManager) OnPushNotificationGet(ctx context.Context, params protocol.TaskIDParams) (*protocol.TaskPushNotificationConfig, error) {
+func (m *optionsTestTaskManager) OnPushNotificationGet(ctx context.Context, params protocol.GetTaskPushNotificationConfigParams) (*protocol.TaskPushNotificationConfig, error) {
 	return &protocol.TaskPushNotificationConfig{
-		TaskID: params.ID,
+		TaskID: params.TaskID,
 		URL:    "http://test.example.com/webhook",
 	}, nil
 }
+
+func (m *optionsTestTaskManager) PushSender() push.Sender { return nil }
 
 func (m *optionsTestTaskManager) OnListTasks(
 	ctx context.Context, params protocol.ListTasksParams,

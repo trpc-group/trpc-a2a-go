@@ -10,6 +10,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +31,22 @@ const (
 	AuthUserKey ContextKey = "auth_user"
 	// AuthHeaderName is the default name of the header containing the authentication token.
 	AuthHeaderName = "Authorization"
+)
+
+// TokenType represents the authentication token type.
+type TokenType string
+
+const (
+	// TokenTypeBearer represents a bearer token.
+	TokenTypeBearer TokenType = "Bearer"
+)
+
+// Authentication errors returned by the inbound auth providers.
+var (
+	ErrMissingToken      = errors.New("missing authentication token")
+	ErrInvalidAuthHeader = errors.New("invalid authorization header format")
+	ErrInvalidToken      = errors.New("invalid authentication token")
+	ErrTokenExpired      = errors.New("token has expired")
 )
 
 // User represents an authenticated user.

@@ -4,14 +4,15 @@
 //
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
-// Package main implements a server with push notification support using JWKS.
-// The server demonstrates how to set up and use push notifications in an A2A server:
+// Package main implements an A2A server with automatic push notifications + JWKS.
 //
-// 1. The JWKS endpoint and JWT authenticator are enabled via server options
-// 2. The message processor runs tasks asynchronously and reports progress as events
-// 3. When a task reaches a terminal state, the task manager sends a push notification
-// 4. Notifications are signed using JWT with the private key in the authenticator
-// 5. Clients can verify the notification using the public key from the JWKS endpoint
+//  1. A push.Sender is wired into the TaskManager via memory.WithPushNotifications,
+//     so the framework delivers task updates to registered webhooks automatically —
+//     the message processor never sends notifications itself.
+//  2. The sender signs each callback with a JWT (via the authenticator); the server
+//     publishes the verification keys at a JWKS endpoint.
+//  3. On a terminal state the framework POSTs a StreamResponse to every webhook the
+//     client registered; the client verifies the JWT using the JWKS public key.
 package main
 
 import (
@@ -21,9 +22,9 @@ import (
 	"fmt"
 	"time"
 
-	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push/pushauth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
@@ -33,12 +34,10 @@ const (
 	defaultServerPort = 8000
 )
 
-// pushNotificationMessageProcessor is a message processor that sends push notifications.
-// It implements the taskmanager.MessageProcessor interface for message processing
-// and handles push notification functionality.
-type pushNotificationMessageProcessor struct {
-	manager *pushNotificationTaskManager
-}
+// pushNotificationMessageProcessor runs tasks asynchronously and reports state.
+// It does NOT send push notifications itself — the framework delivers them
+// automatically once a push.Sender is wired into the TaskManager (see main).
+type pushNotificationMessageProcessor struct{}
 
 // ProcessMessage implements the taskmanager.MessageProcessor interface.
 // One code path serves message/send and message/stream alike: the task is
@@ -126,38 +125,9 @@ func (p *pushNotificationMessageProcessor) processTaskAsync(
 		return
 	}
 
-	// Send push notification
-	p.manager.sendPushNotification(ctx, taskID, string(protocol.TaskStateCompleted))
-
+	// The framework auto-delivers a push notification for this terminal state to
+	// every webhook the client registered — no manual send needed here.
 	log.Infof("Task completed asynchronously: %s", taskID)
-}
-
-type pushNotificationTaskManager struct {
-	taskmanager.TaskManager
-	authenticator *auth.PushNotificationAuthenticator
-}
-
-// sendPushNotification sends a push notification for a completed task
-func (m *pushNotificationTaskManager) sendPushNotification(ctx context.Context, taskID, status string) {
-	log.Infof("Sending push notification for task: %s with status: %s", taskID, status)
-	// Resolve the webhook the client registered for this task through the
-	// TaskManager interface.
-	pushConfig, err := m.TaskManager.OnPushNotificationGet(ctx, protocol.TaskIDParams{ID: taskID})
-	if err != nil {
-		log.Infof("No push notification configuration for task: %s", taskID)
-		return
-	}
-
-	// Send push notification
-	if err := m.authenticator.SendPushNotification(ctx, pushConfig.URL, map[string]interface{}{
-		"task_id":   taskID,
-		"status":    status,
-		"timestamp": time.Now().Format(time.RFC3339),
-	}); err != nil {
-		log.Errorf("Failed to send push notification: %v", err)
-	} else {
-		log.Infof("Push notification sent successfully for task: %s", taskID)
-	}
 }
 
 func main() {
@@ -175,7 +145,6 @@ func main() {
 		Version:     "1.0.0",
 		Capabilities: server.AgentCapabilities{
 			Streaming:              boolPtr(true),
-			PushNotifications:      boolPtr(true),
 			StateTransitionHistory: boolPtr(true),
 		},
 		DefaultInputModes:  []string{"text"},
@@ -193,35 +162,27 @@ func main() {
 		},
 	}
 
-	authenticator := auth.NewPushNotificationAuthenticator()
-	if err := authenticator.GenerateKeyPair(); err != nil {
-		log.Fatalf("failed to generate key pair: %v", err)
+	// A SignedSender generates a signing key by default. Production replicas can
+	// share one key via pushauth.WithJWTKey so every instance signs with a key
+	// published through JWKS.
+	signedSender, err := pushauth.NewSignedSender()
+	if err != nil {
+		log.Fatalf("failed to create signed push sender: %v", err)
 	}
 
-	// Create task processor
+	// TaskManager: automatic delivery on significant task states.
 	processor := &pushNotificationMessageProcessor{}
-	// Create task manager
-	tm, err := memory.NewTaskManager(processor)
+	tm, err := memory.NewTaskManager(processor,
+		memory.WithPushNotifications(signedSender),
+	)
 	if err != nil {
 		log.Fatalf("failed to create task manager: %v", err)
 	}
 
-	// Create custom task manager with push notification support
-	customTM := &pushNotificationTaskManager{
-		TaskManager:   tm,
-		authenticator: authenticator,
-	}
-	processor.manager = customTM
-	// Combine standard options with additional options
-	options := []server.Option{
-		server.WithJWKSEndpoint(true, "/.well-known/jwks.json"),
-		server.WithPushNotificationAuthenticator(authenticator),
-	}
-
-	// Create server with the authenticator
-	a2aServer, err := server.NewA2AServer(
-		customTM,
-		append([]server.Option{server.WithAgentCard(agentCard)}, options...)...,
+	// Server: publish the sender's verification keys at the standard JWKS path.
+	a2aServer, err := server.NewA2AServer(tm,
+		server.WithAgentCard(agentCard),
+		server.WithPushNotificationJWKSHandler(signedSender.JWKSHandler()),
 	)
 	if err != nil {
 		log.Fatalf("failed to create A2A server: %v", err)

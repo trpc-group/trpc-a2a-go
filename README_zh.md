@@ -511,27 +511,29 @@ client, err := client.NewA2AClient(
 
 ### 推送通知鉴权
 
-框架内置了对安全推送通知的支持：
+使用 `SignedSender` 以 JWT 鉴权方式投递推送通知，并通过 server 发布对应的验证公钥：
 
 ```go
-// Create an authenticator for push notifications
-notifAuth := auth.NewPushNotificationAuthenticator()
-
-// Generate a key pair
-if err := notifAuth.GenerateKeyPair(); err != nil {
+sender, err := pushauth.NewSignedSender()
+if err != nil {
     // Handle error
 }
 
-// Expose JWKS endpoint
-http.HandleFunc("/.well-known/jwks.json", notifAuth.HandleJWKS)
+taskManager, err := memory.NewTaskManager(
+    processor,
+    memory.WithPushNotifications(sender),
+)
 
-// Enable JWKS endpoint when creating the server
 srv, err := server.NewA2AServer(
     taskManager,
     server.WithAgentCard(agentCard),
-    server.WithJWKSEndpoint(true, "/.well-known/jwks.json"),
+    server.WithPushNotificationJWKSHandler(sender.JWKSHandler()),
 )
 ```
+
+如果客户端在推送配置中声明了认证 scheme 和凭据（例如 Basic 或 Bearer），
+sender 会按客户端要求使用；客户端未声明凭据时，才回退到这里配置的 JWT 身份。无需签名的场景可使用
+`push.NewHTTPSender()`，并省略 JWKS handler option。
 
 ## 会话管理
 
