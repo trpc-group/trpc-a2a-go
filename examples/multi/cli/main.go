@@ -4,6 +4,7 @@
 //
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
+// Package main implements the client for the multi-agent example.
 package main
 
 import (
@@ -13,101 +14,77 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/client"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 func main() {
-	// Define command-line flags - only root agent is supported
-	rootAgentURL := flag.String("url", "http://localhost:8080", "URL for the root agent")
+	rootURL := flag.String("url", "http://localhost:8080/", "root agent URL")
 	flag.Parse()
 
-	// Create the A2A client
-	a2aClient, err := client.NewA2AClient(*rootAgentURL)
+	a2aClient, err := client.NewA2AClient(*rootURL)
 	if err != nil {
-		log.Fatal("Failed to create A2A client: %v", err)
+		fmt.Fprintf(os.Stderr, "create client: %v\n", err)
+		os.Exit(1)
 	}
 
-	fmt.Printf("Connected to root agent at %s\n", *rootAgentURL)
-	fmt.Println("Type your requests and press Enter. Type 'exit' to quit.")
-
-	// Create a scanner to read user input
+	fmt.Printf("Connected to %s. Type a request, or exit.\n", *rootURL)
 	scanner := bufio.NewScanner(os.Stdin)
-
-	// Main input loop
 	for {
 		fmt.Print("> ")
 		if !scanner.Scan() {
 			break
 		}
-
-		input := scanner.Text()
-		if strings.ToLower(input) == "exit" {
+		input := strings.TrimSpace(scanner.Text())
+		if strings.EqualFold(input, "exit") {
 			break
 		}
-
 		if input == "" {
 			continue
 		}
 
-		// Send the task to the agent
-		response, err := sendMessage(a2aClient, input)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		response, err := a2aClient.SendMessage(ctx, protocol.SendMessageParams{
+			Message: protocol.NewMessage(
+				protocol.MessageRoleUser,
+				[]*protocol.Part{protocol.NewTextPart(input)},
+			),
+		})
+		cancel()
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			continue
 		}
 
-		// Display the response
-		fmt.Printf("\nResponse: %s\n\n", response)
+		text, err := responseText(response)
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			continue
+		}
+		fmt.Printf("%s\n", text)
 	}
 
 	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
+		fmt.Fprintf(os.Stderr, "read input: %v\n", err)
 	}
 }
 
-// sendMessage sends a message to the agent and waits for the response.
-func sendMessage(client *client.A2AClient, text string) (string, error) {
-	ctx := context.Background()
-
-	// Create the message to send
-	message := protocol.NewMessage(
-		protocol.MessageRoleUser,
-		[]*protocol.Part{protocol.NewTextPart(text)},
-	)
-
-	// Prepare the message parameters
-	params := protocol.SendMessageParams{
-		Message: message,
+func responseText(response *protocol.SendMessageResponse) (string, error) {
+	if message := response.GetMessage(); message != nil {
+		return messageText(*message), nil
 	}
-
-	// Send the message to the agent
-	result, err := client.SendMessage(ctx, params)
-	if err != nil {
-		return "", fmt.Errorf("failed to send message: %w", err)
+	if task := response.GetTask(); task != nil && task.Status.Message != nil {
+		return messageText(*task.Status.Message), nil
 	}
-
-	if msg := result.GetMessage(); msg != nil {
-		return extractText(*msg), nil
-	}
-	if task := result.GetTask(); task != nil {
-		if task.Status.Message != nil {
-			return extractText(*task.Status.Message), nil
-		}
-		return "", fmt.Errorf("no response message from agent")
-	}
-	return "", fmt.Errorf("unexpected empty response")
+	return "", fmt.Errorf("agent returned no text")
 }
 
-// extractText extracts the text content from a message.
-func extractText(message protocol.Message) string {
+func messageText(message protocol.Message) string {
 	var result strings.Builder
 	for _, part := range message.Parts {
-		if t := part.TextContent(); t != "" {
-			result.WriteString(t)
-		}
+		result.WriteString(part.TextContent())
 	}
 	return result.String()
 }

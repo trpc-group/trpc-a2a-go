@@ -7,9 +7,7 @@ replace trpc.group/trpc-go/trpc-a2a-go/v2 => ../
 replace trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/redis => ../taskmanager/redis
 
 require (
-	github.com/lestrrat-go/jwx/v2 v2.1.4
 	github.com/redis/go-redis/v9 v9.10.0
-	golang.org/x/oauth2 v0.26.0
 	trpc.group/trpc-go/trpc-a2a-go/v2 v2.0.0
 	trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/redis v0.0.0
 )
@@ -30,6 +28,7 @@ require (
 	github.com/lestrrat-go/httpcc v1.0.1 // indirect
 	github.com/lestrrat-go/httprc v1.0.6 // indirect
 	github.com/lestrrat-go/iter v1.0.2 // indirect
+	github.com/lestrrat-go/jwx/v2 v2.1.4 // indirect
 	github.com/lestrrat-go/option v1.0.1 // indirect
 	github.com/segmentio/asm v1.2.0 // indirect
 	go.opentelemetry.io/otel v1.24.0 // indirect
@@ -44,6 +43,7 @@ require (
 	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/crypto v0.32.0 // indirect
 	golang.org/x/net v0.24.0 // indirect
+	golang.org/x/oauth2 v0.26.0 // indirect
 	golang.org/x/sys v0.30.0 // indirect
 	golang.org/x/text v0.21.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20240102182953-50ed04b92917 // indirect

@@ -265,8 +265,9 @@ provider := auth.NewChainAuthProvider(
 srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card), server.WithAuthProvider(provider))
 ```
 
-The card's `securitySchemes` advertises what the server accepts.
-→ [examples/auth](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth).
+The card's `securitySchemes` advertises what the server accepts. The runnable
+JWT/API-key chain is in
+[examples/auth](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth).
 
 ## Push notifications
 
@@ -304,7 +305,7 @@ filtering or batching, a custom `push.Sender` can hold and delegate to the
 when push is unsupported and persisted (queryable, auto-delivered) when enabled —
 it also reaches your processor as `ec.PushConfig`. Custom headers/tracing:
 `push.WithRequestDecorator`.
-→ [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks).
+→ [examples/notify](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/notify).
 
 `SignedSender` honors a scheme and credentials declared by the client (such as
 Basic or Bearer) and uses its JWT identity as a fallback. If callbacks must be unsigned, use

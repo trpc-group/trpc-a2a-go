@@ -117,7 +117,7 @@ c, _ := client.NewA2AClient("http://localhost:8080/",
 )
 ```
 
-Full client wiring for JWT, API key, and OAuth2:
+Runnable client wiring for JWT and API key:
 → [examples/auth](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth).
 
 ## Calling agents from an agent (orchestration)

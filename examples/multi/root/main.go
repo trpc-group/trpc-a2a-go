@@ -4,337 +4,211 @@
 //
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
+// Package main implements the root agent in the multi-agent example.
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
-	"github.com/tmc/langchaingo/llms"
-	"github.com/tmc/langchaingo/llms/googleai"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/client"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
 
-// rootAgentProcessor implements the taskmanager.MessageProcessor interface.
-type rootAgentProcessor struct {
-	// LLM client for decision making
-	llm *googleai.GoogleAI
-	// Subagent clients
-	creativeClient      *client.A2AClient
-	exchangeClient      *client.A2AClient
-	reimbursementClient *client.A2AClient
+type rootProcessor struct {
+	creative      *client.A2AClient
+	exchange      *client.A2AClient
+	reimbursement *client.A2AClient
 }
 
-// ProcessMessage implements the taskmanager.MessageProcessor interface. The
-// body is fully synchronous: the outbound sub-agent calls block until the
-// sub-agent's round finishes, and the aggregated answer is emitted as a pure
-// message reply — no task comes into existence for a routing exchange.
-func (p *rootAgentProcessor) ProcessMessage(
+func (p *rootProcessor) ProcessMessage(
 	ctx context.Context,
 	ec *taskmanager.ExecContext,
 ) (<-chan protocol.StreamEvent, error) {
 	handle := taskmanager.NewTaskHandle(ctx, ec)
 	defer handle.Close()
 
-	// Extract text from the incoming message
-	text := extractText(ec.Message)
+	text := strings.TrimSpace(messageText(ec.Message))
 	if text == "" {
-		errMsg := "input message must contain text"
-		log.Error("Message processing failed: %s", errMsg)
-
-		// Reply with the error message directly
-		handle.Reply(protocol.NewAgentText(errMsg))
+		_ = handle.Reply(protocol.NewAgentText("input message must contain text"))
 		return handle.Events(), nil
 	}
 
-	log.Info("RootAgent received new request: %s", text)
+	agentName, agentClient := p.route(text)
+	if agentClient == nil {
+		_ = handle.Reply(protocol.NewAgentText(
+			"Choose a creative-writing, currency-exchange, or reimbursement request.",
+		))
+		return handle.Events(), nil
+	}
 
-	// Use Gemini or rule-based routing to decide which subagent to route the task to
-	subagent, err := p.routeTaskToSubagent(ctx, text)
+	contextID := handle.GetContextID()
+	message := protocol.NewMessageWithContext(
+		protocol.MessageRoleUser,
+		[]*protocol.Part{protocol.NewTextPart(text)},
+		nil,
+		&contextID,
+	)
+	response, err := agentClient.SendMessage(ctx, protocol.SendMessageParams{Message: message})
 	if err != nil {
-		log.Error("Error routing task: %v", err)
-		handle.Reply(protocol.NewAgentText(fmt.Sprintf("Failed to process your request: %v", err)))
+		_ = handle.Reply(protocol.NewAgentText(fmt.Sprintf("%s agent call failed: %v", agentName, err)))
 		return handle.Events(), nil
 	}
 
-	var result string
-
-	// Forward the task to the appropriate subagent
-	switch subagent {
-	case "creative":
-		log.Info("Routing to creative agent.")
-		result, err = p.callCreativeAgent(ctx, text)
-	case "exchange":
-		log.Info("Routing to exchange agent.")
-		result, err = p.callExchangeAgent(ctx, text)
-	case "reimbursement":
-		log.Info("Routing to reimbursement agent.")
-		result, err = p.callReimbursementAgent(ctx, text)
-	default:
-		// Handle using the root agent's own logic if no specific subagent was identified
-		log.Info("No specific subagent identified, handling with root agent.")
-		result = fmt.Sprintf("I'm not sure how to process your request: '%s'. You can try asking me to write something creative, check currency exchange rates, or submit a reimbursement request.", text)
-		err = nil
-	}
-
+	result, err := responseText(response)
 	if err != nil {
-		log.Error("Error from subagent: %v", err)
-		handle.Reply(protocol.NewAgentText(fmt.Sprintf("Failed to get response from subagent: %v", err)))
+		_ = handle.Reply(protocol.NewAgentText(fmt.Sprintf("%s agent returned no text: %v", agentName, err)))
 		return handle.Events(), nil
 	}
-
-	// Reply with the aggregated subagent response
-	handle.Reply(protocol.NewAgentText(result))
+	_ = handle.Reply(protocol.NewAgentText(fmt.Sprintf("Routed to %s agent:\n%s", agentName, result)))
 	return handle.Events(), nil
 }
 
-// routeTaskToSubagent uses the LLM to decide which subagent should handle the task.
-func (p *rootAgentProcessor) routeTaskToSubagent(ctx context.Context, text string) (string, error) {
-	if p.llm == nil {
-		// Simple rule-based routing if LLM is not available
-		text = strings.ToLower(text)
-		if strings.Contains(text, "write") || strings.Contains(text, "story") ||
-			strings.Contains(text, "poem") || strings.Contains(text, "creative") {
-			return "creative", nil
-		} else if strings.Contains(text, "exchange") || strings.Contains(text, "currency") ||
-			strings.Contains(text, "convert") || strings.Contains(text, "rate") {
-			return "exchange", nil
-		} else if strings.Contains(text, "reimburse") || strings.Contains(text, "expense") ||
-			strings.Contains(text, "receipt") || strings.Contains(text, "payment") {
-			return "reimbursement", nil
+func (p *rootProcessor) route(text string) (string, *client.A2AClient) {
+	lower := strings.ToLower(text)
+	switch {
+	case containsAny(lower, "write", "story", "poem", "creative"):
+		return "creative", p.creative
+	case containsAny(lower, "exchange", "currency", "convert", "rate"):
+		return "exchange", p.exchange
+	case containsAny(lower, "reimburse", "expense", "receipt", "payment"):
+		return "reimbursement", p.reimbursement
+	default:
+		return "", nil
+	}
+}
+
+func containsAny(text string, keywords ...string) bool {
+	for _, keyword := range keywords {
+		if strings.Contains(text, keyword) {
+			return true
 		}
-		return "", nil
 	}
-
-	// Use Gemini LLM to determine which subagent should handle the request
-	prompt := fmt.Sprintf(
-		"Based on the following user request, determine which agent should handle it:\n\n"+
-			"User request: %s\n\n"+
-			"Available agents:\n"+
-			"1. 'creative' - Creative writing agent that can write stories, poems, or other creative text\n"+
-			"2. 'exchange' - Currency exchange agent that can provide exchange rates\n"+
-			"3. 'reimbursement' - Reimbursement agent that can process expense reports\n\n"+
-			"Respond with ONLY one word: 'creative', 'exchange', 'reimbursement', or 'none' if no agent is applicable.",
-		text,
-	)
-
-	completion, err := p.llm.Call(ctx, prompt, llms.WithTemperature(0))
-	if err != nil {
-		return "", fmt.Errorf("LLM error: %v", err)
-	}
-
-	// Extract and normalize the agent name
-	subagent := strings.ToLower(strings.TrimSpace(completion))
-	if subagent == "none" {
-		return "", nil
-	}
-
-	// Validate that the response is one of our expected agents
-	validAgents := map[string]bool{
-		"creative":      true,
-		"exchange":      true,
-		"reimbursement": true,
-	}
-
-	if _, ok := validAgents[subagent]; !ok {
-		return "", nil
-	}
-
-	return subagent, nil
+	return false
 }
 
-// callCreativeAgent forwards a task to the creative writing agent.
-func (p *rootAgentProcessor) callCreativeAgent(ctx context.Context, text string) (string, error) {
-	// Create the message to send
-	message := protocol.NewMessage(
-		protocol.MessageRoleUser,
-		[]*protocol.Part{protocol.NewTextPart(text)},
-	)
-
-	// Send the message to the creative agent
-	params := protocol.SendMessageParams{
-		Message: message,
+func responseText(response *protocol.SendMessageResponse) (string, error) {
+	if message := response.GetMessage(); message != nil {
+		return messageText(*message), nil
 	}
-	result, err := p.creativeClient.SendMessage(ctx, params)
-	if err != nil {
-		return "", fmt.Errorf("failed to send message to creative agent: %w", err)
-	}
-
-	return extractResponseText(result, "creative agent")
-}
-
-// callExchangeAgent forwards a task to the exchange agent.
-func (p *rootAgentProcessor) callExchangeAgent(ctx context.Context, text string) (string, error) {
-	message := protocol.NewMessage(
-		protocol.MessageRoleUser,
-		[]*protocol.Part{protocol.NewTextPart(text)},
-	)
-
-	params := protocol.SendMessageParams{
-		Message: message,
-	}
-	result, err := p.exchangeClient.SendMessage(ctx, params)
-	if err != nil {
-		return "", fmt.Errorf("failed to send message to exchange agent: %w", err)
-	}
-
-	return extractResponseText(result, "exchange agent")
-}
-
-// callReimbursementAgent forwards a task to the reimbursement agent.
-func (p *rootAgentProcessor) callReimbursementAgent(ctx context.Context, text string) (string, error) {
-	message := protocol.NewMessage(
-		protocol.MessageRoleUser,
-		[]*protocol.Part{protocol.NewTextPart(text)},
-	)
-
-	params := protocol.SendMessageParams{
-		Message: message,
-	}
-	result, err := p.reimbursementClient.SendMessage(ctx, params)
-	if err != nil {
-		return "", fmt.Errorf("failed to send message to reimbursement agent: %w", err)
-	}
-
-	return extractResponseText(result, "reimbursement agent")
-}
-
-func extractResponseText(result *protocol.SendMessageResponse, agentName string) (string, error) {
-	if msg := result.GetMessage(); msg != nil {
-		return extractText(*msg), nil
-	}
-	if task := result.GetTask(); task != nil {
+	if task := response.GetTask(); task != nil {
 		if task.Status.Message != nil {
-			return extractText(*task.Status.Message), nil
+			return messageText(*task.Status.Message), nil
 		}
-		return "", fmt.Errorf("no response message from %s", agentName)
+		for i := len(task.Artifacts) - 1; i >= 0; i-- {
+			if text := partText(task.Artifacts[i].Parts); text != "" {
+				return text, nil
+			}
+		}
 	}
-	return "", fmt.Errorf("unexpected empty response from %s", agentName)
+	return "", fmt.Errorf("empty response")
 }
 
-// extractText extracts the text content from a message.
-func extractText(message protocol.Message) string {
+func messageText(message protocol.Message) string {
+	return partText(message.Parts)
+}
+
+func partText(parts []*protocol.Part) string {
 	var result strings.Builder
-	for _, part := range message.Parts {
-		if t := part.TextContent(); t != "" {
-			result.WriteString(t)
-		}
+	for _, part := range parts {
+		result.WriteString(part.TextContent())
 	}
 	return result.String()
 }
 
-// getAgentCard returns the agent's metadata.
-func getAgentCard() server.AgentCard {
-	return server.AgentCard{
-		Name:        "Multi-Agent Router",
-		Description: "An agent that routes tasks to appropriate subagents.",
-		URL:         "http://localhost:8080",
-		Version:     "1.0.0",
-		Capabilities: server.AgentCapabilities{
-			Streaming:              boolPtr(false),
-			PushNotifications:      boolPtr(false),
-			StateTransitionHistory: boolPtr(true),
-		},
-		DefaultInputModes:  []string{"text"},
-		DefaultOutputModes: []string{"text"},
-		Skills: []server.AgentSkill{
-			{
-				ID:          "route",
-				Name:        "Task Routing",
-				Description: stringPtr("Routes tasks to the appropriate specialized agent."),
-				Tags:        []string{"routing", "multi-agent", "orchestration"},
-				Examples: []string{
-					"Write a poem about autumn",
-					"What's the exchange rate from USD to EUR?",
-					"I need to get reimbursed for a $50 business lunch",
-				},
-				InputModes:  []string{"text"},
-				OutputModes: []string{"text"},
-			},
-		},
-	}
-}
-
-// stringPtr is a helper function to get a pointer to a string.
-func stringPtr(s string) *string {
-	return &s
-}
-
-// boolPtr is a helper function to get a pointer to a bool.
-func boolPtr(b bool) *bool {
-	return &b
-}
-
 func main() {
-	port := flag.Int("port", 8080, "Port to listen on for the root agent")
-	creativeAgentURL := flag.String("creative-url", "http://localhost:8082", "URL for the creative writing agent")
-	exchangeAgentURL := flag.String("exchange-url", "http://localhost:8081", "URL for the exchange agent")
-	reimbursementAgentURL := flag.String("reimbursement-url", "http://localhost:8083", "URL for the reimbursement agent")
+	host := flag.String("host", "localhost", "host to listen on")
+	port := flag.Int("port", 8080, "port to listen on")
+	creativeURL := flag.String("creative-url", "http://localhost:8082/", "creative agent URL")
+	exchangeURL := flag.String("exchange-url", "http://localhost:8081/", "exchange agent URL")
+	reimbursementURL := flag.String("reimbursement-url", "http://localhost:8083/", "reimbursement agent URL")
 	flag.Parse()
 
-	// Create the processor
-	processor := &rootAgentProcessor{}
-
-	// Initialize subagent clients
-	var err error
-	processor.creativeClient, err = client.NewA2AClient(*creativeAgentURL)
+	creativeClient, err := client.NewA2AClient(*creativeURL)
 	if err != nil {
-		log.Fatal("Failed to create creative agent client: %v", err)
+		log.Fatalf("create creative agent client: %v", err)
 	}
-
-	processor.exchangeClient, err = client.NewA2AClient(*exchangeAgentURL)
+	exchangeClient, err := client.NewA2AClient(*exchangeURL)
 	if err != nil {
-		log.Fatal("Failed to create exchange agent client: %v", err)
+		log.Fatalf("create exchange agent client: %v", err)
 	}
-
-	processor.reimbursementClient, err = client.NewA2AClient(*reimbursementAgentURL)
+	reimbursementClient, err := client.NewA2AClient(*reimbursementURL)
 	if err != nil {
-		log.Fatal("Failed to create reimbursement agent client: %v", err)
+		log.Fatalf("create reimbursement agent client: %v", err)
 	}
 
-	// Try to initialize the LLM if an API key is available
-	apiKey := os.Getenv("GOOGLE_API_KEY")
-	if apiKey != "" {
-		ctx := context.Background()
-		processor.llm, err = googleai.New(
-			ctx,
-			googleai.WithAPIKey(apiKey),
-			googleai.WithDefaultModel("gemini-1.5-flash"),
-		)
-		if err != nil {
-			log.Warn("Failed to initialize Gemini LLM: %v. Will use rule-based routing.", err)
-		} else {
-			log.Info("Successfully initialized Gemini LLM for task routing.")
-		}
-	} else {
-		log.Info("No GOOGLE_API_KEY environment variable found. Using rule-based routing.")
+	processor := &rootProcessor{
+		creative:      creativeClient,
+		exchange:      exchangeClient,
+		reimbursement: reimbursementClient,
 	}
-
-	// Create task manager with our processor
 	taskManager, err := memory.NewTaskManager(processor)
 	if err != nil {
-		log.Fatal("Failed to create task manager: %v", err)
+		log.Fatalf("create task manager: %v", err)
 	}
 
-	// Create the A2A server
-	agentCard := getAgentCard()
-	a2aServer, err := server.NewA2AServer(taskManager, server.WithAgentCard(agentCard))
+	address := fmt.Sprintf("%s:%d", *host, *port)
+	agentURL := "http://" + address + "/"
+	streaming := false
+	pushNotifications := false
+	description := "Routes a request to another A2A agent"
+	agentCard := protocol.AgentCard{
+		Name:        "Multi-Agent Router",
+		Description: "Routes requests to deterministic example sub-agents",
+		SupportedInterfaces: []protocol.AgentInterface{{
+			URL:             agentURL,
+			ProtocolBinding: "JSONRPC",
+			ProtocolVersion: protocol.ProtocolVersionV1,
+		}},
+		Version: "2.0.0",
+		Capabilities: protocol.AgentCapabilities{
+			Streaming:         &streaming,
+			PushNotifications: &pushNotifications,
+		},
+		DefaultInputModes:  []string{"text/plain"},
+		DefaultOutputModes: []string{"text/plain"},
+		Skills: []protocol.AgentSkill{{
+			ID:          "route-request",
+			Name:        "Route request",
+			Description: &description,
+			Tags:        []string{"routing", "multi-agent", "orchestration"},
+			Examples: []string{
+				"Write a poem about autumn",
+				"Convert USD to EUR",
+				"Submit an expense receipt",
+			},
+		}},
+	}
+
+	srv, err := server.NewA2AServer(taskManager, server.WithAgentCard(agentCard))
 	if err != nil {
-		log.Fatal("Failed to create A2A server: %v", err)
+		log.Fatalf("create server: %v", err)
 	}
 
-	addr := fmt.Sprintf(":%d", *port)
-	log.Info("Starting Root Agent server on %s", addr)
+	go func() {
+		log.Printf("multi-agent router listening at %s", agentURL)
+		if err := srv.Start(address); err != nil {
+			log.Printf("server stopped: %v", err)
+		}
+	}()
 
-	if err := a2aServer.Start(addr); err != nil {
-		log.Fatal("Failed to start A2A server: %v", err)
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	<-signals
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Stop(shutdownCtx); err != nil {
+		log.Printf("stop server: %v", err)
 	}
 }

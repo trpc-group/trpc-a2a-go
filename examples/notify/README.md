@@ -43,8 +43,7 @@ Both modes use the agent at `http://localhost:8000` and the client webhook at
 `http://localhost:8001/notify` by default. Use `-port` on a server or
 `-agent-url`, `-webhook-listen`, and `-webhook-url` on a client to override them.
 
-See [`../jwks`](../jwks) for a larger JWT/JWKS example, and
-`docs/mkdocs/*/server.md` for the full wiring reference.
+See `docs/mkdocs/*/server.md` for the full wiring reference.
 
 For unsigned delivery, use `push.NewHTTPSender()` and omit
 `WithPushNotificationJWKSHandler`.
