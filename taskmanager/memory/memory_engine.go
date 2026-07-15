@@ -53,6 +53,10 @@ type execution struct {
 	// kept on the handle so manager Close can end every in-flight stream and
 	// unblock an engine parked on a blocking pipe send.
 	pipe *taskSubscriber
+	// yieldDone is non-nil while a suspended round publishes its last event.
+	// A continuation waits for it instead of being rejected as concurrent, so
+	// every observer can safely react to the suspend frame immediately.
+	yieldDone chan struct{}
 }
 
 // sendOutcome is a unary result candidate: exactly one of the fields is set.
@@ -117,6 +121,7 @@ type engine struct {
 // and stores the incoming message and builds the read-only ExecContext — a
 // rejected request never reaches the MessageProcessor and leaves no trace.
 func (m *TaskManager) prepareExecContext(
+	ctx context.Context,
 	request *protocol.SendMessageParams,
 	exec *execution,
 	taskID string,
@@ -133,7 +138,7 @@ func (m *TaskManager) prepareExecContext(
 	// write — the slot frees only after that write — so the snapshot below can
 	// never be a stale pre-terminal copy that would smuggle writes past a
 	// terminal state.
-	if err := m.registerExecution(taskID, exec); err != nil {
+	if err := m.registerExecution(ctx, taskID, exec); err != nil {
 		return nil, err
 	}
 
@@ -284,7 +289,7 @@ func (m *TaskManager) startExecution(
 	// prepareExecContext registers exec as the task's single live run before
 	// the MessageProcessor is invoked, so OnCancelTask can reach the run from
 	// the very first instant events may be produced.
-	ec, err := m.prepareExecContext(request, exec, taskID)
+	ec, err := m.prepareExecContext(reqCtx, request, exec, taskID)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -319,24 +324,39 @@ func (m *TaskManager) startExecution(
 	return eng, nil
 }
 
-// registerExecution publishes the cancellation handle of a starting run, or
-// rejects the round: a task admits at most one live run — concurrent rounds
-// would interleave their writes and close rules (and orphan cancel handles).
-func (m *TaskManager) registerExecution(taskID string, exec *execution) error {
-	m.execMu.Lock()
-	defer m.execMu.Unlock()
-	if m.closed {
-		return jsonrpc.ErrInternalError("task manager is closed")
+// registerExecution publishes the cancellation handle of a starting run. A
+// task admits at most one live run; a continuation waits through the previous
+// round's short suspend handoff, while any other concurrent round is rejected.
+func (m *TaskManager) registerExecution(ctx context.Context, taskID string, exec *execution) error {
+	for {
+		m.execMu.Lock()
+		if m.closed {
+			m.execMu.Unlock()
+			return jsonrpc.ErrInternalError("task manager is closed")
+		}
+		current, exists := m.executions[taskID]
+		if !exists {
+			m.executions[taskID] = exec
+			// Counted under the registry lock so Close (which flips m.closed first)
+			// can never begin waiting before a just-admitted run is counted.
+			m.engineWg.Add(1)
+			m.execMu.Unlock()
+			return nil
+		}
+		yieldDone := current.yieldDone
+		m.execMu.Unlock()
+		if yieldDone == nil {
+			return jsonrpc.ErrInvalidParams(
+				fmt.Sprintf("task %s already has an active execution", taskID))
+		}
+		select {
+		case <-yieldDone:
+			// The previous round has finished publishing its suspend event. Retry
+			// under the lock so Close or another continuation can win cleanly.
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
-	if _, exists := m.executions[taskID]; exists {
-		return jsonrpc.ErrInvalidParams(
-			fmt.Sprintf("task %s already has an active execution", taskID))
-	}
-	m.executions[taskID] = exec
-	// Counted under the registry lock so Close (which flips m.closed first)
-	// can never begin waiting before a just-admitted run is counted.
-	m.engineWg.Add(1)
-	return nil
 }
 
 // releaseExecution aborts a registered run whose engine never started: it
@@ -350,15 +370,43 @@ func (m *TaskManager) releaseExecution(taskID string, exec *execution) {
 // none — claims the execution slot with a sentinel, so a no-live cancel's
 // CANCELED write gets the same single-writer guarantee as a run: no
 // continuation can register (and then write) concurrently with it.
-func (m *TaskManager) claimCancelSlot(taskID string) (live *execution, sentinel *execution) {
+func (m *TaskManager) claimCancelSlot(
+	taskID string,
+) (live *execution, sentinel *execution, yieldDone <-chan struct{}) {
 	m.execMu.Lock()
 	defer m.execMu.Unlock()
 	if exec, ok := m.executions[taskID]; ok {
-		return exec, nil
+		if exec.yieldDone != nil {
+			return nil, nil, exec.yieldDone
+		}
+		return exec, nil, nil
 	}
 	sentinel = &execution{cancel: func() {}}
 	m.executions[taskID] = sentinel
-	return nil, sentinel
+	return nil, sentinel, nil
+}
+
+// requestExecutionCancel linearizes an accepted cancellation against a
+// suspend handoff. It returns the handoff channel when yield won, or accepted
+// after publishing cancelRequested under the registry lock.
+func (m *TaskManager) requestExecutionCancel(
+	taskID string,
+	exec *execution,
+) (yieldDone <-chan struct{}, accepted bool) {
+	m.execMu.Lock()
+	if m.executions[taskID] != exec {
+		m.execMu.Unlock()
+		return nil, false
+	}
+	if exec.yieldDone != nil {
+		yieldDone = exec.yieldDone
+		m.execMu.Unlock()
+		return yieldDone, false
+	}
+	exec.cancelRequested.Store(true)
+	m.execMu.Unlock()
+	exec.cancel()
+	return nil, true
 }
 
 // deregisterExecution removes the handle if it still belongs to this run.
@@ -367,6 +415,34 @@ func (m *TaskManager) deregisterExecution(taskID string, exec *execution) {
 	defer m.execMu.Unlock()
 	if m.executions[taskID] == exec {
 		delete(m.executions, taskID)
+		if exec.yieldDone != nil {
+			close(exec.yieldDone)
+			exec.yieldDone = nil
+		}
+	}
+}
+
+// beginExecutionYield turns an active slot into a short handoff barrier. The
+// slot remains owned by exec until its suspend frame has reached every local
+// observer, but continuations wait for the handoff instead of failing.
+func (m *TaskManager) beginExecutionYield(taskID string, exec *execution) bool {
+	m.execMu.Lock()
+	defer m.execMu.Unlock()
+	if m.executions[taskID] == exec && exec.yieldDone == nil && !exec.cancelRequested.Load() {
+		exec.yieldDone = make(chan struct{})
+		return true
+	}
+	return false
+}
+
+// abortExecutionYield restores an active slot when committing the suspended
+// state fails. Waiters wake and re-evaluate it as an ordinary active run.
+func (m *TaskManager) abortExecutionYield(taskID string, exec *execution) {
+	m.execMu.Lock()
+	defer m.execMu.Unlock()
+	if m.executions[taskID] == exec && exec.yieldDone != nil {
+		close(exec.yieldDone)
+		exec.yieldDone = nil
 	}
 }
 
@@ -533,7 +609,17 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 		event.Status.Timestamp = nowTimestamp()
 	}
 	final := isFinalState(event.Status.State)
+	suspended := !final && isSuspendedState(event.Status.State)
 	event.Final = final
+	yielding := false
+	if suspended {
+		// Establish the handoff before the suspended state can become visible in
+		// the store. A polling client may otherwise observe INPUT_REQUIRED and
+		// still be rejected as a concurrent execution. If cancellation claimed
+		// the slot first, keep this round active so its close rule can persist
+		// CANCELED rather than swallowing the accepted cancellation.
+		yielding = m.beginExecutionYield(eng.ec.TaskID, eng.exec)
+	}
 
 	// Persist first (§3.6), under the task lock.
 	m.taskMu.Lock()
@@ -541,6 +627,9 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 	if exists && isFinalState(task.Status.State) {
 		// Terminal states are immutable: never write over one, whoever set it.
 		m.taskMu.Unlock()
+		if yielding {
+			m.abortExecutionYield(eng.ec.TaskID, eng.exec)
+		}
 		log.Warnf("memory TaskManager: discarding status %s for task %s already in terminal state %s",
 			event.Status.State, eng.ec.TaskID, task.Status.State)
 		eng.terminal = true
@@ -556,15 +645,18 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 	}
 	eng.taskTouched = true
 	snapshot := eng.immediateSnapshotLocked(task)
-	suspended := !final && isSuspendedState(event.Status.State)
-	if suspended {
+	if yielding {
 		// The round is about to yield ownership: keep its own copy as the unary
 		// result, since the shared entry may belong to a continuation before
 		// finish() runs.
 		eng.yieldSnapshot = copyTask(task)
 	}
 	m.taskMu.Unlock()
-	if !eng.persistInlinePushConfig() {
+	if err := eng.persistInlinePushConfig(); err != nil {
+		if yielding {
+			m.abortExecutionYield(eng.ec.TaskID, eng.exec)
+		}
+		eng.violate(err.Error())
 		return
 	}
 
@@ -572,32 +664,30 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 	// publishing the new status; the new/current message remains only on Status.
 	eng.rollStatusMessage(previousStatusMessage)
 
+	response := protocol.NewStreamResponseStatusUpdate(event)
+	if yielding {
+		eng.yielded = true
+		// Queue automatic push before exposing the suspend state. A full bounded
+		// queue may delay publication, but a client can never observe a state it
+		// cannot yet continue. The handoff starts before enqueue so a client that
+		// polls the persisted task also waits instead of being rejected. It also
+		// serializes task-subscriber fan-out with a continuation round.
+		m.dispatchPush(eng.ec.TaskID, response)
+		eng.broadcastWithoutPush(response, snapshot)
+		eng.closePipe()
+		m.deregisterExecution(eng.ec.TaskID, eng.exec)
+		return
+	}
+
 	// Then broadcast: any subscriber that sees this event is guaranteed to
 	// find the store at least as fresh via GetTask.
-	eng.broadcast(protocol.NewStreamResponseStatusUpdate(event), snapshot)
+	eng.broadcast(response, snapshot)
 
 	if final {
 		eng.terminal = true
 		m.cleanSubscribers(eng.ec.TaskID)
 		// Nothing can follow a terminal frame: end the response stream here
 		// instead of trusting the MessageProcessor to close its channel promptly.
-		eng.closePipe()
-	} else if suspended {
-		// §3.4: a suspended round has yielded the task back for a follow-up —
-		// it is no longer actively working. Free the registry slot NOW rather
-		// than at finish(): a streaming (or returnImmediately) client that fires
-		// its continuation on receiving this suspend frame would otherwise
-		// collide with this still-registered run and be wrongly rejected
-		// "already has an active execution". finish()'s pointer-guarded
-		// deregister then no-ops, and it never removes a continuation's own
-		// fresh registration (the guard checks the entry still belongs to us).
-		//
-		// Yielding also ends this round's writes: a continuation (or a no-live
-		// cancel) may own the task from this instant, so later events from this
-		// round are discarded (run loop), the close rules are skipped
-		// (finish()), and the response stream ends at the suspend frame.
-		eng.yielded = true
-		m.deregisterExecution(eng.ec.TaskID, eng.exec)
 		eng.closePipe()
 	}
 }
@@ -634,23 +724,23 @@ func (eng *engine) handleArtifact(event *protocol.TaskArtifactUpdateEvent) {
 	eng.taskTouched = true
 	snapshot := eng.immediateSnapshotLocked(task)
 	m.taskMu.Unlock()
-	if !eng.persistInlinePushConfig() {
+	if err := eng.persistInlinePushConfig(); err != nil {
+		eng.violate(err.Error())
 		return
 	}
 
 	eng.broadcast(protocol.NewStreamResponseArtifactUpdate(event), snapshot)
 }
 
-func (eng *engine) persistInlinePushConfig() bool {
+func (eng *engine) persistInlinePushConfig() error {
 	if !eng.inlinePushPending {
-		return true
+		return nil
 	}
 	eng.inlinePushPending = false
 	if _, err := eng.manager.pushStore.save(*eng.ec.PushConfig); err != nil {
-		eng.violate(fmt.Sprintf("persist inline push config: %v", err))
-		return false
+		return fmt.Errorf("persist inline push config: %w", err)
 	}
-	return true
+	return nil
 }
 
 // newTask materializes the task on its first event (§3.2 lazy creation),
@@ -684,6 +774,16 @@ func (eng *engine) broadcast(response protocol.StreamResponse, snapshot *protoco
 	}
 	eng.sendToPipe(response)
 	eng.manager.notifySubscribers(eng.ec.TaskID, response)
+}
+
+// broadcastWithoutPush publishes an event whose automatic push delivery was
+// already enqueued by the caller.
+func (eng *engine) broadcastWithoutPush(response protocol.StreamResponse, snapshot *protocol.Task) {
+	if snapshot != nil {
+		eng.offerImmediateResult(sendOutcome{task: snapshot})
+	}
+	eng.sendToPipe(response)
+	eng.manager.notifyLiveSubscribers(eng.ec.TaskID, response)
 }
 
 // offerImmediateResult publishes the immediate result exactly once.

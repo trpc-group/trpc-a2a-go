@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 
@@ -34,9 +35,18 @@ const (
 var ErrClosed = errors.New("push dispatcher is closed")
 
 type job struct {
-	taskID string
-	cfg    []byte
-	event  []byte
+	taskID     string
+	generation string
+	cfg        []byte
+	event      []byte
+}
+
+// Registration is an internal snapshot of one persisted push registration.
+// Generation changes on every create/update so a queued delivery cannot be
+// revived by deleting and re-creating the same config ID.
+type Registration struct {
+	Config     protocol.TaskPushNotificationConfig `json:"config"`
+	Generation string                              `json:"generation"`
 }
 
 // Dispatcher bounds automatic delivery while preserving FIFO order for each
@@ -49,10 +59,19 @@ type Dispatcher struct {
 	queues []chan job
 	wg     sync.WaitGroup
 	closed atomic.Bool
+	// isCurrent moves a queued registration into the in-flight state. A false
+	// result means the registration was deleted or replaced after enqueue. Once
+	// it returns true, a later deletion does not cancel the in-flight SendPush.
+	isCurrent func(context.Context, Registration) (bool, error)
 }
 
 // New constructs a dispatcher. A nil parent uses context.Background.
-func New(parent context.Context, sender push.Sender, concurrency, queueSize int) *Dispatcher {
+func New(
+	parent context.Context,
+	sender push.Sender,
+	concurrency, queueSize int,
+	isCurrent func(context.Context, Registration) (bool, error),
+) *Dispatcher {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -70,10 +89,11 @@ func New(parent context.Context, sender push.Sender, concurrency, queueSize int)
 	}
 	ctx, cancel := context.WithCancel(parent)
 	d := &Dispatcher{
-		sender: sender,
-		ctx:    ctx,
-		cancel: cancel,
-		queues: make([]chan job, concurrency),
+		sender:    sender,
+		ctx:       ctx,
+		cancel:    cancel,
+		queues:    make([]chan job, concurrency),
+		isCurrent: isCurrent,
 	}
 	base, extra := queueSize/concurrency, queueSize%concurrency
 	for i := range d.queues {
@@ -91,10 +111,10 @@ func New(parent context.Context, sender push.Sender, concurrency, queueSize int)
 // Enqueue snapshots event and configs before adding one delivery per config.
 // It blocks when the bounded queue is full and returns ErrClosed on shutdown.
 func (d *Dispatcher) Enqueue(
-	configs []protocol.TaskPushNotificationConfig,
+	registrations []Registration,
 	event protocol.StreamResponse,
 ) error {
-	if d == nil || d.sender == nil || len(configs) == 0 {
+	if d == nil || d.sender == nil || len(registrations) == 0 {
 		return nil
 	}
 	if d.closed.Load() {
@@ -104,17 +124,23 @@ func (d *Dispatcher) Enqueue(
 	if err != nil {
 		return fmt.Errorf("snapshot push event: %w", err)
 	}
-	jobs := make([]job, len(configs))
-	for i := range configs {
-		cfgJSON, err := json.Marshal(configs[i])
+	jobs := make([]job, len(registrations))
+	for i := range registrations {
+		cfg := registrations[i].Config
+		cfgJSON, err := json.Marshal(cfg)
 		if err != nil {
-			return fmt.Errorf("snapshot push config %q: %w", configs[i].ID, err)
+			return fmt.Errorf("snapshot push config %q: %w", cfg.ID, err)
 		}
-		jobs[i] = job{taskID: configs[i].TaskID, cfg: cfgJSON, event: eventJSON}
+		jobs[i] = job{
+			taskID:     cfg.TaskID,
+			generation: registrations[i].Generation,
+			cfg:        cfgJSON,
+			event:      eventJSON,
+		}
 	}
 	for i := range jobs {
 		j := jobs[i]
-		queue := d.queues[shard(configs[i], len(d.queues))]
+		queue := d.queues[shard(registrations[i].Config, len(d.queues))]
 		select {
 		case <-d.ctx.Done():
 			return ErrClosed
@@ -134,6 +160,11 @@ func (d *Dispatcher) run(queue <-chan job) {
 		case <-d.ctx.Done():
 			return
 		case j := <-queue:
+			// When Close makes both cases ready, select may choose the queue. Do not
+			// claim a queued delivery after shutdown has started.
+			if d.closed.Load() || d.ctx.Err() != nil {
+				return
+			}
 			var cfg protocol.TaskPushNotificationConfig
 			if err := json.Unmarshal(j.cfg, &cfg); err != nil {
 				log.Warnf("push dispatch: restore config for task %s: %v", j.taskID, err)
@@ -144,11 +175,48 @@ func (d *Dispatcher) run(queue <-chan job) {
 				log.Warnf("push dispatch: restore event for task %s: %v", j.taskID, err)
 				continue
 			}
-			if err := d.sender.SendPush(d.ctx, cfg, event); err != nil {
-				log.Warnf("push dispatch: send config %s for task %s: %v", cfg.ID, j.taskID, err)
+			registration := Registration{Config: cfg, Generation: j.generation}
+			if d.isCurrent != nil {
+				current, err := d.isCurrent(d.ctx, registration)
+				if err != nil {
+					log.Warnf("push dispatch: validate config %s for task %s: %v", cfg.ID, j.taskID, err)
+					continue
+				}
+				if !current {
+					continue
+				}
 			}
+			d.send(j.taskID, cfg, event)
 		}
 	}
+}
+
+// send contains the user-extensible Sender boundary. Recovery is per job: a
+// top-level worker recovery would return from run and permanently strand this
+// shard. returned distinguishes panic(nil) from a normal return on Go 1.20.
+func (d *Dispatcher) send(
+	taskID string,
+	cfg protocol.TaskPushNotificationConfig,
+	event protocol.StreamResponse,
+) {
+	returned := false
+	defer func() {
+		if returned {
+			return
+		}
+		recovered := recover()
+		// The panic value is untrusted and may contain the config, including
+		// credentials. Log only its type plus the stack.
+		log.Errorf("push dispatch: recovered sender panic type %T for config %s task %s\n%s",
+			recovered, cfg.ID, taskID, debug.Stack())
+	}()
+	if err := d.sender.SendPush(d.ctx, cfg, event); err != nil {
+		// Sender errors are also untrusted and can embed signed callback URLs or
+		// credentials. The sender may log its own safe diagnostic details.
+		log.Warnf("push dispatch: send failed for config %s task %s (error type %T)",
+			cfg.ID, taskID, err)
+	}
+	returned = true
 }
 
 func shard(cfg protocol.TaskPushNotificationConfig, count int) int {

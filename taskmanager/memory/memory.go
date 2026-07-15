@@ -226,6 +226,7 @@ func NewTaskManager(processor taskmanager.MessageProcessor, opts ...TaskManagerO
 		manager.pushDispatcher = pushdispatch.New(
 			context.Background(), options.Push.Sender,
 			options.Push.MaxConcurrentDeliveries, options.Push.DeliveryQueueSize,
+			manager.pushStore.isCurrent,
 		)
 	}
 
@@ -353,7 +354,15 @@ func (m *TaskManager) OnGetTask(ctx context.Context, params protocol.TaskQueryPa
 // sentinel so no continuation can start (and write) concurrently.
 func (m *TaskManager) OnCancelTask(ctx context.Context, params protocol.TaskIDParams) (*protocol.Task, error) {
 	for {
-		live, sentinel := m.claimCancelSlot(params.ID)
+		live, sentinel, yieldDone := m.claimCancelSlot(params.ID)
+		if yieldDone != nil {
+			select {
+			case <-yieldDone:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
 		if live == nil {
 			defer m.deregisterExecution(params.ID, sentinel)
 			return m.cancelWithoutLiveRun(params)
@@ -376,10 +385,21 @@ func (m *TaskManager) OnCancelTask(ctx context.Context, params protocol.TaskIDPa
 			return nil, taskmanager.ErrTaskNotCancelable(params.ID, terminal)
 		}
 
-		// Flag before canceling so the engine's close rule sees the request even
-		// when the MessageProcessor reacts by closing the channel immediately.
-		live.cancelRequested.Store(true)
-		live.cancel()
+		// Linearize cancellation against a concurrent suspend handoff. If the
+		// handoff won, wait for it and retry as a no-live cancel; otherwise the
+		// close rule is guaranteed to observe cancelRequested.
+		yieldDone, accepted := m.requestExecutionCancel(params.ID, live)
+		if yieldDone != nil {
+			select {
+			case <-yieldDone:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		if !accepted {
+			continue
+		}
 
 		if m.liveExecution(params.ID) != live {
 			// The run yielded (suspend) or finished while we were canceling, so
@@ -757,8 +777,8 @@ func (m *TaskManager) dispatchPush(taskID string, event protocol.StreamResponse)
 	if m.pushDispatcher == nil {
 		return
 	}
-	configs := m.pushStore.list(taskID)
-	if len(configs) == 0 {
+	registrations := m.pushStore.registrations(taskID)
+	if len(registrations) == 0 {
 		return
 	}
 	m.execMu.Lock()
@@ -767,7 +787,7 @@ func (m *TaskManager) dispatchPush(taskID string, event protocol.StreamResponse)
 	if closed {
 		return
 	}
-	if err := m.pushDispatcher.Enqueue(configs, event); err != nil && !errors.Is(err, pushdispatch.ErrClosed) {
+	if err := m.pushDispatcher.Enqueue(registrations, event); err != nil && !errors.Is(err, pushdispatch.ErrClosed) {
 		log.Warnf("push dispatch: enqueue for task %s: %v", taskID, err)
 	}
 }
@@ -777,7 +797,12 @@ func (m *TaskManager) notifySubscribers(taskID string, event protocol.StreamResp
 	// Deliver push notifications independently of live SSE subscribers: reaching
 	// clients that are not currently streaming is the whole point of push.
 	m.dispatchPush(taskID, event)
+	m.notifyLiveSubscribers(taskID, event)
+}
 
+// notifyLiveSubscribers fans out to process-local task subscribers without
+// dispatching push a second time.
+func (m *TaskManager) notifyLiveSubscribers(taskID string, event protocol.StreamResponse) {
 	m.taskMu.RLock()
 	subs, exists := m.subscribers[taskID]
 	if !exists || len(subs) == 0 {

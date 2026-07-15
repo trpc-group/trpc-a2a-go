@@ -54,6 +54,10 @@ type liveExecution struct {
 	// kept on the handle so manager Close can end every in-flight stream and
 	// unblock an engine parked on a blocking pipe send.
 	pipe *taskSubscriber
+	// yieldDone is non-nil while a suspended round publishes its last event.
+	// A continuation waits for it instead of being rejected as concurrent, so
+	// every observer can safely react to the suspend frame immediately.
+	yieldDone chan struct{}
 }
 
 // requestCancel records the cancel request and cancels the MessageProcessor context.
@@ -207,7 +211,7 @@ func (m *TaskManager) prepareExecution(
 	// only after that write — so the working copy below can never be a stale
 	// pre-terminal snapshot that would smuggle writes past a terminal state.
 	// A rejected request never reaches the MessageProcessor and leaves no trace.
-	if err := m.registerExecution(taskID, ex.live); err != nil {
+	if err := m.registerExecution(ctx, taskID, ex.live); err != nil {
 		cancel()
 		return nil, err
 	}
@@ -604,7 +608,17 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 	ex.taskTouched = true
 	ev.Status = status
 	final := isFinalState(status.State)
+	suspended := !final && isSuspendedState(status.State)
 	ev.Final = final
+	yielding := false
+	if suspended {
+		// Establish the handoff before the suspended state can become visible in
+		// Redis. A polling client may otherwise observe INPUT_REQUIRED and still
+		// be rejected as a concurrent execution. If cancellation claimed the slot
+		// first, keep this round active so its close rule can persist CANCELED
+		// rather than swallowing the accepted cancellation.
+		yielding = ex.manager.beginExecutionYield(ex.ec.TaskID, ex.live)
+	}
 	// The old status message has now been superseded. Move it to history before
 	// storing/publishing the new status; the new/current message stays on Status.
 	ex.rollStatusMessage(previousStatusMessage)
@@ -617,36 +631,44 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 	// broader Redis storage-error handling; broadcasting is correctly skipped
 	// here so subscribers never get ahead of the store.
 	if err := ex.manager.storeTask(context.Background(), ex.task); err != nil {
+		if yielding {
+			ex.manager.abortExecutionYield(ex.ec.TaskID, ex.live)
+		}
 		log.Errorf("RedisTaskManager: failed to store task %s status %s: %v", ev.TaskID, status.State, err)
 		return
 	}
-	if !ex.persistInlinePushConfig() {
+	if err := ex.persistInlinePushConfig(); err != nil {
+		if yielding {
+			ex.manager.abortExecutionYield(ex.ec.TaskID, ex.live)
+		}
+		log.Errorf("RedisTaskManager: failed to persist inline push config for task %s: %v", ex.ec.TaskID, err)
+		ex.failTask("failed to persist inline push config")
 		return
 	}
+	response := protocol.NewStreamResponseStatusUpdate(ev)
+	if yielding {
+		ex.yielded = true
+		// Queue automatic push before exposing the suspend state. A full bounded
+		// queue may delay publication, but a client can never observe a state it
+		// cannot yet continue. The handoff starts before enqueue so a client that
+		// polls the persisted task also waits instead of being rejected. It also
+		// serializes task-subscriber fan-out with a continuation round.
+		ex.manager.dispatchPush(ex.ec.TaskID, response)
+		ex.offerImmediateTask()
+		ex.broadcastWithoutPush(response)
+		ex.closePipe()
+		ex.manager.deregisterExecution(ex.ec.TaskID, ex.live)
+		return
+	}
+
 	// Immediate result first: a returnImmediately waiter must never be stalled behind
 	// a slow subscriber in the fan-out below.
 	ex.offerImmediateTask()
-	ex.broadcast(protocol.NewStreamResponseStatusUpdate(ev))
+	ex.broadcast(response)
 	if final {
 		ex.manager.cleanSubscribers(ev.TaskID)
 		// Nothing can follow a terminal frame: end the response stream here
 		// instead of trusting the MessageProcessor to close its channel promptly.
-		ex.closePipe()
-	} else if isSuspendedState(status.State) {
-		// §3.4: a suspended round has yielded the task back for a follow-up —
-		// it is no longer actively working. Free the registry slot NOW rather
-		// than at finish(): a streaming (or returnImmediately) client that fires
-		// its continuation on receiving this suspend frame would otherwise
-		// collide with this still-registered run and be wrongly rejected
-		// "already has an active execution". finish()'s pointer-guarded
-		// deregister then no-ops and never removes a continuation's own entry.
-		//
-		// Yielding also ends this round's writes: a continuation (or a no-live
-		// cancel) may own the task from this instant, so later events from this
-		// round are discarded (run loop), the close rules are skipped
-		// (finish()), and the response stream ends at the suspend frame.
-		ex.yielded = true
-		ex.manager.deregisterExecution(ex.ec.TaskID, ex.live)
 		ex.closePipe()
 	}
 }
@@ -679,7 +701,9 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 		log.Errorf("RedisTaskManager: failed to store task %s artifact: %v", ev.TaskID, err)
 		return
 	}
-	if !ex.persistInlinePushConfig() {
+	if err := ex.persistInlinePushConfig(); err != nil {
+		log.Errorf("RedisTaskManager: failed to persist inline push config for task %s: %v", ex.ec.TaskID, err)
+		ex.failTask("failed to persist inline push config")
 		return
 	}
 	// Immediate result first: a returnImmediately waiter must never be stalled behind
@@ -688,17 +712,15 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 	ex.broadcast(protocol.NewStreamResponseArtifactUpdate(ev))
 }
 
-func (ex *execution) persistInlinePushConfig() bool {
+func (ex *execution) persistInlinePushConfig() error {
 	if !ex.inlinePushPending {
-		return true
+		return nil
 	}
 	ex.inlinePushPending = false
 	if _, err := ex.manager.storePushConfig(context.Background(), *ex.ec.PushConfig); err != nil {
-		log.Errorf("RedisTaskManager: failed to persist inline push config for task %s: %v", ex.ec.TaskID, err)
-		ex.failTask("failed to persist inline push config")
-		return false
+		return err
 	}
-	return true
+	return nil
 }
 
 // newTask lazily materializes the task on the first task event, seeding the
@@ -732,6 +754,19 @@ func (ex *execution) broadcast(event protocol.StreamResponse) {
 	}
 	if ex.task != nil {
 		ex.manager.notifySubscribers(ex.ec.TaskID, event)
+	}
+}
+
+// broadcastWithoutPush publishes an event whose automatic push delivery was
+// already enqueued by the caller.
+func (ex *execution) broadcastWithoutPush(event protocol.StreamResponse) {
+	if ex.pipe != nil {
+		if err := ex.pipe.Send(event); err != nil {
+			log.Warnf("RedisTaskManager: failed to send event to request pipe for task %s: %v", ex.ec.TaskID, err)
+		}
+	}
+	if ex.task != nil {
+		ex.manager.notifyLiveSubscribers(ex.ec.TaskID, event)
 	}
 }
 

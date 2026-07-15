@@ -7,11 +7,13 @@
 package memory
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"sync"
 
 	"github.com/google/uuid"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/pushdispatch"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
@@ -26,13 +28,14 @@ type pushConfigStore struct {
 	mu sync.RWMutex
 	// closed prevents configs from being re-created after manager shutdown.
 	closed bool
-	// configs maps taskID -> configID -> config.
-	configs map[string]map[string]protocol.TaskPushNotificationConfig
+	// configs maps taskID -> configID -> internal registration. Generation is
+	// intentionally kept out of the public protocol type.
+	configs map[string]map[string]pushdispatch.Registration
 }
 
 func newPushConfigStore() *pushConfigStore {
 	return &pushConfigStore{
-		configs: make(map[string]map[string]protocol.TaskPushNotificationConfig),
+		configs: make(map[string]map[string]pushdispatch.Registration),
 	}
 }
 
@@ -53,9 +56,12 @@ func (s *pushConfigStore) save(
 	}
 	cfg = clonePushConfig(cfg)
 	if s.configs[cfg.TaskID] == nil {
-		s.configs[cfg.TaskID] = make(map[string]protocol.TaskPushNotificationConfig)
+		s.configs[cfg.TaskID] = make(map[string]pushdispatch.Registration)
 	}
-	s.configs[cfg.TaskID][cfg.ID] = cfg
+	s.configs[cfg.TaskID][cfg.ID] = pushdispatch.Registration{
+		Config:     cfg,
+		Generation: uuid.New().String(),
+	}
 	return clonePushConfig(cfg), nil
 }
 
@@ -65,8 +71,8 @@ func (s *pushConfigStore) list(taskID string) []protocol.TaskPushNotificationCon
 	defer s.mu.RUnlock()
 	byID := s.configs[taskID]
 	out := make([]protocol.TaskPushNotificationConfig, 0, len(byID))
-	for _, cfg := range byID {
-		out = append(out, clonePushConfig(cfg))
+	for _, registration := range byID {
+		out = append(out, clonePushConfig(registration.Config))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].ID < out[j].ID
@@ -79,8 +85,40 @@ func (s *pushConfigStore) get(taskID, configID string) (protocol.TaskPushNotific
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	byID := s.configs[taskID]
-	cfg, ok := byID[configID]
-	return clonePushConfig(cfg), ok
+	registration, ok := byID[configID]
+	return clonePushConfig(registration.Config), ok
+}
+
+// registrations returns internal delivery snapshots, ordered by config ID.
+// Generation remains internal and lets the dispatcher discard queued work for
+// a config that was deleted or replaced after enqueue.
+func (s *pushConfigStore) registrations(taskID string) []pushdispatch.Registration {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	byID := s.configs[taskID]
+	out := make([]pushdispatch.Registration, 0, len(byID))
+	for _, registration := range byID {
+		registration.Config = clonePushConfig(registration.Config)
+		out = append(out, registration)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Config.ID < out[j].Config.ID
+	})
+	return out
+}
+
+// isCurrent reports whether registration still names the exact stored
+// generation. Updating, deleting, or deleting and re-creating the same config
+// ID invalidates already queued deliveries.
+func (s *pushConfigStore) isCurrent(
+	_ context.Context,
+	registration pushdispatch.Registration,
+) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	byID := s.configs[registration.Config.TaskID]
+	current, ok := byID[registration.Config.ID]
+	return ok && current.Generation == registration.Generation, nil
 }
 
 // clonePushConfig prevents callers from mutating stored credentials after
@@ -116,5 +154,5 @@ func (s *pushConfigStore) close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
-	s.configs = make(map[string]map[string]protocol.TaskPushNotificationConfig)
+	s.configs = make(map[string]map[string]pushdispatch.Registration)
 }

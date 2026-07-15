@@ -10,9 +10,11 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
@@ -50,6 +52,33 @@ func (r *recordingSender) snapshot() []recordedPush {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]recordedPush(nil), r.calls...)
+}
+
+// firstBlockingSender blocks its first delivery until release is closed, then
+// records it and lets every later delivery complete normally.
+type firstBlockingSender struct {
+	recordingSender
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *firstBlockingSender) SendPush(
+	ctx context.Context, cfg protocol.TaskPushNotificationConfig, event protocol.StreamResponse,
+) error {
+	block := false
+	s.once.Do(func() {
+		block = true
+		close(s.started)
+	})
+	if block {
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return s.recordingSender.SendPush(ctx, cfg, event)
 }
 
 // waitPushCount waits until the sender has recorded at least n deliveries.
@@ -216,6 +245,221 @@ func TestRedisPushRegisteredConfigDelivered(t *testing.T) {
 	}
 	if !gotURLs[webhook] || !gotURLs[secondWebhook] {
 		t.Fatalf("deliveries did not cover both configs: %+v", gotURLs)
+	}
+}
+
+func TestRedisPushQueuedGenerationInvalidatedAcrossManagers(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	sender := &firstBlockingSender{started: started, release: release}
+	managerA, mr := setupTest(t, scriptedExecutor(), WithPushNotifications(push.Config{
+		Sender:                  sender,
+		MaxConcurrentDeliveries: 1,
+		DeliveryQueueSize:       2,
+	}))
+	defer managerA.Close()
+	var releaseOnce sync.Once
+	releaseFirst := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseFirst()
+
+	clientB := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = clientB.Close() })
+	managerB, err := NewTaskManager(scriptedExecutor(), clientB,
+		WithPushNotifications(push.Config{ManualDelivery: true}))
+	if err != nil {
+		t.Fatalf("NewTaskManager B: %v", err)
+	}
+	defer managerB.Close()
+
+	task := storedTask(t, managerA, "task-cross-generation", "ctx-cross-generation", protocol.TaskStateWorking)
+	const configID = "shared-hook"
+	if _, err := managerB.OnPushNotificationSet(context.Background(), protocol.TaskPushNotificationConfig{
+		TaskID: task.ID,
+		ID:     configID,
+		URL:    "https://old.example/hook",
+	}); err != nil {
+		t.Fatalf("manager B initial Set: %v", err)
+	}
+	response := func(state protocol.TaskState) protocol.StreamResponse {
+		return protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{
+			TaskID:    task.ID,
+			ContextID: task.ContextID,
+			Status:    protocol.TaskStatus{State: state},
+		})
+	}
+
+	// Keep the first delivery in flight and leave the old-generation event in
+	// A's process-local queue.
+	managerA.dispatchPush(task.ID, response(protocol.TaskStateWorking))
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first push delivery did not start")
+	}
+	managerA.dispatchPush(task.ID, response(protocol.TaskStateInputRequired))
+
+	// B deletes and recreates the same config ID. Existence and ID checks alone
+	// would revive the queued event; only the shared Redis generation rejects it.
+	if err := managerB.OnPushNotificationDelete(context.Background(),
+		protocol.DeleteTaskPushNotificationConfigParams{TaskID: task.ID, ID: configID}); err != nil {
+		t.Fatalf("manager B Delete: %v", err)
+	}
+	if _, err := managerB.OnPushNotificationSet(context.Background(), protocol.TaskPushNotificationConfig{
+		TaskID: task.ID,
+		ID:     configID,
+		URL:    "https://new.example/hook",
+	}); err != nil {
+		t.Fatalf("manager B recreate: %v", err)
+	}
+	managerA.dispatchPush(task.ID, response(protocol.TaskStateCompleted))
+	releaseFirst()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		calls := sender.snapshot()
+		if len(calls) > 0 {
+			last := calls[len(calls)-1]
+			if update := last.event.GetStatusUpdate(); update != nil &&
+				update.Status.State == protocol.TaskStateCompleted {
+				if len(calls) != 2 {
+					t.Fatalf("deliveries = %d, want in-flight old plus new; queued old generation was not skipped", len(calls))
+				}
+				if state := calls[0].event.GetStatusUpdate().Status.State; state != protocol.TaskStateWorking {
+					t.Fatalf("first delivery state = %s, want %s", state, protocol.TaskStateWorking)
+				}
+				if last.cfg.URL != "https://new.example/hook" {
+					t.Fatalf("recreated config URL = %q, want new URL", last.cfg.URL)
+				}
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("recreated registration was not delivered; calls = %+v", sender.snapshot())
+}
+
+func TestRedisPushBackpressureSerializesSuspendContinuation(t *testing.T) { //nolint:gocyclo // Concurrent handoff phases stay explicit.
+	started := make(chan struct{})
+	release := make(chan struct{})
+	sender := &firstBlockingSender{started: started, release: release}
+	var round atomic.Int32
+	taskIDs := make(chan string, 2)
+	processor := executorFunc(func(
+		_ context.Context, ec *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		taskIDs <- ec.TaskID
+		out := make(chan protocol.StreamEvent, 1)
+		if round.Add(1) == 1 {
+			out <- statusEvent(protocol.TaskStateInputRequired, agentReply("need more"))
+		} else {
+			out <- statusEvent(protocol.TaskStateCompleted, agentReply("done"))
+		}
+		close(out)
+		return out, nil
+	})
+	manager, _ := setupTest(t, processor, WithPushNotifications(push.Config{
+		Sender:                  sender,
+		MaxConcurrentDeliveries: 1,
+		DeliveryQueueSize:       1,
+	}))
+	defer manager.Close()
+	var releaseOnce sync.Once
+	releaseFirst := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseFirst()
+
+	// Occupy the sole worker and fill its one-slot queue so the next enqueue
+	// cannot complete until the sender is released.
+	prefill := storedTask(t, manager, "task-prefill", "ctx-prefill", protocol.TaskStateWorking)
+	if _, err := manager.OnPushNotificationSet(context.Background(), protocol.TaskPushNotificationConfig{
+		TaskID: prefill.ID,
+		ID:     "prefill-hook",
+		URL:    "https://prefill.example/hook",
+	}); err != nil {
+		t.Fatalf("prefill Set: %v", err)
+	}
+	prefillResponse := func(state protocol.TaskState) protocol.StreamResponse {
+		return protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{
+			TaskID: prefill.ID,
+			Status: protocol.TaskStatus{State: state},
+		})
+	}
+	manager.dispatchPush(prefill.ID, prefillResponse(protocol.TaskStateWorking))
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prefill push delivery did not start")
+	}
+	manager.dispatchPush(prefill.ID, prefillResponse(protocol.TaskStateSubmitted))
+
+	params := sendParams("start", "ctx-push-suspend")
+	params.Configuration = &protocol.SendMessageConfiguration{PushConfig: &protocol.TaskPushNotificationConfig{
+		ID:  "suspend-hook",
+		URL: "https://suspend.example/hook",
+	}}
+	stream, err := manager.OnSendMessageStream(context.Background(), params)
+	if err != nil {
+		t.Fatalf("OnSendMessageStream: %v", err)
+	}
+	var taskID string
+	select {
+	case taskID = <-taskIDs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processor did not receive first round")
+	}
+	waitTaskState(t, manager, taskID, protocol.TaskStateInputRequired)
+
+	// Once INPUT_REQUIRED is visible in Redis, the yield barrier must already
+	// exist. This ordering makes a GetTask-driven continuation safe.
+	manager.cancelMu.RLock()
+	live := manager.executions[taskID]
+	yielding := live != nil && live.yieldDone != nil
+	manager.cancelMu.RUnlock()
+	if !yielding {
+		t.Fatal("input-required became visible before the suspend handoff barrier")
+	}
+
+	type continuationResult struct {
+		response *protocol.SendMessageResponse
+		err      error
+	}
+	continuationDone := make(chan continuationResult, 1)
+	go func() {
+		followUp := sendParams("more", "")
+		followUp.Message.TaskID = &taskID
+		response, err := manager.OnSendMessage(context.Background(), followUp)
+		continuationDone <- continuationResult{response: response, err: err}
+	}()
+
+	select {
+	case result := <-continuationDone:
+		t.Fatalf("continuation returned before suspend enqueue was released: response=%+v err=%v",
+			result.response, result.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	select {
+	case event, ok := <-stream:
+		t.Fatalf("stream exposed suspend frame before push enqueue completed: event=%+v open=%v", event, ok)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	releaseFirst()
+	event := recvEvent(t, stream)
+	update := event.GetStatusUpdate()
+	if update == nil || update.TaskID != taskID || update.Status.State != protocol.TaskStateInputRequired {
+		t.Fatalf("suspend frame = %+v, want INPUT_REQUIRED for %s", event, taskID)
+	}
+
+	select {
+	case result := <-continuationDone:
+		if result.err != nil {
+			t.Fatalf("continuation after suspend handoff: %v", result.err)
+		}
+		task := result.response.GetTask()
+		if task == nil || task.Status.State != protocol.TaskStateCompleted {
+			t.Fatalf("continuation response = %+v, want completed task", result.response)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("continuation did not complete after releasing push backpressure")
 	}
 }
 
