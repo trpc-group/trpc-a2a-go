@@ -55,7 +55,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("create signed sender: %v", err)
 	}
-	tm, err := memory.NewTaskManager(worker{}, memory.WithPushNotifications(sender))
+	tm, err := memory.NewTaskManager(worker{}, memory.WithPushNotifications(push.Config{Sender: sender}))
 	if err != nil {
 		log.Fatalf("create task manager: %v", err)
 	}

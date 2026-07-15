@@ -161,10 +161,9 @@ type TaskManager struct {
 	// not part of the public API yet.
 	pushStore *pushConfigStore
 
-	// pushSender, when non-nil, delivers task updates to registered webhooks as
-	// events occur. When nil, push is not supported: the config RPCs return
-	// PushNotificationNotSupported.
-	pushSender push.Sender
+	// pushEnabled controls config registration and capability advertisement.
+	// Automatic delivery is a separate concern owned by pushDispatcher.
+	pushEnabled bool
 
 	// pushDispatcher owns the bounded, ordered automatic-delivery workers. It is
 	// nil when push is disabled or the agent selected manual delivery.
@@ -207,9 +206,6 @@ func NewTaskManager(processor taskmanager.MessageProcessor, opts ...TaskManagerO
 	for _, opt := range opts {
 		opt(options)
 	}
-	if options.Push.ManualDelivery && options.Push.Sender == nil {
-		return nil, fmt.Errorf("push.Config.ManualDelivery requires a Sender")
-	}
 	if options.Push.MaxConcurrentDeliveries < 0 || options.Push.DeliveryQueueSize < 0 {
 		return nil, fmt.Errorf("push delivery concurrency and queue size cannot be negative")
 	}
@@ -221,14 +217,14 @@ func NewTaskManager(processor taskmanager.MessageProcessor, opts ...TaskManagerO
 		tasks:         make(map[string]*protocol.Task),
 		subscribers:   make(map[string][]*taskSubscriber),
 		pushStore:     newPushConfigStore(),
-		pushSender:    options.Push.Sender,
+		pushEnabled:   options.Push.Sender != nil || options.Push.ManualDelivery,
 		executions:    make(map[string]*execution),
 		options:       options,
 		stopCleanup:   make(chan struct{}),
 	}
-	if manager.pushSender != nil && !options.Push.ManualDelivery {
+	if options.Push.Sender != nil && !options.Push.ManualDelivery {
 		manager.pushDispatcher = pushdispatch.New(
-			context.Background(), manager.pushSender,
+			context.Background(), options.Push.Sender,
 			options.Push.MaxConcurrentDeliveries, options.Push.DeliveryQueueSize,
 		)
 	}
@@ -439,7 +435,7 @@ func (m *TaskManager) OnPushNotificationSet(
 	ctx context.Context,
 	params protocol.TaskPushNotificationConfig,
 ) (*protocol.TaskPushNotificationConfig, error) {
-	if m.pushSender == nil {
+	if !m.pushEnabled {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
 	if err := push.ValidateConfig(params); err != nil {
@@ -461,7 +457,7 @@ func (m *TaskManager) OnPushNotificationGet(
 	ctx context.Context,
 	params protocol.GetTaskPushNotificationConfigParams,
 ) (*protocol.TaskPushNotificationConfig, error) {
-	if m.pushSender == nil {
+	if !m.pushEnabled {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
 	if params.ID == "" {
@@ -506,7 +502,7 @@ func (m *TaskManager) OnPushNotificationList(
 	ctx context.Context,
 	params protocol.ListTaskPushNotificationConfigsParams,
 ) (*protocol.ListTaskPushNotificationConfigsResult, error) {
-	if m.pushSender == nil {
+	if !m.pushEnabled {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
 	if err := m.ensurePushTaskExists(params.TaskID); err != nil {
@@ -522,7 +518,7 @@ func (m *TaskManager) OnPushNotificationDelete(
 	ctx context.Context,
 	params protocol.DeleteTaskPushNotificationConfigParams,
 ) error {
-	if m.pushSender == nil {
+	if !m.pushEnabled {
 		return taskmanager.ErrPushNotificationNotSupported()
 	}
 	if params.ID == "" {
@@ -750,7 +746,7 @@ func nowTimestamp() string {
 
 // SupportsPushNotifications reports whether push registration and delivery are enabled.
 func (m *TaskManager) SupportsPushNotifications() bool {
-	return m.pushSender != nil
+	return m.pushEnabled
 }
 
 // dispatchPush delivers event to every push webhook registered for taskID.

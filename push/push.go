@@ -7,10 +7,11 @@
 // Package push owns the A2A push-notification transport: delivering a task
 // update to a client-registered webhook.
 //
-// A Sender delivers a task update to a single webhook; the TaskManager stores
-// the per-task webhook configs internally and, as task events occur, hands each
-// one to the configured Sender. Push is opt-in: with no Sender configured the
-// manager rejects config registration with PushNotificationNotSupported.
+// A Sender delivers a task update to a single webhook. In automatic mode the
+// TaskManager stores per-task webhook configs and hands each event to the
+// configured Sender. In manual mode the application owns delivery. Push is
+// opt-in: when neither a Sender nor ManualDelivery is configured, the manager
+// rejects config registration with PushNotificationNotSupported.
 //
 // Signing is an optional, dependency-free seam: HTTPSender takes an
 // AuthHeaderFunc (WithAuthorizationHeader) to compute the Authorization header
@@ -60,22 +61,23 @@ func (f SenderFunc) SendPush(
 }
 
 // Config configures a task manager's push-notification delivery. It is handed to
-// the manager once (e.g. memory.WithPushConfig) and lives in this
+// the manager once (e.g. memory.WithPushNotifications) and lives in this
 // package so every task manager — including third-party ones — shares a single
 // vocabulary for enabling push. The built-in managers' automatic queue is
 // process-local: it provides bounded, ordered delivery while the process is
 // running, but not durable redelivery after a crash. Use ManualDelivery with a
 // durable outbox when that guarantee is required.
 type Config struct {
-	// Sender delivers task updates to registered webhooks as events occur. When
-	// nil, push is not supported: the manager rejects config registration with
-	// PushNotificationNotSupported (-32003).
+	// Sender delivers task updates to registered webhooks automatically as events
+	// occur. It is required for automatic delivery. In ManualDelivery mode the
+	// manager does not use it, so the application may keep its sender or durable
+	// outbox outside the manager.
 	Sender Sender
 
 	// ManualDelivery disables the framework's automatic dispatch while keeping
 	// push fully supported — clients register configs and the capability is
-	// advertised. The agent delivers by calling the Sender itself, on its own
-	// schedule. Requires Sender to be set.
+	// advertised. It does not require Sender: the application owns delivery and
+	// may use a push.Sender, queue, or durable outbox on its own schedule.
 	//
 	// Know your webhooks: the processor is handed only the config sent inline
 	// with the message (ExecContext.PushConfig). Configs registered afterwards

@@ -320,7 +320,7 @@ func (m *TaskManager) prepareInlinePushConfig(
 	if config == nil {
 		return nil, false, nil
 	}
-	if m.pushSender == nil {
+	if !m.pushEnabled {
 		return nil, false, taskmanager.ErrPushNotificationNotSupported()
 	}
 	pushConfig := *config

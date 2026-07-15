@@ -679,7 +679,7 @@ func (m *mockTaskManager) OnPushNotificationGet(
 	return nil, fmt.Errorf("push notification config not found for task %s", params.TaskID)
 }
 
-// PushSender implements the TaskManager interface.
+// SupportsPushNotifications implements the TaskManager interface.
 func (m *mockTaskManager) SupportsPushNotifications() bool { return m.pushSupported }
 
 // OnListTasks implements the TaskManager interface (v1.0 ListTasks).

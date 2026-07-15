@@ -574,7 +574,7 @@ if err != nil {
 
 taskManager, err := memory.NewTaskManager(
     processor,
-    memory.WithPushNotifications(sender),
+    memory.WithPushNotifications(push.Config{Sender: sender}),
 )
 
 srv, err := server.NewA2AServer(

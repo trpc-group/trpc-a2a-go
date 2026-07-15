@@ -146,10 +146,10 @@ func NewA2AServer(taskManager taskmanager.TaskManager, opts ...Option) (*A2AServ
 }
 
 // resolvePushPosture derives the server's push-notification posture from the
-// TaskManager and the configured options: whether push is enabled (a Sender is
-// present), and whether to publish JWKS (a handler is configured and push is
-// enabled, unless WithJWKSEndpoint decided otherwise). It returns an error when
-// a JWKS endpoint was requested without a handler.
+// TaskManager and the configured options: whether push is enabled and whether
+// to publish JWKS (a handler is configured and push is enabled, unless
+// WithJWKSEndpoint decided otherwise). It returns an error when a JWKS endpoint
+// was requested without a handler.
 func (s *A2AServer) resolvePushPosture(taskManager taskmanager.TaskManager) error {
 	// The server depends only on the manager's semantic capability; a manager may
 	// deliver through HTTP, a queue, or a durable outbox.
@@ -428,8 +428,10 @@ func (s *A2AServer) finalizePushCapability(card AgentCard) AgentCard {
 }
 
 // resolveAgentCard returns the AgentCard for the given tenant (from "?tenant=").
-// An empty tenant yields the default card. On a multi-tenant server (WithTenantCard
-// / WithTenantCardProvider) an unknown tenant yields ok=false (404).
+// The bool reports whether a card was found: a successful lookup returns
+// (card, true), while a missing default or unknown tenant returns (AgentCard{},
+// false). An empty tenant selects the default card. On a multi-tenant server
+// (WithTenantCard / WithTenantCardProvider), an unknown tenant is not found.
 func (s *A2AServer) resolveAgentCard(ctx context.Context, tenant string) (AgentCard, bool) {
 	if tenant == "" {
 		// No default card configured (pure multi-tenant): nothing to serve without a tenant.

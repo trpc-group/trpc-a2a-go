@@ -181,7 +181,7 @@ func (m *TaskManager) prepareExecContext(
 	// fire). For a new lazy task, registration is deferred until the first task
 	// event; a pure-Message exchange must not leave an orphan config behind.
 	if pushConfig != nil {
-		if m.pushSender == nil {
+		if !m.pushEnabled {
 			m.releaseExecution(taskID, exec)
 			return nil, taskmanager.ErrPushNotificationNotSupported()
 		}

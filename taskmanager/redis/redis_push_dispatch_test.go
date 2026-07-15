@@ -13,9 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
-	"github.com/redis/go-redis/v9"
-
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
@@ -84,7 +81,7 @@ func TestRedisPushInlineConfigDelivered(t *testing.T) {
 	m, _ := setupTest(t, scriptedExecutor(
 		statusEvent(protocol.TaskStateWorking, nil),
 		statusEvent(protocol.TaskStateCompleted, agentReply("done")),
-	), WithPushNotifications(sender))
+	), WithPushNotifications(push.Config{Sender: sender}))
 	defer m.Close()
 
 	const webhook = "https://example.com/hook"
@@ -123,7 +120,8 @@ func TestRedisInlinePushConfigMessageOnlyLeavesNoOrphan(t *testing.T) {
 		close(out)
 		return out, nil
 	})
-	m, mr := setupTest(t, processor, WithPushNotifications(&recordingSender{}))
+	m, mr := setupTest(t, processor,
+		WithPushNotifications(push.Config{ManualDelivery: true}))
 	defer m.Close()
 	params := sendParams("hello", "")
 	params.Configuration = &protocol.SendMessageConfiguration{
@@ -143,6 +141,30 @@ func TestRedisInlinePushConfigMessageOnlyLeavesNoOrphan(t *testing.T) {
 	}
 }
 
+func TestRedisManualInlinePushConfigPersists(t *testing.T) {
+	m, _ := setupTest(t, scriptedExecutor(
+		statusEvent(protocol.TaskStateCompleted, agentReply("done")),
+	), WithPushNotifications(push.Config{ManualDelivery: true}))
+	defer m.Close()
+	params := sendParams("hello", "")
+	params.Configuration = &protocol.SendMessageConfiguration{
+		PushConfig: &protocol.TaskPushNotificationConfig{URL: "https://example.com/hook"},
+	}
+	resp, err := m.OnSendMessage(context.Background(), params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := resp.GetTask()
+	if task == nil {
+		t.Fatalf("OnSendMessage response = %+v, want task", resp)
+	}
+	list, err := m.OnPushNotificationList(context.Background(),
+		protocol.ListTaskPushNotificationConfigsParams{TaskID: task.ID})
+	if err != nil || len(list.Configs) != 1 || list.Configs[0].TaskID != task.ID {
+		t.Fatalf("manual inline config: list=%+v err=%v", list, err)
+	}
+}
+
 // TestRedisPushRegisteredConfigDelivered covers the RPC registration path:
 // every config registered for a task is delivered when a later continuation
 // round drives the task to a terminal state.
@@ -150,7 +172,7 @@ func TestRedisPushRegisteredConfigDelivered(t *testing.T) {
 	sender := &recordingSender{}
 	m, _ := setupTest(t, scriptedExecutor(
 		statusEvent(protocol.TaskStateCompleted, agentReply("done")),
-	), WithPushNotifications(sender))
+	), WithPushNotifications(push.Config{Sender: sender}))
 	defer m.Close()
 
 	task := storedTask(t, m, "task-reg", "ctx-reg", protocol.TaskStateWorking)
@@ -197,9 +219,9 @@ func TestRedisPushRegisteredConfigDelivered(t *testing.T) {
 	}
 }
 
-// TestRedisPushRejectedWithoutSender verifies the -32003 gate: with no Sender
-// configured, both the config RPC and an inline config are rejected.
-func TestRedisPushRejectedWithoutSender(t *testing.T) {
+// TestRedisPushRejectedWhenDisabled verifies the -32003 gate when neither
+// automatic nor manual delivery is enabled.
+func TestRedisPushRejectedWhenDisabled(t *testing.T) {
 	m, _ := setupTest(t, scriptedExecutor())
 	defer m.Close()
 
@@ -225,7 +247,7 @@ func TestRedisPushManualSuppresses(t *testing.T) {
 	sender := &recordingSender{}
 	m, _ := setupTest(t, scriptedExecutor(
 		statusEvent(protocol.TaskStateCompleted, agentReply("done")),
-	), WithPushConfig(push.Config{Sender: sender, ManualDelivery: true}))
+	), WithPushNotifications(push.Config{Sender: sender, ManualDelivery: true}))
 	defer m.Close()
 
 	task := storedTask(t, m, "task-manual", "ctx-manual", protocol.TaskStateWorking)
@@ -264,22 +286,45 @@ func TestRedisPushManualSuppresses(t *testing.T) {
 	}
 }
 
-// TestRedisManualWithoutSenderFails pins the invalid config: manual delivery
-// without a Sender is a construction error, not silence.
-func TestRedisManualWithoutSenderFails(t *testing.T) {
-	mr := miniredis.RunT(t)
-	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer client.Close()
-	if _, err := NewTaskManager(scriptedExecutor(), client,
-		WithPushConfig(push.Config{ManualDelivery: true})); err == nil {
-		t.Fatal("ManualDelivery without a Sender must fail construction")
+// TestRedisManualWithoutSenderAllowsRegistration pins the separation between
+// push capability and automatic transport.
+func TestRedisManualWithoutSenderAllowsRegistration(t *testing.T) {
+	m, _ := setupTest(t, scriptedExecutor(),
+		WithPushNotifications(push.Config{ManualDelivery: true}))
+	defer m.Close()
+	task := storedTask(t, m, "manual-without-sender", "ctx-manual-without-sender", protocol.TaskStateWorking)
+	ctx := context.Background()
+	stored, err := m.OnPushNotificationSet(ctx, protocol.TaskPushNotificationConfig{
+		TaskID: task.ID,
+		URL:    "https://example.com/hook",
+	})
+	if err != nil {
+		t.Fatalf("manual registration without Sender: %v", err)
+	}
+	if _, err := m.OnPushNotificationGet(ctx, protocol.GetTaskPushNotificationConfigParams{
+		TaskID: stored.TaskID, ID: stored.ID,
+	}); err != nil {
+		t.Fatalf("manual Get without Sender: %v", err)
+	}
+	list, err := m.OnPushNotificationList(ctx,
+		protocol.ListTaskPushNotificationConfigsParams{TaskID: stored.TaskID})
+	if err != nil || len(list.Configs) != 1 {
+		t.Fatalf("manual List without Sender: list=%+v err=%v", list, err)
+	}
+	if err := m.OnPushNotificationDelete(ctx, protocol.DeleteTaskPushNotificationConfigParams{
+		TaskID: stored.TaskID, ID: stored.ID,
+	}); err != nil {
+		t.Fatalf("manual Delete without Sender: %v", err)
+	}
+	if !m.SupportsPushNotifications() {
+		t.Fatal("manual delivery must advertise push support")
 	}
 }
 
-// TestRedisPushSenderAccessor verifies the accessor the server's discovery reads.
-func TestRedisPushSenderAccessor(t *testing.T) {
+// TestRedisSupportsPushNotifications verifies the capability the server reads.
+func TestRedisSupportsPushNotifications(t *testing.T) {
 	sender := &recordingSender{}
-	m, _ := setupTest(t, scriptedExecutor(), WithPushNotifications(sender))
+	m, _ := setupTest(t, scriptedExecutor(), WithPushNotifications(push.Config{Sender: sender}))
 	defer m.Close()
 	if !m.SupportsPushNotifications() {
 		t.Fatalf("SupportsPushNotifications() = false with a configured sender")
@@ -288,6 +333,6 @@ func TestRedisPushSenderAccessor(t *testing.T) {
 	plain, _ := setupTest(t, scriptedExecutor())
 	defer plain.Close()
 	if plain.SupportsPushNotifications() {
-		t.Fatalf("SupportsPushNotifications() = true without a sender")
+		t.Fatalf("SupportsPushNotifications() = true without a sender or manual delivery")
 	}
 }

@@ -176,7 +176,7 @@ func main() {
 	// TaskManager: automatic delivery for every task event.
 	processor := &pushNotificationMessageProcessor{}
 	tm, err := memory.NewTaskManager(processor,
-		memory.WithPushNotifications(signedSender),
+		memory.WithPushNotifications(push.Config{Sender: signedSender}),
 	)
 	if err != nil {
 		log.Fatalf("failed to create task manager: %v", err)

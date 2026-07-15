@@ -92,9 +92,9 @@ type TaskManager struct {
 	closeOnce sync.Once
 	closeErr  error
 
-	// pushSender delivers task updates to registered webhooks as events occur;
-	// nil disables push (the config RPCs return PushNotificationNotSupported).
-	pushSender push.Sender
+	// pushEnabled controls config registration and capability advertisement.
+	// Automatic delivery is a separate concern owned by pushDispatcher.
+	pushEnabled bool
 	// pushCtx cancels Redis config reads during shutdown.
 	pushCtx    context.Context
 	pushCancel context.CancelFunc
@@ -131,9 +131,6 @@ func NewTaskManager(
 	for _, opt := range opts {
 		opt(options)
 	}
-	if options.Push.ManualDelivery && options.Push.Sender == nil {
-		return nil, errors.New("push.Config.ManualDelivery requires a Sender")
-	}
 	if options.Push.MaxConcurrentDeliveries < 0 || options.Push.DeliveryQueueSize < 0 {
 		return nil, errors.New("push delivery concurrency and queue size cannot be negative")
 	}
@@ -144,13 +141,13 @@ func NewTaskManager(
 		expiration:  options.ExpireTime,
 		subscribers: make(map[string][]*taskSubscriber),
 		executions:  make(map[string]*liveExecution),
-		pushSender:  options.Push.Sender,
+		pushEnabled: options.Push.Sender != nil || options.Push.ManualDelivery,
 		options:     options,
 	}
 	manager.pushCtx, manager.pushCancel = context.WithCancel(context.Background())
-	if manager.pushSender != nil && !options.Push.ManualDelivery {
+	if options.Push.Sender != nil && !options.Push.ManualDelivery {
 		manager.pushDispatcher = pushdispatch.New(
-			manager.pushCtx, manager.pushSender,
+			manager.pushCtx, options.Push.Sender,
 			options.Push.MaxConcurrentDeliveries, options.Push.DeliveryQueueSize,
 		)
 	}
@@ -394,7 +391,7 @@ func (m *TaskManager) OnPushNotificationSet(
 	ctx context.Context,
 	params protocol.TaskPushNotificationConfig,
 ) (*protocol.TaskPushNotificationConfig, error) {
-	if m.pushSender == nil {
+	if !m.pushEnabled {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
 	if err := push.ValidateConfig(params); err != nil {
@@ -416,7 +413,7 @@ func (m *TaskManager) OnPushNotificationGet(
 	ctx context.Context,
 	params protocol.GetTaskPushNotificationConfigParams,
 ) (*protocol.TaskPushNotificationConfig, error) {
-	if m.pushSender == nil {
+	if !m.pushEnabled {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
 	if params.ID == "" {
@@ -482,7 +479,7 @@ func (m *TaskManager) OnPushNotificationList(
 	ctx context.Context,
 	params protocol.ListTaskPushNotificationConfigsParams,
 ) (*protocol.ListTaskPushNotificationConfigsResult, error) {
-	if m.pushSender == nil {
+	if !m.pushEnabled {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
 	if _, err := m.getTaskInternal(ctx, params.TaskID); err != nil {
@@ -502,7 +499,7 @@ func (m *TaskManager) OnPushNotificationDelete(
 	ctx context.Context,
 	params protocol.DeleteTaskPushNotificationConfigParams,
 ) error {
-	if m.pushSender == nil {
+	if !m.pushEnabled {
 		return taskmanager.ErrPushNotificationNotSupported()
 	}
 	if params.ID == "" {
@@ -521,7 +518,7 @@ func (m *TaskManager) OnPushNotificationDelete(
 
 // SupportsPushNotifications reports whether push registration and delivery are enabled.
 func (m *TaskManager) SupportsPushNotifications() bool {
-	return m.pushSender != nil
+	return m.pushEnabled
 }
 
 // storePushConfig persists cfg as one field in the task's push-config hash.

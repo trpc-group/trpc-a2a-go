@@ -178,7 +178,8 @@ func WithJWKSEndpoint(enabled bool, path string) Option {
 // publication implementations can pass any http.Handler.
 //
 // This option controls only JWKS publication; client-declared webhook
-// authentication is handled by the configured push Sender.
+// authentication is handled by whichever component delivers the notification,
+// typically a push.Sender.
 func WithPushNotificationJWKSHandler(handler http.Handler) Option {
 	return func(s *A2AServer) {
 		s.pushJWKSHandler = handler

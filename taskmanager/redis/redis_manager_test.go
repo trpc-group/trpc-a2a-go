@@ -19,6 +19,7 @@ import (
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
@@ -1258,7 +1259,7 @@ func TestOnListTasks(t *testing.T) {
 // =============================================================================
 
 func TestPushNotificationCRUD(t *testing.T) { //nolint:gocyclo // One lifecycle test keeps CRUD state transitions explicit.
-	m, mr := setupTest(t, scriptedExecutor(), WithPushNotifications(&recordingSender{}))
+	m, mr := setupTest(t, scriptedExecutor(), WithPushNotifications(push.Config{Sender: &recordingSender{}}))
 	storedTask(t, m, "task-push", "ctx-push", protocol.TaskStateWorking)
 
 	config := protocol.TaskPushNotificationConfig{
@@ -1358,7 +1359,7 @@ func TestPushNotificationCRUD(t *testing.T) { //nolint:gocyclo // One lifecycle 
 func TestTaskWriteRefreshesPushConfigTTL(t *testing.T) {
 	const expire = 30 * time.Minute
 	m, mr := setupTest(t, scriptedExecutor(), WithExpireTime(expire),
-		WithPushNotifications(&recordingSender{}))
+		WithPushNotifications(push.Config{Sender: &recordingSender{}}))
 	task := storedTask(t, m, "task-push-ttl", "ctx-push-ttl", protocol.TaskStateWorking)
 	if _, err := m.OnPushNotificationSet(context.Background(), protocol.TaskPushNotificationConfig{
 		TaskID: task.ID, URL: "https://example.com/webhook",

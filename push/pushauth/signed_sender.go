@@ -30,7 +30,8 @@ import (
 // server:
 //
 //	sender, _ := pushauth.NewSignedSender()
-//	tm, _  := memory.NewTaskManager(proc, memory.WithPushNotifications(sender))
+//	tm, _ := memory.NewTaskManager(proc,
+//	    memory.WithPushNotifications(push.Config{Sender: sender}))
 //	srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 //	    server.WithPushNotificationJWKSHandler(sender.JWKSHandler()))
 //	// The server publishes the identity at its JWKS endpoint.

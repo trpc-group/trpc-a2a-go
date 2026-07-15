@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
@@ -195,7 +196,7 @@ func TestTaskManager_OnGetTask(t *testing.T) {
 }
 
 func TestTaskManager_PushNotifications(t *testing.T) {
-	manager := newTestManager(t, echoExecutor(), WithPushNotifications(noopSender()))
+	manager := newTestManager(t, echoExecutor(), WithPushNotifications(push.Config{Sender: noopSender()}))
 	ctx := context.Background()
 	seedTask(manager, protocol.Task{ID: "test-task-id", Status: protocol.TaskStatus{State: protocol.TaskStateWorking}})
 
@@ -727,7 +728,7 @@ func TestTaskManager_OnListTasks(t *testing.T) {
 
 // TestTaskManager_PushNotificationListDelete covers the v1.0 list/delete push-config methods.
 func TestTaskManager_PushNotificationListDelete(t *testing.T) {
-	manager := newTestManager(t, echoExecutor(), WithPushNotifications(noopSender()))
+	manager := newTestManager(t, echoExecutor(), WithPushNotifications(push.Config{Sender: noopSender()}))
 	ctx := context.Background()
 	seedTask(manager, protocol.Task{ID: "task-1", Status: protocol.TaskStatus{State: protocol.TaskStateWorking}})
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
@@ -274,7 +275,7 @@ func TestSendMessage_PushConfigReachesProcessor(t *testing.T) {
 			close(out)
 			return out, nil
 		})
-	manager, _ := setupTest(t, processor, WithPushNotifications(&recordingSender{}))
+	manager, _ := setupTest(t, processor, WithPushNotifications(push.Config{Sender: &recordingSender{}}))
 
 	params := sendParams("hello", "")
 	params.Configuration = &protocol.SendMessageConfiguration{

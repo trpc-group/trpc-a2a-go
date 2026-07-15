@@ -22,8 +22,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
-// noopSender enables push (unlocking config registration) without delivering
-// anything — the SenderFunc-based "agent delivers on its own schedule" mode.
+// noopSender enables automatic push in tests while discarding every delivery.
 func noopSender() push.Sender {
 	return push.SenderFunc(func(context.Context, protocol.TaskPushNotificationConfig, protocol.StreamResponse) error {
 		return nil
@@ -45,8 +44,9 @@ func TestTaskManager_PushDispatchOnTerminalState(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	manager := newTestManager(t, echoExecutor(), WithPushNotifications(
-		push.NewHTTPSender(push.WithUnsafeAllowPrivateNetworks())))
+	manager := newTestManager(t, echoExecutor(), WithPushNotifications(push.Config{
+		Sender: push.NewHTTPSender(push.WithUnsafeAllowPrivateNetworks()),
+	}))
 
 	taskID := "push-e2e-task"
 	seedTask(manager, protocol.Task{
@@ -81,10 +81,9 @@ func TestTaskManager_PushDispatchOnTerminalState(t *testing.T) {
 	}
 }
 
-// TestTaskManager_PushRejectedWithoutSender: with no Sender configured, push is
-// not supported — config registration is rejected with -32003 instead of being
-// stored and never delivered (a silent lie to the client).
-func TestTaskManager_PushRejectedWithoutSender(t *testing.T) {
+// TestTaskManager_PushRejectedWhenDisabled verifies config registration is
+// rejected with -32003 when neither automatic nor manual delivery is enabled.
+func TestTaskManager_PushRejectedWhenDisabled(t *testing.T) {
 	manager := newTestManager(t, echoExecutor())
 	ctx := context.Background()
 
@@ -111,7 +110,7 @@ func TestTaskManager_PushRejectedWithoutSender(t *testing.T) {
 // TestOnPushNotificationSet_GeneratesResourceIDs verifies that each Create
 // without an explicit ID creates a distinct push-config resource.
 func TestOnPushNotificationSet_GeneratesResourceIDs(t *testing.T) {
-	manager := newTestManager(t, echoExecutor(), WithPushNotifications(noopSender()))
+	manager := newTestManager(t, echoExecutor(), WithPushNotifications(push.Config{Sender: noopSender()}))
 	ctx := context.Background()
 	taskID := "replace-task"
 	seedTask(manager, protocol.Task{ID: taskID, Status: protocol.TaskStatus{State: protocol.TaskStateWorking}})
@@ -180,10 +179,8 @@ func TestManualPushDelivery(t *testing.T) {
 
 	// ManualDelivery keeps push enabled (registration, config RPCs) while
 	// the framework delivers nothing — the agent pushes on its own schedule.
-	manager := newTestManager(t, echoExecutor(), WithPushConfig(push.Config{
-		Sender:         push.NewHTTPSender(push.WithUnsafeAllowPrivateNetworks()),
-		ManualDelivery: true,
-	}))
+	manager := newTestManager(t, echoExecutor(),
+		WithPushNotifications(push.Config{ManualDelivery: true}))
 	ctx := context.Background()
 
 	taskID := "manual-task"
@@ -229,7 +226,7 @@ func TestManualPushDelivery(t *testing.T) {
 // no config must NOT be reported as "task not found" (-32001); a genuinely
 // missing task must.
 func TestOnPushNotificationGet_DistinguishesConfigNotFound(t *testing.T) {
-	manager := newTestManager(t, echoExecutor(), WithPushNotifications(noopSender()))
+	manager := newTestManager(t, echoExecutor(), WithPushNotifications(push.Config{Sender: noopSender()}))
 	ctx := context.Background()
 
 	seedTask(manager, protocol.Task{
@@ -262,11 +259,11 @@ func TestInlinePushConfigRegistration(t *testing.T) {
 		return p
 	}
 
-	t.Run("gated without sender", func(t *testing.T) {
+	t.Run("gated when disabled", func(t *testing.T) {
 		manager := newTestManager(t, echoExecutor())
 		_, err := manager.OnSendMessage(context.Background(), inlineParams())
 		if !errors.Is(err, taskmanager.ErrPushNotificationNotSupportedSentinel) {
-			t.Fatalf("expected PushNotificationNotSupported for inline config without sender, got %v", err)
+			t.Fatalf("expected PushNotificationNotSupported for inline config while disabled, got %v", err)
 		}
 	})
 
@@ -281,7 +278,8 @@ func TestInlinePushConfigRegistration(t *testing.T) {
 				close(out)
 				return out, nil
 			})
-		manager := newTestManager(t, processor, WithPushNotifications(noopSender()))
+		manager := newTestManager(t, processor,
+			WithPushNotifications(push.Config{ManualDelivery: true}))
 
 		if _, err := manager.OnSendMessage(context.Background(), inlineParams()); err != nil {
 			t.Fatalf("send failed: %v", err)
@@ -308,7 +306,8 @@ func TestInlinePushConfigRegistration(t *testing.T) {
 				close(out)
 				return out, nil
 			})
-		manager := newTestManager(t, processor, WithPushNotifications(noopSender()))
+		manager := newTestManager(t, processor,
+			WithPushNotifications(push.Config{ManualDelivery: true}))
 
 		if _, err := manager.OnSendMessage(context.Background(), inlineParams()); err != nil {
 			t.Fatalf("send failed: %v", err)
@@ -324,21 +323,50 @@ func TestInlinePushConfigRegistration(t *testing.T) {
 
 // TestSupportsPushNotifications: the server probes this semantic capability.
 func TestSupportsPushNotifications(t *testing.T) {
-	withPush := newTestManager(t, echoExecutor(), WithPushNotifications(noopSender()))
+	withPush := newTestManager(t, echoExecutor(), WithPushNotifications(push.Config{Sender: noopSender()}))
 	if !withPush.SupportsPushNotifications() {
 		t.Error("expected push support when a sender is configured")
 	}
+	manual := newTestManager(t, echoExecutor(), WithPushNotifications(push.Config{ManualDelivery: true}))
+	if !manual.SupportsPushNotifications() {
+		t.Error("expected push support in manual delivery mode")
+	}
 	without := newTestManager(t, echoExecutor())
 	if without.SupportsPushNotifications() {
-		t.Error("expected push to be unsupported without a sender")
+		t.Error("expected push to be unsupported without a sender or manual delivery")
 	}
 }
 
-// TestManualWithoutSenderFails pins the invalid config: manual delivery without
-// a Sender is a construction error, not silence.
-func TestManualWithoutSenderFails(t *testing.T) {
-	if _, err := NewTaskManager(echoExecutor(),
-		WithPushConfig(push.Config{ManualDelivery: true})); err == nil {
-		t.Fatal("ManualDelivery without a Sender must fail construction")
+// TestManualWithoutSenderAllowsRegistration pins the separation between push
+// capability and automatic transport: manual mode needs no manager-owned Sender.
+func TestManualWithoutSenderAllowsRegistration(t *testing.T) {
+	manager := newTestManager(t, echoExecutor(),
+		WithPushNotifications(push.Config{ManualDelivery: true}))
+	seedTask(manager, protocol.Task{
+		ID:     "manual-without-sender",
+		Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
+	})
+	ctx := context.Background()
+	stored, err := manager.OnPushNotificationSet(ctx, protocol.TaskPushNotificationConfig{
+		TaskID: "manual-without-sender",
+		URL:    "https://example.com/hook",
+	})
+	if err != nil {
+		t.Fatalf("manual registration without Sender: %v", err)
+	}
+	if _, err := manager.OnPushNotificationGet(ctx, protocol.GetTaskPushNotificationConfigParams{
+		TaskID: stored.TaskID, ID: stored.ID,
+	}); err != nil {
+		t.Fatalf("manual Get without Sender: %v", err)
+	}
+	list, err := manager.OnPushNotificationList(ctx,
+		protocol.ListTaskPushNotificationConfigsParams{TaskID: stored.TaskID})
+	if err != nil || len(list.Configs) != 1 {
+		t.Fatalf("manual List without Sender: list=%+v err=%v", list, err)
+	}
+	if err := manager.OnPushNotificationDelete(ctx, protocol.DeleteTaskPushNotificationConfigParams{
+		TaskID: stored.TaskID, ID: stored.ID,
+	}); err != nil {
+		t.Fatalf("manual Delete without Sender: %v", err)
 	}
 }

@@ -88,7 +88,7 @@ The example demonstrates these A2A API features:
 
 - `server.NewA2AServer()` - Create an A2A server
 - `pushauth.NewSignedSender()` - Create a signing sender with a generated key
-- `memory.WithPushNotifications()` - Enable automatic delivery to registered webhooks
+- `memory.WithPushNotifications(push.Config{Sender: sender})` - Enable automatic delivery to registered webhooks
 - `server.WithPushNotificationJWKSHandler()` - Publish the sender's verification keys
 - `pushauth.NewVerifier()` - Configure webhook verification against JWKS
 - `pushauth.Verifier.VerifyPushNotification()` - Verify a callback against JWKS

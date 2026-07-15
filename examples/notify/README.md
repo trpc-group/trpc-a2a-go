@@ -4,22 +4,22 @@ Two examples show the ways an agent can deliver push notifications. Each keeps
 the A2A server and webhook client in separate programs so their responsibilities
 and logs are easy to follow.
 
-Both wire a signing `pushauth.SignedSender` into the TaskManager and pass its
-`JWKSHandler()` to the server with `WithPushNotificationJWKSHandler`, so the
-webhook can verify every notification. The only difference is who decides when
-to deliver.
+Both create a signing `pushauth.SignedSender` and pass its `JWKSHandler()` to the
+server with `WithPushNotificationJWKSHandler`, so the webhook can verify every
+notification. Automatic mode gives the sender to the TaskManager; manual mode
+keeps it in the processor and enables only registration on the TaskManager.
 
 | | wiring | who delivers |
 | --- | --- | --- |
-| [`auto/`](auto) | `memory.WithPushNotifications(sender)` | the framework, for each task event |
-| [`manual/`](manual) | `memory.WithPushConfig(push.Config{Sender: sender, ManualDelivery: true})` | the agent, from inside the processor, on its own schedule |
+| [`auto/`](auto) | `memory.WithPushNotifications(push.Config{Sender: sender})` | the framework, for each task event |
+| [`manual/`](manual) | `memory.WithPushNotifications(push.Config{ManualDelivery: true})` | the agent, from inside the processor, on its own schedule |
 
 - **auto** — the processor just completes the task; the framework POSTs each
   `StreamResponse` to every registered webhook in per-config order.
 - **manual** — automatic dispatch is off; the processor calls the `SignedSender`
-  itself, here pushing a mid-task milestone and the final result. Registration,
-  the JWKS endpoint, and the advertised capability all still work. Caveat: the
-  processor only sees
+  itself, here pushing a mid-task milestone and the final result. The manager
+  does not need or use a sender in this mode; registration, the JWKS endpoint,
+  and the advertised capability all still work. Caveat: the processor only sees
   the webhook sent inline with the message (`ExecContext.PushConfig`); configs
   registered afterwards via `tasks/pushNotificationConfig/set` live in the
   manager's store, so an agent that must honor those too needs the TaskManager
