@@ -1,126 +1,56 @@
-# A2A Basic Example
+# A2A Basic Task Lifecycle Example
 
-This example demonstrates a basic implementation of the Agent-to-Agent (A2A) protocol using the trpc-a2a-go library. It consists of:
+This example focuses on the v2 task lifecycle. It intentionally uses one
+server, one scripted client, and the in-memory task manager.
 
-1. A versatile text processing agent server that supports multiple operations
-2. A feature-rich CLI client that demonstrates all the core A2A protocol APIs
+It demonstrates:
 
-The server is written in the `taskmanager.TaskHandle` style: the minimal-edit
-port of a v0.x TaskHandler processor, with a fully synchronous body and one
-code path serving both `message/send` and `message/stream` (see "Migrating
-from v0.x" in the repository README). For the native channel style, see
-`examples/simple`.
+- blocking `message/send`
+- suspending a task with `input-required`
+- continuing that task by sending a follow-up message with the same `taskId`
+- reading a task with `tasks/get`
+- filtering tasks by `contextId` with `tasks/list`
+- starting work with `returnImmediately` and canceling the live task with
+  `tasks/cancel`
+- v1.0 agent discovery through `supportedInterfaces`
 
-## Server Features
+Push notifications and streaming are covered by their dedicated examples.
 
-The server is a text processing agent capable of:
+## Run
 
-- Processing text in various modes: reverse, uppercase, lowercase, word count
-- Supporting both streaming and non-streaming responses
-- Demonstrating multi-turn conversations with the `input-required` state
-- Handling task cancellation
-- Creating and streaming artifacts
-
-### Running the Server
+Start the server:
 
 ```bash
-cd server
-go run main.go [options]
+cd examples/basic/server
+go run .
 ```
 
-Server options:
-- `--host`: Host address (default: localhost)
-- `--port`: Port number (default: 8080)
-- `--desc`: Custom agent description
-- `--no-cors`: Disable CORS headers
-- `--no-stream`: Disable streaming capability
-
-## Client Features
-
-The client is a CLI application that connects to an A2A agent and provides:
-
-- Support for both streaming and non-streaming modes
-- Interactive CLI with command history
-- Session management for contextual conversations
-- Task management (create, cancel, get)
-- Agent capability discovery
-
-### Running the Client
+In another terminal, run the client:
 
 ```bash
-cd client
-go run main.go [options]
+cd examples/basic/client
+go run .
 ```
 
-Client options:
-- `--agent`: Agent URL (default: http://localhost:8080/)
-- `--timeout`: Request timeout (default: 60s)
-- `--no-stream`: Disable streaming mode
-- `--context`: Use specific context ID (generate new if empty)
-- `--use-tasks-get`: Use tasks/get to fetch final state (default: true)
-- `--history`: Number of history messages to request (default: 0)
+The server listens at `http://localhost:8080/` by default. Use `-host` and
+`-port` to change the server address, or point the client at another endpoint:
 
-### Client Commands
+```bash
+go run ./client -agent http://localhost:8080/
+```
 
-Once the client is running, you can use the following commands:
+The client runs the complete lifecycle in order and checks that the
+`input-required` follow-up completes the original task instead of creating a
+new one.
 
-- `help`: Show help message
-- `exit`: Exit the program
-- `context [id]`: Set or generate a new context ID
-- `mode [stream|sync]`: Set interaction mode (streaming or standard)
-- `cancel [task-id]`: Cancel a task
-- `get [task-id] [history]`: Get task details
-- `card`: Fetch and display the agent's capabilities card
+## Server commands
 
-For normal interaction, simply type your message and press Enter.
+- Any ordinary text completes as an uppercase artifact.
+- `profile` suspends with `input-required`; the next message must carry the
+  returned `taskId` and completes the same task.
+- `wait` stays in `working` for up to 30 seconds, giving the client a live task
+  to cancel.
 
-### Text Processing Commands
-
-The server understands the following text processing commands:
-
-- `reverse <text>`: Reverses the input text
-- `uppercase <text>`: Converts text to uppercase
-- `lowercase <text>`: Converts text to lowercase
-- `count <text>`: Counts words and characters in text
-- `multi`: Start a multi-step interaction
-- `example`: Demonstrates input-required state
-- `help`: Shows the help message
-
-## Usage Example
-
-1. Start the server:
-   ```bash
-   cd server
-   go run main.go
-   ```
-
-2. In another terminal, start the client:
-   ```bash
-   cd client
-   go run main.go
-   ```
-
-3. Try some commands:
-   ```
-   > help
-   > reverse hello world
-   > uppercase the quick brown fox
-   > multi
-   > card
-   > mode sync
-   > lowercase TESTING LOWERCASE
-   ```
-
-## A2A Protocol Implementation
-
-This example demonstrates the following A2A protocol features:
-
-- Agent discovery via Agent Cards (/.well-known/agent-card.json)
-- Task creation using message/send and message/stream
-- Task state retrieval using tasks/get
-- Task cancellation using tasks/cancel
-- Streaming updates for long-running tasks
-- Multi-turn conversations using the input-required state
-- Artifact generation and streaming
-
-The implementation follows the A2A specification and provides a practical example of building interoperable AI agents using the protocol. 
+On a continuation round, the framework supplies the current task as
+`ExecContext.Task`. The server relies on that snapshot and does not maintain a
+separate session map.

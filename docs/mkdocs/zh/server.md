@@ -225,7 +225,7 @@ provider := auth.NewChainAuthProvider(
 srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card), server.WithAuthProvider(provider))
 ```
 
-card 的 `securitySchemes` 公示服务端接受什么。→ [examples/auth](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth)。
+card 的 `securitySchemes` 公示服务端接受什么。可运行的 JWT/API key 链式鉴权见 [examples/auth](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth)。
 
 ## 扩展 Agent Card
 
@@ -266,7 +266,7 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
     server.WithPushNotificationJWKSHandler(sender.JWKSHandler()))
 ```
 
-客户端经 `CreateTaskPushNotificationConfig` 注册配置(用 `ListTaskPushNotificationConfigs` / `DeleteTaskPushNotificationConfig` 管理)。**不注入 sender = 不支持 push**:config RPC 返回 `-32003 PushNotificationNotSupported`(与官方 SDK 一致)。想保留注册、由 agent 自己掌控投递,用 `WithPushConfig(push.Config{Sender: sender, ManualDelivery: true})`——自动投递关闭,注册/JWKS 发现/能力声明照常;要过滤/攒批,自定义 `push.Sender` 持有并委托给 `SignedSender` 即可，无需嵌入。请求内联的 `configuration.taskPushNotificationConfig` 同样视为注册:未启用时拒绝,启用时落库(可查询、自动投递),并照旧作为 `ec.PushConfig` 传给 processor。自定义 header / tracing:`push.WithRequestDecorator`。→ [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks)。
+客户端经 `CreateTaskPushNotificationConfig` 注册配置(用 `ListTaskPushNotificationConfigs` / `DeleteTaskPushNotificationConfig` 管理)。**不注入 sender = 不支持 push**:config RPC 返回 `-32003 PushNotificationNotSupported`(与官方 SDK 一致)。想保留注册、由 agent 自己掌控投递,用 `WithPushConfig(push.Config{Sender: sender, ManualDelivery: true})`——自动投递关闭,注册/JWKS 发现/能力声明照常;要过滤/攒批,自定义 `push.Sender` 持有并委托给 `SignedSender` 即可，无需嵌入。请求内联的 `configuration.taskPushNotificationConfig` 同样视为注册:未启用时拒绝,启用时落库(可查询、自动投递),并照旧作为 `ec.PushConfig` 传给 processor。自定义 header / tracing:`push.WithRequestDecorator`。→ [examples/notify](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/notify)。
 
 `SignedSender` 会优先遵循客户端声明的 scheme 和凭据（例如 Basic 或 Bearer），客户端未声明凭据时才回退到 JWT 身份。如果回调无需签名，使用 `push.NewHTTPSender()` 并省略 `WithPushNotificationJWKSHandler`。
 

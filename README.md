@@ -125,59 +125,42 @@ go run main.go -host localhost:8080
 ### 2. Streaming Examples ([examples/streaming](examples/streaming))
 
 Examples focused on streaming capabilities:
-- Server implementation with streaming response support
-- Client implementation for handling streaming data
+- Asynchronous task creation with `returnImmediately`
+- Task subscription, appendable artifact chunks, and real cancellation
 
 ```bash
 # Start the streaming server
-cd examples/streaming/server
-go run main.go
+cd examples
+go run ./streaming/server
 
-# Run the streaming client
-cd examples/streaming/client
-go run main.go
+# Run the streaming client from examples in another terminal
+go run ./streaming/client
 ```
 
 ### 3. Basic Example ([examples/basic](examples/basic))
 
-A comprehensive example showcasing:
-- A versatile text processing server with multiple operations
-- A feature-rich CLI client with support for all core A2A protocol APIs
-- Streaming and non-streaming modes
-- Multi-turn conversations with session management
-- Task management (create, cancel, get)
-- Agent capability discovery
+A focused task-lifecycle example showcasing:
+- Blocking send and `input-required` continuation on the same task
+- `tasks/get`, `tasks/list`, and `tasks/cancel`
+- `TaskHandle`, `ExecContext.Task`, and v1.0 agent discovery
 
 ### 4. Authentication Examples ([examples/auth](examples/auth))
 
 Complete examples demonstrating authentication:
-- Server implementation with various authentication methods
-- Client examples showing how to connect with different auth methods
-- JWT, API key, and OAuth2 implementations
-- Command-line options for all authentication parameters
+- JWT bearer and API-key request authentication
+- Authenticated extended agent card discovery
+- A local-only shared-secret setup with documented production boundaries
 
 ```bash
-# Start the authentication server with OAuth2 support enabled
-cd examples/auth/server
-go run main.go --enable-oauth true
+# Start the authentication server from examples/auth
+cd examples/auth
+go run ./server
 
-# Run client with JWT authentication
-cd examples/auth/client
-go run main.go --auth jwt --jwt-secret "your-secret-key"
+# Run a client from examples/auth in another terminal
+go run ./client -auth jwt
 
 # Run client with API key authentication
-go run main.go --auth apikey --api-key "test-api-key"
-
-# Run client with OAuth2 authentication
-go run main.go --auth oauth2 \
-  --oauth2-client-id "my-client-id" \
-  --oauth2-client-secret "my-client-secret"
-
-# Run client with JWT from a file
-go run main.go --auth jwt --jwt-secret-file "path/to/jwt-secret.key"
-
-# Specify custom message and session ID
-go run main.go --auth jwt --message "Custom message" --session-id "session123"
+go run ./client -auth apikey -api-key "test-api-key"
 ```
 
 ### 5. v0 Compatibility Example ([examples/compat](examples/compat))
@@ -559,7 +542,7 @@ client, err := client.NewA2AClient(
 )
 ```
 
-See the [examples/auth/client](examples/auth/client) directory for complete examples of using different authentication methods.
+See [examples/auth](examples/auth) for runnable JWT and API-key authentication flows.
 
 ### Push Notification Authentication
 
