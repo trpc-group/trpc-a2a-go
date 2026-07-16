@@ -65,11 +65,11 @@ func fetchDefaultCard(t *testing.T, ts *httptest.Server) AgentCard {
 
 // TestNewA2AServer_PublishesConfiguredJWKS: with a JWKS handler passed via
 // WithPushNotificationJWKSHandler, the server publishes the keys, and it
-// advertises the push capability automatically from the TaskManager's Sender.
+// advertises the push capability automatically from the TaskManager.
 func TestNewA2AServer_PublishesConfiguredJWKS(t *testing.T) {
 	sender, err := pushauth.NewSignedSender()
 	require.NoError(t, err)
-	tm := newDiscoveryTM(t, memory.WithPushNotifications(sender))
+	tm := newDiscoveryTM(t, memory.WithPushNotifications(push.Config{Sender: sender}))
 
 	srv, err := NewA2AServer(tm, WithAgentCard(discoveryCard()),
 		WithPushNotificationJWKSHandler(sender.JWKSHandler()))
@@ -83,17 +83,39 @@ func TestNewA2AServer_PublishesConfiguredJWKS(t *testing.T) {
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "JWKS should be published")
 
-	// The served card advertises the push capability (from the Sender).
+	// The served card advertises the push capability.
 	card := fetchDefaultCard(t, ts)
 	require.NotNil(t, card.Capabilities.PushNotifications)
 	assert.True(t, *card.Capabilities.PushNotifications, "capability should be auto-set")
+}
+
+// TestNewA2AServer_ManualPushWithoutSender verifies that application-owned
+// delivery and key publication do not couple the TaskManager to a Sender.
+func TestNewA2AServer_ManualPushWithoutSender(t *testing.T) {
+	sender, err := pushauth.NewSignedSender()
+	require.NoError(t, err)
+	tm := newDiscoveryTM(t,
+		memory.WithPushNotifications(push.Config{ManualDelivery: true}))
+	srv, err := NewA2AServer(tm, WithAgentCard(discoveryCard()),
+		WithPushNotificationJWKSHandler(sender.JWKSHandler()))
+	require.NoError(t, err)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	card := fetchDefaultCard(t, ts)
+	require.NotNil(t, card.Capabilities.PushNotifications)
+	assert.True(t, *card.Capabilities.PushNotifications)
+	resp, err := ts.Client().Get(ts.URL + protocol.JWKSPath)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
 // TestNewA2AServer_PushWithoutJWKS: a plain Sender enables push (capability
 // auto-set) but publishes no JWKS, and construction succeeds.
 func TestNewA2AServer_PushWithoutJWKS(t *testing.T) {
 	sender := push.NewHTTPSender()
-	tm := newDiscoveryTM(t, memory.WithPushNotifications(sender))
+	tm := newDiscoveryTM(t, memory.WithPushNotifications(push.Config{Sender: sender}))
 
 	srv, err := NewA2AServer(tm, WithAgentCard(discoveryCard()))
 	require.NoError(t, err)
@@ -117,7 +139,7 @@ func TestNewA2AServer_PushWithoutJWKS(t *testing.T) {
 func TestNewA2AServer_JWKSExplicitDisable(t *testing.T) {
 	sender, err := pushauth.NewSignedSender()
 	require.NoError(t, err)
-	tm := newDiscoveryTM(t, memory.WithPushNotifications(sender))
+	tm := newDiscoveryTM(t, memory.WithPushNotifications(push.Config{Sender: sender}))
 
 	srv, err := NewA2AServer(tm, WithAgentCard(discoveryCard()),
 		WithPushNotificationJWKSHandler(sender.JWKSHandler()),
@@ -133,49 +155,52 @@ func TestNewA2AServer_JWKSExplicitDisable(t *testing.T) {
 	assert.NotEqual(t, http.StatusOK, resp.StatusCode, "explicit disable wins over discovery")
 }
 
-// TestFinalizePushCapability_RespectsExplicitAndSigned: an explicit capability
-// value is never overridden, and a signed card is immutable.
-func TestFinalizePushCapability_RespectsExplicitAndSigned(t *testing.T) {
+// TestNewA2AServer_CapabilityContract prevents unsupported advertisement while
+// allowing a card to disable a capability supported by the shared manager.
+func TestNewA2AServer_CapabilityContract(t *testing.T) {
 	sender, err := pushauth.NewSignedSender()
 	require.NoError(t, err)
-	tm := newDiscoveryTM(t, memory.WithPushNotifications(sender))
+	tm := newDiscoveryTM(t, memory.WithPushNotifications(push.Config{Sender: sender}))
 
-	t.Run("explicit false wins", func(t *testing.T) {
+	t.Run("explicit false disables one card", func(t *testing.T) {
 		card := discoveryCard()
 		f := false
 		card.Capabilities.PushNotifications = &f
 		srv, err := NewA2AServer(tm, WithAgentCard(card))
 		require.NoError(t, err)
-		ts := httptest.NewServer(srv.Handler())
-		defer ts.Close()
-
-		got := fetchDefaultCard(t, ts)
-		require.NotNil(t, got.Capabilities.PushNotifications)
-		assert.False(t, *got.Capabilities.PushNotifications, "explicit false must not be overridden")
+		resolved, ok := srv.resolveAgentCard(context.Background(), "")
+		require.True(t, ok)
+		require.NotNil(t, resolved.Capabilities.PushNotifications)
+		assert.False(t, *resolved.Capabilities.PushNotifications)
 	})
 
-	t.Run("signed card untouched", func(t *testing.T) {
+	t.Run("signed card remains immutable", func(t *testing.T) {
 		card := discoveryCard()
 		card.Signatures = []protocol.AgentCardSignature{{Protected: "hdr", Signature: "sig"}}
 		srv, err := NewA2AServer(tm, WithAgentCard(card))
 		require.NoError(t, err)
-		ts := httptest.NewServer(srv.Handler())
-		defer ts.Close()
+		resolved, ok := srv.resolveAgentCard(context.Background(), "")
+		require.True(t, ok)
+		assert.Nil(t, resolved.Capabilities.PushNotifications)
+	})
 
-		got := fetchDefaultCard(t, ts)
-		assert.Nil(t, got.Capabilities.PushNotifications,
-			"a signed card is immutable: filling a field would invalidate the JWS")
+	t.Run("explicit true without manager support", func(t *testing.T) {
+		card := discoveryCard()
+		v := true
+		card.Capabilities.PushNotifications = &v
+		_, err := NewA2AServer(newDiscoveryTM(t), WithAgentCard(card))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not support push")
 	})
 }
 
-// TestNewA2AServer_JWKSWithoutSenderNoCapability: a JWKS handler does
-// not by itself advertise the push capability — that requires the TaskManager's
-// Sender. Without one, the card must not claim pushNotifications, and no JWKS is
-// published (which would otherwise contradict config RPCs returning -32003).
+// TestNewA2AServer_JWKSWithoutSenderNoCapability: a JWKS handler does not by
+// itself advertise push. Without either automatic or manual delivery enabled,
+// the card must not claim pushNotifications and no JWKS is published.
 func TestNewA2AServer_JWKSWithoutSenderNoCapability(t *testing.T) {
 	sender, err := pushauth.NewSignedSender()
 	require.NoError(t, err)
-	tm := newDiscoveryTM(t) // NO push sender wired.
+	tm := newDiscoveryTM(t) // Push is not enabled.
 
 	srv, err := NewA2AServer(tm, WithAgentCard(discoveryCard()),
 		WithPushNotificationJWKSHandler(sender.JWKSHandler()))
@@ -187,7 +212,7 @@ func TestNewA2AServer_JWKSWithoutSenderNoCapability(t *testing.T) {
 	card := fetchDefaultCard(t, ts)
 	if card.Capabilities.PushNotifications != nil {
 		assert.False(t, *card.Capabilities.PushNotifications,
-			"a signing identity alone must not advertise push capability without a Sender")
+			"a signing identity alone must not advertise push capability")
 	}
 
 	// And no JWKS is published without a delivery capability.

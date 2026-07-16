@@ -96,15 +96,13 @@ func ErrPushNotificationNotSupported() *jsonrpc.Error {
 	}).WithWrappedError(ErrPushNotificationNotSupportedSentinel)
 }
 
-// ErrPushConfigNotFound creates a JSON-RPC error for a task that exists but has
-// no push notification config. It deliberately does NOT reuse ErrCodeTaskNotFound
-// (-32001, reserved for a missing task); the A2A error set defines no dedicated
-// code for a missing config, so InvalidParams is used.
+// ErrPushConfigNotFound creates the TaskNotFoundError required by the A2A
+// push-config methods when the addressed configuration does not exist.
 // The returned error wraps ErrPushConfigNotFoundSentinel for use with errors.Is().
 func ErrPushConfigNotFound(taskID string) *jsonrpc.Error {
 	return (&jsonrpc.Error{
-		Code:    ErrCodeInvalidParams,
-		Message: "Push notification config not found",
+		Code:    ErrCodeTaskNotFound,
+		Message: "Task not found",
 		Data:    fmt.Sprintf("Task '%s' has no push notification config.", taskID),
 	}).WithWrappedError(ErrPushConfigNotFoundSentinel)
 }

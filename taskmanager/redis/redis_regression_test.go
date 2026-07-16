@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
@@ -107,6 +108,130 @@ func TestTerminal_NotResurrectedByYieldedRound(t *testing.T) {
 			t.Fatalf("terminal CANCELED was overwritten with %s", stored.Status.State)
 		}
 		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// Cancellation and suspension linearize under cancelMu. When cancellation
+// wins, a later suspend event must remain owned by the canceled round so its
+// close rule persists CANCELED instead of yielding and swallowing the cancel.
+func TestCancelWinsConcurrentSuspendPersistsCanceled(t *testing.T) {
+	cancelObserved := make(chan struct{})
+	emitSuspend := make(chan struct{})
+	processor := executorFunc(func(
+		ctx context.Context, _ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent, 2)
+		go func() {
+			defer close(out)
+			out <- statusEvent(protocol.TaskStateWorking, nil)
+			<-ctx.Done()
+			close(cancelObserved)
+			<-emitSuspend
+			// Deliberately emit a suspend event after accepting cancellation.
+			// The engine must not let it yield ownership away from the close rule.
+			out <- statusEvent(protocol.TaskStateInputRequired, agentReply("need more"))
+		}()
+		return out, nil
+	})
+	manager, _ := setupTest(t, processor)
+	defer manager.Close()
+	var emitOnce sync.Once
+	releaseSuspend := func() { emitOnce.Do(func() { close(emitSuspend) }) }
+	defer releaseSuspend()
+
+	stream, err := manager.OnSendMessageStream(context.Background(), sendParams("start", ""))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream: %v", err)
+	}
+	firstEvent := recvEvent(t, stream)
+	working := firstEvent.GetStatusUpdate()
+	if working == nil || working.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("first stream frame = %+v, want WORKING", working)
+	}
+	taskID := working.TaskID
+
+	// The processor cannot emit INPUT_REQUIRED until OnCancelTask has published
+	// cancelRequested and canceled its context, making cancel the deterministic
+	// winner of the linearization race.
+	snapshot, err := manager.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: taskID})
+	if err != nil {
+		t.Fatalf("OnCancelTask: %v", err)
+	}
+	if snapshot.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("cancel snapshot state = %s, want WORKING", snapshot.Status.State)
+	}
+	select {
+	case <-cancelObserved:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processor did not observe accepted cancellation")
+	}
+	releaseSuspend()
+
+	var sawSuspend, sawCanceled bool
+	deadline := time.After(2 * time.Second)
+	for !sawCanceled {
+		select {
+		case event, ok := <-stream:
+			if !ok {
+				t.Fatalf("stream closed before CANCELED; saw INPUT_REQUIRED=%v", sawSuspend)
+			}
+			if update := event.GetStatusUpdate(); update != nil {
+				switch update.Status.State {
+				case protocol.TaskStateInputRequired:
+					sawSuspend = true
+				case protocol.TaskStateCanceled:
+					sawCanceled = true
+				}
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for CANCELED; saw INPUT_REQUIRED=%v", sawSuspend)
+		}
+	}
+	if !sawSuspend {
+		t.Fatal("processor's post-cancel INPUT_REQUIRED event was not exercised")
+	}
+	pollTaskState(t, manager, taskID, protocol.TaskStateCanceled)
+}
+
+// When suspension wins the same linearization race, cancellation must receive
+// the existing handoff channel instead of canceling the yielded execution.
+func TestRequestExecutionCancelReturnsWinningYieldHandoff(t *testing.T) {
+	manager, _ := setupTest(t, scriptedExecutor())
+	defer manager.Close()
+	const taskID = "task-yield-wins-cancel-race"
+	var canceled atomic.Bool
+	live := &liveExecution{cancel: func() { canceled.Store(true) }}
+	if err := manager.registerExecution(context.Background(), taskID, live); err != nil {
+		t.Fatalf("registerExecution: %v", err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			manager.releaseExecution(taskID, live)
+		}
+	}()
+
+	if !manager.beginExecutionYield(taskID, live) {
+		t.Fatal("beginExecutionYield did not claim the live execution")
+	}
+	wantHandoff := live.yieldDone
+	handoff, accepted := manager.requestExecutionCancel(taskID, live)
+	if accepted {
+		t.Fatal("cancellation was accepted after yield won")
+	}
+	if handoff == nil || handoff != wantHandoff {
+		t.Fatalf("handoff = %v, want existing yield channel %v", handoff, wantHandoff)
+	}
+	if live.cancelRequested.Load() || canceled.Load() {
+		t.Fatal("yield-winning execution was canceled")
+	}
+
+	manager.releaseExecution(taskID, live)
+	released = true
+	select {
+	case <-handoff:
+	case <-time.After(time.Second):
+		t.Fatal("handoff did not close when the yielding execution deregistered")
 	}
 }
 
@@ -274,7 +399,7 @@ func TestSendMessage_PushConfigReachesProcessor(t *testing.T) {
 			close(out)
 			return out, nil
 		})
-	manager, _ := setupTest(t, processor, WithPushNotifications(&recordingSender{}))
+	manager, _ := setupTest(t, processor, WithPushNotifications(push.Config{Sender: &recordingSender{}}))
 
 	params := sendParams("hello", "")
 	params.Configuration = &protocol.SendMessageConfiguration{

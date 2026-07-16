@@ -9,7 +9,7 @@
 //  1. A push.Sender is wired into the TaskManager via memory.WithPushNotifications,
 //     so the framework delivers task updates to registered webhooks automatically —
 //     the message processor never sends notifications itself.
-//  2. The sender signs each callback with a JWT (via the authenticator); the server
+//  2. The sender signs each callback with a JWT (via its signer); the server
 //     publishes the verification keys at a JWKS endpoint.
 //  3. On a terminal state the framework POSTs a StreamResponse to every webhook the
 //     client registered; the client verifies the JWT using the JWKS public key.
@@ -24,6 +24,7 @@ import (
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push/pushauth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
@@ -165,15 +166,17 @@ func main() {
 	// A SignedSender generates a signing key by default. Production replicas can
 	// share one key via pushauth.WithJWTKey so every instance signs with a key
 	// published through JWKS.
-	signedSender, err := pushauth.NewSignedSender()
+	// This local demo intentionally posts to a loopback client webhook.
+	signedSender, err := pushauth.NewSignedSender(
+		pushauth.WithSenderOptions(push.WithUnsafeAllowPrivateNetworks()))
 	if err != nil {
 		log.Fatalf("failed to create signed push sender: %v", err)
 	}
 
-	// TaskManager: automatic delivery on significant task states.
+	// TaskManager: automatic delivery for every task event.
 	processor := &pushNotificationMessageProcessor{}
 	tm, err := memory.NewTaskManager(processor,
-		memory.WithPushNotifications(signedSender),
+		memory.WithPushNotifications(push.Config{Sender: signedSender}),
 	)
 	if err != nil {
 		log.Fatalf("failed to create task manager: %v", err)

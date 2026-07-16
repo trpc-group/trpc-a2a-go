@@ -10,12 +10,11 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
-
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
@@ -55,6 +54,33 @@ func (r *recordingSender) snapshot() []recordedPush {
 	return append([]recordedPush(nil), r.calls...)
 }
 
+// firstBlockingSender blocks its first delivery until release is closed, then
+// records it and lets every later delivery complete normally.
+type firstBlockingSender struct {
+	recordingSender
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *firstBlockingSender) SendPush(
+	ctx context.Context, cfg protocol.TaskPushNotificationConfig, event protocol.StreamResponse,
+) error {
+	block := false
+	s.once.Do(func() {
+		block = true
+		close(s.started)
+	})
+	if block {
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return s.recordingSender.SendPush(ctx, cfg, event)
+}
+
 // waitPushCount waits until the sender has recorded at least n deliveries.
 func waitPushCount(t *testing.T, s *recordingSender, n int) {
 	t.Helper()
@@ -77,14 +103,14 @@ func assertPushUnsupported(t *testing.T, err error) {
 }
 
 // TestRedisPushInlineConfigDelivered covers the full loop: a message carrying an
-// inline push config registers the webhook, and the framework delivers the
-// terminal event to it. The content-less working heartbeat is not delivered.
+// inline push config registers the webhook, and the framework delivers every
+// task event to it in order.
 func TestRedisPushInlineConfigDelivered(t *testing.T) {
 	sender := &recordingSender{}
 	m, _ := setupTest(t, scriptedExecutor(
-		statusEvent(protocol.TaskStateWorking, nil),                  // heartbeat: not pushed
-		statusEvent(protocol.TaskStateCompleted, agentReply("done")), // pushed
-	), WithPushNotifications(sender))
+		statusEvent(protocol.TaskStateWorking, nil),
+		statusEvent(protocol.TaskStateCompleted, agentReply("done")),
+	), WithPushNotifications(push.Config{Sender: sender}))
 	defer m.Close()
 
 	const webhook = "https://example.com/hook"
@@ -96,17 +122,75 @@ func TestRedisPushInlineConfigDelivered(t *testing.T) {
 		t.Fatalf("OnSendMessage: %v", err)
 	}
 
-	waitPushCount(t, sender, 1)
+	waitPushCount(t, sender, 2)
 	calls := sender.snapshot()
-	if len(calls) != 1 {
-		t.Fatalf("want exactly 1 push (terminal only), got %d", len(calls))
+	if len(calls) != 2 {
+		t.Fatalf("want both status updates delivered, got %d", len(calls))
 	}
-	su := calls[0].event.GetStatusUpdate()
-	if su == nil || su.Status.State != protocol.TaskStateCompleted {
-		t.Fatalf("want Completed push, got %+v", calls[0].event)
+	for i, want := range []protocol.TaskState{protocol.TaskStateWorking, protocol.TaskStateCompleted} {
+		su := calls[i].event.GetStatusUpdate()
+		if su == nil || su.Status.State != want {
+			t.Fatalf("push %d state = %+v, want %s", i, calls[i].event, want)
+		}
 	}
 	if calls[0].cfg.URL != webhook {
 		t.Fatalf("want webhook %q, got %q", webhook, calls[0].cfg.URL)
+	}
+}
+
+func TestRedisInlinePushConfigMessageOnlyLeavesNoOrphan(t *testing.T) {
+	taskIDs := make(chan string, 1)
+	processor := executorFunc(func(
+		_ context.Context, ec *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		taskIDs <- ec.TaskID
+		out := make(chan protocol.StreamEvent, 1)
+		out <- agentReply("message only")
+		close(out)
+		return out, nil
+	})
+	m, mr := setupTest(t, processor,
+		WithPushNotifications(push.Config{ManualDelivery: true}))
+	defer m.Close()
+	params := sendParams("hello", "")
+	params.Configuration = &protocol.SendMessageConfiguration{
+		PushConfig: &protocol.TaskPushNotificationConfig{URL: "https://example.com/hook"},
+	}
+	if _, err := m.OnSendMessage(context.Background(), params); err != nil {
+		t.Fatal(err)
+	}
+	taskID := <-taskIDs
+	if mr.Exists(taskPrefix+taskID) || mr.Exists(pushNotificationPrefix+taskID) {
+		t.Fatalf("message-only round created task or push-config keys for %s", taskID)
+	}
+	list, err := m.OnPushNotificationList(context.Background(),
+		protocol.ListTaskPushNotificationConfigsParams{TaskID: taskID})
+	if !errors.Is(err, taskmanager.ErrTaskNotFoundSentinel) || list != nil {
+		t.Fatalf("message-only round left a queryable config: list=%+v err=%v", list, err)
+	}
+}
+
+func TestRedisManualInlinePushConfigPersists(t *testing.T) {
+	m, _ := setupTest(t, scriptedExecutor(
+		statusEvent(protocol.TaskStateCompleted, agentReply("done")),
+	), WithPushNotifications(push.Config{ManualDelivery: true}))
+	defer m.Close()
+	params := sendParams("hello", "")
+	params.Configuration = &protocol.SendMessageConfiguration{
+		PushConfig: &protocol.TaskPushNotificationConfig{URL: "https://example.com/hook"},
+	}
+	resp, err := m.OnSendMessage(context.Background(), params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := resp.GetTask()
+	if task == nil {
+		t.Fatalf("OnSendMessage response = %+v, want task", resp)
+	}
+	list, err := m.OnPushNotificationList(context.Background(),
+		protocol.ListTaskPushNotificationConfigsParams{TaskID: task.ID})
+	if err != nil || len(list.Configs) != 1 || list.Configs[0].TaskID != task.ID {
+		t.Fatalf("manual inline config: list=%+v err=%v", list, err)
 	}
 }
 
@@ -117,7 +201,7 @@ func TestRedisPushRegisteredConfigDelivered(t *testing.T) {
 	sender := &recordingSender{}
 	m, _ := setupTest(t, scriptedExecutor(
 		statusEvent(protocol.TaskStateCompleted, agentReply("done")),
-	), WithPushNotifications(sender))
+	), WithPushNotifications(push.Config{Sender: sender}))
 	defer m.Close()
 
 	task := storedTask(t, m, "task-reg", "ctx-reg", protocol.TaskStateWorking)
@@ -164,9 +248,224 @@ func TestRedisPushRegisteredConfigDelivered(t *testing.T) {
 	}
 }
 
-// TestRedisPushRejectedWithoutSender verifies the -32003 gate: with no Sender
-// configured, both the config RPC and an inline config are rejected.
-func TestRedisPushRejectedWithoutSender(t *testing.T) {
+func TestRedisPushQueuedGenerationInvalidatedAcrossManagers(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	sender := &firstBlockingSender{started: started, release: release}
+	managerA, mr := setupTest(t, scriptedExecutor(), WithPushNotifications(push.Config{
+		Sender:                  sender,
+		MaxConcurrentDeliveries: 1,
+		DeliveryQueueSize:       2,
+	}))
+	defer managerA.Close()
+	var releaseOnce sync.Once
+	releaseFirst := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseFirst()
+
+	clientB := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = clientB.Close() })
+	managerB, err := NewTaskManager(scriptedExecutor(), clientB,
+		WithPushNotifications(push.Config{ManualDelivery: true}))
+	if err != nil {
+		t.Fatalf("NewTaskManager B: %v", err)
+	}
+	defer managerB.Close()
+
+	task := storedTask(t, managerA, "task-cross-generation", "ctx-cross-generation", protocol.TaskStateWorking)
+	const configID = "shared-hook"
+	if _, err := managerB.OnPushNotificationSet(context.Background(), protocol.TaskPushNotificationConfig{
+		TaskID: task.ID,
+		ID:     configID,
+		URL:    "https://old.example/hook",
+	}); err != nil {
+		t.Fatalf("manager B initial Set: %v", err)
+	}
+	response := func(state protocol.TaskState) protocol.StreamResponse {
+		return protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{
+			TaskID:    task.ID,
+			ContextID: task.ContextID,
+			Status:    protocol.TaskStatus{State: state},
+		})
+	}
+
+	// Keep the first delivery in flight and leave the old-generation event in
+	// A's process-local queue.
+	managerA.dispatchPush(task.ID, response(protocol.TaskStateWorking))
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first push delivery did not start")
+	}
+	managerA.dispatchPush(task.ID, response(protocol.TaskStateInputRequired))
+
+	// B deletes and recreates the same config ID. Existence and ID checks alone
+	// would revive the queued event; only the shared Redis generation rejects it.
+	if err := managerB.OnPushNotificationDelete(context.Background(),
+		protocol.DeleteTaskPushNotificationConfigParams{TaskID: task.ID, ID: configID}); err != nil {
+		t.Fatalf("manager B Delete: %v", err)
+	}
+	if _, err := managerB.OnPushNotificationSet(context.Background(), protocol.TaskPushNotificationConfig{
+		TaskID: task.ID,
+		ID:     configID,
+		URL:    "https://new.example/hook",
+	}); err != nil {
+		t.Fatalf("manager B recreate: %v", err)
+	}
+	managerA.dispatchPush(task.ID, response(protocol.TaskStateCompleted))
+	releaseFirst()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		calls := sender.snapshot()
+		if len(calls) > 0 {
+			last := calls[len(calls)-1]
+			if update := last.event.GetStatusUpdate(); update != nil &&
+				update.Status.State == protocol.TaskStateCompleted {
+				if len(calls) != 2 {
+					t.Fatalf("deliveries = %d, want in-flight old plus new; queued old generation was not skipped", len(calls))
+				}
+				if state := calls[0].event.GetStatusUpdate().Status.State; state != protocol.TaskStateWorking {
+					t.Fatalf("first delivery state = %s, want %s", state, protocol.TaskStateWorking)
+				}
+				if last.cfg.URL != "https://new.example/hook" {
+					t.Fatalf("recreated config URL = %q, want new URL", last.cfg.URL)
+				}
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("recreated registration was not delivered; calls = %+v", sender.snapshot())
+}
+
+func TestRedisPushBackpressureSerializesSuspendContinuation(t *testing.T) { //nolint:gocyclo // Concurrent handoff phases stay explicit.
+	started := make(chan struct{})
+	release := make(chan struct{})
+	sender := &firstBlockingSender{started: started, release: release}
+	var round atomic.Int32
+	taskIDs := make(chan string, 2)
+	processor := executorFunc(func(
+		_ context.Context, ec *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		taskIDs <- ec.TaskID
+		out := make(chan protocol.StreamEvent, 1)
+		if round.Add(1) == 1 {
+			out <- statusEvent(protocol.TaskStateInputRequired, agentReply("need more"))
+		} else {
+			out <- statusEvent(protocol.TaskStateCompleted, agentReply("done"))
+		}
+		close(out)
+		return out, nil
+	})
+	manager, _ := setupTest(t, processor, WithPushNotifications(push.Config{
+		Sender:                  sender,
+		MaxConcurrentDeliveries: 1,
+		DeliveryQueueSize:       1,
+	}))
+	defer manager.Close()
+	var releaseOnce sync.Once
+	releaseFirst := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseFirst()
+
+	// Occupy the sole worker and fill its one-slot queue so the next enqueue
+	// cannot complete until the sender is released.
+	prefill := storedTask(t, manager, "task-prefill", "ctx-prefill", protocol.TaskStateWorking)
+	if _, err := manager.OnPushNotificationSet(context.Background(), protocol.TaskPushNotificationConfig{
+		TaskID: prefill.ID,
+		ID:     "prefill-hook",
+		URL:    "https://prefill.example/hook",
+	}); err != nil {
+		t.Fatalf("prefill Set: %v", err)
+	}
+	prefillResponse := func(state protocol.TaskState) protocol.StreamResponse {
+		return protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{
+			TaskID: prefill.ID,
+			Status: protocol.TaskStatus{State: state},
+		})
+	}
+	manager.dispatchPush(prefill.ID, prefillResponse(protocol.TaskStateWorking))
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prefill push delivery did not start")
+	}
+	manager.dispatchPush(prefill.ID, prefillResponse(protocol.TaskStateSubmitted))
+
+	params := sendParams("start", "ctx-push-suspend")
+	params.Configuration = &protocol.SendMessageConfiguration{PushConfig: &protocol.TaskPushNotificationConfig{
+		ID:  "suspend-hook",
+		URL: "https://suspend.example/hook",
+	}}
+	stream, err := manager.OnSendMessageStream(context.Background(), params)
+	if err != nil {
+		t.Fatalf("OnSendMessageStream: %v", err)
+	}
+	var taskID string
+	select {
+	case taskID = <-taskIDs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processor did not receive first round")
+	}
+	waitTaskState(t, manager, taskID, protocol.TaskStateInputRequired)
+
+	// Once INPUT_REQUIRED is visible in Redis, the yield barrier must already
+	// exist. This ordering makes a GetTask-driven continuation safe.
+	manager.cancelMu.RLock()
+	live := manager.executions[taskID]
+	yielding := live != nil && live.yieldDone != nil
+	manager.cancelMu.RUnlock()
+	if !yielding {
+		t.Fatal("input-required became visible before the suspend handoff barrier")
+	}
+
+	type continuationResult struct {
+		response *protocol.SendMessageResponse
+		err      error
+	}
+	continuationDone := make(chan continuationResult, 1)
+	go func() {
+		followUp := sendParams("more", "")
+		followUp.Message.TaskID = &taskID
+		response, err := manager.OnSendMessage(context.Background(), followUp)
+		continuationDone <- continuationResult{response: response, err: err}
+	}()
+
+	select {
+	case result := <-continuationDone:
+		t.Fatalf("continuation returned before suspend enqueue was released: response=%+v err=%v",
+			result.response, result.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	select {
+	case event, ok := <-stream:
+		t.Fatalf("stream exposed suspend frame before push enqueue completed: event=%+v open=%v", event, ok)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	releaseFirst()
+	event := recvEvent(t, stream)
+	update := event.GetStatusUpdate()
+	if update == nil || update.TaskID != taskID || update.Status.State != protocol.TaskStateInputRequired {
+		t.Fatalf("suspend frame = %+v, want INPUT_REQUIRED for %s", event, taskID)
+	}
+
+	select {
+	case result := <-continuationDone:
+		if result.err != nil {
+			t.Fatalf("continuation after suspend handoff: %v", result.err)
+		}
+		task := result.response.GetTask()
+		if task == nil || task.Status.State != protocol.TaskStateCompleted {
+			t.Fatalf("continuation response = %+v, want completed task", result.response)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("continuation did not complete after releasing push backpressure")
+	}
+}
+
+// TestRedisPushRejectedWhenDisabled verifies the -32003 gate when neither
+// automatic nor manual delivery is enabled.
+func TestRedisPushRejectedWhenDisabled(t *testing.T) {
 	m, _ := setupTest(t, scriptedExecutor())
 	defer m.Close()
 
@@ -192,7 +491,7 @@ func TestRedisPushManualSuppresses(t *testing.T) {
 	sender := &recordingSender{}
 	m, _ := setupTest(t, scriptedExecutor(
 		statusEvent(protocol.TaskStateCompleted, agentReply("done")),
-	), WithPushConfig(push.Config{Sender: sender, ManualDelivery: true}))
+	), WithPushNotifications(push.Config{Sender: sender, ManualDelivery: true}))
 	defer m.Close()
 
 	task := storedTask(t, m, "task-manual", "ctx-manual", protocol.TaskStateWorking)
@@ -231,52 +530,53 @@ func TestRedisPushManualSuppresses(t *testing.T) {
 	}
 }
 
-// TestRedisManualWithoutSenderFails pins the invalid config: manual delivery
-// without a Sender is a construction error, not silence.
-func TestRedisManualWithoutSenderFails(t *testing.T) {
-	mr := miniredis.RunT(t)
-	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer client.Close()
-	if _, err := NewTaskManager(scriptedExecutor(), client,
-		WithPushConfig(push.Config{ManualDelivery: true})); err == nil {
-		t.Fatal("ManualDelivery without a Sender must fail construction")
+// TestRedisManualWithoutSenderAllowsRegistration pins the separation between
+// push capability and automatic transport.
+func TestRedisManualWithoutSenderAllowsRegistration(t *testing.T) {
+	m, _ := setupTest(t, scriptedExecutor(),
+		WithPushNotifications(push.Config{ManualDelivery: true}))
+	defer m.Close()
+	task := storedTask(t, m, "manual-without-sender", "ctx-manual-without-sender", protocol.TaskStateWorking)
+	ctx := context.Background()
+	stored, err := m.OnPushNotificationSet(ctx, protocol.TaskPushNotificationConfig{
+		TaskID: task.ID,
+		URL:    "https://example.com/hook",
+	})
+	if err != nil {
+		t.Fatalf("manual registration without Sender: %v", err)
+	}
+	if _, err := m.OnPushNotificationGet(ctx, protocol.GetTaskPushNotificationConfigParams{
+		TaskID: stored.TaskID, ID: stored.ID,
+	}); err != nil {
+		t.Fatalf("manual Get without Sender: %v", err)
+	}
+	list, err := m.OnPushNotificationList(ctx,
+		protocol.ListTaskPushNotificationConfigsParams{TaskID: stored.TaskID})
+	if err != nil || len(list.Configs) != 1 {
+		t.Fatalf("manual List without Sender: list=%+v err=%v", list, err)
+	}
+	if err := m.OnPushNotificationDelete(ctx, protocol.DeleteTaskPushNotificationConfigParams{
+		TaskID: stored.TaskID, ID: stored.ID,
+	}); err != nil {
+		t.Fatalf("manual Delete without Sender: %v", err)
+	}
+	if !m.SupportsPushNotifications() {
+		t.Fatal("manual delivery must advertise push support")
 	}
 }
 
-// TestRedisPushSenderAccessor verifies the accessor the server's discovery reads.
-func TestRedisPushSenderAccessor(t *testing.T) {
+// TestRedisSupportsPushNotifications verifies the capability the server reads.
+func TestRedisSupportsPushNotifications(t *testing.T) {
 	sender := &recordingSender{}
-	m, _ := setupTest(t, scriptedExecutor(), WithPushNotifications(sender))
+	m, _ := setupTest(t, scriptedExecutor(), WithPushNotifications(push.Config{Sender: sender}))
 	defer m.Close()
-	if m.PushSender() != push.Sender(sender) {
-		t.Fatalf("PushSender() did not return the configured sender")
+	if !m.SupportsPushNotifications() {
+		t.Fatalf("SupportsPushNotifications() = false with a configured sender")
 	}
 
 	plain, _ := setupTest(t, scriptedExecutor())
 	defer plain.Close()
-	if plain.PushSender() != nil {
-		t.Fatalf("PushSender() must be nil when push is not configured")
-	}
-}
-
-// TestRedisPushWorthy pins the delivery policy: content-less working/submitted
-// heartbeats are skipped; everything else is delivered.
-func TestRedisPushWorthy(t *testing.T) {
-	cases := []struct {
-		name  string
-		event protocol.StreamResponse
-		want  bool
-	}{
-		{"working-heartbeat", protocol.NewStreamResponseStatusUpdate(statusEvent(protocol.TaskStateWorking, nil)), false},
-		{"submitted-heartbeat", protocol.NewStreamResponseStatusUpdate(statusEvent(protocol.TaskStateSubmitted, nil)), false},
-		{"working-with-message", protocol.NewStreamResponseStatusUpdate(statusEvent(protocol.TaskStateWorking, agentReply("x"))), true},
-		{"completed", protocol.NewStreamResponseStatusUpdate(statusEvent(protocol.TaskStateCompleted, nil)), true},
-		{"input-required", protocol.NewStreamResponseStatusUpdate(statusEvent(protocol.TaskStateInputRequired, nil)), true},
-		{"message", protocol.NewStreamResponseMessage(agentReply("hi")), true},
-	}
-	for _, c := range cases {
-		if got := pushWorthy(c.event); got != c.want {
-			t.Errorf("%s: pushWorthy = %v, want %v", c.name, got, c.want)
-		}
+	if plain.SupportsPushNotifications() {
+		t.Fatalf("SupportsPushNotifications() = true without a sender or manual delivery")
 	}
 }

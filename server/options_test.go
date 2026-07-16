@@ -18,7 +18,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry/metrics"
 )
 
@@ -283,64 +282,6 @@ func TestNewA2AServerWithAgentCardURL(t *testing.T) {
 	}
 }
 
-func TestComposeJWKSURL(t *testing.T) {
-	tests := []struct {
-		name         string
-		agentCardURL string
-		jwksEndpoint string
-		expectedURL  string
-	}{
-		{
-			name:         "Agent card with sub-path",
-			agentCardURL: "http://localhost:8080/agent",
-			jwksEndpoint: "/agent/.well-known/jwks.json",
-			expectedURL:  "http://localhost:8080/agent/.well-known/jwks.json",
-		},
-		{
-			name:         "Agent card with multi-level path",
-			agentCardURL: "https://example.com:9090/api/v2/agents/myagent",
-			jwksEndpoint: "/api/v2/agents/myagent/.well-known/jwks.json",
-			expectedURL:  "https://example.com:9090/api/v2/agents/myagent/.well-known/jwks.json",
-		},
-		{
-			name:         "Agent card with root path",
-			agentCardURL: "http://localhost:8080/",
-			jwksEndpoint: "/.well-known/jwks.json",
-			expectedURL:  "http://localhost:8080/.well-known/jwks.json",
-		},
-		{
-			name:         "Empty agent card URL",
-			agentCardURL: "",
-			jwksEndpoint: "/.well-known/jwks.json",
-			expectedURL:  "/.well-known/jwks.json",
-		},
-		{
-			name:         "Invalid agent card URL",
-			agentCardURL: "not-a-valid-url",
-			jwksEndpoint: "/.well-known/jwks.json",
-			expectedURL:  "/.well-known/jwks.json",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Create server instance
-			server := &A2AServer{
-				agentCard: AgentCard{
-					URL: tt.agentCardURL,
-				},
-				jwksEndpoint: tt.jwksEndpoint,
-			}
-
-			// Call the function
-			result := server.composeJWKSURL()
-
-			// Verify the result
-			assert.Equal(t, tt.expectedURL, result, "JWKS URL composition mismatch")
-		})
-	}
-}
-
 // optionsTestTaskManager is a simple mock implementing taskmanager.TaskManager interface
 type optionsTestTaskManager struct{}
 
@@ -381,7 +322,7 @@ func (m *optionsTestTaskManager) OnPushNotificationGet(ctx context.Context, para
 	}, nil
 }
 
-func (m *optionsTestTaskManager) PushSender() push.Sender { return nil }
+func (m *optionsTestTaskManager) SupportsPushNotifications() bool { return false }
 
 func (m *optionsTestTaskManager) OnListTasks(
 	ctx context.Context, params protocol.ListTasksParams,

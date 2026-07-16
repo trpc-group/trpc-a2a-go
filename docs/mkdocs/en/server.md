@@ -273,18 +273,18 @@ The card's `securitySchemes` advertises what the server accepts.
 For disconnected operation, the client registers a webhook and the framework
 delivers task updates to it automatically. Delivery is opt-in: give the
 TaskManager a `push.Sender` and it POSTs a `StreamResponse` to every webhook
-registered for a task as the task reaches a significant state — terminal,
-input-required, auth-required, or any update carrying a message.
+registered for a task for every task event. To filter or batch events, wrap the
+configured `push.Sender` with an application policy.
 
 ```go
 // A SignedSender generates a temporary signing key by default. Production
 // replicas share one key via pushauth.WithJWTKey(key, kid).
 sender, _ := pushauth.NewSignedSender()
 
-// TaskManager: the Sender enables automatic delivery. The server discovers the
-// push capability from it and advertises pushNotifications on the card.
+// TaskManager: the Sender enables automatic delivery. The manager reports its
+// push capability to the server, which advertises it on the card.
 tm, _ := memory.NewTaskManager(processor,
-    memory.WithPushNotifications(sender),
+    memory.WithPushNotifications(push.Config{Sender: sender}),
 )
 
 // Server: publish the sender's verification keys at the JWKS endpoint.
@@ -293,22 +293,33 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 ```
 
 Clients register configs via `CreateTaskPushNotificationConfig` (manage them with
-`List`/`Delete`). **Without a sender, push is unsupported**: the config RPCs
+`Get`/`List`/`Delete`; get and delete address both task ID and config ID).
+Without either a sender or manual delivery, push is unsupported: the config RPCs
 return `-32003 PushNotificationNotSupported`, matching the official SDK. To keep
-registration open while the agent controls delivery itself, set
-`WithPushConfig(push.Config{Sender: sender, ManualDelivery: true})`
-— automatic dispatch turns off while registration and the capability stay on; for
-filtering or batching, a custom `push.Sender` can hold and delegate to the
-`SignedSender`; embedding it is not required. An inline
+registration open while the application controls delivery itself, set
+`WithPushNotifications(push.Config{ManualDelivery: true})`. The TaskManager does
+not need or use a sender in this mode; the application may deliver through a
+`push.Sender`, queue, or durable outbox. Automatic delivery uses a bounded,
+process-local queue: it preserves order per registered config and backpressures
+task event processing when full, but it is not a durable outbox across process
+crashes. Use manual delivery backed by durable storage when that guarantee is
+required. An inline
 `configuration.taskPushNotificationConfig` is a registration too: it is rejected
-when push is unsupported and persisted (queryable, auto-delivered) when enabled —
-it also reaches your processor as `ec.PushConfig`. Custom headers/tracing:
+when push is unsupported and persisted once the round materializes a task.
+Automatic mode delivers it; manual mode leaves delivery to the application. A
+message-only round does not leave an orphan config. It also reaches your
+processor as `ec.PushConfig`. Custom headers/tracing:
 `push.WithRequestDecorator`.
 → [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks).
 
-`SignedSender` honors a scheme and credentials declared by the client (such as
-Basic or Bearer) and uses its JWT identity as a fallback. If callbacks must be unsigned, use
-`push.NewHTTPSender()` and omit `WithPushNotificationJWKSHandler`.
+`SignedSender` honors static credentials declared by the client (such as Basic
+or Bearer) and signs with its JWT identity only when `Authentication` is omitted.
+A declared scheme without credentials must be resolved with
+`push.NewHTTPSender(push.WithAuthorizationHeader(...))`; it is never silently
+replaced by JWT. `HTTPSender` rejects private/special-use destinations and
+redirects by default; trusted private callbacks require the explicit
+`push.WithUnsafeAllowPrivateNetworks()` option. If callbacks must be unsigned,
+use `push.NewHTTPSender()` and omit `WithPushNotificationJWKSHandler`.
 
 ## Multi-tenant hosting
 
@@ -327,13 +338,19 @@ srv, _ := server.NewA2AServer(tm,
 
 ## Serving on a subpath
 
-Mount the whole server under a path prefix (behind a gateway, say). The path
-goes in the agent card URL and `WithBasePath`:
+Mount the whole server under a path prefix, for example behind a gateway.
+Prefer an explicit `WithBasePath`; it adjusts the agent card, JSON-RPC, and JWKS
+endpoints together:
 
 ```go
 srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
     server.WithBasePath("/api/v1/agent"))   // card + JSON-RPC under /api/v1/agent/…
 ```
+
+If `WithBasePath` is not set, the server attempts to derive the base path from
+the path in `agentCard.URL`. An explicit `WithBasePath` takes precedence, which
+is useful when a gateway exposes a different external URL from the server's
+internal route.
 
 → [examples/subpath](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/subpath).
 

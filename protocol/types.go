@@ -79,11 +79,6 @@ func GenerateRPCID() string {
 	return uuid.New().String()
 }
 
-// GeneratePushConfigID generates a new unique push-notification config ID.
-func GeneratePushConfigID() string {
-	return "push-" + uuid.New().String()
-}
-
 // ---------------------------------------------------------------------------
 // Core data types (v1.0 — no "kind" fields, Part is a struct, not interface)
 // ---------------------------------------------------------------------------
@@ -277,10 +272,9 @@ type AuthenticationInfo struct {
 	Credentials string `json:"credentials,omitempty"`
 }
 
-// PushNotificationConfig holds the delivery details for task push notifications.
-// It is the internal "details" view used by SendMessageConfiguration; the same
-// fields are carried directly on TaskPushNotificationConfig for the push-config
-// RPC methods.
+// PushNotificationConfig is the legacy/internal delivery-details view retained
+// for v0 compatibility. V1.0 carries its standard fields directly on
+// TaskPushNotificationConfig.
 type PushNotificationConfig struct {
 	ID             string              `json:"id,omitempty"`
 	URL            string              `json:"url"`
@@ -301,10 +295,6 @@ type TaskPushNotificationConfig struct {
 	URL            string              `json:"url"`
 	Token          string              `json:"token,omitempty"`
 	Authentication *AuthenticationInfo `json:"authentication,omitempty"`
-	// CreatedAt is the RFC3339 time the config was created (v1.0 field). It is
-	// set by the store on Save and is read-only from the client's perspective.
-	CreatedAt string         `json:"createdAt,omitempty"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
 // Details returns the delivery details of this config as a PushNotificationConfig
@@ -318,7 +308,6 @@ func (c *TaskPushNotificationConfig) Details() *PushNotificationConfig {
 		URL:            c.URL,
 		Token:          c.Token,
 		Authentication: c.Authentication,
-		Metadata:       c.Metadata,
 	}
 }
 
@@ -380,7 +369,7 @@ type GetTaskPushNotificationConfigParams struct {
 	RPCID  string `json:"-"`
 	Tenant string `json:"tenant,omitempty"`
 	TaskID string `json:"taskId"`
-	ID     string `json:"id,omitempty"`
+	ID     string `json:"id"`
 }
 
 // ---------------------------------------------------------------------------

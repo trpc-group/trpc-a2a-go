@@ -5,7 +5,7 @@
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
 // Command client runs a webhook receiver, registers it with the automatic-push
-// agent, and waits for the terminal notification.
+// agent, and logs notifications through the terminal task state.
 package main
 
 import (
@@ -37,9 +37,8 @@ func main() {
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
-	delivered := make(chan string, 8)
-	verifier := pushauth.NewAuthenticator()
-	verifier.SetJWKSClient(strings.TrimRight(*agentURL, "/") + protocol.JWKSPath)
+	delivered := make(chan protocol.TaskState, 8)
+	verifier := pushauth.NewVerifier(strings.TrimRight(*agentURL, "/") + protocol.JWKSPath)
 	webhook := &http.Server{Handler: webhookHandler(verifier, delivered)}
 	listener, err := net.Listen("tcp", *webhookListen)
 	if err != nil {
@@ -57,15 +56,23 @@ func main() {
 	sendMessage(*agentURL, *webhookURL)
 	log.Print("request returned; waiting for automatic push instead of polling")
 
-	select {
-	case state := <-delivered:
-		log.Printf("received verified notification: task state = %s", state)
-	case <-time.After(3 * time.Second):
-		log.Fatal("timed out waiting for a push notification")
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case state := <-delivered:
+			log.Printf("received verified notification: task state = %s", state)
+			if state == protocol.TaskStateCompleted || state == protocol.TaskStateFailed ||
+				state == protocol.TaskStateCanceled || state == protocol.TaskStateRejected {
+				return
+			}
+		case <-timer.C:
+			log.Fatal("timed out waiting for a terminal push notification")
+		}
 	}
 }
 
-func webhookHandler(verifier *pushauth.Authenticator, delivered chan<- string) http.Handler {
+func webhookHandler(verifier *pushauth.Verifier, delivered chan<- protocol.TaskState) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -87,7 +94,7 @@ func webhookHandler(verifier *pushauth.Authenticator, delivered chan<- string) h
 			state = update.Status.State
 		}
 		w.WriteHeader(http.StatusOK)
-		delivered <- string(state)
+		delivered <- state
 	})
 }
 

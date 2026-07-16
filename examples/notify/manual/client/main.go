@@ -38,8 +38,7 @@ func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
 	delivered := make(chan string, 8)
-	verifier := pushauth.NewAuthenticator()
-	verifier.SetJWKSClient(strings.TrimRight(*agentURL, "/") + protocol.JWKSPath)
+	verifier := pushauth.NewVerifier(strings.TrimRight(*agentURL, "/") + protocol.JWKSPath)
 	webhook := &http.Server{Handler: webhookHandler(verifier, delivered)}
 	listener, err := net.Listen("tcp", *webhookListen)
 	if err != nil {
@@ -67,7 +66,7 @@ func main() {
 	}
 }
 
-func webhookHandler(verifier *pushauth.Authenticator, delivered chan<- string) http.Handler {
+func webhookHandler(verifier *pushauth.Verifier, delivered chan<- string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {

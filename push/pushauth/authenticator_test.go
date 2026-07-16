@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,8 +25,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestAuthenticator_GenerateKeyPair(t *testing.T) {
-	auth := NewAuthenticator()
+func TestJWTSigner_GenerateKeyPair(t *testing.T) {
+	auth := NewJWTSigner()
 	err := auth.GenerateKeyPair()
 
 	require.NoError(t, err)
@@ -53,8 +55,8 @@ func TestAuthenticator_GenerateKeyPair(t *testing.T) {
 	assert.Equal(t, "sig", usageVal)
 }
 
-func TestAuthenticator_SignPayload(t *testing.T) {
-	auth := NewAuthenticator()
+func TestJWTSigner_SignPayload(t *testing.T) {
+	auth := NewJWTSigner()
 	err := auth.GenerateKeyPair()
 	require.NoError(t, err)
 
@@ -77,14 +79,14 @@ func TestAuthenticator_SignPayload(t *testing.T) {
 	assert.Contains(t, claims, "request_body_sha256")
 
 	// Test with error case - no private key
-	authNoKey := NewAuthenticator()
+	authNoKey := NewJWTSigner()
 	_, err = authNoKey.SignPayload(payload)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "private key not initialized")
 }
 
-func TestAuthenticator_HandleJWKS(t *testing.T) {
-	auth := NewAuthenticator()
+func TestJWTSigner_HandleJWKS(t *testing.T) {
+	auth := NewJWTSigner()
 	err := auth.GenerateKeyPair()
 	require.NoError(t, err)
 
@@ -199,8 +201,8 @@ func TestJWKSClient_GetKey(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found")
 }
 
-func TestAuthenticator_CreateAuthorizationHeader(t *testing.T) {
-	auth := NewAuthenticator()
+func TestJWTSigner_CreateAuthorizationHeader(t *testing.T) {
+	auth := NewJWTSigner()
 	err := auth.GenerateKeyPair()
 	require.NoError(t, err)
 
@@ -211,36 +213,28 @@ func TestAuthenticator_CreateAuthorizationHeader(t *testing.T) {
 	assert.True(t, strings.HasPrefix(header, "Bearer "))
 
 	// Test error case
-	authNoKey := NewAuthenticator()
+	authNoKey := NewJWTSigner()
 	_, err = authNoKey.CreateAuthorizationHeader(payload)
 	assert.Error(t, err)
 }
 
-func TestAuthenticator_SetJWKSClient(t *testing.T) {
-	auth := NewAuthenticator()
-
-	// Initially jwksClient should be nil
-	assert.Nil(t, auth.jwksClient)
-
-	// Set JWKS client
-	auth.SetJWKSClient("http://example.com/jwks.json")
-
-	// Verify client was set
-	assert.NotNil(t, auth.jwksClient)
-	assert.Equal(t, "http://example.com/jwks.json", auth.jwksClient.jwksURL)
+func TestNewVerifier(t *testing.T) {
+	verifier := NewVerifier("http://example.com/jwks.json", VerifierConfig{CacheTTL: time.Minute})
+	require.NotNil(t, verifier.jwksClient)
+	assert.Equal(t, "http://example.com/jwks.json", verifier.jwksClient.jwksURL)
+	assert.Equal(t, time.Minute, verifier.jwksClient.cacheTTL)
 }
 
-func TestAuthenticator_VerifyPushNotification(t *testing.T) {
+func TestVerifier_VerifyPushNotification(t *testing.T) {
 	// Agent side: generate a key pair and publish it via a JWKS endpoint.
-	signer := NewAuthenticator()
+	signer := NewJWTSigner()
 	require.NoError(t, signer.GenerateKeyPair())
 
 	jwksServer := httptest.NewServer(http.HandlerFunc(signer.HandleJWKS))
 	defer jwksServer.Close()
 
 	// Client side: verify tokens against that JWKS endpoint.
-	verifier := NewAuthenticator()
-	verifier.SetJWKSClient(jwksServer.URL)
+	verifier := NewVerifier(jwksServer.URL)
 
 	payload := []byte(`{"task_id":"task-1","status":"completed"}`)
 
@@ -299,7 +293,7 @@ func TestAuthenticator_VerifyPushNotification(t *testing.T) {
 
 	t.Run("unknown key id", func(t *testing.T) {
 		// A signer whose key is not published on the verifier's JWKS endpoint.
-		other := NewAuthenticator()
+		other := NewJWTSigner()
 		require.NoError(t, other.GenerateKeyPair())
 		header, err := other.CreateAuthorizationHeader(payload)
 		require.NoError(t, err)
@@ -308,10 +302,63 @@ func TestAuthenticator_VerifyPushNotification(t *testing.T) {
 	})
 
 	t.Run("jwks client not initialized", func(t *testing.T) {
-		bare := NewAuthenticator()
+		bare := &Verifier{}
 		header, err := signer.CreateAuthorizationHeader(payload)
 		require.NoError(t, err)
 		err = bare.VerifyPushNotification(newRequest(header), payload)
 		require.Error(t, err)
 	})
+}
+
+func TestVerifier_RefreshesUnknownKeyIDOnce(t *testing.T) {
+	signerA := NewJWTSigner()
+	require.NoError(t, signerA.GenerateKeyPair())
+	signerB := NewJWTSigner()
+	require.NoError(t, signerB.GenerateKeyPair())
+
+	var currentMu sync.RWMutex
+	current := signerA
+	var fetches atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetches.Add(1)
+		currentMu.RLock()
+		signer := current
+		currentMu.RUnlock()
+		signer.HandleJWKS(w, r)
+	}))
+	defer server.Close()
+
+	verifier := NewVerifier(server.URL, VerifierConfig{CacheTTL: time.Hour})
+	payload := []byte(`{"taskId":"task-1"}`)
+	request := func(header string) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/push", nil)
+		req.Header.Set("Authorization", header)
+		return req
+	}
+	headerA, err := signerA.CreateAuthorizationHeader(payload)
+	require.NoError(t, err)
+	require.NoError(t, verifier.VerifyPushNotification(request(headerA), payload))
+
+	currentMu.Lock()
+	current = signerB
+	currentMu.Unlock()
+	headerB, err := signerB.CreateAuthorizationHeader(payload)
+	require.NoError(t, err)
+
+	const goroutines = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, goroutines)
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- verifier.VerifyPushNotification(request(headerB), payload)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	assert.Equal(t, int32(2), fetches.Load(), "concurrent unknown-kid misses must share one refresh")
 }

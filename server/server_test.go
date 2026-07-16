@@ -27,7 +27,6 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/sse"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push/pushauth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
@@ -504,6 +503,7 @@ type mockTaskManager struct {
 	pushNotificationSetError    error
 	pushNotificationGetResponse *protocol.TaskPushNotificationConfig
 	pushNotificationGetError    error
+	pushSupported               bool
 
 	// New message handling fields
 	sendMessageResponse     *protocol.SendMessageResponse
@@ -679,8 +679,8 @@ func (m *mockTaskManager) OnPushNotificationGet(
 	return nil, fmt.Errorf("push notification config not found for task %s", params.TaskID)
 }
 
-// PushSender implements the TaskManager interface.
-func (m *mockTaskManager) PushSender() push.Sender { return nil }
+// SupportsPushNotifications implements the TaskManager interface.
+func (m *mockTaskManager) SupportsPushNotifications() bool { return m.pushSupported }
 
 // OnListTasks implements the TaskManager interface (v1.0 ListTasks).
 func (m *mockTaskManager) OnListTasks(
@@ -817,9 +817,9 @@ func (p *shutdownAwareMeterProvider) Shutdown(context.Context) error {
 }
 
 func TestServer_WithPushNotificationJWKSHandler(t *testing.T) {
-	// Create authenticator
-	authenticator := pushauth.NewAuthenticator()
-	err := authenticator.GenerateKeyPair()
+	// Create signer
+	signer := pushauth.NewJWTSigner()
+	err := signer.GenerateKeyPair()
 	require.NoError(t, err)
 
 	// Create a task processor and manager
@@ -827,7 +827,7 @@ func TestServer_WithPushNotificationJWKSHandler(t *testing.T) {
 	tm, err := memory.NewTaskManager(processor)
 	require.NoError(t, err)
 
-	jwksHandler := http.HandlerFunc(authenticator.HandleJWKS)
+	jwksHandler := http.HandlerFunc(signer.HandleJWKS)
 
 	// Create server with a JWKS handler.
 	card := AgentCard{
@@ -955,68 +955,6 @@ func TestA2AServer_HandleAgentGetAuthenticatedExtendedCard(t *testing.T) {
 					assert.Equal(t, agentCard.Description, resultCard.Description)
 				}
 			}
-		})
-	}
-}
-
-// Test for JWKS URL composition
-func TestA2AServer_ComposeJWKSURL(t *testing.T) {
-	tests := []struct {
-		name         string
-		agentCardURL string
-		jwksEndpoint string
-		expected     string
-	}{
-		{
-			name:         "empty_agent_url",
-			agentCardURL: "",
-			jwksEndpoint: "/.well-known/jwks.json",
-			expected:     "/.well-known/jwks.json",
-		},
-		{
-			name:         "valid_http_url",
-			agentCardURL: "http://localhost:8080/agent",
-			jwksEndpoint: "/.well-known/jwks.json",
-			expected:     "http://localhost:8080/.well-known/jwks.json",
-		},
-		{
-			name:         "valid_https_url",
-			agentCardURL: "https://api.example.com/v1/agent",
-			jwksEndpoint: "/.well-known/jwks.json",
-			expected:     "https://api.example.com/.well-known/jwks.json",
-		},
-		{
-			name:         "url_with_port",
-			agentCardURL: "https://api.example.com:9443/agent",
-			jwksEndpoint: "/.well-known/jwks.json",
-			expected:     "https://api.example.com:9443/.well-known/jwks.json",
-		},
-		{
-			name:         "invalid_url",
-			agentCardURL: "not-a-valid-url",
-			jwksEndpoint: "/.well-known/jwks.json",
-			expected:     "/.well-known/jwks.json",
-		},
-		{
-			name:         "url_without_scheme",
-			agentCardURL: "localhost:8080/agent",
-			jwksEndpoint: "/.well-known/jwks.json",
-			expected:     "/.well-known/jwks.json",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mockTM := newMockTaskManager()
-			agentCard := defaultAgentCard()
-			agentCard.URL = tt.agentCardURL
-
-			a2aServer, err := NewA2AServer(mockTM, WithAgentCard(agentCard))
-			require.NoError(t, err)
-			a2aServer.jwksEndpoint = tt.jwksEndpoint
-
-			result := a2aServer.composeJWKSURL()
-			assert.Equal(t, tt.expected, result)
 		})
 	}
 }

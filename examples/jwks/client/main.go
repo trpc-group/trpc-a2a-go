@@ -69,15 +69,13 @@ func (t *taskTracker) update(taskID, status string) {
 }
 
 type webhookHandler struct {
-	verifier *pushauth.Authenticator
+	verifier *pushauth.Verifier
 	tasks    *taskTracker
 }
 
 func newWebhookHandler(jwksURL string) *webhookHandler {
-	verifier := pushauth.NewAuthenticator()
-	// SetJWKSClient configures the SDK's cached JWKSClient. Verification fetches
-	// keys on demand and reuses them until the cache expires.
-	verifier.SetJWKSClient(jwksURL)
+	// NewVerifier is ready to use and refreshes JWKS immediately on key rotation.
+	verifier := pushauth.NewVerifier(jwksURL)
 	return &webhookHandler{verifier: verifier, tasks: newTaskTracker()}
 }
 

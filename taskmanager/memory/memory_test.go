@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
@@ -195,8 +196,9 @@ func TestTaskManager_OnGetTask(t *testing.T) {
 }
 
 func TestTaskManager_PushNotifications(t *testing.T) {
-	manager := newTestManager(t, echoExecutor(), WithPushNotifications(noopSender()))
+	manager := newTestManager(t, echoExecutor(), WithPushNotifications(push.Config{Sender: noopSender()}))
 	ctx := context.Background()
+	seedTask(manager, protocol.Task{ID: "test-task-id", Status: protocol.TaskStatus{State: protocol.TaskStateWorking}})
 
 	tests := []struct {
 		name      string
@@ -212,6 +214,7 @@ func TestTaskManager_PushNotifications(t *testing.T) {
 			taskID: "test-task-id",
 			config: &protocol.TaskPushNotificationConfig{
 				TaskID: "test-task-id",
+				ID:     "cfg-set",
 				URL:    "https://example.com/webhook",
 				Token:  "Bearer token",
 			},
@@ -230,6 +233,7 @@ func TestTaskManager_PushNotifications(t *testing.T) {
 			taskID: "test-task-id",
 			getParams: &protocol.GetTaskPushNotificationConfigParams{
 				TaskID: "test-task-id",
+				ID:     "cfg-setup",
 			},
 			validate: func(t *testing.T, result interface{}, err error) {
 				if err != nil {
@@ -256,6 +260,7 @@ func TestTaskManager_PushNotifications(t *testing.T) {
 			taskID: "non-existent-task",
 			getParams: &protocol.GetTaskPushNotificationConfigParams{
 				TaskID: "non-existent-task",
+				ID:     "cfg-missing",
 			},
 			validate: func(t *testing.T, result interface{}, err error) {
 				if err == nil {
@@ -268,6 +273,7 @@ func TestTaskManager_PushNotifications(t *testing.T) {
 	// First set up a push notification for the get test
 	setupConfig := protocol.TaskPushNotificationConfig{
 		TaskID: "test-task-id",
+		ID:     "cfg-setup",
 		URL:    "https://example.com/webhook",
 		Token:  "Bearer token",
 	}
@@ -722,12 +728,14 @@ func TestTaskManager_OnListTasks(t *testing.T) {
 
 // TestTaskManager_PushNotificationListDelete covers the v1.0 list/delete push-config methods.
 func TestTaskManager_PushNotificationListDelete(t *testing.T) {
-	manager := newTestManager(t, echoExecutor(), WithPushNotifications(noopSender()))
+	manager := newTestManager(t, echoExecutor(), WithPushNotifications(push.Config{Sender: noopSender()}))
 	ctx := context.Background()
+	seedTask(manager, protocol.Task{ID: "task-1", Status: protocol.TaskStatus{State: protocol.TaskStateWorking}})
 
-	if _, err := manager.OnPushNotificationSet(ctx, protocol.TaskPushNotificationConfig{
+	created, err := manager.OnPushNotificationSet(ctx, protocol.TaskPushNotificationConfig{
 		TaskID: "task-1", URL: "https://example.com/webhook",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("OnPushNotificationSet failed: %v", err)
 	}
 
@@ -739,7 +747,9 @@ func TestTaskManager_PushNotificationListDelete(t *testing.T) {
 		t.Fatalf("Expected one config, got %+v", list.Configs)
 	}
 
-	if err := manager.OnPushNotificationDelete(ctx, protocol.DeleteTaskPushNotificationConfigParams{TaskID: "task-1"}); err != nil {
+	if err := manager.OnPushNotificationDelete(ctx, protocol.DeleteTaskPushNotificationConfigParams{
+		TaskID: "task-1", ID: created.ID,
+	}); err != nil {
 		t.Fatalf("OnPushNotificationDelete failed: %v", err)
 	}
 
@@ -752,7 +762,9 @@ func TestTaskManager_PushNotificationListDelete(t *testing.T) {
 	}
 
 	// Deleting again is a no-op.
-	if err := manager.OnPushNotificationDelete(ctx, protocol.DeleteTaskPushNotificationConfigParams{TaskID: "task-1"}); err != nil {
+	if err := manager.OnPushNotificationDelete(ctx, protocol.DeleteTaskPushNotificationConfigParams{
+		TaskID: "task-1", ID: created.ID,
+	}); err != nil {
 		t.Fatalf("Idempotent delete failed: %v", err)
 	}
 }

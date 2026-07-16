@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push/pushauth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
@@ -24,7 +25,7 @@ import (
 const defaultPort = 8000
 
 // worker completes the task asynchronously. It does not send push
-// notifications; the TaskManager dispatches significant events automatically.
+// notifications; the TaskManager dispatches task events automatically.
 type worker struct{}
 
 func (worker) ProcessMessage(
@@ -35,7 +36,7 @@ func (worker) ProcessMessage(
 	go func() {
 		defer h.Close()
 		h.UpdateTaskState(protocol.TaskStateWorking, nil)
-		log.Printf("task %s -> working (heartbeat, not pushed)", ec.TaskID)
+		log.Printf("task %s -> working", ec.TaskID)
 		time.Sleep(300 * time.Millisecond)
 		h.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText("done"))
 		log.Printf("task %s -> completed; framework will auto-push", ec.TaskID)
@@ -48,11 +49,13 @@ func main() {
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
-	sender, err := pushauth.NewSignedSender()
+	// This local demo intentionally posts to a loopback client webhook.
+	sender, err := pushauth.NewSignedSender(
+		pushauth.WithSenderOptions(push.WithUnsafeAllowPrivateNetworks()))
 	if err != nil {
 		log.Fatalf("create signed sender: %v", err)
 	}
-	tm, err := memory.NewTaskManager(worker{}, memory.WithPushNotifications(sender))
+	tm, err := memory.NewTaskManager(worker{}, memory.WithPushNotifications(push.Config{Sender: sender}))
 	if err != nil {
 		log.Fatalf("create task manager: %v", err)
 	}

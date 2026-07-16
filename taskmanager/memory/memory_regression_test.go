@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
@@ -180,20 +181,155 @@ func TestClaimCancelSlot_BlocksConcurrentRegistration(t *testing.T) {
 	manager := newTestManager(t, echoExecutor())
 	const taskID = "task-claim-slot"
 
-	live, sentinel := manager.claimCancelSlot(taskID)
+	live, sentinel, yieldDone := manager.claimCancelSlot(taskID)
 	if live != nil || sentinel == nil {
 		t.Fatalf("expected to claim the free slot, got live=%v sentinel=%v", live, sentinel)
 	}
-	if err := manager.registerExecution(taskID, &execution{cancel: func() {}}); err == nil {
+	if yieldDone != nil {
+		t.Fatal("free slot unexpectedly reported a yield handoff")
+	}
+	if err := manager.registerExecution(context.Background(), taskID, &execution{cancel: func() {}}); err == nil {
 		t.Fatal("registration must be rejected while a cancel sentinel holds the slot")
 	}
 	manager.deregisterExecution(taskID, sentinel)
 
 	exec := &execution{cancel: func() {}}
-	if err := manager.registerExecution(taskID, exec); err != nil {
+	if err := manager.registerExecution(context.Background(), taskID, exec); err != nil {
 		t.Fatalf("registration after sentinel release failed: %v", err)
 	}
 	manager.releaseExecution(taskID, exec)
+}
+
+// Cancellation and suspend handoff use execMu as their linearization point.
+// Whichever operation acquires it first must keep ownership of the execution:
+// cancel prevents yielding, while yield makes cancel wait for the handoff.
+func TestCancelYieldLinearization(t *testing.T) {
+	t.Run("cancel wins", func(t *testing.T) {
+		manager := newTestManager(t, echoExecutor())
+		const taskID = "task-cancel-wins-yield"
+		var cancelCalls atomic.Int32
+		exec := &execution{cancel: func() { cancelCalls.Add(1) }}
+		if err := manager.registerExecution(context.Background(), taskID, exec); err != nil {
+			t.Fatalf("register execution: %v", err)
+		}
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { manager.releaseExecution(taskID, exec) }) }
+		defer release()
+
+		yieldDone, accepted := manager.requestExecutionCancel(taskID, exec)
+		if !accepted || yieldDone != nil {
+			t.Fatalf("cancel result: accepted=%v yieldDone=%v, want accepted with no handoff", accepted, yieldDone)
+		}
+		if got := cancelCalls.Load(); got != 1 {
+			t.Fatalf("execution cancel calls = %d, want 1", got)
+		}
+		if manager.beginExecutionYield(taskID, exec) {
+			t.Fatal("suspend handoff started after cancellation had already won")
+		}
+
+		release()
+	})
+
+	t.Run("yield wins", func(t *testing.T) {
+		manager := newTestManager(t, echoExecutor())
+		const taskID = "task-yield-wins-cancel"
+		var cancelCalls atomic.Int32
+		exec := &execution{cancel: func() { cancelCalls.Add(1) }}
+		if err := manager.registerExecution(context.Background(), taskID, exec); err != nil {
+			t.Fatalf("register execution: %v", err)
+		}
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { manager.releaseExecution(taskID, exec) }) }
+		defer release()
+		if !manager.beginExecutionYield(taskID, exec) {
+			t.Fatal("suspend handoff did not start")
+		}
+		handoff := exec.yieldDone
+
+		yieldDone, accepted := manager.requestExecutionCancel(taskID, exec)
+		if accepted || yieldDone != handoff {
+			t.Fatalf("cancel result: accepted=%v yieldDone=%v, want existing handoff %v",
+				accepted, yieldDone, handoff)
+		}
+		if got := cancelCalls.Load(); got != 0 {
+			t.Fatalf("execution cancel calls = %d, want 0 while yield owns the slot", got)
+		}
+
+		release()
+		select {
+		case <-handoff:
+		default:
+			t.Fatal("releasing the yielded execution did not finish its handoff")
+		}
+	})
+}
+
+// A suspend event may already be ready to emit when CancelTask wins the
+// execution lock. The event is still persisted and published, but it must not
+// yield the slot: closing the processor channel applies the cancellation close
+// rule and leaves the task terminally CANCELED.
+func TestCancelBeforeSuspendClosePersistsCanceled(t *testing.T) {
+	releaseSuspend := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseSuspend) }) }
+	defer release()
+	var processorSawCancel atomic.Bool
+	processor := funcExecutor(func(
+		ctx context.Context,
+		_ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent)
+		go func() {
+			defer close(out)
+			out <- workingEvent()
+			<-releaseSuspend
+			processorSawCancel.Store(ctx.Err() != nil)
+			out <- statusUpdate(protocol.TaskStateInputRequired, agentReply("need more"))
+		}()
+		return out, nil
+	})
+	manager := newTestManager(t, processor)
+
+	stream, err := manager.OnSendMessageStream(context.Background(), userParams("start"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream: %v", err)
+	}
+	workingEvent := recvEvent(t, stream)
+	working := workingEvent.GetStatusUpdate()
+	if working == nil || working.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("first stream event = %+v, want WORKING", working)
+	}
+	taskID := working.TaskID
+
+	cancelSnapshot, err := manager.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: taskID})
+	if err != nil {
+		t.Fatalf("OnCancelTask: %v", err)
+	}
+	if cancelSnapshot.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("cancel snapshot state = %s, want WORKING", cancelSnapshot.Status.State)
+	}
+
+	// Cancellation has returned, so requestExecutionCancel won before the
+	// processor's already-prepared suspend event is allowed to reach the engine.
+	release()
+	suspendedEvent := recvEvent(t, stream)
+	suspended := suspendedEvent.GetStatusUpdate()
+	if suspended == nil || suspended.Status.State != protocol.TaskStateInputRequired {
+		t.Fatalf("post-cancel processor event = %+v, want INPUT_REQUIRED", suspended)
+	}
+	canceledEvent := recvEvent(t, stream)
+	canceled := canceledEvent.GetStatusUpdate()
+	if canceled == nil || canceled.Status.State != protocol.TaskStateCanceled || !canceled.Final {
+		t.Fatalf("close-rule event = %+v, want final CANCELED", canceled)
+	}
+	waitClosed(t, stream)
+
+	if !processorSawCancel.Load() {
+		t.Fatal("processor emitted its pending suspend event before observing cancellation")
+	}
+	if got, ok := storedTaskState(manager, taskID); !ok || got != protocol.TaskStateCanceled {
+		t.Fatalf("stored state = %s (exists=%v), want CANCELED", got, ok)
+	}
 }
 
 // Cancel racing a continuation on a suspended task must converge: the task
@@ -359,7 +495,7 @@ func TestSendMessage_PushConfigReachesProcessor(t *testing.T) {
 			close(out)
 			return out, nil
 		})
-	manager := newTestManager(t, processor, WithPushNotifications(noopSender()))
+	manager := newTestManager(t, processor, WithPushNotifications(push.Config{Sender: noopSender()}))
 
 	params := userParams("hello")
 	params.Configuration = &protocol.SendMessageConfiguration{

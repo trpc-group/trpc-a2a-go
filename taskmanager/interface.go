@@ -11,7 +11,6 @@ import (
 	"context"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 )
 
 // ExecContext is the read-only snapshot of one incoming message for a
@@ -128,11 +127,10 @@ type MessageProcessor interface {
 // delegating the agent logic to an injected MessageProcessor.
 // This interface corresponds to the Task Service defined in the A2A Specification.
 type TaskManager interface {
-	// PushSender returns the sender used for push-notification delivery, or nil
-	// when push notifications are not supported. The server uses this capability
-	// to keep the advertised agent-card capability and JWKS publication aligned
-	// with the TaskManager's actual delivery configuration.
-	PushSender() push.Sender
+	// SupportsPushNotifications reports whether push-config registration and
+	// delivery are available. It deliberately exposes capability rather than a
+	// concrete transport so queue- and outbox-backed implementations fit too.
+	SupportsPushNotifications() bool
 
 	// OnSendMessage handles a request corresponding to the 'message/send' RPC method.
 	// It invokes the MessageProcessor and derives the result from the emitted events:

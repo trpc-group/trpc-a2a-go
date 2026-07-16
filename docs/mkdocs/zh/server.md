@@ -249,16 +249,16 @@ srv, _ := server.NewA2AServer(tm,
 
 ## 推送通知
 
-用于离线运行:客户端注册 webhook,框架随任务进展**自动**回调它。投递是 opt-in 的——给 TaskManager 一个 `push.Sender`,任务每到达显著状态(终态、input-required、auth-required,或任何携带 message 的更新)时,框架就把 `StreamResponse` POST 到该任务注册的每个 webhook。
+用于离线运行:客户端注册 webhook,框架随任务进展**自动**回调它。投递是 opt-in 的——给 TaskManager 一个 `push.Sender`,框架会把每个任务事件的 `StreamResponse` POST 到该任务注册的每个 webhook；需要过滤或攒批时，用自定义 `push.Sender` 显式实现策略。
 
 ```go
 // SignedSender 默认生成临时签名 key；生产多副本用
 // pushauth.WithJWTKey(key, kid) 共享同一把私钥。
 sender, _ := pushauth.NewSignedSender()
 
-// TaskManager:Sender 开启自动投递;server 从它发现 push 能力并在 card 上声明。
+// TaskManager:Sender 开启自动投递；manager 向 server 报告 push 能力，server 在 card 上声明。
 tm, _ := memory.NewTaskManager(processor,
-    memory.WithPushNotifications(sender),
+    memory.WithPushNotifications(push.Config{Sender: sender}),
 )
 
 // Server:在 JWKS endpoint 发布 sender 的验证公钥。
@@ -266,9 +266,9 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
     server.WithPushNotificationJWKSHandler(sender.JWKSHandler()))
 ```
 
-客户端经 `CreateTaskPushNotificationConfig` 注册配置(用 `ListTaskPushNotificationConfigs` / `DeleteTaskPushNotificationConfig` 管理)。**不注入 sender = 不支持 push**:config RPC 返回 `-32003 PushNotificationNotSupported`(与官方 SDK 一致)。想保留注册、由 agent 自己掌控投递,用 `WithPushConfig(push.Config{Sender: sender, ManualDelivery: true})`——自动投递关闭,注册/JWKS 发现/能力声明照常;要过滤/攒批,自定义 `push.Sender` 持有并委托给 `SignedSender` 即可，无需嵌入。请求内联的 `configuration.taskPushNotificationConfig` 同样视为注册:未启用时拒绝,启用时落库(可查询、自动投递),并照旧作为 `ec.PushConfig` 传给 processor。自定义 header / tracing:`push.WithRequestDecorator`。→ [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks)。
+客户端经 `CreateTaskPushNotificationConfig` 注册配置(用 `Get` / `List` / `DeleteTaskPushNotificationConfig` 管理；Get/Delete 同时使用 task ID 和 config ID 定位)。既没有 sender、也没有开启手动投递时，push 不受支持：config RPC 返回 `-32003 PushNotificationNotSupported`(与官方 SDK 一致)。想保留注册、由应用自己掌控投递，用 `WithPushNotifications(push.Config{ManualDelivery: true})`。此时 TaskManager 不需要也不会使用 sender，应用可自行通过 `push.Sender`、队列或 durable outbox 投递；注册、JWKS 发现和能力声明照常。自动投递使用有界的进程内队列：同一配置保持顺序，队列满时对任务事件施加背压，但进程崩溃后不提供 durable outbox 保证；需要该保证时使用手动投递并接入持久化队列。请求内联的 `configuration.taskPushNotificationConfig` 同样视为注册：未启用时拒绝；启用后，仅在本轮真正创建 task 时落库，自动模式由框架投递，手动模式由应用负责；纯 message 结果不会留下孤儿配置。它也照旧作为 `ec.PushConfig` 传给 processor。自定义 header / tracing：`push.WithRequestDecorator`。→ [examples/jwks](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks)。
 
-`SignedSender` 会优先遵循客户端声明的 scheme 和凭据（例如 Basic 或 Bearer），客户端未声明凭据时才回退到 JWT 身份。如果回调无需签名，使用 `push.NewHTTPSender()` 并省略 `WithPushNotificationJWKSHandler`。
+`SignedSender` 会原样遵循客户端声明的静态凭据（例如 Basic 或 Bearer），仅当客户端完全省略 `Authentication` 时才使用 JWT 身份。若客户端声明了 scheme 但凭据需要动态获取，应使用 `push.NewHTTPSender(push.WithAuthorizationHeader(...))` 解析，框架不会静默用 JWT 覆盖。`HTTPSender` 默认拒绝私网/特殊用途地址和重定向；确实需要可信私网回调时，必须显式传 `push.WithUnsafeAllowPrivateNetworks()`。如果回调无需签名，使用 `push.NewHTTPSender()` 并省略 `WithPushNotificationJWKSHandler`。
 
 ## 多租户托管
 

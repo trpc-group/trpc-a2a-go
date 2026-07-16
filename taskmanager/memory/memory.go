@@ -12,11 +12,14 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/pushdispatch"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
@@ -158,18 +161,13 @@ type TaskManager struct {
 	// not part of the public API yet.
 	pushStore *pushConfigStore
 
-	// pushSender, when non-nil, delivers task updates to registered webhooks as
-	// events occur. When nil, push is not supported: the config RPCs return
-	// PushNotificationNotSupported.
-	pushSender push.Sender
+	// pushEnabled controls config registration and capability advertisement.
+	// Automatic delivery is a separate concern owned by pushDispatcher.
+	pushEnabled bool
 
-	// pushWg tracks in-flight asynchronous push deliveries so Close can drain them.
-	pushWg sync.WaitGroup
-	// pushCtx bounds every push delivery; pushCancel is called in Close so a slow
-	// or hung webhook cannot stall shutdown — the in-flight send is cancelled
-	// rather than awaited to its full timeout.
-	pushCtx    context.Context
-	pushCancel context.CancelFunc
+	// pushDispatcher owns the bounded, ordered automatic-delivery workers. It is
+	// nil when push is disabled or the agent selected manual delivery.
+	pushDispatcher *pushdispatch.Dispatcher
 
 	// executions tracks the cancellation handle of every live MessageProcessor run,
 	// keyed by task ID. Registered before ProcessMessage, removed when the engine
@@ -208,8 +206,8 @@ func NewTaskManager(processor taskmanager.MessageProcessor, opts ...TaskManagerO
 	for _, opt := range opts {
 		opt(options)
 	}
-	if options.Push.ManualDelivery && options.Push.Sender == nil {
-		return nil, fmt.Errorf("push.Config.ManualDelivery requires a Sender")
+	if options.Push.MaxConcurrentDeliveries < 0 || options.Push.DeliveryQueueSize < 0 {
+		return nil, fmt.Errorf("push delivery concurrency and queue size cannot be negative")
 	}
 
 	manager := &TaskManager{
@@ -219,12 +217,18 @@ func NewTaskManager(processor taskmanager.MessageProcessor, opts ...TaskManagerO
 		tasks:         make(map[string]*protocol.Task),
 		subscribers:   make(map[string][]*taskSubscriber),
 		pushStore:     newPushConfigStore(),
-		pushSender:    options.Push.Sender,
+		pushEnabled:   options.Push.Sender != nil || options.Push.ManualDelivery,
 		executions:    make(map[string]*execution),
 		options:       options,
 		stopCleanup:   make(chan struct{}),
 	}
-	manager.pushCtx, manager.pushCancel = context.WithCancel(context.Background())
+	if options.Push.Sender != nil && !options.Push.ManualDelivery {
+		manager.pushDispatcher = pushdispatch.New(
+			context.Background(), options.Push.Sender,
+			options.Push.MaxConcurrentDeliveries, options.Push.DeliveryQueueSize,
+			manager.pushStore.isCurrent,
+		)
+	}
 
 	// Start cleanup goroutine if enabled
 	if options.EnableCleanup {
@@ -350,7 +354,15 @@ func (m *TaskManager) OnGetTask(ctx context.Context, params protocol.TaskQueryPa
 // sentinel so no continuation can start (and write) concurrently.
 func (m *TaskManager) OnCancelTask(ctx context.Context, params protocol.TaskIDParams) (*protocol.Task, error) {
 	for {
-		live, sentinel := m.claimCancelSlot(params.ID)
+		live, sentinel, yieldDone := m.claimCancelSlot(params.ID)
+		if yieldDone != nil {
+			select {
+			case <-yieldDone:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
 		if live == nil {
 			defer m.deregisterExecution(params.ID, sentinel)
 			return m.cancelWithoutLiveRun(params)
@@ -373,10 +385,21 @@ func (m *TaskManager) OnCancelTask(ctx context.Context, params protocol.TaskIDPa
 			return nil, taskmanager.ErrTaskNotCancelable(params.ID, terminal)
 		}
 
-		// Flag before canceling so the engine's close rule sees the request even
-		// when the MessageProcessor reacts by closing the channel immediately.
-		live.cancelRequested.Store(true)
-		live.cancel()
+		// Linearize cancellation against a concurrent suspend handoff. If the
+		// handoff won, wait for it and retry as a no-live cancel; otherwise the
+		// close rule is guaranteed to observe cancelRequested.
+		yieldDone, accepted := m.requestExecutionCancel(params.ID, live)
+		if yieldDone != nil {
+			select {
+			case <-yieldDone:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		if !accepted {
+			continue
+		}
 
 		if m.liveExecution(params.ID) != live {
 			// The run yielded (suspend) or finished while we were canceling, so
@@ -432,15 +455,14 @@ func (m *TaskManager) OnPushNotificationSet(
 	ctx context.Context,
 	params protocol.TaskPushNotificationConfig,
 ) (*protocol.TaskPushNotificationConfig, error) {
-	if m.pushSender == nil {
+	if !m.pushEnabled {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
-	// A Set without an explicit config ID replaces the task's default config
-	// (keyed by the task ID) instead of appending a new one, matching the
-	// pre-refactor overwrite semantics and avoiding duplicate deliveries.
-	// Clients that want multiple configs for a task pass distinct IDs.
-	if params.ID == "" {
-		params.ID = params.TaskID
+	if err := push.ValidateConfig(params); err != nil {
+		return nil, jsonrpc.ErrInvalidParams(err.Error())
+	}
+	if err := m.ensurePushTaskExists(params.TaskID); err != nil {
+		return nil, err
 	}
 	stored, err := m.pushStore.save(params)
 	if err != nil {
@@ -455,26 +477,17 @@ func (m *TaskManager) OnPushNotificationGet(
 	ctx context.Context,
 	params protocol.GetTaskPushNotificationConfigParams,
 ) (*protocol.TaskPushNotificationConfig, error) {
-	if m.pushSender == nil {
+	if !m.pushEnabled {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
-	var config protocol.TaskPushNotificationConfig
-	var found bool
-	if params.ID != "" {
-		config, found = m.pushStore.get(params.TaskID, params.ID)
-	} else {
-		configs := m.pushStore.list(params.TaskID)
-		if len(configs) > 0 {
-			config, found = configs[0], true
-		}
+	if params.ID == "" {
+		return nil, jsonrpc.ErrInvalidParams("push notification config ID is required")
 	}
+	if err := m.ensurePushTaskExists(params.TaskID); err != nil {
+		return nil, err
+	}
+	config, found := m.pushStore.get(params.TaskID, params.ID)
 	if !found {
-		m.taskMu.RLock()
-		_, taskExists := m.tasks[params.TaskID]
-		m.taskMu.RUnlock()
-		if !taskExists {
-			return nil, taskmanager.ErrTaskNotFound(params.TaskID)
-		}
 		return nil, taskmanager.ErrPushConfigNotFound(params.TaskID)
 	}
 	return &config, nil
@@ -509,8 +522,11 @@ func (m *TaskManager) OnPushNotificationList(
 	ctx context.Context,
 	params protocol.ListTaskPushNotificationConfigsParams,
 ) (*protocol.ListTaskPushNotificationConfigsResult, error) {
-	if m.pushSender == nil {
+	if !m.pushEnabled {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
+	}
+	if err := m.ensurePushTaskExists(params.TaskID); err != nil {
+		return nil, err
 	}
 	configs := m.pushStore.list(params.TaskID)
 	return &protocol.ListTaskPushNotificationConfigsResult{Configs: configs}, nil
@@ -522,18 +538,27 @@ func (m *TaskManager) OnPushNotificationDelete(
 	ctx context.Context,
 	params protocol.DeleteTaskPushNotificationConfigParams,
 ) error {
-	if m.pushSender == nil {
+	if !m.pushEnabled {
 		return taskmanager.ErrPushNotificationNotSupported()
 	}
-	// v1.0 addresses a specific config by ID; when omitted, remove all configs
-	// for the task (legacy whole-task delete).
-	if params.ID != "" {
-		m.pushStore.remove(params.TaskID, params.ID)
-		log.Debugf("TaskManager: Push notification config %s deleted for task %s", params.ID, params.TaskID)
-		return nil
+	if params.ID == "" {
+		return jsonrpc.ErrInvalidParams("push notification config ID is required")
 	}
-	m.pushStore.removeAll(params.TaskID)
-	log.Debugf("TaskManager: All push notification configs deleted for task %s", params.TaskID)
+	if err := m.ensurePushTaskExists(params.TaskID); err != nil {
+		return err
+	}
+	m.pushStore.remove(params.TaskID, params.ID)
+	log.Debugf("TaskManager: Push notification config %s deleted for task %s", params.ID, params.TaskID)
+	return nil
+}
+
+func (m *TaskManager) ensurePushTaskExists(taskID string) error {
+	m.taskMu.RLock()
+	_, exists := m.tasks[taskID]
+	m.taskMu.RUnlock()
+	if !exists {
+		return taskmanager.ErrTaskNotFound(taskID)
+	}
 	return nil
 }
 
@@ -739,72 +764,32 @@ func nowTimestamp() string {
 	return time.Now().UTC().Format(time.RFC3339)
 }
 
-// PushSender returns the Sender configured via WithPushNotifications or
-// WithPushConfig, or nil when push is not enabled. The A2AServer uses it to keep
-// the advertised pushNotifications capability aligned with delivery support.
-func (m *TaskManager) PushSender() push.Sender {
-	return m.pushSender
+// SupportsPushNotifications reports whether push registration and delivery are enabled.
+func (m *TaskManager) SupportsPushNotifications() bool {
+	return m.pushEnabled
 }
 
 // dispatchPush delivers event to every push webhook registered for taskID.
-// It is a no-op unless a Sender is configured, and stays silent in manual
-// delivery mode (the agent pushes on its own schedule). Delivery is
-// asynchronous and best-effort: a slow or failing webhook must not block task
-// event processing.
+// It is a no-op unless automatic delivery is configured. The bounded dispatcher
+// preserves order per config; when its queue is full this call applies
+// backpressure rather than dropping an event.
 func (m *TaskManager) dispatchPush(taskID string, event protocol.StreamResponse) {
-	if m.pushSender == nil || m.options.Push.ManualDelivery {
+	if m.pushDispatcher == nil {
 		return
 	}
-	if !pushWorthy(event) {
+	registrations := m.pushStore.registrations(taskID)
+	if len(registrations) == 0 {
 		return
 	}
-	configs := m.pushStore.list(taskID)
-	if len(configs) == 0 {
-		return
-	}
-	// Reserve the deliveries on pushWg under execMu together with the closed
-	// check. Close sets m.closed under execMu before it waits on pushWg, so once
-	// shutdown has begun no new Add can race that Wait. This matters because
-	// dispatch is also reached from the OnCancelTask RPC path, which engineWg
-	// does not track.
 	m.execMu.Lock()
-	if m.closed {
-		m.execMu.Unlock()
+	closed := m.closed
+	m.execMu.Unlock()
+	if closed {
 		return
 	}
-	m.pushWg.Add(len(configs))
-	m.execMu.Unlock()
-
-	for i := range configs {
-		cfg := configs[i]
-		go func() {
-			defer m.pushWg.Done()
-			if err := m.pushSender.SendPush(m.pushCtx, cfg, event); err != nil {
-				log.Warnf("push dispatch: send to %s for task %s: %v", cfg.URL, taskID, err)
-			}
-		}()
+	if err := m.pushDispatcher.Enqueue(registrations, event); err != nil && !errors.Is(err, pushdispatch.ErrClosed) {
+		log.Warnf("push dispatch: enqueue for task %s: %v", taskID, err)
 	}
-}
-
-// pushWorthy reports whether an event represents a task update worth pushing.
-// A status update that carries a message payload is always delivered (a
-// disconnected push client would otherwise miss agent output). Only content-less
-// working/submitted heartbeats are skipped, to avoid webhook storms; terminal,
-// input-required and auth-required transitions, along with task, message and
-// artifact events, are delivered.
-func pushWorthy(event protocol.StreamResponse) bool {
-	if su := event.GetStatusUpdate(); su != nil {
-		if su.Status.Message != nil {
-			return true
-		}
-		switch su.Status.State {
-		case protocol.TaskStateWorking, protocol.TaskStateSubmitted, protocol.TaskStateUnspecified:
-			return false
-		default:
-			return true
-		}
-	}
-	return true
 }
 
 // notifySubscribers notifies all subscribers of the task
@@ -812,7 +797,12 @@ func (m *TaskManager) notifySubscribers(taskID string, event protocol.StreamResp
 	// Deliver push notifications independently of live SSE subscribers: reaching
 	// clients that are not currently streaming is the whole point of push.
 	m.dispatchPush(taskID, event)
+	m.notifyLiveSubscribers(taskID, event)
+}
 
+// notifyLiveSubscribers fans out to process-local task subscribers without
+// dispatching push a second time.
+func (m *TaskManager) notifyLiveSubscribers(taskID string, event protocol.StreamResponse) {
 	m.taskMu.RLock()
 	subs, exists := m.subscribers[taskID]
 	if !exists || len(subs) == 0 {
@@ -1038,6 +1028,9 @@ func (m *TaskManager) Close() error {
 			}
 		}
 		m.execMu.Unlock()
+		// Unblock an enqueue waiting on a full queue and cancel slow webhook
+		// calls before waiting for engines that may be inside dispatch.
+		m.pushDispatcher.Close()
 		for _, pipe := range pipes {
 			pipe.Close()
 		}
@@ -1061,16 +1054,10 @@ func (m *TaskManager) Close() error {
 		// afterwards.
 		m.engineWg.Wait()
 
-		// New push deliveries are fenced by m.closed (set above under execMu and
-		// checked in dispatchPush before any pushWg.Add), so no Add can race this
-		// Wait. Cancel the in-flight ones so a slow webhook cannot stall shutdown,
-		// then drain them.
-		m.pushCancel()
-		m.pushWg.Wait()
-
 		m.taskMu.Lock()
 		m.tasks = make(map[string]*protocol.Task)
 		m.taskMu.Unlock()
+		m.pushStore.close()
 	})
 	return nil
 }
