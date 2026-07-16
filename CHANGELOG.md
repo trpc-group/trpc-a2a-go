@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Redis TaskManager
+
+- **Cross-node `SubscribeToTask` is available as an opt-in.** `redis.WithCrossNodeResubscribe(true)` stores Task updates and their Redis Stream events atomically, so a reconnect may land on any replica sharing Redis without a snapshot/event gap. Enable it on every producer and subscriber replica. Execution, continuation, and live-cancel routing remain node-local; this is not a distributed work queue.
+
 ### A2A v1.0 conformance fixes
 
 - **Streaming artifact chunks reassemble by `ArtifactID`.** Artifact events sharing an `ArtifactID` now merge into a single artifact — `TaskHandle.AddArtifact` creates or replaces it, while `TaskHandle.AppendArtifact` appends continuation parts — instead of accumulating as separate fragments. `tasks/get` and the final task snapshot return one merged artifact per streamed deliverable, matching the spec and reference SDKs. Applies to the in-memory and Redis task managers; the per-chunk SSE frames are unchanged.

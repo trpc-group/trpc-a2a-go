@@ -24,13 +24,24 @@ type TaskManagerOptions struct {
 	// TaskSubscriberBufSize is the buffer size for task subscriber channels.
 	TaskSubscriberBufSize int
 
-	// TaskSubscriberBlockingSend enables blocking send for task subscribers.
+	// TaskSubscriberBlockingSend enables blocking send for local task subscribers
+	// and request pipes. Cross-node resubscribe tailers always use blocking send:
+	// their Redis reader can wait without blocking a task producer.
 	TaskSubscriberBlockingSend bool
 
 	// Push configures push-notification delivery (see push.Config). Push is
 	// enabled by either a Sender for automatic delivery or ManualDelivery for
 	// application-owned delivery.
 	Push push.Config
+
+	// CrossNodeResubscribe, when true, mirrors each task's events onto a per-task
+	// Redis stream and serves OnResubscribe by tailing that stream. This makes
+	// SubscribeToTask work across instances (a reconnect landing on a different
+	// node than the one running the task), at the cost of one XADD per event.
+	// Each task stream retains approximately the latest 10,000 events.
+	// When false (default) resubscribe is served from the in-process subscriber
+	// map only — correct for single-instance deployments.
+	CrossNodeResubscribe bool
 }
 
 // DefaultRedisTaskManagerOptions returns the default configuration options.
@@ -73,7 +84,8 @@ func WithTaskSubscriberBufferSize(size int) TaskManagerOption {
 	}
 }
 
-// WithTaskSubscriberBlockingSend sets the blocking send flag for the task subscriber
+// WithTaskSubscriberBlockingSend sets blocking send for local task subscribers
+// and request pipes. Cross-node resubscribe tailers always block independently.
 func WithTaskSubscriberBlockingSend(blockingSend bool) TaskManagerOption {
 	return func(opts *TaskManagerOptions) {
 		opts.TaskSubscriberBlockingSend = blockingSend
@@ -88,5 +100,17 @@ func WithTaskSubscriberBlockingSend(blockingSend bool) TaskManagerOption {
 func WithPushNotifications(cfg push.Config) TaskManagerOption {
 	return func(opts *TaskManagerOptions) {
 		opts.Push = cfg
+	}
+}
+
+// WithCrossNodeResubscribe enables cross-instance SubscribeToTask by mirroring
+// each task's events onto a per-task Redis stream. Enable it on every replica
+// sharing Redis when a resubscribe may land on a different instance than the one
+// running the task. It does not distribute execution, continuation, or cancel
+// requests between replicas. Each task stream retains approximately the latest
+// 10,000 events.
+func WithCrossNodeResubscribe(enabled bool) TaskManagerOption {
+	return func(opts *TaskManagerOptions) {
+		opts.CrossNodeResubscribe = enabled
 	}
 }

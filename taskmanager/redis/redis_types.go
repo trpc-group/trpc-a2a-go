@@ -18,8 +18,8 @@ import (
 // taskSubscriber is an in-process event channel attached to a task. It is
 // internal machinery: the MessageProcessor contract exposes only event channels, so
 // subscribers are created by the manager for resubscribe and for the
-// message/stream request pipe. Cross-replica streaming is out of scope; the
-// subscriber map lives in this process only.
+// message/stream request pipe. Cross-node resubscribe tailers also feed one of
+// these local channels; the subscriber itself has no distributed semantics.
 type taskSubscriber struct {
 	taskID     string
 	eventQueue chan protocol.StreamResponse

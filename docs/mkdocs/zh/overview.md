@@ -30,7 +30,7 @@ tRPC-A2A-Go 是 A2A（Agent-to-Agent）协议 v1.0 的 Go 实现。它同时提�
 | 子路径部署 | 支持 | `WithBasePath` 适配网关或统一前缀。 |
 | legacy v0.2.x wire 兼容 | 支持 | `compat/v0` 挂到同一端点、同一鉴权链，保留 v0 默认行为。 |
 | OpenTelemetry 指标 | 支持 | 请求数、耗时、TTFT；可注入 meter provider 或让 server 创建 OTLP provider。 |
-| Redis 跨副本实时流式 | 部分支持 | 任务快照共享；实时事件扇出仍是进程内。 |
+| Redis 跨节点 `SubscribeToTask` | 可选支持 | 共享 Redis 的所有副本都需开启 `WithCrossNodeResubscribe(true)`。 |
 
 ## 架构
 
@@ -101,7 +101,7 @@ sequenceDiagram
 ## 当前边界
 
 - 当前只实现 JSON-RPC 传输绑定；gRPC 和 HTTP+JSON（REST）还没有落地。
-- Redis 后端共享任务、会话和 artifact 快照，但实时 SSE 事件扇出仍在单进程内。
+- Redis 后端可选择把 Task 事件写入 Redis Stream，使 `SubscribeToTask` 能跨节点接回；continuation、live cancel 和执行 single-writer 仍是节点本地能力，并非分布式工作队列。
 - A2A 没有定义“删除任务”API；生产环境需要通过 TTL 控制终态任务留存。
 
 ## 下一步

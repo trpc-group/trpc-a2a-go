@@ -21,6 +21,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/pushdispatch"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/taskevent"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
@@ -40,6 +41,8 @@ const (
 	// Default configuration values.
 	defaultMaxHistoryLength         = 100
 	defaultTaskSubscriberBufferSize = 1024
+	taskEventReadIdleInitialDelay   = 100 * time.Millisecond
+	taskEventReadIdleMaxDelay       = time.Second
 )
 
 // appendConversationMessageScript appends a MessageID exactly once, trims the
@@ -72,6 +75,9 @@ type TaskManager struct {
 	client redis.UniversalClient
 	// expiration is the time after which Redis keys expire.
 	expiration time.Duration
+	// eventTransport distributes task events between manager instances. It is
+	// nil when cross-node resubscribe is disabled.
+	eventTransport taskevent.Transport
 
 	// subMu is a mutex for the subscribers map.
 	subMu sync.RWMutex
@@ -101,6 +107,13 @@ type TaskManager struct {
 	// pushDispatcher owns the bounded, ordered automatic-delivery workers. It is
 	// nil when push is disabled or the agent selected manual delivery.
 	pushDispatcher *pushdispatch.Dispatcher
+
+	// tailerWg counts cross-node resubscribe tailer goroutines so Close joins
+	// them before closing the Redis client. baseCtx is canceled by Close to
+	// unpark a tailer parked in a blocking transport read.
+	tailerWg   sync.WaitGroup
+	baseCtx    context.Context
+	baseCancel context.CancelFunc
 
 	// options
 	options *TaskManagerOptions
@@ -134,15 +147,24 @@ func NewTaskManager(
 	if options.Push.MaxConcurrentDeliveries < 0 || options.Push.DeliveryQueueSize < 0 {
 		return nil, errors.New("push delivery concurrency and queue size cannot be negative")
 	}
+	expiration := options.ExpireTime
+	if expiration < time.Millisecond {
+		// go-redis applies the same lower bound for SET expiration. Keep Lua PX
+		// arguments valid and preserve the pre-streaming expiration semantics.
+		expiration = time.Millisecond
+	}
 
 	manager := &TaskManager{
 		processor:   processor,
 		client:      client,
-		expiration:  options.ExpireTime,
+		expiration:  expiration,
 		subscribers: make(map[string][]*taskSubscriber),
 		executions:  make(map[string]*liveExecution),
 		pushEnabled: options.Push.Sender != nil || options.Push.ManualDelivery,
 		options:     options,
+	}
+	if options.CrossNodeResubscribe {
+		manager.eventTransport = newRedisTaskEventTransport(client, expiration)
 	}
 	manager.pushCtx, manager.pushCancel = context.WithCancel(context.Background())
 	if options.Push.Sender != nil && !options.Push.ManualDelivery {
@@ -152,6 +174,7 @@ func NewTaskManager(
 			manager.isCurrentPushRegistration,
 		)
 	}
+	manager.baseCtx, manager.baseCancel = context.WithCancel(context.Background())
 
 	return manager, nil
 }
@@ -180,9 +203,14 @@ func (m *TaskManager) OnSendMessage(
 		select {
 		case out := <-ex.immediateResult:
 			return m.buildSendResponse(out.task, out.message, historyLength)
+		case err := <-ex.runFailed:
+			return nil, err
 		case <-ex.done:
 			// The stream closed before any immediate result: same derivation as
 			// blocking.
+			if ex.runErr != nil {
+				return nil, ex.runErr
+			}
 			return m.buildSendResponse(ex.finalTask, ex.lastMessage, historyLength)
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -190,7 +218,12 @@ func (m *TaskManager) OnSendMessage(
 	}
 
 	select {
+	case err := <-ex.runFailed:
+		return nil, err
 	case <-ex.done:
+		if ex.runErr != nil {
+			return nil, ex.runErr
+		}
 		return m.buildSendResponse(ex.finalTask, ex.lastMessage, historyLength)
 	case <-ctx.Done():
 		// The request died first. The execution is detached: it keeps running
@@ -395,13 +428,14 @@ func (m *TaskManager) cancelWithoutLiveRun(
 		Final: true,
 	}
 	task.Status = event.Status
+	response := protocol.NewStreamResponseStatusUpdate(event)
 	// Persist with a background context (like every engine write): the CANCELED
 	// state must land even if the cancel request's own context is already done.
-	if err := m.storeTask(context.Background(), task); err != nil {
+	if err := m.commitTaskEvent(context.Background(), task, response); err != nil {
 		log.Errorf("Error storing cancelled task %s: %v", params.ID, err)
 		return nil, err
 	}
-	m.notifySubscribers(params.ID, protocol.NewStreamResponseStatusUpdate(event))
+	m.notifySubscribers(params.ID, response)
 	m.cleanSubscribers(params.ID)
 
 	return task, nil
@@ -693,6 +727,9 @@ func (m *TaskManager) OnResubscribe(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (<-chan protocol.StreamResponse, error) {
+	if m.eventTransport != nil {
+		return m.onCrossNodeResubscribe(ctx, params)
+	}
 	// The snapshot read happens OUTSIDE subMu: getTaskInternal is a network
 	// round-trip and subMu sits on every broadcast's fan-out path — holding it
 	// across a slow Redis call would stall every stream in the process.
@@ -761,6 +798,149 @@ func (m *TaskManager) OnResubscribe(
 	return subscriber.Channel(), nil
 }
 
+// onCrossNodeResubscribe is the cross-node resubscribe path (opt-in via
+// WithCrossNodeResubscribe). The first frame is the current snapshot; a tailer
+// then reads events committed after the snapshot's atomic event cursor.
+func (m *TaskManager) onCrossNodeResubscribe(
+	ctx context.Context,
+	params protocol.TaskIDParams,
+) (<-chan protocol.StreamResponse, error) {
+	// The transport loads the Task and event cursor at one atomic boundary. A
+	// concurrent task-event commit is therefore either reflected by both values
+	// or by neither: the snapshot and subsequent read contain no gap or overlap.
+	task, startID, err := m.eventTransport.LoadTaskAndCursor(ctx, params.ID)
+	if err != nil {
+		return nil, err
+	}
+	// v1.0: subscribing to an already-terminal task is an error.
+	if isFinalState(task.Status.State) {
+		return nil, taskmanager.ErrUnsupportedOperation(
+			fmt.Sprintf("subscribe to task %s in terminal state %s", params.ID, task.Status.State))
+	}
+
+	subscriber := newTaskSubscriber(
+		params.ID,
+		m.options.TaskSubscriberBufSize,
+		true,
+	)
+	// v1.0: the first stream event must be the current Task snapshot.
+	if err := subscriber.Send(protocol.NewStreamResponseTask(task)); err != nil {
+		subscriber.Close()
+		return nil, err
+	}
+
+	// The subscriber is NOT registered in the local map: the event transport is
+	// its only source, whose producer may be another instance. Admit the tailer
+	// under cancelMu so Close cannot wait before this goroutine is counted.
+	m.cancelMu.Lock()
+	if m.closed {
+		m.cancelMu.Unlock()
+		subscriber.Close()
+		return nil, jsonrpc.ErrInternalError("task manager is closed")
+	}
+	m.tailerWg.Add(1)
+	m.cancelMu.Unlock()
+	go m.tailTaskEvents(ctx, params.ID, startID, subscriber)
+
+	return subscriber.Channel(), nil
+}
+
+// tailTaskEvents feeds a resubscriber from the configured event transport,
+// reading strictly after startID. It closes the subscriber and returns on the
+// terminal status frame, when the request ends, or when the manager closes.
+func (m *TaskManager) tailTaskEvents(ctx context.Context, taskID, startID string, sub *taskSubscriber) {
+	defer m.tailerWg.Done()
+	defer sub.Close()
+
+	// Cancel a blocking transport read, and unblock a parked blocking-send via
+	// Close, when the request ends or the manager closes.
+	readCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	tailerDone := make(chan struct{})
+	defer close(tailerDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-m.baseCtx.Done():
+		case <-tailerDone:
+			return
+		}
+		cancel()
+		sub.Close()
+	}()
+
+	idleDelay := taskEventReadIdleInitialDelay
+	jitterUnit := time.Now().UnixNano() % 1000
+	for i := 0; i < len(taskID); i++ {
+		jitterUnit = (jitterUnit*33 + int64(taskID[i])) % 1000
+	}
+	for {
+		// ReadAfter implementations may use bounded blocking reads, so re-check
+		// cancellation between batches.
+		select {
+		case <-readCtx.Done():
+			return
+		default:
+		}
+		previousID := startID
+		events, nextID, err := m.eventTransport.ReadAfter(readCtx, taskID, startID)
+		if err != nil {
+			return // read context canceled, transport closed, or a storage error.
+		}
+		startID = nextID
+		// A transport may implement ReadAfter as a non-blocking poll. Exponential
+		// backoff keeps long-idle subscriptions from producing fixed-rate Redis
+		// traffic; per-tailer jitter avoids synchronized polling across replicas.
+		if len(events) == 0 && nextID == previousID {
+			jitterRange := idleDelay / 4
+			waitDelay := idleDelay
+			if jitterRange > 0 {
+				waitDelay += jitterRange * time.Duration(jitterUnit) / 1000
+			}
+			timer := time.NewTimer(waitDelay)
+			select {
+			case <-readCtx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			if idleDelay < taskEventReadIdleMaxDelay {
+				idleDelay *= 2
+				if idleDelay > taskEventReadIdleMaxDelay {
+					idleDelay = taskEventReadIdleMaxDelay
+				}
+			}
+			continue
+		}
+		idleDelay = taskEventReadIdleInitialDelay
+		for _, event := range events {
+			if err := sub.Send(event); err != nil {
+				return // consumer gone.
+			}
+			// Terminate on a terminal STATUS frame only — an artifact's
+			// lastChunk (also IsFinal on the artifact) ends an artifact, not
+			// the task.
+			if su := event.GetStatusUpdate(); su != nil && isFinalState(su.Status.State) {
+				return
+			}
+		}
+	}
+}
+
+// appendTaskEvent distributes an event that does not modify the Task snapshot.
+// Task-changing events use commitTaskEvent so their snapshot and event share
+// one atomic commit. It is a no-op when no event transport is configured.
+func (m *TaskManager) appendTaskEvent(
+	ctx context.Context,
+	taskID string,
+	event protocol.StreamResponse,
+) error {
+	if m.eventTransport == nil {
+		return nil
+	}
+	return m.eventTransport.AppendEvent(ctx, taskID, event)
+}
+
 // taskChanged reports whether two snapshots of the same task differ in what a
 // stream conveys: status or artifacts. It deep-compares Artifacts rather than
 // counting them — an append=true chunk merges into an existing artifact without
@@ -778,8 +958,9 @@ func taskChanged(before, after *protocol.Task) bool {
 // Internal helper methods
 // =============================================================================
 
-// processReplyMessage processes and stores the reply message.
-func (m *TaskManager) processReplyMessage(ctxID *string, message *protocol.Message) {
+// stampReplyMessage fills the framework-owned reply fields before the event is
+// persisted or published.
+func (m *TaskManager) stampReplyMessage(ctxID *string, message *protocol.Message) {
 	message.ContextID = ctxID
 	message.Role = protocol.MessageRoleAgent
 	if message.MessageID == "" {
@@ -789,8 +970,6 @@ func (m *TaskManager) processReplyMessage(ctxID *string, message *protocol.Messa
 		contextID := protocol.GenerateContextID()
 		message.ContextID = &contextID
 	}
-
-	m.storeMessage(context.Background(), *message)
 }
 
 // storeMessage stores a message in Redis and updates conversation history.
@@ -923,6 +1102,30 @@ func (m *TaskManager) storeTask(ctx context.Context, task *protocol.Task) error 
 		return fmt.Errorf("failed to store task: %w", err)
 	}
 
+	return nil
+}
+
+// commitTaskEvent atomically persists a Task snapshot and distributes the event
+// that produced it when an event transport is configured. Without one it keeps
+// the original single-key Task persistence path.
+func (m *TaskManager) commitTaskEvent(
+	ctx context.Context,
+	task *protocol.Task,
+	event protocol.StreamResponse,
+) error {
+	if m.eventTransport == nil {
+		return m.storeTask(ctx, task)
+	}
+	if err := m.eventTransport.CommitTaskEvent(ctx, task, event); err != nil {
+		return err
+	}
+	// Keep the latest v2 storeTask behavior: every Task write refreshes its push
+	// registrations. This key cannot join the atomic script because the existing
+	// push key is in a different Redis Cluster slot; failure here must not turn an
+	// already-committed Task/event pair into a false negative result.
+	if err := m.client.Expire(ctx, pushNotificationPrefix+task.ID, m.expiration).Err(); err != nil {
+		log.Warnf("RedisTaskManager: failed to refresh push config expiration for task %s: %v", task.ID, err)
+	}
 	return nil
 }
 
@@ -1234,7 +1437,12 @@ func (m *TaskManager) Close() error {
 		// CANCELED) must land while the Redis client is still usable.
 		m.engineWg.Wait()
 
+		// Stop cross-node resubscribe tailers. baseCancel ends readers between
+		// polls; closing the client below also releases an in-flight Redis command.
+		// Join after that close so no tailer goroutine outlives the manager.
+		m.baseCancel()
 		m.closeErr = m.client.Close()
+		m.tailerWg.Wait()
 	})
 	return m.closeErr
 }
