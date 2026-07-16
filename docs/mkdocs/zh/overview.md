@@ -34,33 +34,56 @@ tRPC-A2A-Go 是 A2A（Agent-to-Agent）协议 v1.0 的 Go 实现。它同时提�
 
 ## 架构
 
-```mermaid
-flowchart TB
-    subgraph clients["客户端"]
-        C1["A2A v1.0 client"]
-        C2["legacy v0.2.x client"]
-    end
-    subgraph server["server"]
-        direction TB
-        AUTH["鉴权链"]
-        CARD["agent card / extended card"]
-        RPC["JSON-RPC + SSE 分发"]
-        COMPAT["compat/v0 handler"]
-    end
-    TM["TaskManager<br/>memory / redis / 自定义"]
-    MP["MessageProcessor<br/>你的 agent"]
+下图以生产环境的 Redis 路径为例。其他存储实现仍遵循相同的 server、
+`TaskManager` 与 `MessageProcessor` 边界；Redis 额外提供共享状态和可选的
+跨节点事件传输。
 
-    C1 --> AUTH
-    C2 --> AUTH
-    AUTH --> CARD
-    AUTH --> RPC
-    RPC --> TM
-    COMPAT -.-> TM
-    TM --> MP
-    MP -- "事件流" --> TM
+```mermaid
+flowchart LR
+    subgraph CALLERS["调用方"]
+        APP["A2A 业务应用 / Orchestrator"]
+        LEGACY["legacy v0.2.x 调用方"]
+    end
+
+    subgraph ADAPTERS["Wire 适配层"]
+        CLIENT["client<br/>JSON-RPC / SSE"]
+        SERVER["server<br/>agent card · 鉴权 · 方法分发"]
+        COMPAT["compat/v0<br/>v0 wire ↔ v1 类型"]
+    end
+
+    subgraph RUNTIME["Task Runtime"]
+        PORT["taskmanager.TaskManager<br/>框架端口"]
+        RT["redis.TaskManager<br/>round engine · 生命周期 · 持久化 · fan-out"]
+        MP["MessageProcessor<br/>你的 agent"]
+    end
+
+    subgraph STATE["共享 Redis 状态与分发"]
+        STORE[("Task · Message · Conversation · PushConfig")]
+        TRANSPORT["internal task-event transport"]
+        STREAMS[("每 Task 一个 Redis Stream")]
+    end
+
+    subgraph DELIVERY["响应交付"]
+        UNARY["JSON-RPC 一元结果"]
+        SSE["SSE / SubscribeToTask"]
+        PUSH["push.Sender → webhook"]
+    end
+
+    APP --> CLIENT --> SERVER
+    LEGACY --> SERVER
+    SERVER -->|"v1 方法"| PORT
+    SERVER -->|"v0 方法"| COMPAT --> PORT
+    PORT --> RT
+    RT <-->|"ExecContext / 有序 StreamEvent"| MP
+    RT <-->|"Task 状态"| STORE
+    RT <-->|"commit / read"| TRANSPORT
+    TRANSPORT <--> STREAMS
+    RT --> UNARY
+    RT --> SSE
+    RT --> PUSH
 ```
 
-三层职责是固定的：
+核心职责边界如下：
 
 - **`server`** 终结 wire 层：鉴权、提供 agent card、分发 JSON-RPC 方法和 SSE 流，也可以把 `compat/v0` 挂在同一端点里。
 - **`TaskManager`** 持有状态：懒创建任务、持久化事件、维护会话历史、处理取消、留存策略和订阅者扇出。
@@ -74,16 +97,31 @@ flowchart TB
 sequenceDiagram
     participant Client
     participant Server as server（鉴权、分发）
-    participant TM as TaskManager
+    participant TM as TaskManager / round engine
+    participant Registry as 本地执行注册表
     participant P as MessageProcessor
+    participant Store as Task + Conversation 存储
 
     Client->>Server: SendMessage / SendStreamingMessage
     Server->>Server: 鉴权、解析 tenant、校验 agent 能力
     Server->>TM: OnSendMessage / OnSendMessageStream
-    TM->>P: ProcessMessage(ctx, ec)
+    TM->>Registry: 获取该 Task 的本地执行槽
+    TM->>Store: 加载 continuation、持久化用户消息
+    TM->>P: ProcessMessage(detachedCtx, ExecContext)
     P-->>TM: <-chan events（Message / status / artifact）
-    Note over TM: 事件先持久化再广播；<br/>首个任务事件懒创建任务；<br/>channel 关闭时应用轮次规则
-    TM-->>Server: 最终快照或实时事件流
+    loop 每个事件
+        TM->>TM: 校验事件并物化 Task 快照
+        TM->>Store: 对外暴露前先持久化
+        Store-->>TM: 提交成功
+        TM-->>Server: 流式调用交付已提交的 StreamResponse
+    end
+    TM->>TM: 应用终态、挂起、违规或关闭规则
+    TM->>Registry: 释放执行槽
+    alt SendMessage
+        TM-->>Server: 派生 Task / Message 结果
+    else SendStreamingMessage
+        TM-->>Server: 关闭已提交事件流
+    end
     Server-->>Client: JSON-RPC 结果 / SSE 帧
 ```
 

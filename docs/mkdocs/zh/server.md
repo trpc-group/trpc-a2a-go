@@ -206,6 +206,31 @@ tm, _ := redistm.NewTaskManager(proc, redisClient,   // 注意参数序:(process
 continuation、live cancel 或执行请求。每个 Task Stream 约保留最新 10,000 个事件；
 落后超过该窗口的客户端可能错过中间事件。
 
+```mermaid
+sequenceDiagram
+    participant A as Node A round engine
+    participant Redis as 共享 Redis
+    participant B as Node B TaskManager
+    participant Client
+
+    A->>Redis: 原子写入 Task 快照及其事件
+    Client->>B: SubscribeToTask(taskId)
+    B->>Redis: 原子读取 Task 快照和 Stream 尾游标
+    Redis-->>B: 同一个一致性切面
+    B-->>Client: 当前 Task 快照（首帧）
+
+    loop 游标之后提交的事件
+        B->>Redis: 从游标之后读取
+        Redis-->>B: 有序 StreamResponse 批次
+        B-->>Client: SSE 帧
+    end
+```
+
+对会改变 Task 的事件，快照包含切面处已物化的 Task 状态；游标及其之前的
+事件帧不会重放。已有 artifact chunk 已物化在 `Task.Artifacts` 中。Stream
+只发送切面之后的新事件，读写两侧的原子边界保证更新不会落在“初始快照”
+和“后续 Stream”之间而丢失。
+
 → [examples/redis](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis)。实现 `taskmanager.TaskManager` 接口即可自带后端。
 
 留存:

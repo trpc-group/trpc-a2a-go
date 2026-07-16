@@ -244,6 +244,32 @@ It does not route continuation, live-cancel, or execution requests between
 nodes. Each task stream retains approximately the latest 10,000 events; clients
 that lag beyond that bound may miss intermediate events.
 
+```mermaid
+sequenceDiagram
+    participant A as Node A round engine
+    participant Redis as shared Redis
+    participant B as Node B TaskManager
+    participant Client
+
+    A->>Redis: atomically store Task snapshot + append its event
+    Client->>B: SubscribeToTask(taskId)
+    B->>Redis: atomically load Task snapshot + stream tail cursor
+    Redis-->>B: one consistent cut
+    B-->>Client: current Task snapshot (first frame)
+
+    loop events committed after the cursor
+        B->>Redis: read after cursor
+        Redis-->>B: ordered StreamResponse batch
+        B-->>Client: SSE frames
+    end
+```
+
+For task-changing events, the snapshot contains the materialized Task state at
+the cut; no event frame at or before the cursor is replayed. In particular,
+existing artifact chunks are already materialized in `Task.Artifacts`. The
+stream sends only later events, and the atomic write and read boundaries prevent
+an update from falling between the initial snapshot and the subsequent tail.
+
 → [examples/redis](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis).
 Implement the `taskmanager.TaskManager` interface for a custom backend.
 
