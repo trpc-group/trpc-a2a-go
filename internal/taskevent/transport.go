@@ -46,8 +46,9 @@ type Transport interface {
 
 	// ReadAfter returns an ordered batch strictly after cursor and the cursor to
 	// use for the next call. It may block until events arrive or ctx ends. An
-	// empty batch is not an error. The returned cursor is never behind the input
-	// cursor and may advance past transport records that yielded no valid event.
+	// empty batch is not an error; callers must wait or back off before retrying
+	// when the cursor also did not advance. The returned cursor is never behind
+	// the input cursor and may advance past records that yielded no valid event.
 	ReadAfter(
 		ctx context.Context,
 		taskID string,

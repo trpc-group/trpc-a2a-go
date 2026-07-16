@@ -32,8 +32,6 @@ const (
 	streamMaxLen = 10000
 	// streamReadCount caps entries returned per XREAD.
 	streamReadCount = 64
-	// streamBlockTimeout bounds one XREAD BLOCK slice so readers re-check context.
-	streamBlockTimeout = 5 * time.Second
 )
 
 // commitTaskEventScript atomically persists a Task snapshot and its event. The
@@ -207,8 +205,11 @@ func (t *redisTaskEventTransport) ReadAfter(
 ) ([]protocol.StreamResponse, string, error) {
 	res, err := t.client.XRead(ctx, &redisclient.XReadArgs{
 		Streams: []string{streamKey(taskID), cursor},
-		Block:   streamBlockTimeout,
-		Count:   streamReadCount,
+		// Do not pin the TaskManager's shared Redis connection pool while a
+		// subscription is idle. The manager applies a context-aware backoff when
+		// this non-blocking read has no event or cursor progress.
+		Block: -1,
+		Count: streamReadCount,
 	}).Result()
 	if errors.Is(err, redisclient.Nil) {
 		return nil, cursor, nil

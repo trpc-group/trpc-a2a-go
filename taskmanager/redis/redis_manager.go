@@ -41,6 +41,8 @@ const (
 	// Default configuration values.
 	defaultMaxHistoryLength         = 100
 	defaultTaskSubscriberBufferSize = 1024
+	taskEventReadIdleInitialDelay   = 100 * time.Millisecond
+	taskEventReadIdleMaxDelay       = time.Second
 )
 
 // appendConversationMessageScript appends a MessageID exactly once, trims the
@@ -201,9 +203,14 @@ func (m *TaskManager) OnSendMessage(
 		select {
 		case out := <-ex.immediateResult:
 			return m.buildSendResponse(out.task, out.message, historyLength)
+		case err := <-ex.runFailed:
+			return nil, err
 		case <-ex.done:
 			// The stream closed before any immediate result: same derivation as
 			// blocking.
+			if ex.runErr != nil {
+				return nil, ex.runErr
+			}
 			return m.buildSendResponse(ex.finalTask, ex.lastMessage, historyLength)
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -211,7 +218,12 @@ func (m *TaskManager) OnSendMessage(
 	}
 
 	select {
+	case err := <-ex.runFailed:
+		return nil, err
 	case <-ex.done:
+		if ex.runErr != nil {
+			return nil, ex.runErr
+		}
 		return m.buildSendResponse(ex.finalTask, ex.lastMessage, historyLength)
 	case <-ctx.Done():
 		// The request died first. The execution is detached: it keeps running
@@ -857,6 +869,11 @@ func (m *TaskManager) tailTaskEvents(ctx context.Context, taskID, startID string
 		sub.Close()
 	}()
 
+	idleDelay := taskEventReadIdleInitialDelay
+	jitterUnit := time.Now().UnixNano() % 1000
+	for i := 0; i < len(taskID); i++ {
+		jitterUnit = (jitterUnit*33 + int64(taskID[i])) % 1000
+	}
 	for {
 		// ReadAfter implementations may use bounded blocking reads, so re-check
 		// cancellation between batches.
@@ -865,11 +882,37 @@ func (m *TaskManager) tailTaskEvents(ctx context.Context, taskID, startID string
 			return
 		default:
 		}
+		previousID := startID
 		events, nextID, err := m.eventTransport.ReadAfter(readCtx, taskID, startID)
 		if err != nil {
 			return // read context canceled, transport closed, or a storage error.
 		}
 		startID = nextID
+		// A transport may implement ReadAfter as a non-blocking poll. Exponential
+		// backoff keeps long-idle subscriptions from producing fixed-rate Redis
+		// traffic; per-tailer jitter avoids synchronized polling across replicas.
+		if len(events) == 0 && nextID == previousID {
+			jitterRange := idleDelay / 4
+			waitDelay := idleDelay
+			if jitterRange > 0 {
+				waitDelay += jitterRange * time.Duration(jitterUnit) / 1000
+			}
+			timer := time.NewTimer(waitDelay)
+			select {
+			case <-readCtx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			if idleDelay < taskEventReadIdleMaxDelay {
+				idleDelay *= 2
+				if idleDelay > taskEventReadIdleMaxDelay {
+					idleDelay = taskEventReadIdleMaxDelay
+				}
+			}
+			continue
+		}
+		idleDelay = taskEventReadIdleInitialDelay
 		for _, event := range events {
 			if err := sub.Send(event); err != nil {
 				return // consumer gone.
@@ -915,8 +958,9 @@ func taskChanged(before, after *protocol.Task) bool {
 // Internal helper methods
 // =============================================================================
 
-// processReplyMessage processes and stores the reply message.
-func (m *TaskManager) processReplyMessage(ctxID *string, message *protocol.Message) {
+// stampReplyMessage fills the framework-owned reply fields before the event is
+// persisted or published.
+func (m *TaskManager) stampReplyMessage(ctxID *string, message *protocol.Message) {
 	message.ContextID = ctxID
 	message.Role = protocol.MessageRoleAgent
 	if message.MessageID == "" {
@@ -926,8 +970,6 @@ func (m *TaskManager) processReplyMessage(ctxID *string, message *protocol.Messa
 		contextID := protocol.GenerateContextID()
 		message.ContextID = &contextID
 	}
-
-	m.storeMessage(context.Background(), *message)
 }
 
 // storeMessage stores a message in Redis and updates conversation history.
@@ -1074,7 +1116,17 @@ func (m *TaskManager) commitTaskEvent(
 	if m.eventTransport == nil {
 		return m.storeTask(ctx, task)
 	}
-	return m.eventTransport.CommitTaskEvent(ctx, task, event)
+	if err := m.eventTransport.CommitTaskEvent(ctx, task, event); err != nil {
+		return err
+	}
+	// Keep the latest v2 storeTask behavior: every Task write refreshes its push
+	// registrations. This key cannot join the atomic script because the existing
+	// push key is in a different Redis Cluster slot; failure here must not turn an
+	// already-committed Task/event pair into a false negative result.
+	if err := m.client.Expire(ctx, pushNotificationPrefix+task.ID, m.expiration).Err(); err != nil {
+		log.Warnf("RedisTaskManager: failed to refresh push config expiration for task %s: %v", task.ID, err)
+	}
+	return nil
 }
 
 // isFinalState checks if a TaskState represents a terminal state.
@@ -1385,10 +1437,9 @@ func (m *TaskManager) Close() error {
 		// CANCELED) must land while the Redis client is still usable.
 		m.engineWg.Wait()
 
-		// Stop cross-node resubscribe tailers. A blocking XREAD is not aborted by
-		// context alone, so closing the client is what unparks it; baseCancel
-		// stops any tailer between slices from re-reading. Join after, so no
-		// tailer goroutine outlives Close.
+		// Stop cross-node resubscribe tailers. baseCancel ends readers between
+		// polls; closing the client below also releases an in-flight Redis command.
+		// Join after that close so no tailer goroutine outlives the manager.
 		m.baseCancel()
 		m.closeErr = m.client.Close()
 		m.tailerWg.Wait()

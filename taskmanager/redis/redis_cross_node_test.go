@@ -12,6 +12,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,6 +56,50 @@ type blockAfterCommandHook struct {
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
+}
+
+// nonBlockingEmptyTransport is a valid polling transport that currently has
+// no events. It verifies the manager, rather than every implementation, owns
+// the idle-read backoff contract.
+type nonBlockingEmptyTransport struct {
+	reads atomic.Int64
+}
+
+func (*nonBlockingEmptyTransport) CommitTaskEvent(
+	context.Context,
+	*protocol.Task,
+	protocol.StreamResponse,
+) error {
+	return nil
+}
+
+func (*nonBlockingEmptyTransport) AppendEvent(
+	context.Context,
+	string,
+	protocol.StreamResponse,
+) error {
+	return nil
+}
+
+func (*nonBlockingEmptyTransport) LoadTaskAndCursor(
+	context.Context,
+	string,
+) (*protocol.Task, string, error) {
+	return &protocol.Task{
+		ID: "task-empty-poll",
+		Status: protocol.TaskStatus{
+			State: protocol.TaskStateWorking,
+		},
+	}, "cursor", nil
+}
+
+func (t *nonBlockingEmptyTransport) ReadAfter(
+	context.Context,
+	string,
+	string,
+) ([]protocol.StreamResponse, string, error) {
+	t.reads.Add(1)
+	return nil, "cursor", nil
 }
 
 func (h *blockAfterCommandHook) DialHook(next redis.DialHook) redis.DialHook {
@@ -270,15 +315,14 @@ func TestCrossNode_ClientDisconnectClosesStream(t *testing.T) {
 	}
 }
 
-// Close returns promptly and joins the tailer even with a resubscribe parked in
-// a blocking XREAD.
+// Close returns promptly and joins an active polling resubscribe tailer.
 func TestCrossNode_CloseJoinsActiveTailer(t *testing.T) {
 	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor())
 	task := storedTask(t, nodeA, "task-close", "ctx-close", protocol.TaskStateWorking)
 	if _, err := nodeB.OnResubscribe(context.Background(), protocol.TaskIDParams{ID: task.ID}); err != nil {
 		t.Fatalf("OnResubscribe: %v", err)
 	}
-	// nodeB's tailer is parked in XREAD BLOCK; Close must cancel and join it.
+	// nodeB's tailer is polling/waiting; Close must cancel and join it.
 	done := make(chan error, 1)
 	go func() { done <- nodeB.Close() }()
 	select {
@@ -383,6 +427,51 @@ func TestCrossNode_InputRequiredDoesNotCloseResubscribe(t *testing.T) {
 	}
 }
 
+// A continuation clears the previous Status.Message from the Task snapshot.
+// That mutation must be journaled so a subscriber that already received the
+// old snapshot observes the clear even when the continuation emits only a
+// Message and never produces another task status.
+func TestCrossNode_ContinuationStatusMessageClearIsJournaled(t *testing.T) {
+	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor(agentReply("clarification")))
+	task := storedTask(t, nodeA, "task-clear-status", "ctx-clear-status", protocol.TaskStateInputRequired)
+	task.Status.Message = agentReply("need input")
+	if err := nodeA.storeTask(context.Background(), task); err != nil {
+		t.Fatalf("store task status message: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream, err := nodeB.OnResubscribe(ctx, protocol.TaskIDParams{ID: task.ID})
+	if err != nil {
+		t.Fatalf("OnResubscribe: %v", err)
+	}
+	initial, ok := recvTimeout(t, stream)
+	if !ok || initial.GetTask() == nil || initial.GetTask().Status.Message == nil {
+		t.Fatalf("expected initial snapshot with status message, got %+v", initial)
+	}
+
+	params := sendParams("more input", task.ContextID)
+	params.Message.TaskID = &task.ID
+	if _, err := nodeA.OnSendMessage(context.Background(), params); err != nil {
+		t.Fatalf("continuation: %v", err)
+	}
+	cleared, ok := recvTimeout(t, stream)
+	if !ok || cleared.GetStatusUpdate() == nil {
+		t.Fatalf("expected journaled status clear, got %+v", cleared)
+	}
+	status := cleared.GetStatusUpdate().Status
+	if status.State != protocol.TaskStateInputRequired || status.Message != nil {
+		t.Fatalf("unexpected status clear event: %+v", status)
+	}
+	stored, err := nodeA.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: task.ID})
+	if err != nil {
+		t.Fatalf("OnGetTask: %v", err)
+	}
+	if stored.Status.Message != nil {
+		t.Fatalf("continuation did not clear stored status message: %+v", stored.Status)
+	}
+}
+
 // The Redis tailer is an independent reader, so it uses cancelable blocking
 // backpressure instead of treating a temporarily full output buffer as EOF.
 func TestCrossNode_SlowConsumerDoesNotLoseStream(t *testing.T) {
@@ -419,6 +508,62 @@ func TestCrossNode_SlowConsumerDoesNotLoseStream(t *testing.T) {
 		// Keep the size-one buffer full between reads. A non-blocking tailer would
 		// evict the subscriber before all queued Redis events are delivered.
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// An idle polling transport must back off exponentially instead of producing a
+// fixed-rate Redis read stream when it returns no events or cursor progress.
+func TestCrossNode_EmptyTransportReadBacksOff(t *testing.T) {
+	manager, _ := setupTest(t, scriptedExecutor())
+	transport := &nonBlockingEmptyTransport{}
+	manager.eventTransport = transport
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := manager.OnResubscribe(ctx, protocol.TaskIDParams{ID: "task-empty-poll"})
+	if err != nil {
+		t.Fatalf("OnResubscribe: %v", err)
+	}
+	if frame, ok := recvTimeout(t, stream); !ok || frame.GetTask() == nil {
+		t.Fatalf("expected initial snapshot, got %+v", frame)
+	}
+	time.Sleep(650 * time.Millisecond)
+	cancel()
+	if _, ok := recvTimeout(t, stream); ok {
+		t.Fatal("resubscribe stream remained open after cancellation")
+	}
+	if reads := transport.reads.Load(); reads > 4 {
+		t.Fatalf("empty ReadAfter did not back off: reads=%d", reads)
+	}
+}
+
+// Idle cross-node subscriptions must not consume the Redis connections used by
+// Task storage. With a size-one pool, one tailer and one GetTask must coexist.
+func TestCrossNode_IdleTailerDoesNotStarveTaskStoragePool(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{
+		Addr:        mr.Addr(),
+		PoolSize:    1,
+		PoolTimeout: 50 * time.Millisecond,
+	})
+	manager, err := NewTaskManager(scriptedExecutor(), client, WithCrossNodeResubscribe(true))
+	if err != nil {
+		t.Fatalf("NewTaskManager: %v", err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	task := storedTask(t, manager, "task-pool", "ctx-pool", protocol.TaskStateWorking)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream, err := manager.OnResubscribe(ctx, protocol.TaskIDParams{ID: task.ID})
+	if err != nil {
+		t.Fatalf("OnResubscribe: %v", err)
+	}
+	if frame, ok := recvTimeout(t, stream); !ok || frame.GetTask() == nil {
+		t.Fatalf("expected initial snapshot, got %+v", frame)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if _, err := manager.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: task.ID}); err != nil {
+		t.Fatalf("active tailer starved task storage: %v", err)
 	}
 }
 
@@ -467,11 +612,239 @@ func TestCrossNode_MessageAppendFailureIsNotExposedAsSuccess(t *testing.T) {
 
 	params := sendParams("continue", task.ContextID)
 	params.Message.TaskID = &task.ID
-	if response, err := manager.OnSendMessage(context.Background(), params); err == nil {
+	response, err := manager.OnSendMessage(context.Background(), params)
+	if err == nil {
 		t.Fatalf("message append failure was exposed as success: %+v", response)
+	}
+	if !strings.Contains(err.Error(), "task event stream has wrong type") {
+		t.Fatalf("message append returned the wrong error: %v", err)
 	}
 	if buffered := len(subscriber.Channel()); buffered != 0 {
 		t.Fatalf("message append failure reached local subscriber: buffered=%d", buffered)
+	}
+	history, err := manager.getConversationHistory(context.Background(), task.ContextID, 100)
+	if err != nil {
+		t.Fatalf("getConversationHistory: %v", err)
+	}
+	for _, message := range history {
+		if message.Role == protocol.MessageRoleAgent {
+			t.Fatalf("message append failure persisted an agent reply: %+v", message)
+		}
+	}
+}
+
+// A failed Task/event commit is an execution error. Neither a status nor an
+// artifact working copy may be returned as if it committed successfully.
+func TestCrossNode_TaskCommitFailureIsNotExposedAsSuccess(t *testing.T) {
+	tests := []struct {
+		name              string
+		event             protocol.StreamEvent
+		returnImmediately bool
+	}{
+		{name: "status", event: statusEvent(protocol.TaskStateCompleted, agentReply("done"))},
+		{
+			name:              "status-return-immediately",
+			event:             statusEvent(protocol.TaskStateCompleted, agentReply("done")),
+			returnImmediately: true,
+		},
+		{name: "artifact", event: artifactEvent("artifact", "uncommitted")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager, _ := setupTest(
+				t,
+				scriptedExecutor(test.event),
+				WithCrossNodeResubscribe(true),
+			)
+			taskID := "task-" + test.name + "-fail"
+			contextID := "ctx-" + test.name + "-fail"
+			task := storedTask(t, manager, taskID, contextID, protocol.TaskStateWorking)
+			if err := manager.client.Set(context.Background(), streamKey(task.ID), "not-a-stream", 0).Err(); err != nil {
+				t.Fatalf("seed wrong-type stream key: %v", err)
+			}
+
+			params := sendParams("continue", task.ContextID)
+			params.Message.TaskID = &task.ID
+			if test.returnImmediately {
+				returnImmediately := true
+				params.Configuration = &protocol.SendMessageConfiguration{ReturnImmediately: &returnImmediately}
+			}
+			response, err := manager.OnSendMessage(context.Background(), params)
+			if err == nil {
+				t.Fatalf("failed %s commit was exposed as success: %+v", test.name, response)
+			}
+			if !strings.Contains(err.Error(), "task event stream has wrong type") {
+				t.Fatalf("failed %s commit returned the wrong error: %v", test.name, err)
+			}
+			stored, err := manager.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: task.ID})
+			if err != nil {
+				t.Fatalf("OnGetTask after failed %s commit: %v", test.name, err)
+			}
+			if stored.Status.State != protocol.TaskStateWorking || len(stored.Artifacts) != 0 {
+				t.Fatalf("failed %s commit changed stored Task: %+v", test.name, stored)
+			}
+		})
+	}
+}
+
+// A known persistence failure is a result immediately. The unary caller must
+// not wait for a long-running processor to close its channel while the engine
+// drains that channel in the background.
+func TestCrossNode_PersistenceFailureReturnsBeforeProcessorCloses(t *testing.T) {
+	release := make(chan struct{})
+	processorDone := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseProcessor := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseProcessor()
+	processor := executorFunc(func(context.Context, *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent)
+		go func() {
+			defer close(processorDone)
+			defer close(out)
+			out <- statusEvent(protocol.TaskStateCompleted, agentReply("uncommitted"))
+			<-release
+		}()
+		return out, nil
+	})
+	manager, _ := setupTest(t, processor, WithCrossNodeResubscribe(true))
+	task := storedTask(t, manager, "task-fast-failure", "ctx-fast-failure", protocol.TaskStateWorking)
+	if err := manager.client.Set(context.Background(), streamKey(task.ID), "not-a-stream", 0).Err(); err != nil {
+		t.Fatalf("seed wrong-type stream key: %v", err)
+	}
+
+	params := sendParams("continue", task.ContextID)
+	params.Message.TaskID = &task.ID
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.OnSendMessage(context.Background(), params)
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "task event stream has wrong type") {
+			t.Fatalf("unexpected persistence result: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("persistence failure waited for the processor channel to close")
+	}
+	select {
+	case <-processorDone:
+		t.Fatal("processor closed before the failure was returned")
+	default:
+	}
+	releaseProcessor()
+}
+
+// The streaming response has no asynchronous error return, so a persistence
+// failure must at least close it immediately while the processor is drained.
+func TestCrossNode_PersistenceFailureClosesStreamBeforeProcessorCloses(t *testing.T) {
+	release := make(chan struct{})
+	processorDone := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseProcessor := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseProcessor()
+	processor := executorFunc(func(context.Context, *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent)
+		go func() {
+			defer close(processorDone)
+			defer close(out)
+			out <- statusEvent(protocol.TaskStateCompleted, agentReply("uncommitted"))
+			<-release
+		}()
+		return out, nil
+	})
+	manager, _ := setupTest(t, processor, WithCrossNodeResubscribe(true))
+	task := storedTask(t, manager, "task-stream-failure", "ctx-stream-failure", protocol.TaskStateWorking)
+	if err := manager.client.Set(context.Background(), streamKey(task.ID), "not-a-stream", 0).Err(); err != nil {
+		t.Fatalf("seed wrong-type stream key: %v", err)
+	}
+
+	params := sendParams("continue", task.ContextID)
+	params.Message.TaskID = &task.ID
+	stream, err := manager.OnSendMessageStream(context.Background(), params)
+	if err != nil {
+		t.Fatalf("OnSendMessageStream: %v", err)
+	}
+	select {
+	case frame, ok := <-stream:
+		if ok {
+			t.Fatalf("uncommitted event reached stream: %+v", frame)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("persistence failure left the response stream open")
+	}
+	select {
+	case <-processorDone:
+		t.Fatal("processor closed before the response stream")
+	default:
+	}
+	releaseProcessor()
+}
+
+// A superseded status message moves to history only after the new status and
+// its event commit. If that commit fails, the message remains solely on the
+// stored Task rather than appearing in both Task.Status and history.
+func TestCrossNode_FailedStatusCommitDoesNotAdvanceHistory(t *testing.T) {
+	taskID := make(chan string, 1)
+	releaseSecond := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseProcessor := func() { releaseOnce.Do(func() { close(releaseSecond) }) }
+	defer releaseProcessor()
+	processor := executorFunc(func(_ context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
+		taskID <- ec.TaskID
+		out := make(chan protocol.StreamEvent)
+		go func() {
+			defer close(out)
+			out <- statusEvent(protocol.TaskStateWorking, agentReply("first"))
+			<-releaseSecond
+			out <- statusEvent(protocol.TaskStateCompleted, agentReply("second"))
+		}()
+		return out, nil
+	})
+	manager, _ := setupTest(t, processor, WithCrossNodeResubscribe(true))
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.OnSendMessage(context.Background(), sendParams("start", "ctx-history-failure"))
+		result <- err
+	}()
+	id := <-taskID
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		stored, err := manager.getTaskInternal(context.Background(), id)
+		if err == nil && stored.Status.Message != nil &&
+			stored.Status.Message.Parts[0].TextContent() == "first" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("first status was not persisted: task=%+v err=%v", stored, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := manager.client.Set(context.Background(), streamKey(id), "not-a-stream", 0).Err(); err != nil {
+		t.Fatalf("replace stream with wrong type: %v", err)
+	}
+	releaseProcessor()
+	if err := <-result; err == nil || !strings.Contains(err.Error(), "task event stream has wrong type") {
+		t.Fatalf("unexpected failed status result: %v", err)
+	}
+
+	stored, err := manager.getTaskInternal(context.Background(), id)
+	if err != nil {
+		t.Fatalf("get stored task: %v", err)
+	}
+	if stored.Status.State != protocol.TaskStateWorking || stored.Status.Message == nil ||
+		stored.Status.Message.Parts[0].TextContent() != "first" {
+		t.Fatalf("failed commit changed stored status: %+v", stored.Status)
+	}
+	history, err := manager.getConversationHistory(context.Background(), stored.ContextID, 100)
+	if err != nil {
+		t.Fatalf("get conversation history: %v", err)
+	}
+	for _, message := range history {
+		if message.Role == protocol.MessageRoleAgent {
+			t.Fatalf("failed commit advanced status history: %+v", message)
+		}
 	}
 }
 
@@ -499,6 +872,32 @@ func TestCrossNode_SubMillisecondExpirationIsClamped(t *testing.T) {
 	}
 	if got, err := manager.client.XLen(context.Background(), streamKey(task.ID)).Result(); err != nil || got != 1 {
 		t.Fatalf("stream event missing after clamped TTL: xlen=%d err=%v", got, err)
+	}
+}
+
+// The event-transport path preserves storeTask's push-registration TTL refresh
+// without pulling the cross-slot push key into the atomic Task/event script.
+func TestCrossNode_TaskCommitRefreshesPushConfigExpiration(t *testing.T) {
+	manager, _ := setupTest(t, scriptedExecutor(), WithCrossNodeResubscribe(true))
+	task := storedTask(t, manager, "task-push-expire", "ctx-push-expire", protocol.TaskStateWorking)
+	pushKey := pushNotificationPrefix + task.ID
+	if err := manager.client.HSet(context.Background(), pushKey, "config", "value").Err(); err != nil {
+		t.Fatalf("seed push config: %v", err)
+	}
+	if err := manager.client.Persist(context.Background(), pushKey).Err(); err != nil {
+		t.Fatalf("remove push config expiration: %v", err)
+	}
+	update := statusEvent(protocol.TaskStateWorking, nil)
+	update.TaskID = task.ID
+	update.ContextID = task.ContextID
+	task.Status = update.Status
+	if err := manager.commitTaskEvent(
+		context.Background(), task, protocol.NewStreamResponseStatusUpdate(update),
+	); err != nil {
+		t.Fatalf("commitTaskEvent: %v", err)
+	}
+	if ttl, err := manager.client.TTL(context.Background(), pushKey).Result(); err != nil || ttl <= 0 {
+		t.Fatalf("push config TTL was not refreshed: ttl=%s err=%v", ttl, err)
 	}
 }
 
