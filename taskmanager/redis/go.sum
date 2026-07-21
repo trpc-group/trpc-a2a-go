@@ -21,3 +21,5 @@ go.uber.org/multierr v1.10.0/go.mod h1:20+QtiLqy0Nd6FdQB9TLXag12DsQkrbs3htMFfDN8
 go.uber.org/zap v1.27.0 h1:aJMhYGrd5QSmlpLMr2MftRKl7t8J8PTZPA732ud/XR8=
 go.uber.org/zap v1.27.0/go.mod h1:GB2qFLM7cTU87MWRP2mPIjqfIDnGu+VIO4V/SdhGo2E=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+trpc.group/trpc-go/trpc-a2a-go/v2 v2.0.0-alpha.3 h1:Uoe+XqCCGiRZ6QVPyYqznNuFBnmsBZOBrQM+7g0TyxI=
+trpc.group/trpc-go/trpc-a2a-go/v2 v2.0.0-alpha.3/go.mod h1:99CiMuw358i5qqoQ5pRGe8JBRRsf45oUBfTRgHnWn2Q=
