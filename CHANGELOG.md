@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Task management
+
+- **A stateless TaskManager is available for applications that own conversation context outside A2A.** `taskmanager/stateless` runs Message-only processor rounds without retaining tasks or history; task lifecycle operations, continuations, push notifications, and background unary execution are explicitly unsupported. Memory and Redis remain available when clients need the A2A task model.
+
 ## 2.0.0-alpha.2 (2026-07-21)
 
 This prerelease hardens task lifecycle handling, adds automatic push delivery,

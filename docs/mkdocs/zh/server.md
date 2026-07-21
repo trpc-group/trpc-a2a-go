@@ -1,6 +1,6 @@
 # 构建 Agent（服务端）
 
-本页讲如何把一个 Go agent 暴露为 A2A server：启动 HTTP 服务、实现 `MessageProcessor`、选择存储后端，并按需打开鉴权、推送通知、多租户、子路径部署、legacy 兼容和遥测。调用 agent 见 [客户端](client.md)；协议对象与交互模型见 [协议](protocol.md)。
+本页讲如何把一个 Go agent 暴露为 A2A server：启动 HTTP 服务、实现 `MessageProcessor`、选择 TaskManager 模式，并按需打开鉴权、推送通知、多租户、子路径部署、legacy 兼容和遥测。调用 agent 见 [客户端](client.md)；协议对象与交互模型见 [协议](protocol.md)。
 
 ```bash
 go get trpc.group/trpc-go/trpc-a2a-go/v2
@@ -13,7 +13,7 @@ go get trpc.group/trpc-go/trpc-a2a-go/v2
 | 部分 | 你提供什么 | 框架做什么 |
 | --- | --- | --- |
 | agent card | agent 的身份、URL、能力、技能、鉴权声明 | 暴露 `/.well-known/agent-card.json`，并归一化 v1/v0 字段。 |
-| `TaskManager` | 选择 memory、Redis 或自定义实现 | 管理任务、事件、会话历史、取消、订阅和留存。 |
+| `TaskManager` | 选择 stateless、memory、Redis 或自定义实现 | 决定执行生命周期，以及是否管理任务、事件和会话历史。 |
 | `MessageProcessor` | 你的 agent 逻辑 | 接收 `ExecContext`，消费你返回的事件流，派生一元和流式响应。 |
 
 最小启动代码如下：
@@ -113,6 +113,9 @@ return out, nil
 ## 轮次生命周期
 
 一个**轮次**就是一次 `ProcessMessage` 调用，以及框架把它返回的 channel 读完的过程。可以把它理解为“agent 推进一次任务”的最小执行单位。
+下面的任务生命周期和持久化规则适用于 memory 与 Redis manager；
+[TaskManager 实现](#taskmanager)中的 stateless manager 只接受直接
+`Message` 事件，不保存 Task 或会话历史。
 
 轮次大致按这个顺序发生：
 
@@ -139,9 +142,11 @@ return out, nil
 
 ## 执行与取消
 
-client 断开连接不会自动取消 agent 的工作。框架会让轮次在一个与请求连接分离的 context 上继续跑，结果仍然可以通过 `GetTask` 或 `SubscribeToTask` 取回。
+memory 与 Redis manager 中，client 断开连接不会自动取消 agent 的工作。框架会让轮次在一个与请求连接分离的 context 上继续跑，结果仍然可以通过 `GetTask` 或 `SubscribeToTask` 取回。
 
-真正会取消 processor `ctx` 的只有两类动作：client 调 `CancelTask`，或者 manager / server 停机。收到取消后，推荐做法是停止继续发送普通进度，尽快关闭 channel；如果你需要收尾，也可以发出自己的终态事件，框架会尊重它。
+stateless manager 的轮次与请求绑定：client 断开后会取消 processor，因为此时没有可供后续查询的 Task，也没有可重新订阅的流。
+
+对于 memory 与 Redis，真正会取消 processor `ctx` 的只有两类动作：client 调 `CancelTask`，或者 manager / server 停机。收到取消后，推荐做法是停止继续发送普通进度，尽快关闭 channel；如果你需要收尾，也可以发出自己的终态事件，框架会尊重它。
 
 `CancelTask` 返回的是“发起取消那一刻”的任务快照，所以它可能仍然是 `working`。最终是否落成 `CANCELED`，要等 processor 停下并关闭 channel。已经终态的任务不能取消，会返回 `-32002`。
 
@@ -173,11 +178,25 @@ client 断开连接不会自动取消 agent 的工作。框架会让轮次在一
 
 `Task.history` 是响应时按 `historyLength` 从会话里临时组出来的；`ec.History` 是本轮开始前拍下的快照，并按 `MaxHistoryLength`（默认 100）截断。
 
-请求里的 `configuration` 也按职责分开：`returnImmediately` 和 `historyLength` 由框架消费；`acceptedOutputModes` 会进入 `ec.AcceptedOutputModes`，`taskPushNotificationConfig` 会进入 `ec.PushConfig`，交给你的 processor 自行决定怎么用。
+memory 与 Redis 会消费请求 `configuration` 里的 `returnImmediately` 和 `historyLength`；`acceptedOutputModes` 会进入 `ec.AcceptedOutputModes`，`taskPushNotificationConfig` 会进入 `ec.PushConfig`。stateless 仍会传递 `acceptedOutputModes`，但拒绝 push 配置和 `returnImmediately=true`。
 
-## 存储后端
+## TaskManager 实现
 
-`TaskManager` 拥有任务与会话状态。内置两个后端。
+`TaskManager` 同时决定执行生命周期和状态归属。项目内置三种实现。
+
+**Stateless**——请求绑定，只返回直接 Message，不保存 Task 或会话历史：
+
+```go
+import "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/stateless"
+
+tm, _ := stateless.NewTaskManager(proc)
+```
+
+适合应用已经自行管理会话上下文、且不希望启用 A2A 任务管理的场景。
+processor 只能发 `*protocol.Message`，status 与 artifact 事件会被拒绝；
+`GetTask`、`ListTasks`、`CancelTask`、`SubscribeToTask`、push notification、
+task continuation，以及一元请求的 `returnImmediately=true` 都不支持。
+客户端需要其中任一任务能力时，请使用 memory 或 Redis。
 
 **内存**——零依赖、单进程:
 
@@ -208,7 +227,7 @@ continuation、live cancel 或执行请求。每个 Task Stream 约保留最新 
 
 → [examples/redis](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis)。实现 `taskmanager.TaskManager` 接口即可自带后端。
 
-留存:
+有状态 manager 的留存策略:
 
 | | memory 后端 | redis 后端 |
 | --- | --- | --- |

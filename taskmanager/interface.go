@@ -17,10 +17,11 @@ import (
 // MessageProcessor to process. It is a struct (not an interface) on purpose:
 // adding fields later is a non-breaking change.
 type ExecContext struct {
-	// TaskID is pre-allocated by the framework. Whether a task actually comes
-	// into existence depends on the MessageProcessor: the framework creates (and
-	// persists) the task lazily when the first task event is emitted. On a
-	// continuation (see Task) it is the existing task's ID.
+	// TaskID is pre-allocated by the framework. In a task-capable manager, whether
+	// a task actually comes into existence depends on the MessageProcessor: the
+	// framework creates (and persists) the task lazily when the first task event
+	// is emitted. On a continuation (see Task) it is the existing task's ID. A
+	// Message-only manager may use the ID only to identify the execution round.
 	TaskID string
 
 	// Task is non-nil on a continuation: when a client follows up on a task in
@@ -42,9 +43,9 @@ type ExecContext struct {
 	Tenant string
 
 	// History is a snapshot of the conversation history for ContextID,
-	// truncated per the manager's configuration. (The client-requested
-	// historyLength applies to the task returned in responses, not to this
-	// snapshot.)
+	// truncated per the manager's configuration. It is nil for managers that do
+	// not retain conversation history. (The client-requested historyLength
+	// applies to the task returned in responses, not to this snapshot.)
 	History []protocol.Message
 
 	// AcceptedOutputModes is the client's declared list of accepted output
@@ -104,10 +105,13 @@ type ExecContext struct {
 // message/stream response stream ends at the terminal or suspend frame; the
 // channel itself is still drained until closed.
 //
-// ctx is canceled when the task is canceled via CancelTask. A client
-// disconnect does NOT cancel ctx: the work keeps running and its results
-// remain retrievable (GetTask / SubscribeToTask). The framework always drains
-// the channel until it is closed, so senders never leak.
+// For task-capable managers, ctx is canceled when the task is canceled via
+// CancelTask. A client disconnect does NOT cancel ctx: the work keeps running
+// and its results remain retrievable (GetTask / SubscribeToTask). A manager
+// that explicitly provides request-bound, Message-only execution may cancel
+// ctx on disconnect because it has no task to retrieve or resubscribe to. The
+// framework always drains the channel until it is closed, so senders never
+// leak.
 //
 // The framework starts consuming the channel only after ProcessMessage
 // returns: sends beyond the channel buffer from inside ProcessMessage itself
@@ -122,9 +126,12 @@ type MessageProcessor interface {
 	ProcessMessage(ctx context.Context, ec *ExecContext) (<-chan protocol.StreamEvent, error)
 }
 
-// TaskManager defines the interface for managing A2A task lifecycles based on the protocol.
-// Implementations handle task creation, updates, retrieval, cancellation, and events,
-// delegating the agent logic to an injected MessageProcessor.
+// TaskManager defines the interface for serving A2A message and task methods.
+// Task-capable implementations handle task creation, updates, retrieval,
+// cancellation, and events, delegating the agent logic to an injected
+// MessageProcessor. Message-only implementations may reject task methods with
+// ErrUnsupportedOperation.
+//
 // This interface corresponds to the Task Service defined in the A2A Specification.
 type TaskManager interface {
 	// SupportsPushNotifications reports whether push-config registration and
@@ -133,19 +140,21 @@ type TaskManager interface {
 	SupportsPushNotifications() bool
 
 	// OnSendMessage handles a request corresponding to the 'message/send' RPC method.
-	// It invokes the MessageProcessor and derives the result from the emitted events:
-	// the final task snapshot when task events were emitted, otherwise the last
-	// message. With returnImmediately=true it returns as soon as the first
-	// immediateResult event is persisted, while execution continues in the background.
+	// A task-capable manager derives the final task snapshot when task events were
+	// emitted, otherwise the last message. With returnImmediately=true it returns
+	// as soon as the first immediate result is persisted, while execution continues
+	// in the background. A Message-only manager returns its last message and may
+	// reject returnImmediately because no task remains for later retrieval.
 	OnSendMessage(
 		ctx context.Context,
 		request protocol.SendMessageParams,
 	) (*protocol.SendMessageResponse, error)
 
 	// OnSendMessageStream handles a request corresponding to the 'message/stream' RPC method.
-	// It invokes the MessageProcessor and returns a channel that carries every emitted
-	// event (persisted before delivery). The channel is closed when the round
-	// ends; setup errors are returned directly instead.
+	// It invokes the MessageProcessor and returns a channel that carries emitted
+	// events. Task-capable managers persist task events before delivery; a
+	// Message-only manager may forward direct replies without persistence. The
+	// channel is closed when the round ends; setup errors are returned directly.
 	OnSendMessageStream(
 		ctx context.Context,
 		request protocol.SendMessageParams,

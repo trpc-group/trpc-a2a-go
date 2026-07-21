@@ -1,7 +1,7 @@
 # Building an Agent (Server)
 
 The server side: how to stand up an A2A server, define your agent as a
-`MessageProcessor`, choose a storage backend, and turn on the framework's
+`MessageProcessor`, choose a TaskManager mode, and turn on the framework's
 server capabilities. For calling agents, see [Client](client.md); the runtime contract these APIs
 rely on is [The round contract](#the-round-contract) below.
 
@@ -12,7 +12,7 @@ go get trpc.group/trpc-go/trpc-a2a-go/v2
 ## The server in three parts
 
 A server binds an **agent card** (identity + capabilities), a **TaskManager**
-(state), and your **MessageProcessor** (logic):
+(execution and state policy), and your **MessageProcessor** (logic):
 
 ```go
 import (
@@ -141,6 +141,10 @@ is a processor written entirely on the raw channel.)
 
 The exact semantics your agent code lives under and clients observe. A
 **round** is one `ProcessMessage` invocation and the drain of its channel.
+The task lifecycle and persistence rules below describe the memory and Redis
+managers. The stateless manager described under
+[TaskManager implementations](#taskmanager-implementations) accepts only direct
+`Message` events and retains neither tasks nor conversation history.
 
 ### Round lifecycle
 
@@ -169,11 +173,15 @@ The exact semantics your agent code lives under and clients observe. A
 
 ### Execution and cancellation
 
-- Rounds run on a **detached context**: a client disconnect does **not** cancel
-  the work; results stay retrievable via `GetTask`/`SubscribeToTask`.
-- Only `CancelTask` (and manager shutdown) cancels the processor's `ctx`. The
-  polite reaction is to **stop emitting and close** — the framework persists
-  `CANCELED`. A terminal event emitted *after* the cancel still wins.
+- Memory and Redis rounds run on a **detached context**: a client disconnect
+  does **not** cancel the work; results stay retrievable via
+  `GetTask`/`SubscribeToTask`.
+- Stateless rounds are request-bound: a disconnect cancels the processor
+  because there is no task to retrieve or stream to resubscribe to.
+- In memory and Redis managers, only `CancelTask` (and manager shutdown)
+  cancels the processor's `ctx`. The polite reaction is to **stop emitting and
+  close** — the framework persists `CANCELED`. A terminal event emitted *after*
+  the cancel still wins.
 - `CancelTask` **returns the snapshot at the moment cancellation was requested**
   (possibly still `working`); the terminal `CANCELED` lands when the round winds
   down. Canceling an already-terminal task returns `-32002`.
@@ -209,14 +217,33 @@ continues the task).
 request's `historyLength`. `ec.History` is a snapshot taken before the round,
 truncated to `MaxHistoryLength` (default 100).
 
-Request `configuration` fields: `returnImmediately` and `historyLength` are
-consumed by the framework; `acceptedOutputModes` (`ec.AcceptedOutputModes`) and
+For memory and Redis, request `configuration` fields `returnImmediately` and
+`historyLength` are consumed by the framework;
+`acceptedOutputModes` (`ec.AcceptedOutputModes`) and
 `taskPushNotificationConfig` (`ec.PushConfig`) are passed through to your
-processor.
+processor. Stateless still passes `acceptedOutputModes`, but rejects push
+configuration and `returnImmediately=true`.
 
-## Storage backends
+## TaskManager implementations
 
-The `TaskManager` owns task and conversation state. Two backends ship in-tree.
+The `TaskManager` chooses both execution lifetime and state ownership. Three
+implementations ship in-tree.
+
+**Stateless** — request-bound, direct Messages with no retained task or
+conversation history:
+
+```go
+import "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/stateless"
+
+tm, _ := stateless.NewTaskManager(proc)
+```
+
+Use this when the application already owns conversation context and does not
+want A2A task management. The processor may emit only `*protocol.Message`;
+status and artifact events are rejected. `GetTask`, `ListTasks`, `CancelTask`,
+`SubscribeToTask`, push notifications, task continuations, and unary
+`returnImmediately=true` are unsupported. Use memory or Redis when clients
+need any of those task capabilities.
 
 **In-memory** — zero dependencies, single process:
 
@@ -249,7 +276,7 @@ that lag beyond that bound may miss intermediate events.
 → [examples/redis](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis).
 Implement the `taskmanager.TaskManager` interface for a custom backend.
 
-Retention:
+Retention for the stateful managers:
 
 | | memory backend | redis backend |
 | --- | --- | --- |
