@@ -241,6 +241,13 @@ func (m *TaskManager) prepareExecution(
 			message.ContextID = &contextID
 		}
 	}
+	acceptedOutputModes, inlinePushConfig := messageConfigurationValues(request.Configuration)
+	pushConfig, pending, err := m.prepareInlinePushConfig(taskID, task, inlinePushConfig)
+	if err != nil {
+		m.releaseExecution(taskID, ex.live)
+		cancel()
+		return nil, err
+	}
 
 	// Store the user message into the conversation, stamping ContextID when
 	// absent.
@@ -284,21 +291,15 @@ func (m *TaskManager) prepareExecution(
 		log.Warnf("RedisTaskManager: failed to load history for context %s: %v", contextID, err)
 	}
 	*ex.ec = taskmanager.ExecContext{
-		TaskID:    taskID,
-		Task:      task,
-		Message:   *message,
-		ContextID: contextID,
-		Tenant:    request.Tenant,
-		History:   history,
+		TaskID:              taskID,
+		Task:                task,
+		Message:             *message,
+		ContextID:           contextID,
+		Tenant:              request.Tenant,
+		History:             history,
+		AcceptedOutputModes: acceptedOutputModes,
+		PushConfig:          pushConfig,
 	}
-	ex.ec.AcceptedOutputModes, ex.ec.PushConfig = messageConfigurationValues(request.Configuration)
-	pushConfig, pending, err := m.prepareInlinePushConfig(taskID, task, ex.ec.PushConfig)
-	if err != nil {
-		m.releaseExecution(taskID, ex.live)
-		cancel()
-		return nil, err
-	}
-	ex.ec.PushConfig = pushConfig
 	ex.inlinePushPending = pending
 
 	events, err := m.processor.ProcessMessage(execCtx, ex.ec)

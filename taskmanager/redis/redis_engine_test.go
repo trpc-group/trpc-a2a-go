@@ -7,8 +7,10 @@
 package redis
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -317,6 +319,70 @@ func TestOnSendMessage_ContinuationContextMismatchRejected(t *testing.T) {
 	// The rejected continuation must not store the request message.
 	if mr.Exists(messagePrefix + "mismatch-msg") {
 		t.Fatal("rejected continuation must not store the request message")
+	}
+}
+
+// A continuation rejected during inline push-config validation must not clear
+// the current status message or append the rejected user turn to Redis.
+func TestOnSendMessage_RejectedContinuationLeavesPersistenceUntouched(t *testing.T) {
+	var invocations atomic.Int32
+	processor := executorFunc(func(
+		ctx context.Context, ec *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		invocations.Add(1)
+		out := make(chan protocol.StreamEvent, 1)
+		out <- statusEvent(protocol.TaskStateInputRequired, agentReply("need more"))
+		close(out)
+		return out, nil
+	})
+	m, _ := setupTest(t, processor)
+
+	first, err := m.OnSendMessage(context.Background(), sendParams("start", "ctx-rejected-continuation"))
+	if err != nil {
+		t.Fatalf("round 1 failed: %v", err)
+	}
+	taskID := first.GetTask().ID
+	taskKey := taskPrefix + taskID
+	conversationKey := conversationPrefix + "ctx-rejected-continuation"
+	beforeTask, err := m.client.Get(context.Background(), taskKey).Bytes()
+	if err != nil {
+		t.Fatalf("read task before continuation: %v", err)
+	}
+	beforeHistory, err := m.client.LRange(context.Background(), conversationKey, 0, -1).Result()
+	if err != nil {
+		t.Fatalf("read history before continuation: %v", err)
+	}
+
+	followUp := sendParams("rejected", "ctx-rejected-continuation")
+	followUp.Message.MessageID = "rejected-continuation-message"
+	followUp.Message.TaskID = &taskID
+	followUp.Configuration = &protocol.SendMessageConfiguration{
+		PushConfig: &protocol.TaskPushNotificationConfig{URL: "https://example.com/hook"},
+	}
+	_, err = m.OnSendMessage(context.Background(), followUp)
+	assertRPCCode(t, err, taskmanager.ErrPushNotificationNotSupported().Code)
+
+	afterTask, err := m.client.Get(context.Background(), taskKey).Bytes()
+	if err != nil {
+		t.Fatalf("read task after continuation: %v", err)
+	}
+	if !bytes.Equal(afterTask, beforeTask) {
+		t.Fatal("rejected continuation changed the stored task snapshot")
+	}
+	afterHistory, err := m.client.LRange(context.Background(), conversationKey, 0, -1).Result()
+	if err != nil {
+		t.Fatalf("read history after continuation: %v", err)
+	}
+	if !reflect.DeepEqual(afterHistory, beforeHistory) {
+		t.Fatalf("rejected continuation changed history: before=%v after=%v", beforeHistory, afterHistory)
+	}
+	if exists, err := m.client.Exists(
+		context.Background(), messagePrefix+followUp.Message.MessageID,
+	).Result(); err != nil || exists != 0 {
+		t.Fatalf("rejected continuation stored its message: exists=%d err=%v", exists, err)
+	}
+	if got := invocations.Load(); got != 1 {
+		t.Fatalf("processor must not run for the rejected round, invocations=%d", got)
 	}
 }
 

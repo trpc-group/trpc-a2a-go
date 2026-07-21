@@ -1,16 +1,32 @@
 # Changelog
 
-## Unreleased
+## 2.0.0-alpha.2 (2026-07-21)
+
+This prerelease hardens task lifecycle handling, adds automatic push delivery,
+and makes Redis-backed streaming subscriptions resumable across service nodes.
+
+### Push notifications
+
+- **Task events can be delivered automatically to registered webhooks.** The in-memory and Redis task managers now share bounded, ordered push-delivery workers, while manual delivery remains available for applications that own dispatch themselves.
+- **Push registration and authentication are hardened.** Registration updates are checked before delivery, superseded configurations no longer receive queued events, shutdown joins active workers, and the signing APIs consistently use `SignedSender` terminology.
+
+### Task lifecycle and A2A v1.0 conformance
+
+- **Streaming artifact chunks reassemble by `ArtifactID`.** Artifact events sharing an `ArtifactID` now merge into a single artifact — `TaskHandle.AddArtifact` creates or replaces it, while `TaskHandle.AppendArtifact` appends continuation parts — instead of accumulating as separate fragments. `GetTask` and the final task snapshot return one merged artifact per streamed deliverable; per-chunk SSE frames are unchanged.
+- **`TaskHandle.AppendArtifact(artifact, lastChunk)` adds an explicit artifact-append operation** for streaming continuation chunks without dropping to the raw channel. `TaskHandle.AddArtifact(artifact, lastChunk)` keeps its alpha.1 signature and wire shape.
+- **Superseded status messages move into conversation history.** The current `status.message` stays only on `Task.Status`; when a later status replaces it, or a follow-up message continues a suspended task, the previous status message moves into history before the next turn. A terminal status message remains on `Task.Status.Message`.
+- **Invalid sends are rejected before task execution.** `SendMessage` and `SendStreamingMessage` now apply the same user-role, non-empty-parts, non-null-part, and push-availability validation.
 
 ### Redis TaskManager
 
 - **Cross-node `SubscribeToTask` is available as an opt-in.** `redis.WithCrossNodeResubscribe(true)` stores Task updates and their Redis Stream events atomically, so a reconnect may land on any replica sharing Redis without a snapshot/event gap. Enable it on every producer and subscriber replica. Execution, continuation, and live-cancel routing remain node-local; this is not a distributed work queue.
+- **Rejected continuations leave no durable side effects.** Inline push configuration is validated before the Redis task snapshot, status history, or request message is changed.
+- **The Redis TaskManager is installable from the root `/v2` release.** It now ships in the root module instead of an unpublishable nested module, preserving the existing `trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/redis` import path and eliminating the need for a separate Redis tag. The root and main examples modules build with Go 1.20; `examples/multi` retains its declared Go 1.23 minimum.
 
-### A2A v1.0 conformance fixes
+### API, examples, and documentation
 
-- **Streaming artifact chunks reassemble by `ArtifactID`.** Artifact events sharing an `ArtifactID` now merge into a single artifact — `TaskHandle.AddArtifact` creates or replaces it, while `TaskHandle.AppendArtifact` appends continuation parts — instead of accumulating as separate fragments. `tasks/get` and the final task snapshot return one merged artifact per streamed deliverable, matching the spec and reference SDKs. Applies to the in-memory and Redis task managers; the per-chunk SSE frames are unchanged.
-- **`TaskHandle.AppendArtifact(artifact, lastChunk)` adds an explicit artifact-append operation** for streaming continuation chunks without dropping to the raw channel. `TaskHandle.AddArtifact(artifact, lastChunk)` keeps its alpha.1 signature and wire shape.
-- **Superseded status messages move into conversation history.** The current `status.message` stays only on `Task.Status`; when a later status replaces it, or a follow-up message continues a suspended task, the previous status message moves into history before the next turn. This preserves input-required questions without duplicating the current message across `status` and `history`, matching the reference SDKs. A terminal status message is never superseded and remains on `status.Message` only — emit an agent's final answer as a `Message` if it must survive into another conversation. Applies to both task managers; moved messages count toward the history-length window.
+- **`protocol.NewAgentText` replaces the removed `taskmanager.ReplyText` helper** and keeps agent-message construction next to the protocol types it creates.
+- **Examples are reorganized by responsibility.** `simple` demonstrates the raw channel contract, `basic` contains the interactive `TaskHandle` flow, and focused `inputrequired` and `middleware` examples make multi-turn handling and request-context propagation easier to discover.
 
 ## 2.0.0-alpha.1 (2026-07-07)
 
