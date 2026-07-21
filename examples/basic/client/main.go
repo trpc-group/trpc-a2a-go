@@ -237,15 +237,17 @@ func runInteractiveSession(a2aClient *client.A2AClient, config Config) {
 			log.Printf("Processing input %d/%d: %s", i+1, len(inputs), input)
 
 			// Process built-in commands
-			if cmdResult := processCommand(
+			if handled, resetContinuation := processCommand(
 				a2aClient,
 				input,
 				&config,
 				&contextID,
 				&useStreaming,
 				lastTaskID,
-			); cmdResult {
-				lastTaskState = ""
+			); handled {
+				if resetContinuation {
+					lastTaskState = ""
+				}
 				continue
 			}
 
@@ -282,16 +284,17 @@ func runInteractiveSession(a2aClient *client.A2AClient, config Config) {
 		}
 
 		// Process built-in commands
-		if cmdResult := processCommand(
+		if handled, resetContinuation := processCommand(
 			a2aClient,
 			input,
 			&config,
 			&contextID,
 			&useStreaming,
 			lastTaskID,
-		); cmdResult {
-			// Reset task state after command processing
-			lastTaskState = ""
+		); handled {
+			if resetContinuation {
+				lastTaskState = ""
+			}
 			continue
 		}
 
@@ -317,7 +320,8 @@ func continueTaskID(lastTaskID string, lastTaskState protocol.TaskState) string 
 	return ""
 }
 
-// processCommand handles built-in client commands and returns true if a command was processed.
+// processCommand handles built-in client commands. resetContinuation reports
+// whether the command intentionally leaves the current input-required task.
 func processCommand(
 	a2aClient *client.A2AClient,
 	input string,
@@ -325,7 +329,7 @@ func processCommand(
 	contextID *string,
 	useStreaming *bool,
 	lastTaskID string,
-) bool {
+) (handled, resetContinuation bool) {
 	parts := strings.Fields(input)
 	cmd := strings.ToLower(parts[0])
 
@@ -333,11 +337,11 @@ func processCommand(
 	case cmdExit:
 		fmt.Println("Exiting.")
 		os.Exit(0)
-		return true
+		return true, true
 
 	case cmdHelp:
 		displayHelpMessage()
-		return true
+		return true, false
 
 	case cmdContext:
 		if len(parts) > 1 {
@@ -347,7 +351,7 @@ func processCommand(
 			*contextID = protocol.GenerateContextID()
 			fmt.Printf("Generated new context ID: %s\n", *contextID)
 		}
-		return true
+		return true, true
 
 	case cmdMode:
 		if len(parts) > 1 {
@@ -365,7 +369,7 @@ func processCommand(
 			fmt.Printf("Current mode: %s\n", getModeName(*useStreaming))
 			fmt.Println("Usage: mode [stream|sync]")
 		}
-		return true
+		return true, false
 
 	case cmdCancel:
 		taskID := lastTaskID
@@ -374,10 +378,10 @@ func processCommand(
 		}
 		if taskID == "" {
 			fmt.Println("No task ID provided or available from last request.")
-			return true
+			return true, false
 		}
-		cancelTask(a2aClient, taskID, config.Timeout)
-		return true
+		canceled := cancelTask(a2aClient, taskID, config.Timeout)
+		return true, canceled && taskID == lastTaskID
 
 	case cmdGet:
 		taskID := lastTaskID
@@ -386,7 +390,7 @@ func processCommand(
 		}
 		if taskID == "" {
 			fmt.Println("No task ID provided or available from last request.")
-			return true
+			return true, false
 		}
 		historyLength := config.HistoryLength
 		if len(parts) > 2 {
@@ -396,24 +400,24 @@ func processCommand(
 			}
 		}
 		getTask(a2aClient, taskID, historyLength, config.Timeout)
-		return true
+		return true, false
 
 	case cmdCard:
 		agentCard, err := fetchAgentCard(config.AgentURL)
 		if err != nil {
 			fmt.Printf("Failed to fetch agent card: %v\n", err)
-			return true
+			return true, false
 		}
 		displayAgentCapabilities(agentCard)
-		return true
+		return true, false
 
 	case cmdNew:
 		*contextID = protocol.GenerateContextID()
 		fmt.Printf("Starting a new context: %s\n", *contextID)
-		return true
+		return true, true
 	}
 
-	return false
+	return false, false
 }
 
 // getModeName returns a user-friendly name for the current mode.
@@ -655,8 +659,8 @@ func getArtifactName(artifact protocol.Artifact) string {
 	return fmt.Sprintf("Artifact %s", artifact.ArtifactID)
 }
 
-// cancelTask attempts to cancel a running task.
-func cancelTask(a2aClient *client.A2AClient, taskID string, timeout time.Duration) {
+// cancelTask attempts to cancel a running task and reports whether the request succeeded.
+func cancelTask(a2aClient *client.A2AClient, taskID string, timeout time.Duration) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -667,7 +671,7 @@ func cancelTask(a2aClient *client.A2AClient, taskID string, timeout time.Duratio
 	if err != nil {
 		log.Printf("ERROR: Failed to cancel task %s: %v", taskID, err)
 		fmt.Printf("Failed to cancel task: %v\n", err)
-		return
+		return false
 	}
 
 	fmt.Println("Task cancellation result:")
@@ -677,6 +681,7 @@ func cancelTask(a2aClient *client.A2AClient, taskID string, timeout time.Duratio
 		fmt.Println("  Message:")
 		printMessage(*task.Status.Message)
 	}
+	return true
 }
 
 // getTask fetches and displays a task's current state.

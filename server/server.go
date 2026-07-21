@@ -603,11 +603,16 @@ func (s *A2AServer) unmarshalParams(params json.RawMessage, v interface{}) *json
 func (s *A2AServer) validateSendMessageParams(
 	ctx context.Context, params *protocol.SendMessageParams,
 ) *jsonrpc.Error {
-	if params.Message.Role == "" {
-		return jsonrpc.ErrInvalidParams("message role is required")
+	if params.Message.Role != protocol.MessageRoleUser {
+		return jsonrpc.ErrInvalidParams("message role must be ROLE_USER")
 	}
 	if len(params.Message.Parts) == 0 {
 		return jsonrpc.ErrInvalidParams("message with at least one part is required")
+	}
+	for _, part := range params.Message.Parts {
+		if part == nil {
+			return jsonrpc.ErrInvalidParams("message parts must not contain null")
+		}
 	}
 	if params.Configuration != nil && params.Configuration.PushConfig != nil &&
 		!s.pushAvailableForTenant(ctx, params.Tenant) {

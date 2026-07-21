@@ -28,8 +28,8 @@ differently:
 | long-running | `/long-task` or `/async-long-task` | `returnImmediately` kickoff; subscribe for live chunks, or poll with `/gettask` / cancel with `/cancel`. |
 | pure-message | send a message with no text part | Processor replies with a plain `Message` and **no task is created**. |
 
-The default path uses `taskmanager.TaskHandle` synchronously (buffers, then
-`Events()`). The long-task path emits from a goroutine so
+The default path fills and closes a buffered raw event channel synchronously.
+The long-task path sends on a raw channel from a goroutine so
 `returnImmediately` / `SubscribeToTask` / `CancelTasks` can observe progress.
 
 ## Run it
