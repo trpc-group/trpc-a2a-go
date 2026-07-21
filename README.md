@@ -94,12 +94,16 @@ contract). The server reverses text, while the client automatically exercises
 blocking send, `returnImmediately` plus polling, streaming, and a pure-message
 reply without creating a task.
 
+Terminal 1 — start the server from the repository root:
+
 ```bash
-# Start the simple server
 cd examples/simple/server
 go run main.go
+```
 
-# Run all four client demos
+Terminal 2 — run all four client demos from the repository root:
+
+```bash
 cd examples/simple/client
 go run main.go
 ```

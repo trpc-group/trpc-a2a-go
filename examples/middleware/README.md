@@ -10,7 +10,7 @@ is safe.
 
 ## Flow
 
-```
+```text
 client  --X-Request-ID / X-User-ID-->  headerMiddleware
                                           |
                                           v  context.WithValue
@@ -32,7 +32,7 @@ go run ./client -request-id req-42 -user-id bob -text "hi"
 
 Expected client output:
 
-```
+```text
 reply: echo="hi" requestID="req-42" userID="bob"
 ```
 

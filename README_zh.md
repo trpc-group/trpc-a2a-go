@@ -80,12 +80,16 @@ go run main.go -stream
 负责反转文本，Client 会依次演示阻塞 send、`returnImmediately` 加轮询、
 流式消费，以及不创建 task 的纯 Message 回复。
 
+终端 1——从仓库根目录启动 Server：
+
 ```bash
-# Start the simple server
 cd examples/simple/server
 go run main.go
+```
 
-# 运行四种 client demo
+终端 2——从仓库根目录运行四种 Client demo：
+
+```bash
 cd examples/simple/client
 go run main.go
 ```
