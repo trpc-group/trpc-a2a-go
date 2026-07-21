@@ -32,13 +32,16 @@ type Middleware interface {
 }
 
 // MiddlewareChain represents HTTP request middleware that can be composed.
-// Each middleware in the chain must be non-nil.
 type MiddlewareChain []Middleware
 
 // Wrap applies the chain to handler. Middleware is applied in reverse order,
-// so the first middleware in the chain becomes the outermost wrapper.
+// so the first middleware in the chain becomes the outermost wrapper. Nil
+// middleware is ignored.
 func (chain MiddlewareChain) Wrap(handler HTTPReqHandler) HTTPReqHandler {
 	for i := len(chain) - 1; i >= 0; i-- {
+		if chain[i] == nil {
+			continue
+		}
 		handler = chain[i].Wrap(handler)
 	}
 	return handler
@@ -151,7 +154,7 @@ func WithHTTPReqHandler(handler HTTPReqHandler) Option {
 
 // WithMiddleware adds HTTP request middleware to the A2AClient.
 // Multiple middleware are applied in registration order, with the first
-// middleware becoming the outermost wrapper. Each middleware must be non-nil.
+// middleware becoming the outermost wrapper. Nil middleware is ignored.
 func WithMiddleware(middlewares ...Middleware) Option {
 	return func(c *A2AClient) {
 		c.middlewares = append(c.middlewares, middlewares...)

@@ -169,6 +169,8 @@ func TestWithAuthProvider(t *testing.T) {
 	assert.Equal(t, mockProvider, client.authProvider)
 }
 
+// TestWithMiddleware verifies middleware ordering, terminal handler wrapping,
+// and nil middleware handling.
 func TestWithMiddleware(t *testing.T) {
 	var events []string
 	var wrapCalls int
@@ -200,11 +202,11 @@ func TestWithMiddleware(t *testing.T) {
 		"http://localhost:8080",
 		WithMiddleware(middleware("first")),
 		WithHTTPReqHandler(terminal),
-		WithMiddleware(middleware("second")),
+		WithMiddleware(nil, middleware("second")),
 	)
 	require.NoError(t, err)
 	assert.Equal(t, 2, wrapCalls)
-	assert.Len(t, client.middlewares, 2)
+	assert.Len(t, client.middlewares, 3)
 
 	req := httptest.NewRequest(http.MethodGet, "http://localhost:8080", nil)
 	resp, err := client.httpReqHandler.Handle(
