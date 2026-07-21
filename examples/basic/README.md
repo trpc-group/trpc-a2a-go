@@ -57,7 +57,6 @@ Client options:
 - `--timeout`: Request timeout (default: 60s)
 - `--no-stream`: Disable streaming mode
 - `--context`: Use specific context ID (generate new if empty)
-- `--use-tasks-get`: Use tasks/get to fetch final state (default: true)
 - `--history`: Number of history messages to request (default: 0)
 
 ### Client Commands
@@ -66,13 +65,14 @@ Once the client is running, you can use the following commands:
 
 - `help`: Show help message
 - `exit`: Exit the program
-- `context [id]`: Set or generate a new context ID
+- `context [id]` / `new`: Set or generate a new context ID
 - `mode [stream|sync]`: Set interaction mode (streaming or standard)
 - `cancel [task-id]`: Cancel a task
 - `get [task-id] [history]`: Get task details
 - `card`: Fetch and display the agent's capabilities card
 
-For normal interaction, simply type your message and press Enter.
+For normal interaction, type your message and press Enter. After the agent
+suspends in `input-required`, the next message continues the same `taskId`.
 
 ### Text Processing Commands
 
@@ -82,7 +82,7 @@ The server understands the following text processing commands:
 - `uppercase <text>`: Converts text to uppercase
 - `lowercase <text>`: Converts text to lowercase
 - `count <text>`: Counts words and characters in text
-- `multi`: Start a multi-step interaction
+- `multi`: Start a multi-step interaction (client continues with the same `taskId`)
 - `example`: Demonstrates input-required state
 - `help`: Shows the help message
 
@@ -120,7 +120,13 @@ This example demonstrates the following A2A protocol features:
 - Task state retrieval using tasks/get
 - Task cancellation using tasks/cancel
 - Streaming updates for long-running tasks
-- Multi-turn conversations using the input-required state
+- Multi-turn conversations using the `input-required` state
 - Artifact generation and streaming
 
-The implementation follows the A2A specification and provides a practical example of building interoperable AI agents using the protocol. 
+Multi-turn progress is stored on the suspended status message's `Metadata`
+(`step` / `mode`). On continuation the framework rolls that message into
+`ExecContext.History`, so the processor needs no process-local session map.
+
+For push notifications, see [`examples/notify`](../notify) or [`examples/jwks`](../jwks)
+(`memory.WithPushNotifications` + `push.Sender`). This basic example keeps push off
+so it stays focused on the TaskHandle processor style.

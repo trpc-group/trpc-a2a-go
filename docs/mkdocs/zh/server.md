@@ -98,7 +98,7 @@ return out, nil
 ### 常见形态
 
 - **纯回复**(不产生任务):`h.Reply(taskmanager.ReplyText("..."))`。
-- **实时流式**——把函数体放进 goroutine,事件就会实时到达 `SendStreamingMessage` 的消费者;长循环里检查 `ctx.Err()`,被取消时直接关闭(框架落 `CANCELED`)。→ [examples/streaming](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/streaming)
+- **实时流式**——把函数体放进 goroutine,事件就会实时到达 `SendStreamingMessage` 的消费者;长循环里检查 `ctx.Err()`,被取消时直接关闭(框架落 `CANCELED`)。→ [examples/simple](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple)（`/long-task` 与 client `-stream`）
 - **多轮**——用 `h.UpdateTaskState(protocol.TaskStateInputRequired, taskmanager.ReplyText("need more"))` 挂起并关闭;后续消息(回传 `taskId`)作为新一轮到来,此时 `ec.Task` 已就位。
 
 ### 写 Processor 时记住这几条

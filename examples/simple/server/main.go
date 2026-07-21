@@ -15,7 +15,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
@@ -24,86 +26,14 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
 
-// simpleMessageProcessor implements the taskmanager.MessageProcessor interface.
-type simpleMessageProcessor struct{}
+// longTaskMarker is the well-known text that triggers processLongTask.
+// Keep in sync with examples/simple/client.
+// Used only to simulate a long-running task for async / subscribe / cancel demos.
+const longTaskMarker = "__long_task__"
 
-// ProcessMessage processes one message and reports progress as events. There is no
-// streaming/non-streaming branch: for message/send the framework drains the
-// events and answers with the final task snapshot (or the reply message); for
-// message/stream it forwards them as they happen.
-func (e *simpleMessageProcessor) ProcessMessage(
-	ctx context.Context,
-	ec *taskmanager.ExecContext,
-) (<-chan protocol.StreamEvent, error) {
-	out := make(chan protocol.StreamEvent, 4)
-	go func() {
-		defer close(out)
-
-		text := extractText(ec.Message)
-		if text == "" {
-			// A pure-message reply: no task comes into existence for this round.
-			out <- protocol.NewAgentText("input message must contain text.")
-			return
-		}
-
-		log.Infof("Processing message with input: %s", text)
-
-		// TaskID/ContextID on events may be left empty: the framework stamps
-		// them from the ExecContext and creates the task on this first event.
-		out <- &protocol.TaskStatusUpdateEvent{
-			Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
-		}
-
-		result := reverseString(text)
-		lastChunk := true
-		out <- &protocol.TaskArtifactUpdateEvent{
-			Artifact: *protocol.NewArtifactWithID(
-				stringPtr("Reversed Text"),
-				stringPtr("The input text reversed"),
-				[]*protocol.Part{protocol.NewTextPart(result)},
-			),
-			LastChunk: &lastChunk,
-		}
-
-		// A terminal status ends the round.
-		out <- &protocol.TaskStatusUpdateEvent{
-			Status: protocol.TaskStatus{
-				State:   protocol.TaskStateCompleted,
-				Message: protocol.NewAgentText(fmt.Sprintf("Processed result: %s", result)),
-			},
-		}
-	}()
-	return out, nil
-}
-
-// extractText extracts the text content from a message.
-func extractText(message protocol.Message) string {
-	for _, part := range message.Parts {
-		if t := part.TextContent(); t != "" {
-			return t
-		}
-	}
-	return ""
-}
-
-// reverseString reverses a string.
-func reverseString(s string) string {
-	runes := []rune(s)
-	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
-		runes[i], runes[j] = runes[j], runes[i]
-	}
-	return string(runes)
-}
-
-// Helper function to create string pointers.
-func stringPtr(s string) *string {
-	return &s
-}
-
-// Helper function to create bool pointers.
-func boolPtr(b bool) *bool {
-	return &b
-}
+// longTaskSentence is streamed one word per second; GetTask / subscribe snapshots
+// show the words aggregated into this full sentence.
+const longTaskSentence = "Hello from the long task demo: we stream one word per second so SubscribeToTask can show live updates and GetTask can return the aggregated sentence until CancelTasks stops us early."
 
 func main() {
 	// Parse command-line flags.
@@ -170,4 +100,200 @@ func main() {
 	// Wait for termination signal.
 	sig := <-sigChan
 	log.Infof("Received signal %v, shutting down...", sig)
+}
+
+// simpleMessageProcessor contains ordinary synchronous business logic.
+type simpleMessageProcessor struct{}
+
+// ProcessMessage processes one message. The default path is synchronous
+// (TaskHandle buffers, then Events()). The long-task path emits live from a
+// goroutine so returnImmediately / SubscribeToTask can observe progress.
+func (e *simpleMessageProcessor) ProcessMessage(
+	ctx context.Context,
+	ec *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+	handle := taskmanager.NewTaskHandle(ctx, ec)
+
+	history := handle.GetMessageHistory()
+	log.Infof(
+		"Task context: taskID=%s contextID=%s historyCount=%d",
+		handle.TaskID(),
+		handle.GetContextID(),
+		len(history),
+	)
+	if task := handle.GetTask(); task != nil {
+		log.Infof("Continuing task: taskID=%s state=%s", task.ID, task.Status.State)
+	}
+	for i, message := range history {
+		log.Infof(
+			"History[%d]: messageID=%s role=%s text=%q",
+			i,
+			message.MessageID,
+			message.Role,
+			extractText(message),
+		)
+	}
+
+	text := extractText(ec.Message)
+	if text == longTaskMarker {
+		return e.processLongTask(ctx, handle)
+	}
+
+	defer handle.Close()
+
+	if text == "" {
+		// A pure-message reply: no task comes into existence for this round.
+		if err := handle.Reply(protocol.NewAgentText("input message must contain text.")); err != nil {
+			return nil, err
+		}
+		return handle.Events(), nil
+	}
+
+	log.Infof("Processing message with input: %s", text)
+
+	if err := handle.UpdateTaskState(protocol.TaskStateSubmitted, nil); err != nil {
+		return nil, err
+	}
+	if err := handle.UpdateTaskState(protocol.TaskStateWorking, nil); err != nil {
+		return nil, err
+	}
+
+	// Stream a full sentence as word chunks (no delay) so message/stream and
+	// GetTask both show the same aggregated reply.
+	result := reverseString(text)
+	sentence := fmt.Sprintf("You said %q; reversed it is %q.", text, result)
+	if err := emitSentenceChunks(handle, "Reversed Text", "Input text reversed as a sentence", sentence); err != nil {
+		return nil, err
+	}
+
+	// A second artifact in the same turn (also no delay).
+	externalSentence := "You can return another artifact if you want to."
+	if err := emitSentenceChunks(handle, "External Artifact", "A second artifact in the same turn", externalSentence); err != nil {
+		return nil, err
+	}
+
+	// Keep status.message short; the full reply is in the artifact.
+	if err := handle.UpdateTaskState(
+		protocol.TaskStateCompleted,
+		protocol.NewAgentText("done"),
+	); err != nil {
+		return nil, err
+	}
+	return handle.Events(), nil
+}
+
+// emitSentenceChunks writes a sentence as one artifact, one word per chunk,
+// with no sleep — useful for demos of streaming vs aggregated GetTask.
+func emitSentenceChunks(handle *taskmanager.TaskHandle, name, description, sentence string) error {
+	words := strings.Fields(sentence)
+	if len(words) == 0 {
+		return nil
+	}
+	artifact := protocol.NewArtifactWithID(
+		stringPtr(name),
+		stringPtr(description),
+		[]*protocol.Part{protocol.NewTextPart(words[0])},
+	)
+	if err := handle.AddArtifact(*artifact, len(words) == 1); err != nil {
+		return err
+	}
+	for i := 1; i < len(words); i++ {
+		lastChunk := i == len(words)-1
+		if err := handle.AppendArtifact(protocol.Artifact{
+			ArtifactID: artifact.ArtifactID,
+			Parts:      []*protocol.Part{protocol.NewTextPart(" " + words[i])},
+		}, lastChunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// processLongTask simulates a long-running agent turn: one word of
+// longTaskSentence per second. Events are produced from a goroutine after
+// Events() is returned, so clients can exercise returnImmediately,
+// SubscribeToTask, and CancelTasks while the round is still in WORKING.
+func (e *simpleMessageProcessor) processLongTask(
+	ctx context.Context,
+	handle *taskmanager.TaskHandle,
+) (<-chan protocol.StreamEvent, error) {
+	words := strings.Fields(longTaskSentence)
+	go func() {
+		defer handle.Close()
+
+		log.Infof("Starting long task: %d words, 1s interval", len(words))
+		if err := handle.UpdateTaskState(protocol.TaskStateSubmitted, nil); err != nil {
+			return
+		}
+		if err := handle.UpdateTaskState(protocol.TaskStateWorking, nil); err != nil {
+			return
+		}
+
+		artifact := protocol.NewArtifactWithID(
+			stringPtr("Long Task Progress"),
+			stringPtr("One word per second of a full sentence"),
+			[]*protocol.Part{protocol.NewTextPart(words[0])},
+		)
+		if err := handle.AddArtifact(*artifact, len(words) == 1); err != nil {
+			return
+		}
+
+		for i := 1; i < len(words); i++ {
+			select {
+			case <-ctx.Done():
+				log.Infof("Long task canceled after %d/%d words", i, len(words))
+				_ = handle.UpdateTaskState(
+					protocol.TaskStateCanceled,
+					protocol.NewAgentText(fmt.Sprintf("canceled after %d/%d words", i, len(words))),
+				)
+				return
+			case <-time.After(time.Second):
+			}
+
+			lastChunk := i == len(words)-1
+			if err := handle.AppendArtifact(protocol.Artifact{
+				ArtifactID: artifact.ArtifactID,
+				Parts:      []*protocol.Part{protocol.NewTextPart(" " + words[i])},
+			}, lastChunk); err != nil {
+				return
+			}
+		}
+
+		// Status message is a short completion note; the full sentence lives in
+		// the artifact (GetTask already aggregates chunks there).
+		_ = handle.UpdateTaskState(
+			protocol.TaskStateCompleted,
+			protocol.NewAgentText(fmt.Sprintf("long task finished (%d words)", len(words))),
+		)
+	}()
+	return handle.Events(), nil
+}
+
+// extractText extracts the text content from a message.
+func extractText(message protocol.Message) string {
+	for _, part := range message.Parts {
+		if t := part.TextContent(); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// reverseString reverses a string.
+func reverseString(s string) string {
+	runes := []rune(s)
+	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
+		runes[i], runes[j] = runes[j], runes[i]
+	}
+	return string(runes)
+}
+
+// Helper function to create string pointers.
+func stringPtr(s string) *string {
+	return &s
+}
+
+// Helper function to create bool pointers.
+func boolPtr(b bool) *bool {
+	return &b
 }

@@ -34,9 +34,8 @@ go run main.go
 
 | 示例 | 重点能力 |
 | --- | --- |
-| [`examples/simple`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple) | 最小 server/client、阻塞 send、`returnImmediately`、SSE 流式、裸 channel。 |
+| [`examples/simple`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple) | 交互式最小示例：阻塞 send、`-stream`、长任务 `/long-task`、GetTask/Subscribe/Cancel、裸 channel。 |
 | [`examples/basic`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic) | `TaskHandle` 风格、多轮、任务管理、agent card 发现、CLI。 |
-| [`examples/streaming`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/streaming) | 长任务实时进度和流式消费。 |
 | [`examples/auth`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth) | JWT、API key、OAuth2、鉴权后的 extended agent card。 |
 | [`examples/jwks`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks) | push notification、JWT 签名、JWKS 校验。 |
 | [`examples/redis`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis) | Redis TaskManager、任务/会话持久化。 |

@@ -117,7 +117,8 @@ is a processor written entirely on the raw channel.)
 - **Live streaming** — run the body in a goroutine so each event reaches
   `SendStreamingMessage` consumers as it happens; check `ctx.Err()` in long
   loops and just close on cancellation (the framework persists `CANCELED`).
-  → [examples/streaming](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/streaming)
+  → [examples/simple](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple)
+  (`/long-task` and client `-stream`)
 - **Multi-turn** — suspend with
   `h.UpdateTaskState(protocol.TaskStateInputRequired, taskmanager.ReplyText("need more"))`,
   close, and handle the follow-up (which echoes the `taskId`) as a new round

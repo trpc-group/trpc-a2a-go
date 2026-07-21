@@ -25,10 +25,9 @@ tRPC AI ecosystem
 - [Documentation](#documentation)
 - [Examples](#examples)
   - [Simple Example](#1-simple-example-examplessimple)
-  - [Streaming Examples](#2-streaming-examples-examplesstreaming)
-  - [Basic Example](#3-basic-example-examplesbasic)
-  - [Authentication Examples](#4-authentication-examples-examplesauth)
-  - [v0 Compatibility Example](#5-v0-compatibility-example-examplescompat)
+  - [Basic Example](#2-basic-example-examplesbasic)
+  - [Authentication Examples](#3-authentication-examples-examplesauth)
+  - [v0 Compatibility Example](#4-v0-compatibility-example-examplescompat)
 - [Creating Your Own Agent](#creating-your-own-agent)
 - [Migrating from v0.x](#migrating-from-v0x)
 - [Authentication](#authentication)
@@ -102,43 +101,31 @@ The repository includes several examples demonstrating different aspects of the 
 
 ### 1. Simple Example ([examples/simple](examples/simple))
 
-A minimal example demonstrating the core A2A functionality in the native
-channel style (the raw `MessageProcessor` contract):
-- Simple server that reverses text input, emitting events on the raw channel
-- Client demonstrating the three consumption modes: blocking send,
-  `returnImmediately`, and streaming — all served by one processor
-- Basic task lifecycle (lazy creation, processing, completion) and artifacts
+A minimal interactive example on the native channel style (the raw
+`MessageProcessor` contract):
+- Server that reverses text (chunked sentence + external artifact) and a
+  long-running demo task (`/long-task`) for live subscribe/cancel
+- Interactive client covering blocking send, `-stream`,
+  `returnImmediately` long tasks, GetTask, SubscribeToTask, and CancelTask
+  — all served by one processor
 
 ```bash
 # Start the simple server
 cd examples/simple/server
 go run main.go
 
-# Run the simple client (runs the blocking / returnImmediately / streaming demos)
+# Interactive client (blocking send by default)
 cd examples/simple/client
 go run main.go
+
+# Streaming consumption mode
+go run main.go -stream
 
 # Point the client at a different server
 go run main.go -host localhost:8080
 ```
 
-### 2. Streaming Examples ([examples/streaming](examples/streaming))
-
-Examples focused on streaming capabilities:
-- Server implementation with streaming response support
-- Client implementation for handling streaming data
-
-```bash
-# Start the streaming server
-cd examples/streaming/server
-go run main.go
-
-# Run the streaming client
-cd examples/streaming/client
-go run main.go
-```
-
-### 3. Basic Example ([examples/basic](examples/basic))
+### 2. Basic Example ([examples/basic](examples/basic))
 
 A comprehensive example showcasing:
 - A versatile text processing server with multiple operations
@@ -148,7 +135,7 @@ A comprehensive example showcasing:
 - Task management (create, cancel, get)
 - Agent capability discovery
 
-### 4. Authentication Examples ([examples/auth](examples/auth))
+### 3. Authentication Examples ([examples/auth](examples/auth))
 
 Complete examples demonstrating authentication:
 - Server implementation with various authentication methods
@@ -180,7 +167,7 @@ go run main.go --auth jwt --jwt-secret-file "path/to/jwt-secret.key"
 go run main.go --auth jwt --message "Custom message" --session-id "session123"
 ```
 
-### 5. v0 Compatibility Example ([examples/compat](examples/compat))
+### 4. v0 Compatibility Example ([examples/compat](examples/compat))
 
 One server, both protocol generations: v1.0 clients on the standard wire and
 unmodified v0.2.x clients through [compat/v0](compat/v0) — same endpoint,
