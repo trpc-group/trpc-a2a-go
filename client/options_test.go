@@ -169,6 +169,84 @@ func TestWithAuthProvider(t *testing.T) {
 	assert.Equal(t, mockProvider, client.authProvider)
 }
 
+// TestWithMiddleware verifies middleware ordering, terminal handler wrapping,
+// and nil middleware handling.
+func TestWithMiddleware(t *testing.T) {
+	var events []string
+	var wrapCalls int
+	terminal := httpReqHandlerFunc(func(
+		context.Context,
+		*http.Client,
+		*http.Request,
+	) (*http.Response, error) {
+		events = append(events, "handler")
+		return httptest.NewRecorder().Result(), nil
+	})
+	middleware := func(name string) Middleware {
+		return middlewareFunc(func(next HTTPReqHandler) HTTPReqHandler {
+			wrapCalls++
+			return httpReqHandlerFunc(func(
+				ctx context.Context,
+				httpClient *http.Client,
+				req *http.Request,
+			) (*http.Response, error) {
+				events = append(events, name+" before")
+				resp, err := next.Handle(ctx, httpClient, req)
+				events = append(events, name+" after")
+				return resp, err
+			})
+		})
+	}
+
+	client, err := NewA2AClient(
+		"http://localhost:8080",
+		WithMiddleware(middleware("first")),
+		WithHTTPReqHandler(terminal),
+		WithMiddleware(nil, middleware("second")),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 2, wrapCalls)
+	assert.Len(t, client.middlewares, 3)
+
+	req := httptest.NewRequest(http.MethodGet, "http://localhost:8080", nil)
+	resp, err := client.httpReqHandler.Handle(
+		context.Background(),
+		client.httpClient,
+		req,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.NoError(t, resp.Body.Close())
+	assert.Equal(t, 2, wrapCalls)
+	assert.Equal(t, []string{
+		"first before",
+		"second before",
+		"handler",
+		"second after",
+		"first after",
+	}, events)
+}
+
+type httpReqHandlerFunc func(
+	ctx context.Context,
+	client *http.Client,
+	req *http.Request,
+) (*http.Response, error)
+
+func (f httpReqHandlerFunc) Handle(
+	ctx context.Context,
+	client *http.Client,
+	req *http.Request,
+) (*http.Response, error) {
+	return f(ctx, client, req)
+}
+
+type middlewareFunc func(next HTTPReqHandler) HTTPReqHandler
+
+func (f middlewareFunc) Wrap(next HTTPReqHandler) HTTPReqHandler {
+	return f(next)
+}
+
 // mockClientProvider implements auth.ClientProvider for testing
 type mockClientProvider struct{}
 

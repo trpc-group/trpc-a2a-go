@@ -9,6 +9,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -20,6 +21,47 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/telemetry/metrics"
 )
+
+// TestMiddlewareChain verifies wrapping order and nil middleware handling.
+func TestMiddlewareChain(t *testing.T) {
+	var events []string
+	middleware := func(name string) Middleware {
+		return middlewareFunc(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				events = append(events, name+" before")
+				next.ServeHTTP(w, r)
+				events = append(events, name+" after")
+			})
+		})
+	}
+	terminal := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		events = append(events, "handler")
+	})
+
+	handler := MiddlewareChain{
+		middleware("first"),
+		nil,
+		middleware("second"),
+	}.Wrap(terminal)
+	handler.ServeHTTP(
+		httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodPost, "/", nil),
+	)
+
+	assert.Equal(t, []string{
+		"first before",
+		"second before",
+		"handler",
+		"second after",
+		"first after",
+	}, events)
+}
+
+type middlewareFunc func(next http.Handler) http.Handler
+
+func (f middlewareFunc) Wrap(next http.Handler) http.Handler {
+	return f(next)
+}
 
 func TestWithCORSEnabled(t *testing.T) {
 	// Test with CORS enabled
