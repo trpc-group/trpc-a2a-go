@@ -203,7 +203,7 @@ func (p *myMessageProcessor) ProcessMessage(
     text := extractTextFromMessage(ec.Message)
     if text == "" {
         // A pure-message reply: no task comes into existence this round.
-        handle.Reply(taskmanager.ReplyText("input message must contain text."))
+        handle.Reply(protocol.NewAgentText("input message must contain text."))
         return handle.Events(), nil
     }
 
@@ -219,7 +219,7 @@ func (p *myMessageProcessor) ProcessMessage(
 
     // A terminal status ends the round; the message/send caller receives
     // this final task snapshot (with its artifacts).
-    handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("Processed: "+result))
+    handle.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText("Processed: "+result))
     return handle.Events(), nil
 }
 
@@ -348,7 +348,7 @@ func (p *myProcessor) ProcessMessage(
     handle.UpdateTaskState(protocol.TaskStateWorking, nil)
     result := doWork(ec.Message)
     handle.AddArtifact(result.Artifact, true)
-    handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("done"))
+    handle.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText("done"))
 
     return handle.Events(), nil
 }

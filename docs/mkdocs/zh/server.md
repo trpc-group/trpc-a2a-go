@@ -42,7 +42,7 @@ srv.Start(":8080")   // 在 "/" 服务 JSON-RPC，在 /.well-known/agent-card.js
 | `WithBasePath(prefix)` | 挂载到子路径。 |
 | `WithJSONRPCEndpoint(path)` | 自定义 JSON-RPC endpoint。通常优先用 `WithBasePath`。 |
 | `WithCompatHandler(h)` | 同时服务 legacy v0.2.x wire。 |
-| `WithMiddleware(mw...)` | 包裹 HTTP handler 链。 |
+| `WithMiddleware(mw...)` | 包裹 HTTP handler 链。→ [middleware context 示例](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/middleware) |
 | `WithCORSEnabled(true)` | 输出 CORS 头。 |
 | `WithReadTimeout` / `WithWriteTimeout` / `WithIdleTimeout` | HTTP server 超时。 |
 | `WithTelemetryMeterProvider(mp)` / `WithTelemetryMeterProviderOptions(...)` | 注入已有 meter provider，或让 server 创建 OTLP provider。 |
@@ -73,12 +73,12 @@ func (p *proc) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) 
     h.UpdateTaskState(protocol.TaskStateWorking, nil)
     result := doWork(ec.Message)
     h.AddArtifact(result.Artifact, true)                              // lastChunk=true
-    h.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("done"))
+    h.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText("done"))
     return h.Events(), nil
 }
 ```
 
-动词:`UpdateTaskState(state, message)`、`AddArtifact(artifact, lastChunk)`、`AppendArtifact(artifact, lastChunk)`、`Reply(message)`,以及读取 `TaskID()`、`GetContextID()`、`GetTask()`、`GetMessageHistory()`。`AddArtifact` 新增 artifact(或替换同 ID 的 artifact),`AppendArtifact` 追加续块,并且必须复用同一个 `ArtifactID`。`taskmanager.ReplyText(text)` 构造一条 agent 消息。
+动词:`UpdateTaskState(state, message)`、`AddArtifact(artifact, lastChunk)`、`AppendArtifact(artifact, lastChunk)`、`Reply(message)`,以及读取 `TaskID()`、`GetContextID()`、`GetTask()`、`GetMessageHistory()`。`AddArtifact` 新增 artifact(或替换同 ID 的 artifact),`AppendArtifact` 追加续块,并且必须复用同一个 `ArtifactID`。`protocol.NewAgentText(text)` 构造一条 agent 消息。
 
 **`TaskHandle` 底层就是 channel 操作。** 真正的契约是你返回的 `<-chan protocol.StreamEvent`:`UpdateTaskState` 发一个 `*protocol.TaskStatusUpdateEvent`,`AddArtifact` 和 `AppendArtifact` 发一个 `*protocol.TaskArtifactUpdateEvent`,`Reply` 发一个 `*protocol.Message`,`Close` 关闭 channel。你很少需要,但可以自己构造并发送这些事件——这也是够到 `TaskHandle` 不暴露的字段的唯一办法:
 
@@ -97,9 +97,9 @@ return out, nil
 
 ### 常见形态
 
-- **纯回复**(不产生任务):`h.Reply(taskmanager.ReplyText("..."))`。
+- **纯回复**(不产生任务):`h.Reply(protocol.NewAgentText("..."))`。
 - **实时流式**——把函数体放进 goroutine,事件就会实时到达 `SendStreamingMessage` 的消费者;长循环里检查 `ctx.Err()`,被取消时直接关闭(框架落 `CANCELED`)。→ [examples/basic](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic)（`/long-task` 与 client `-stream`）
-- **多轮**——用 `h.UpdateTaskState(protocol.TaskStateInputRequired, taskmanager.ReplyText("need more"))` 挂起并关闭;后续消息(回传 `taskId`)作为新一轮到来,此时 `ec.Task` 已就位。
+- **多轮**——用 `h.UpdateTaskState(protocol.TaskStateInputRequired, protocol.NewAgentText("need more"))` 挂起并关闭;后续消息(回传 `taskId`)作为新一轮到来,此时 `ec.Task` 已就位。→ [examples/inputrequired](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/inputrequired)
 
 ### 写 Processor 时记住这几条
 

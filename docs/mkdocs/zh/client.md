@@ -241,7 +241,7 @@ func (p *root) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) 
     h.UpdateTaskState(protocol.TaskStateWorking, nil)
     sub, err := p.weatherClient.SendMessage(ctx, forward(ec.Message))
     if err != nil {
-        h.UpdateTaskState(protocol.TaskStateFailed, taskmanager.ReplyText(err.Error()))
+        h.UpdateTaskState(protocol.TaskStateFailed, protocol.NewAgentText(err.Error()))
         return h.Events(), nil
     }
     h.UpdateTaskState(protocol.TaskStateCompleted, extractReply(sub))
