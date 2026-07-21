@@ -198,6 +198,11 @@ processor 只能发 `*protocol.Message`，status 与 artifact 事件会被拒绝
 task continuation，以及一元请求的 `returnImmediately=true` 都不支持。
 客户端需要其中任一任务能力时，请使用 memory 或 Redis。
 
+因此，stateless 也不保留 legacy v0.2.x 的一元非阻塞默认行为。
+`compat/v0` 会把缺省配置或 `blocking=false` 转成
+`returnImmediately=true`，随后被 stateless 拒绝。legacy 一元客户端必须显式
+设置 `blocking=true`；如果必须保留原来的非阻塞行为，请使用 memory 或 Redis。
+
 **内存**——零依赖、单进程:
 
 ```go
@@ -327,7 +332,7 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 
 ## 服务 legacy v0.2.x 客户端
 
-让未修改的 v0.2.x 客户端在迁移期间继续工作:把 `compat/v0` 挂到同一端点。legacy 斜杠方法名与 v1.0 的 PascalCase 名不相交,所以一个端点同时分发两代——在同一鉴权链内、对同一个 `TaskManager`,并保留老默认(尤其非阻塞的 `message/send`)。
+使用 memory 或 Redis 时，可以在迁移期间让未修改的 v0.2.x 客户端继续工作：把 `compat/v0` 挂到同一端点。legacy 斜杠方法名与 v1.0 的 PascalCase 名不相交，所以一个端点可以在同一鉴权链内、对同一个 `TaskManager` 分发两代请求。memory 与 Redis 会保留老默认，尤其是非阻塞的 `message/send`；stateless 与请求绑定，不支持这个默认行为，legacy 一元调用方必须显式设置 `blocking=true`。
 
 ```go
 import v0 "trpc.group/trpc-go/trpc-a2a-go/v2/compat/v0"

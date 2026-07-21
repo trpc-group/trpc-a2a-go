@@ -245,6 +245,12 @@ status and artifact events are rejected. `GetTask`, `ListTasks`, `CancelTask`,
 `returnImmediately=true` are unsupported. Use memory or Redis when clients
 need any of those task capabilities.
 
+This also means stateless does not preserve the legacy v0.2.x non-blocking
+unary default. `compat/v0` maps an absent configuration or `blocking=false` to
+`returnImmediately=true`, which stateless rejects. A legacy unary client must
+send `blocking=true`; use memory or Redis if the original non-blocking behavior
+must be preserved.
+
 **In-memory** — zero dependencies, single process:
 
 ```go
@@ -393,11 +399,13 @@ internal route.
 
 ## Serving legacy v0.2.x clients
 
-Keep unmodified v0.2.x clients working while they migrate: mount `compat/v0` on
-the same endpoint. Legacy slash-method names are disjoint from the v1.0
-PascalCase names, so one endpoint dispatches both — inside the same auth chain,
-against the same `TaskManager`, preserving the old defaults (notably the
-non-blocking `message/send`).
+With memory or Redis, keep unmodified v0.2.x clients working while they
+migrate: mount `compat/v0` on the same endpoint. Legacy slash-method names are
+disjoint from the v1.0 PascalCase names, so one endpoint dispatches both inside
+the same auth chain and against the same `TaskManager`. Memory and Redis
+preserve the old defaults,
+notably non-blocking `message/send`. Stateless is request-bound and rejects
+that default; legacy unary callers using it must set `blocking=true`.
 
 ```go
 import v0 "trpc.group/trpc-go/trpc-a2a-go/v2/compat/v0"

@@ -67,26 +67,28 @@ type ExecContext struct {
 // behavior: process one message and report progress by sending events on the
 // returned channel.
 //
-// Allowed event types:
-//   - *protocol.Message: a direct reply. No task comes into existence for a
-//     pure-message exchange.
-//   - *protocol.TaskStatusUpdateEvent, *protocol.TaskArtifactUpdateEvent:
-//     drive the task identified by ExecContext.TaskID. The framework owns the
-//     task lifecycle: it creates the task on the first task event, persists
-//     every event before broadcasting it to subscribers, and derives the
-//     unary (message/send) result from the stream.
-//   - *protocol.Task is NOT allowed: task snapshots are materialized by the
-//     framework from the event stream. Emitting one is a contract violation.
+// Accepted event types depend on the TaskManager:
+//   - *protocol.Message is a direct reply accepted by every manager. No task
+//     comes into existence for a pure-message exchange.
+//   - *protocol.TaskStatusUpdateEvent and *protocol.TaskArtifactUpdateEvent
+//     drive the task identified by ExecContext.TaskID in task-capable managers.
+//     The manager creates the task on the first task event, persists every event
+//     before broadcasting it to subscribers, and derives the unary result from
+//     the stream. Message-only managers reject these events.
+//   - *protocol.Task is never accepted: task snapshots are materialized by
+//     task-capable managers from the event stream. Emitting one is a contract
+//     violation.
 //
-// Events may leave TaskID/ContextID empty; the framework stamps them. Filling
-// them with values different from the ExecContext's is a contract violation
-// (the framework marks the task failed and discards the remaining events; the
-// channel is still drained).
+// Task events accepted by a task-capable manager may leave TaskID/ContextID
+// empty; the manager stamps them. A direct Message may leave ContextID empty.
+// Foreign IDs are a contract violation: task-capable managers mark an existing
+// task failed, while request-bound Message-only managers cancel the round. In
+// both cases the remaining events are discarded and the channel is drained.
 //
 // Sending an event hands it off to the framework: the processor must not
 // retain and mutate an event (or its Parts/Message) after sending it.
 //
-// Closing the channel ends the round:
+// For a task-capable manager, closing the channel ends the round:
 //   - with the task in a terminal state, or after a pure-message reply: a
 //     normal end;
 //   - in input-required / auth-required: the task stays suspended awaiting a
@@ -98,12 +100,15 @@ type ExecContext struct {
 //     terminal state leads the framework to mark the task CANCELED on the
 //     processor's behalf.
 //
-// A terminal or suspend-state status event ends the round's writes early: a
-// suspend event yields the task — the framework immediately admits a
-// continuation, so this round no longer owns the task and any events it emits
-// afterwards are discarded (close the channel after suspending). The
-// message/stream response stream ends at the terminal or suspend frame; the
-// channel itself is still drained until closed.
+// A request-bound Message-only manager defines completion in terms of direct
+// replies and channel closure; it does not apply task close rules.
+//
+// In a task-capable manager, a terminal or suspend-state status event ends the
+// round's writes early: a suspend event yields the task — the framework
+// immediately admits a continuation, so this round no longer owns the task and
+// any events it emits afterwards are discarded (close the channel after
+// suspending). The message/stream response stream ends at the terminal or
+// suspend frame; the channel itself is still drained until closed.
 //
 // For task-capable managers, ctx is canceled when the task is canceled via
 // CancelTask. A client disconnect does NOT cancel ctx: the work keeps running
@@ -120,8 +125,9 @@ type ExecContext struct {
 //
 // Returning a non-nil error means the round failed to start: no events are
 // consumed and the error is mapped to a JSON-RPC error. To report a business
-// failure, emit a TASK_STATE_FAILED status event and close the channel
-// instead.
+// failure, use an event supported by the selected manager and close the
+// channel: a TASK_STATE_FAILED status for a task-capable manager, or a direct
+// agent Message for a Message-only manager.
 type MessageProcessor interface {
 	ProcessMessage(ctx context.Context, ec *ExecContext) (<-chan protocol.StreamEvent, error)
 }
@@ -143,8 +149,9 @@ type TaskManager interface {
 	// A task-capable manager derives the final task snapshot when task events were
 	// emitted, otherwise the last message. With returnImmediately=true it returns
 	// as soon as the first immediate result is persisted, while execution continues
-	// in the background. A Message-only manager returns its last message and may
-	// reject returnImmediately because no task remains for later retrieval.
+	// in the background. A request-bound Message-only manager returns its last
+	// message and may reject returnImmediately because it cannot continue
+	// execution after the request completes.
 	OnSendMessage(
 		ctx context.Context,
 		request protocol.SendMessageParams,

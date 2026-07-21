@@ -188,6 +188,67 @@ func TestOnSendMessage_MessageOnly(t *testing.T) {
 	}
 }
 
+func TestOnSendMessage_BlockingWaitsForProcessorClose(t *testing.T) {
+	messageConsumed := make(chan struct{})
+	releaseProcessor := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(releaseProcessor)
+		}
+	}()
+
+	manager := newManager(t, processorFunc(func(
+		_ context.Context,
+		_ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent)
+		go func() {
+			out <- protocol.NewAgentText("ready")
+			close(messageConsumed)
+			<-releaseProcessor
+			close(out)
+		}()
+		return out, nil
+	}))
+
+	returnImmediately := false
+	request := messageParams("hello")
+	request.Configuration = &protocol.SendMessageConfiguration{
+		ReturnImmediately: &returnImmediately,
+	}
+	type sendResult struct {
+		response *protocol.SendMessageResponse
+		err      error
+	}
+	result := make(chan sendResult, 1)
+	go func() {
+		response, err := manager.OnSendMessage(context.Background(), request)
+		result <- sendResult{response: response, err: err}
+	}()
+
+	waitSignal(t, messageConsumed, "processor Message consumption")
+	select {
+	case got := <-result:
+		t.Fatalf("OnSendMessage returned before processor close: response=%#v err=%v", got.response, got.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseProcessor)
+	released = true
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatalf("OnSendMessage failed: %v", got.err)
+		}
+		if text := messageText(got.response.GetMessage()); text != "ready" {
+			t.Fatalf("message text = %q, want ready", text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for OnSendMessage after processor close")
+	}
+}
+
 func TestOnSendMessage_SetupFailures(t *testing.T) {
 	processorErr := errors.New("processor unavailable")
 	tests := []struct {
