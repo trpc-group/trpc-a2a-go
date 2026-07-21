@@ -36,11 +36,12 @@ const (
 // A2AClient provides methods to interact with an A2A agent server.
 // It handles making HTTP requests and encoding/decoding JSON-RPC messages.
 type A2AClient struct {
-	baseURL        *url.URL            // Parsed base URL of the agent server.
-	httpClient     *http.Client        // Underlying HTTP client.
-	userAgent      string              // User-Agent header string.
-	authProvider   auth.ClientProvider // Authentication provider.
-	httpReqHandler HTTPReqHandler      // Custom HTTP request handler.
+	baseURL            *url.URL            // Parsed base URL of the agent server.
+	httpClient         *http.Client        // Underlying HTTP client.
+	userAgent          string              // User-Agent header string.
+	authProvider       auth.ClientProvider // Authentication provider.
+	httpReqHandler     HTTPReqHandler      // Custom HTTP request handler.
+	httpReqMiddlewares []HTTPReqMiddleware // HTTP request middleware in registration order.
 
 	maxBufSize     int
 	initialBufSize int
@@ -74,7 +75,24 @@ func NewA2AClient(agentURL string, opts ...Option) (*A2AClient, error) {
 	for _, opt := range opts {
 		opt(client)
 	}
+	client.httpReqHandler = wrapHTTPReqHandler(
+		client.httpReqHandler,
+		client.httpReqMiddlewares,
+	)
 	return client, nil
+}
+
+func wrapHTTPReqHandler(
+	handler HTTPReqHandler,
+	middlewares []HTTPReqMiddleware,
+) HTTPReqHandler {
+	for i := len(middlewares) - 1; i >= 0; i-- {
+		if middlewares[i] == nil {
+			continue
+		}
+		handler = middlewares[i].Wrap(handler)
+	}
+	return handler
 }
 
 // SendMessage sends a message using the message/send method.
