@@ -267,6 +267,50 @@ func TestInlinePushConfigRegistration(t *testing.T) {
 		}
 	})
 
+	t.Run("rejected continuation leaves no trace", func(t *testing.T) {
+		manager := newTestManager(t, eventsExecutor(
+			statusUpdate(protocol.TaskStateInputRequired, agentReply("need more input")),
+		))
+		first, err := manager.OnSendMessage(context.Background(), userParams("start"))
+		if err != nil {
+			t.Fatalf("first send failed: %v", err)
+		}
+		suspended := first.GetTask()
+		if suspended == nil || suspended.Status.Message == nil {
+			t.Fatalf("expected suspended task with status message, got %+v", first)
+		}
+
+		followUp := inlineParams()
+		followUp.Message.TaskID = &suspended.ID
+		_, err = manager.OnSendMessage(context.Background(), followUp)
+		if !errors.Is(err, taskmanager.ErrPushNotificationNotSupportedSentinel) {
+			t.Fatalf("expected rejected inline config, got %v", err)
+		}
+
+		after, err := manager.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: suspended.ID})
+		if err != nil {
+			t.Fatalf("get task after rejection: %v", err)
+		}
+		if after.Status.Message == nil ||
+			after.Status.Message.MessageID != suspended.Status.Message.MessageID {
+			t.Fatalf("rejected continuation changed current status message: before=%+v after=%+v",
+				suspended.Status.Message, after.Status.Message)
+		}
+		if len(after.History) != len(suspended.History) {
+			t.Fatalf("rejected continuation changed history length: before=%d after=%d",
+				len(suspended.History), len(after.History))
+		}
+		manager.conversationMu.RLock()
+		_, stored := manager.messages[followUp.Message.MessageID]
+		manager.conversationMu.RUnlock()
+		if stored {
+			t.Fatalf("rejected continuation stored incoming message %s", followUp.Message.MessageID)
+		}
+		if live := manager.liveExecution(suspended.ID); live != nil {
+			t.Fatal("rejected continuation did not release its execution slot")
+		}
+	})
+
 	t.Run("message-only leaves no orphan", func(t *testing.T) {
 		var taskID atomic.Pointer[string]
 		processor := funcExecutor(

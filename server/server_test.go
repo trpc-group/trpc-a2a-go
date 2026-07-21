@@ -261,6 +261,34 @@ func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 		assert.Contains(t, resp.Error.Data, "mock send message failed")
 	})
 
+	t.Run("message/send rejects empty role", func(t *testing.T) {
+		params := protocol.SendMessageParams{
+			Message: protocol.Message{
+				MessageID: "msg-no-role",
+				Parts:     []*protocol.Part{protocol.NewTextPart("Input data")},
+			},
+		}
+		resp := performJSONRPCRequest(t, testServer, "SendMessage", params, "req-msg-send-no-role")
+		assert.Nil(t, resp.Result)
+		require.NotNil(t, resp.Error)
+		assert.Equal(t, jsonrpc.CodeInvalidParams, resp.Error.Code)
+		assert.Contains(t, fmt.Sprint(resp.Error.Data), "role")
+	})
+
+	t.Run("message/send rejects empty parts", func(t *testing.T) {
+		params := protocol.SendMessageParams{
+			Message: protocol.Message{
+				MessageID: "msg-no-parts",
+				Role:      protocol.MessageRoleUser,
+			},
+		}
+		resp := performJSONRPCRequest(t, testServer, "SendMessage", params, "req-msg-send-no-parts")
+		assert.Nil(t, resp.Result)
+		require.NotNil(t, resp.Error)
+		assert.Equal(t, jsonrpc.CodeInvalidParams, resp.Error.Code)
+		assert.Contains(t, fmt.Sprint(resp.Error.Data), "part")
+	})
+
 	// --- Test tasks/get ---
 	t.Run("tasks/get success", func(t *testing.T) {
 		mockTM.GetResponse = &protocol.Task{

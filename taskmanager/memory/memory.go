@@ -283,7 +283,7 @@ func (m *TaskManager) OnSendMessage(
 			return m.buildSendResponse(out.task, out.message, historyLength)
 		case <-eng.done:
 			// The stream closed before any immediate result: same derivation as blocking.
-			return m.buildSendResponse(eng.finalTask, eng.lastMessage, historyLength)
+			return m.buildSendResponse(eng.finalOutcome.task, eng.finalOutcome.message, historyLength)
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -291,7 +291,7 @@ func (m *TaskManager) OnSendMessage(
 
 	select {
 	case <-eng.done:
-		return m.buildSendResponse(eng.finalTask, eng.lastMessage, historyLength)
+		return m.buildSendResponse(eng.finalOutcome.task, eng.finalOutcome.message, historyLength)
 	case <-ctx.Done():
 		// The request died first. The execution is detached (§3.3): it keeps
 		// running and its results stay retrievable via GetTask/resubscribe.

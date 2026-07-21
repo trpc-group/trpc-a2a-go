@@ -14,9 +14,21 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry/metrics"
+)
+
+// error.type attribute values recorded by metricsTracker.
+const (
+	errTypeInvalidParams                = "invalid_params"
+	errTypePushNotificationNotSupported = "push_notification_not_supported"
+	errTypeMessageProcessingFailed      = "message_processing_failed"
+	errTypeStreamingNotSupported        = "streaming_not_supported"
+	errTypeSubscribeFailed              = "subscribe_failed"
+	errTypeClientDisconnected           = "client_disconnected"
 )
 
 // metricsTracker holds per-request telemetry state for the server package.
@@ -78,9 +90,21 @@ func (t *metricsTracker) observeNonStreamingResult(result *protocol.SendMessageR
 }
 
 func (t *metricsTracker) setError(errType string) {
+	if t == nil {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.errType = errType
+}
+
+// setValidateSendMessageError classifies errors from validateSendMessageParams.
+func (t *metricsTracker) setValidateSendMessageError(err *jsonrpc.Error) {
+	if err != nil && err.Code == taskmanager.ErrCodePushNotificationNotSupported {
+		t.setError(errTypePushNotificationNotSupported)
+		return
+	}
+	t.setError(errTypeInvalidParams)
 }
 
 func (t *metricsTracker) record(ctx context.Context) {
