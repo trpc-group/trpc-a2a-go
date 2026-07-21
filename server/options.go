@@ -36,9 +36,12 @@ type MiddlewareChain []Middleware
 
 // Wrap applies all middlewares in the chain to the given handler.
 // Middlewares are applied in reverse order so the first middleware in the slice
-// becomes the outermost wrapper.
+// becomes the outermost wrapper. Nil middleware is ignored.
 func (chain MiddlewareChain) Wrap(handler http.Handler) http.Handler {
 	for i := len(chain) - 1; i >= 0; i-- {
+		if chain[i] == nil {
+			continue
+		}
 		handler = chain[i].Wrap(handler)
 	}
 	return handler
@@ -234,6 +237,7 @@ func WithBasePath(basePath string) Option {
 // WithMiddleware adds HTTP middleware(s) to the server's chain.
 // Multiple middlewares can be provided and will be chained together.
 // The first middleware in the slice will be the outermost wrapper.
+// Nil middleware is ignored.
 // Middlewares only take effect on the JSON-RPC endpoint.
 func WithMiddleware(middlewares ...Middleware) Option {
 	return func(s *A2AServer) {
