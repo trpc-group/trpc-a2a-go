@@ -48,13 +48,7 @@ cd examples/basic/server
 go run main.go
 
 # Specify different host and port
-go run main.go --host 0.0.0.0 --port 9000
-
-# Disable streaming capability
-go run main.go --no-stream
-
-# Disable CORS headers
-go run main.go --no-cors
+go run main.go -host 0.0.0.0 -port 9000
 ```
 
 ### Using the Basic CLI Client
@@ -65,16 +59,10 @@ cd examples/basic/client
 go run main.go
 
 # Connect to a specific agent
-go run main.go --agent http://localhost:9000/
+go run main.go -host localhost:9000
 
-# Specify request timeout
-go run main.go --timeout 30s
-
-# Disable streaming mode
-go run main.go --no-stream
-
-# Use a specific context ID (conversation)
-go run main.go --context "your-context-id"
+# Consume ordinary messages through message/stream
+go run main.go -stream
 ```
 
 ## Documentation
@@ -101,39 +89,31 @@ The repository includes several examples demonstrating different aspects of the 
 
 ### 1. Simple Example ([examples/simple](examples/simple))
 
-A minimal interactive example on the native channel style (the raw
-`MessageProcessor` contract):
-- Server that reverses text (chunked sentence + external artifact) and a
-  long-running demo task (`/long-task`) for live subscribe/cancel
-- Interactive client covering blocking send, `-stream`,
-  `returnImmediately` long tasks, GetTask, SubscribeToTask, and CancelTask
-  — all served by one processor
+A minimal example of the native channel style (the raw `MessageProcessor`
+contract). The server reverses text, while the client automatically exercises
+blocking send, `returnImmediately` plus polling, streaming, and a pure-message
+reply without creating a task.
 
 ```bash
 # Start the simple server
 cd examples/simple/server
 go run main.go
 
-# Interactive client (blocking send by default)
+# Run all four client demos
 cd examples/simple/client
 go run main.go
-
-# Streaming consumption mode
-go run main.go -stream
-
-# Point the client at a different server
-go run main.go -host localhost:8080
 ```
 
 ### 2. Basic Example ([examples/basic](examples/basic))
 
-A comprehensive example showcasing:
-- A versatile text processing server with multiple operations
-- A feature-rich CLI client with support for all core A2A protocol APIs
-- Streaming and non-streaming modes
-- Multi-turn conversations with session management
-- Task management (create, cancel, get)
-- Agent capability discovery
+An interactive `TaskHandle`-based chat example showcasing:
+
+- Blocking `message/send` and streaming `message/stream`
+- Long-running tasks started with `returnImmediately`
+- GetTask, SubscribeToTask, and CancelTask
+- Conversation grouping and message history through `contextId`
+
+See [examples/basic/README.md](examples/basic/README.md) for the REPL commands.
 
 ### 3. Authentication Examples ([examples/auth](examples/auth))
 

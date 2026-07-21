@@ -43,13 +43,7 @@ cd examples/basic/server
 go run main.go
 
 # Specify different host and port
-go run main.go --host 0.0.0.0 --port 9000
-
-# Disable streaming capability
-go run main.go --no-stream
-
-# Disable CORS headers
-go run main.go --no-cors
+go run main.go -host 0.0.0.0 -port 9000
 ```
 
 ### 使用 Basic CLI 客户端
@@ -60,16 +54,10 @@ cd examples/basic/client
 go run main.go
 
 # Connect to a specific agent
-go run main.go --agent http://localhost:9000/
+go run main.go -host localhost:9000
 
-# Specify request timeout
-go run main.go --timeout 30s
-
-# Disable streaming mode
-go run main.go --no-stream
-
-# Use a specific context ID (conversation)
-go run main.go --context "your-context-id"
+# 通过 message/stream 消费普通消息
+go run main.go -stream
 ```
 
 ## 文档
@@ -88,35 +76,30 @@ go run main.go --context "your-context-id"
 
 ### 1. 简单示例 ([examples/simple](examples/simple))
 
-一个最小的交互式示例，以原生 channel 风格（即裸 `MessageProcessor` 契约）演示 A2A 核心功能：
-- Server：文本反转（分 chunk 句子 + external artifact），以及长任务 demo（`/long-task`）用于 subscribe/cancel
-- 交互式 Client：覆盖阻塞 send、`-stream`、`returnImmediately` 长任务、GetTask、SubscribeToTask、CancelTask——全部由同一个 processor 提供服务
+一个原生 channel 风格（即裸 `MessageProcessor` 契约）的最小示例。Server
+负责反转文本，Client 会依次演示阻塞 send、`returnImmediately` 加轮询、
+流式消费，以及不创建 task 的纯 Message 回复。
 
 ```bash
 # Start the simple server
 cd examples/simple/server
 go run main.go
 
-# Interactive client (blocking send by default)
+# 运行四种 client demo
 cd examples/simple/client
 go run main.go
-
-# Streaming consumption mode
-go run main.go -stream
-
-# Point the client at a different server
-go run main.go -host localhost:8080
 ```
 
 ### 2. 基础示例 ([examples/basic](examples/basic))
 
-一个综合示例，展示：
-- 一个多功能文本处理 server，支持多种操作
-- 一个功能丰富的 CLI 客户端，支持所有核心 A2A 协议 API
-- 流式与非流式模式
-- 带 session 管理的多轮对话
-- task 管理（创建、取消、获取）
-- agent 能力发现
+一个基于 `TaskHandle` 的交互式 chat 示例，展示：
+
+- 阻塞 `message/send` 与流式 `message/stream`
+- 通过 `returnImmediately` 启动长任务
+- GetTask、SubscribeToTask 与 CancelTask
+- 通过 `contextId` 组织会话并读取消息历史
+
+REPL 命令见 [examples/basic/README.md](examples/basic/README.md)。
 
 ### 3. 鉴权示例 ([examples/auth](examples/auth))
 
