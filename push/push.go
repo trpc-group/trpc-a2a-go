@@ -12,6 +12,8 @@
 // configured Sender. In manual mode the application owns delivery. Push is
 // opt-in: when neither a Sender nor ManualDelivery is configured, the manager
 // rejects config registration with PushNotificationNotSupported.
+// Dispatcher is the reusable process-local queue used by the built-in task
+// managers to preserve per-registration order and apply bounded backpressure.
 //
 // Signing is an optional, dependency-free seam: HTTPSender takes an
 // AuthHeaderFunc (WithAuthorizationHeader) to compute the Authorization header

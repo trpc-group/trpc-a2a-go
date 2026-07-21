@@ -17,7 +17,6 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 
-	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
@@ -341,10 +340,7 @@ func TestOnSendMessageNoEvents(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty execution")
 	}
-	var rpcErr *jsonrpc.Error
-	if !errors.As(err, &rpcErr) || rpcErr.Code != taskmanager.ErrCodeInternalError {
-		t.Errorf("expected internal error (-32603), got %v", err)
-	}
+	assertRPCCode(t, err, taskmanager.ErrCodeInternalError)
 }
 
 func TestOnSendMessageExecuteError(t *testing.T) {
@@ -369,10 +365,7 @@ func TestOnSendMessageNilChannel(t *testing.T) {
 	}))
 
 	_, err := m.OnSendMessage(context.Background(), sendParams("hello", "ctx-nil"))
-	var rpcErr *jsonrpc.Error
-	if !errors.As(err, &rpcErr) || rpcErr.Code != taskmanager.ErrCodeInternalError {
-		t.Errorf("expected internal error for nil channel, got %v", err)
-	}
+	assertRPCCode(t, err, taskmanager.ErrCodeInternalError)
 }
 
 // =============================================================================
@@ -571,8 +564,8 @@ func TestTerminalTaskSendRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for terminal task")
 	}
-	var rpcErr *jsonrpc.Error
-	if !errors.As(err, &rpcErr) || rpcErr.Code != taskmanager.ErrCodeInvalidParams {
+	rpcErr := decodeRPCError(t, err)
+	if rpcErr.Code != taskmanager.ErrCodeInvalidParams {
 		t.Errorf("expected invalid params (-32602), got %v", err)
 	}
 	if data, _ := rpcErr.Data.(string); !strings.Contains(data, "task task-frozen is in terminal state") {
@@ -660,10 +653,7 @@ func TestTaskSnapshotEventWithoutTaskLeavesNoTrace(t *testing.T) {
 	m, mr := setupTest(t, scriptedExecutor(&protocol.Task{ID: "task-x"}))
 
 	_, err := m.OnSendMessage(context.Background(), sendParams("go", "ctx-trace"))
-	var rpcErr *jsonrpc.Error
-	if !errors.As(err, &rpcErr) || rpcErr.Code != taskmanager.ErrCodeInternalError {
-		t.Errorf("expected internal error (no result), got %v", err)
-	}
+	assertRPCCode(t, err, taskmanager.ErrCodeInternalError)
 	for _, key := range mr.Keys() {
 		if strings.HasPrefix(key, taskPrefix) {
 			t.Errorf("violation before task creation must not persist a task, found %s", key)
@@ -1334,10 +1324,9 @@ func TestPushNotificationCRUD(t *testing.T) { //nolint:gocyclo // One lifecycle 
 		t.Fatalf("list after single delete: configs=%+v err=%v", list.Configs, err)
 	}
 
-	if err := m.OnPushNotificationDelete(context.Background(),
-		protocol.DeleteTaskPushNotificationConfigParams{TaskID: config.TaskID}); !errors.Is(err, jsonrpc.ErrInvalidParamsSentinel) {
-		t.Fatalf("delete without config ID: got %v, want InvalidParams", err)
-	}
+	err = m.OnPushNotificationDelete(context.Background(),
+		protocol.DeleteTaskPushNotificationConfigParams{TaskID: config.TaskID})
+	assertRPCCode(t, err, taskmanager.ErrCodeInvalidParams)
 
 	// Public CRUD must not create or expose orphan configs for missing tasks.
 	_, err = m.OnPushNotificationSet(context.Background(), protocol.TaskPushNotificationConfig{

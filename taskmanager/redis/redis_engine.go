@@ -13,7 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
@@ -159,14 +158,14 @@ func (m *TaskManager) resolveContinuation(
 	}
 	if isFinalState(loaded.Status.State) {
 		// A terminal task is immutable: reject without invoking the MessageProcessor.
-		return nil, jsonrpc.ErrInvalidParams(
+		return nil, taskmanager.ErrInvalidParams(
 			fmt.Sprintf("task %s is in terminal state %s", loaded.ID, loaded.Status.State))
 	}
 	if message.ContextID != nil && *message.ContextID != "" && *message.ContextID != loaded.ContextID {
 		// A continuation must stay in the task's own conversation: a foreign
 		// contextId would resolve the wrong ec.History and contradict the
 		// task snapshot's ContextID.
-		return nil, jsonrpc.ErrInvalidParams(
+		return nil, taskmanager.ErrInvalidParams(
 			fmt.Sprintf("message contextId does not match task %s context", loaded.ID))
 	}
 	return loaded, nil
@@ -311,7 +310,7 @@ func (m *TaskManager) prepareExecution(
 	if events == nil {
 		m.releaseExecution(taskID, ex.live)
 		cancel()
-		return nil, jsonrpc.ErrInternalError("processor returned nil channel")
+		return nil, taskmanager.ErrInternalError("processor returned nil channel")
 	}
 
 	go func() {
@@ -350,7 +349,7 @@ func (m *TaskManager) prepareInlinePushConfig(
 		pushConfig.ID = taskID
 	}
 	if err := push.ValidateConfig(pushConfig); err != nil {
-		return nil, false, jsonrpc.ErrInvalidParams(err.Error())
+		return nil, false, taskmanager.ErrInvalidParams(err.Error())
 	}
 	if task != nil {
 		if _, err := m.storePushConfig(context.Background(), pushConfig); err != nil {

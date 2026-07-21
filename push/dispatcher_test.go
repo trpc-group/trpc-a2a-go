@@ -4,7 +4,7 @@
 //
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
-package pushdispatch
+package push
 
 import (
 	"context"
@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 )
 
 func statusResponse(state protocol.TaskState) protocol.StreamResponse {
@@ -29,7 +28,7 @@ func TestDispatcherPreservesOrderPerConfig(t *testing.T) {
 	releaseFirst := make(chan struct{})
 	delivered := make(chan protocol.TaskState, 2)
 	var once sync.Once
-	sender := push.SenderFunc(func(
+	sender := SenderFunc(func(
 		ctx context.Context, _ protocol.TaskPushNotificationConfig, event protocol.StreamResponse,
 	) error {
 		state := event.GetStatusUpdate().Status.State
@@ -44,7 +43,7 @@ func TestDispatcherPreservesOrderPerConfig(t *testing.T) {
 		delivered <- state
 		return nil
 	})
-	d := New(context.Background(), sender, 4, 8, nil)
+	d := NewDispatcher(context.Background(), sender, 4, 8, nil)
 	defer d.Close()
 	cfg := protocol.TaskPushNotificationConfig{TaskID: "task-1", ID: "config-1", URL: "https://example.com"}
 	registration := Registration{Config: cfg, Generation: "generation-1"}
@@ -80,7 +79,7 @@ func TestDispatcherSnapshotsInputs(t *testing.T) {
 		cfg   protocol.TaskPushNotificationConfig
 		event protocol.StreamResponse
 	}, 1)
-	sender := push.SenderFunc(func(
+	sender := SenderFunc(func(
 		ctx context.Context, cfg protocol.TaskPushNotificationConfig, event protocol.StreamResponse,
 	) error {
 		select {
@@ -94,7 +93,7 @@ func TestDispatcherSnapshotsInputs(t *testing.T) {
 		}{cfg: cfg, event: event}
 		return nil
 	})
-	d := New(context.Background(), sender, 1, 1, nil)
+	d := NewDispatcher(context.Background(), sender, 1, 1, nil)
 	defer d.Close()
 	auth := &protocol.AuthenticationInfo{Scheme: "Bearer", Credentials: "original"}
 	cfg := protocol.TaskPushNotificationConfig{
@@ -126,14 +125,14 @@ func TestDispatcherSnapshotsInputs(t *testing.T) {
 func TestDispatcherBackpressureUnblocksOnClose(t *testing.T) {
 	started := make(chan struct{})
 	var once sync.Once
-	sender := push.SenderFunc(func(
+	sender := SenderFunc(func(
 		ctx context.Context, _ protocol.TaskPushNotificationConfig, _ protocol.StreamResponse,
 	) error {
 		once.Do(func() { close(started) })
 		<-ctx.Done()
 		return ctx.Err()
 	})
-	d := New(context.Background(), sender, 1, 1, nil)
+	d := NewDispatcher(context.Background(), sender, 1, 1, nil)
 	cfg := protocol.TaskPushNotificationConfig{TaskID: "task-1", ID: "config-1", URL: "https://example.com"}
 	registration := Registration{Config: cfg, Generation: "generation-1"}
 	if err := d.Enqueue([]Registration{registration}, statusResponse(protocol.TaskStateWorking)); err != nil {
@@ -155,8 +154,8 @@ func TestDispatcherBackpressureUnblocksOnClose(t *testing.T) {
 	d.Close()
 	select {
 	case err := <-blocked:
-		if !errors.Is(err, ErrClosed) {
-			t.Fatalf("blocked enqueue error = %v, want ErrClosed", err)
+		if !errors.Is(err, ErrDispatcherClosed) {
+			t.Fatalf("blocked enqueue error = %v, want ErrDispatcherClosed", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Close did not unblock enqueue")
@@ -167,7 +166,7 @@ func TestDispatcherCloseDoesNotClaimQueuedJob(t *testing.T) {
 	firstStarted := make(chan struct{})
 	validatorCalls := 0
 	senderCalls := 0
-	sender := push.SenderFunc(func(
+	sender := SenderFunc(func(
 		ctx context.Context, _ protocol.TaskPushNotificationConfig, _ protocol.StreamResponse,
 	) error {
 		senderCalls++
@@ -181,7 +180,7 @@ func TestDispatcherCloseDoesNotClaimQueuedJob(t *testing.T) {
 		validatorCalls++
 		return true, nil
 	}
-	d := New(context.Background(), sender, 1, 1, isCurrent)
+	d := NewDispatcher(context.Background(), sender, 1, 1, isCurrent)
 	defer d.Close()
 	cfg := protocol.TaskPushNotificationConfig{TaskID: "task-1", ID: "config-1", URL: "https://example.com"}
 	registration := Registration{Config: cfg, Generation: "generation-1"}
@@ -227,7 +226,7 @@ func TestDispatcherRecoversSenderPanicPerJob(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			calls := 0
 			delivered := make(chan protocol.TaskState, 1)
-			sender := push.SenderFunc(func(
+			sender := SenderFunc(func(
 				_ context.Context, _ protocol.TaskPushNotificationConfig, event protocol.StreamResponse,
 			) error {
 				calls++
@@ -237,7 +236,7 @@ func TestDispatcherRecoversSenderPanicPerJob(t *testing.T) {
 				delivered <- event.GetStatusUpdate().Status.State
 				return nil
 			})
-			d := New(context.Background(), sender, 1, 2, nil)
+			d := NewDispatcher(context.Background(), sender, 1, 2, nil)
 			cfg := protocol.TaskPushNotificationConfig{
 				TaskID: "task-1", ID: "config-1", URL: "https://example.com",
 			}
@@ -280,7 +279,7 @@ func TestDispatcherSkipsQueuedOldGeneration(t *testing.T) {
 	releaseFirst := make(chan struct{})
 	delivered := make(chan protocol.TaskState, 2)
 	currentGeneration := "generation-1"
-	sender := push.SenderFunc(func(
+	sender := SenderFunc(func(
 		ctx context.Context, _ protocol.TaskPushNotificationConfig, event protocol.StreamResponse,
 	) error {
 		state := event.GetStatusUpdate().Status.State
@@ -298,7 +297,7 @@ func TestDispatcherSkipsQueuedOldGeneration(t *testing.T) {
 	isCurrent := func(_ context.Context, registration Registration) (bool, error) {
 		return registration.Generation == currentGeneration, nil
 	}
-	d := New(context.Background(), sender, 1, 3, isCurrent)
+	d := NewDispatcher(context.Background(), sender, 1, 3, isCurrent)
 	defer d.Close()
 	cfg := protocol.TaskPushNotificationConfig{TaskID: "task-1", ID: "config-1", URL: "https://example.com"}
 	oldRegistration := Registration{Config: cfg, Generation: "generation-1"}
@@ -334,7 +333,7 @@ func TestDispatcherSkipsQueuedOldGeneration(t *testing.T) {
 
 func TestDispatcherValidationErrorFailsClosed(t *testing.T) {
 	delivered := make(chan protocol.TaskState, 2)
-	sender := push.SenderFunc(func(
+	sender := SenderFunc(func(
 		_ context.Context, _ protocol.TaskPushNotificationConfig, event protocol.StreamResponse,
 	) error {
 		delivered <- event.GetStatusUpdate().Status.State
@@ -346,7 +345,7 @@ func TestDispatcherValidationErrorFailsClosed(t *testing.T) {
 		}
 		return true, nil
 	}
-	d := New(context.Background(), sender, 1, 2, isCurrent)
+	d := NewDispatcher(context.Background(), sender, 1, 2, isCurrent)
 	defer d.Close()
 	cfg := protocol.TaskPushNotificationConfig{TaskID: "task-1", ID: "config-1", URL: "https://example.com"}
 	if err := d.Enqueue([]Registration{{Config: cfg, Generation: "invalid"}},

@@ -307,6 +307,9 @@ if err := srv.Start(":8080"); err != nil {
 }
 ```
 
+Redis TaskManager 作为独立 module 发布，请使用
+`go get trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2@v2.0.0-alpha.3` 安装。
+
 ## 从 v0.x 迁移
 
 v1.0（`/v2`）版本用上文所示的单一 event-stream 契约，替换了原来多结果返回的 `MessageProcessor` + `TaskHandler` 回调。熟悉的名字得以保留：你依然实现 `MessageProcessor.ProcessMessage`，原来的 `TaskHandler` 动词以 `TaskHandle` 兼容层的形式延续，因此 v0.x 的 processor 函数体只需极少改动即可迁移——包括完全同步的函数体，而它正是 v0.x 常见的写法。（wire 说明：v1.0 的 JSON-RPC 绑定将操作命名为 `SendMessage`、`SendStreamingMessage`、`GetTask`、`ListTasks`、`CancelTask`、`SubscribeToTask` 以及 `*TaskPushNotificationConfig` 的 CRUD；带斜杠的名字——`message/send`、`tasks/get`……——是 v0.2.x 的 wire，仍由 `compat/v0` 提供服务。本指南沿用迁移读者已经熟悉的 v0.x 名称来指代这些操作。）

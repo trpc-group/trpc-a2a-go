@@ -220,8 +220,12 @@ tm, _ := memory.NewTaskManager(proc,
 
 **Redis**——跨进程共享、重启不丢:
 
+```bash
+go get trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2@v2.0.0-alpha.3
+```
+
 ```go
-import redistm "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/redis"
+import redistm "trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2"
 
 tm, _ := redistm.NewTaskManager(proc, redisClient,   // 注意参数序:(processor, client)
     redistm.WithExpireTime(time.Hour),                // key TTL

@@ -325,6 +325,9 @@ if err := srv.Start(":8080"); err != nil {
 }
 ```
 
+The Redis TaskManager is a separate module. Install it with
+`go get trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2@v2.0.0-alpha.3`.
+
 ## Migrating from v0.x
 
 The v1.0 (`/v2`) release replaces the multi-outcome `MessageProcessor` +

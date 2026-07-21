@@ -1,10 +1,38 @@
 # Changelog
 
-## Unreleased
+## 2.0.0-alpha.3 (2026-07-22)
+
+This prerelease adds request-scoped stateless execution and restores Redis
+dependency isolation by publishing the Redis TaskManager as a separate Go
+module.
 
 ### Task management
 
 - **A stateless TaskManager is available for applications that own conversation context outside A2A.** `taskmanager/stateless` derives either a direct `Message` or a request-local `Task` from the standard processor event stream without retaining tasks, events, or history after the request. Cross-request task operations, continuations, push notifications, suspended tasks, and background task execution are unavailable; use memory or Redis when clients need those capabilities.
+
+### Redis module
+
+- **Redis no longer expands the root module graph.** The root `/v2` module no
+  longer requires `go-redis`, `miniredis`, or their Redis-only transitive
+  dependencies.
+- **The Redis import path changes in this alpha release** from
+  `trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/redis` to
+  `trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2` so the nested module
+  follows Go semantic import versioning and can be released with a valid v2
+  tag.
+- Install the Redis backend with
+  `go get trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2@v2.0.0-alpha.3`.
+  The coordinated repository tags are `v2.0.0-alpha.3` for the root module and
+  `taskmanager/redis/v2.0.0-alpha.3` for the Redis module.
+
+### TaskManager extension support
+
+- The shared bounded push-delivery dispatcher now lives in the public `push`
+  package so TaskManager implementations in separate modules can reuse the
+  same ordering, backpressure, shutdown, and stale-registration behavior.
+- `taskmanager.ErrInvalidParams` and `taskmanager.ErrInternalError` let
+  out-of-module TaskManager implementations return standard JSON-RPC errors
+  without importing framework internals.
 
 ## 2.0.0-alpha.2 (2026-07-21)
 

@@ -4,10 +4,7 @@
 //
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
-// Package pushdispatch provides the task managers' shared, process-local push
-// delivery queue. It is internal so push.Sender remains the only delivery API
-// third-party task managers need to implement.
-package pushdispatch
+package push
 
 import (
 	"context"
@@ -21,7 +18,6 @@ import (
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 )
 
 const (
@@ -31,8 +27,8 @@ const (
 	maxQueueSize       = 1 << 20
 )
 
-// ErrClosed is returned when shutdown has started.
-var ErrClosed = errors.New("push dispatcher is closed")
+// ErrDispatcherClosed is returned when dispatcher shutdown has started.
+var ErrDispatcherClosed = errors.New("push dispatcher is closed")
 
 type job struct {
 	taskID     string
@@ -41,7 +37,7 @@ type job struct {
 	event      []byte
 }
 
-// Registration is an internal snapshot of one persisted push registration.
+// Registration is a snapshot of one persisted push registration.
 // Generation changes on every create/update so a queued delivery cannot be
 // revived by deleting and re-creating the same config ID.
 type Registration struct {
@@ -53,7 +49,7 @@ type Registration struct {
 // (taskId, configId). Keys are assigned to stable worker shards; this avoids a
 // goroutine per webhook while allowing unrelated webhooks to make progress.
 type Dispatcher struct {
-	sender push.Sender
+	sender Sender
 	ctx    context.Context
 	cancel context.CancelFunc
 	queues []chan job
@@ -65,10 +61,10 @@ type Dispatcher struct {
 	isCurrent func(context.Context, Registration) (bool, error)
 }
 
-// New constructs a dispatcher. A nil parent uses context.Background.
-func New(
+// NewDispatcher constructs a dispatcher. A nil parent uses context.Background.
+func NewDispatcher(
 	parent context.Context,
-	sender push.Sender,
+	sender Sender,
 	concurrency, queueSize int,
 	isCurrent func(context.Context, Registration) (bool, error),
 ) *Dispatcher {
@@ -109,7 +105,7 @@ func New(
 }
 
 // Enqueue snapshots event and configs before adding one delivery per config.
-// It blocks when the bounded queue is full and returns ErrClosed on shutdown.
+// It blocks when the bounded queue is full and returns ErrDispatcherClosed on shutdown.
 func (d *Dispatcher) Enqueue(
 	registrations []Registration,
 	event protocol.StreamResponse,
@@ -118,7 +114,7 @@ func (d *Dispatcher) Enqueue(
 		return nil
 	}
 	if d.closed.Load() {
-		return ErrClosed
+		return ErrDispatcherClosed
 	}
 	eventJSON, err := json.Marshal(event)
 	if err != nil {
@@ -143,10 +139,10 @@ func (d *Dispatcher) Enqueue(
 		queue := d.queues[shard(registrations[i].Config, len(d.queues))]
 		select {
 		case <-d.ctx.Done():
-			return ErrClosed
+			return ErrDispatcherClosed
 		case queue <- j:
 			if d.closed.Load() {
-				return ErrClosed
+				return ErrDispatcherClosed
 			}
 		}
 	}

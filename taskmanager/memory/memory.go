@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/pushdispatch"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
@@ -167,7 +166,7 @@ type TaskManager struct {
 
 	// pushDispatcher owns the bounded, ordered automatic-delivery workers. It is
 	// nil when push is disabled or the agent selected manual delivery.
-	pushDispatcher *pushdispatch.Dispatcher
+	pushDispatcher *push.Dispatcher
 
 	// executions tracks the cancellation handle of every live MessageProcessor run,
 	// keyed by task ID. Registered before ProcessMessage, removed when the engine
@@ -223,7 +222,7 @@ func NewTaskManager(processor taskmanager.MessageProcessor, opts ...TaskManagerO
 		stopCleanup:   make(chan struct{}),
 	}
 	if options.Push.Sender != nil && !options.Push.ManualDelivery {
-		manager.pushDispatcher = pushdispatch.New(
+		manager.pushDispatcher = push.NewDispatcher(
 			context.Background(), options.Push.Sender,
 			options.Push.MaxConcurrentDeliveries, options.Push.DeliveryQueueSize,
 			manager.pushStore.isCurrent,
@@ -787,7 +786,7 @@ func (m *TaskManager) dispatchPush(taskID string, event protocol.StreamResponse)
 	if closed {
 		return
 	}
-	if err := m.pushDispatcher.Enqueue(registrations, event); err != nil && !errors.Is(err, pushdispatch.ErrClosed) {
+	if err := m.pushDispatcher.Enqueue(registrations, event); err != nil && !errors.Is(err, push.ErrDispatcherClosed) {
 		log.Warnf("push dispatch: enqueue for task %s: %v", taskID, err)
 	}
 }
