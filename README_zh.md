@@ -20,10 +20,9 @@ tRPC AI 生态
 - [文档](#文档)
 - [示例](#示例)
   - [简单示例](#1-简单示例-examplessimple)
-  - [流式示例](#2-流式示例-examplesstreaming)
-  - [基础示例](#3-基础示例-examplesbasic)
-  - [鉴权示例](#4-鉴权示例-examplesauth)
-  - [v0 兼容示例](#5-v0-兼容示例-examplescompat)
+  - [基础示例](#2-基础示例-examplesbasic)
+  - [鉴权示例](#3-鉴权示例-examplesauth)
+  - [v0 兼容示例](#4-v0-兼容示例-examplescompat)
 - [创建你自己的 Agent](#创建你自己的-agent)
 - [从 v0.x 迁移](#从-v0x-迁移)
 - [鉴权](#鉴权)
@@ -44,13 +43,7 @@ cd examples/basic/server
 go run main.go
 
 # Specify different host and port
-go run main.go --host 0.0.0.0 --port 9000
-
-# Disable streaming capability
-go run main.go --no-stream
-
-# Disable CORS headers
-go run main.go --no-cors
+go run main.go -host 0.0.0.0 -port 9000
 ```
 
 ### 使用 Basic CLI 客户端
@@ -61,16 +54,10 @@ cd examples/basic/client
 go run main.go
 
 # Connect to a specific agent
-go run main.go --agent http://localhost:9000/
+go run main.go -host localhost:9000
 
-# Specify request timeout
-go run main.go --timeout 30s
-
-# Disable streaming mode
-go run main.go --no-stream
-
-# Use a specific context ID (conversation)
-go run main.go --context "your-context-id"
+# 通过 message/stream 消费普通消息
+go run main.go -stream
 ```
 
 ## 文档
@@ -89,51 +76,36 @@ go run main.go --context "your-context-id"
 
 ### 1. 简单示例 ([examples/simple](examples/simple))
 
-一个最小示例，以原生 channel 风格（即裸 `MessageProcessor` 契约）演示 A2A 的核心功能：
-- 一个简单 server，将文本输入反转，并在裸 channel 上发出 event
-- 客户端演示三种消费模式：阻塞式 send、`returnImmediately`、以及 streaming——全部由同一个 processor 提供服务
-- 基本的 task 生命周期（惰性创建、处理、完成）与 artifact
+一个原生 channel 风格（即裸 `MessageProcessor` 契约）的最小示例。Server
+负责反转文本，Client 会依次演示阻塞 send、`returnImmediately` 加轮询、
+流式消费，以及不创建 task 的纯 Message 回复。
+
+终端 1——从仓库根目录启动 Server：
 
 ```bash
-# Start the simple server
 cd examples/simple/server
 go run main.go
-
-# Run the simple client (runs the blocking / returnImmediately / streaming demos)
-cd examples/simple/client
-go run main.go
-
-# Point the client at a different server
-go run main.go -host localhost:8080
 ```
 
-### 2. 流式示例 ([examples/streaming](examples/streaming))
-
-聚焦 streaming 能力的示例：
-- 支持流式响应的 server 实现
-- 处理流式数据的 client 实现
+终端 2——从仓库根目录运行四种 Client demo：
 
 ```bash
-# Start the streaming server
-cd examples/streaming/server
-go run main.go
-
-# Run the streaming client
-cd examples/streaming/client
+cd examples/simple/client
 go run main.go
 ```
 
-### 3. 基础示例 ([examples/basic](examples/basic))
+### 2. 基础示例 ([examples/basic](examples/basic))
 
-一个综合示例，展示：
-- 一个多功能文本处理 server，支持多种操作
-- 一个功能丰富的 CLI 客户端，支持所有核心 A2A 协议 API
-- 流式与非流式模式
-- 带 session 管理的多轮对话
-- task 管理（创建、取消、获取）
-- agent 能力发现
+一个基于 `TaskHandle` 的交互式 chat 示例，展示：
 
-### 4. 鉴权示例 ([examples/auth](examples/auth))
+- 阻塞 `message/send` 与流式 `message/stream`
+- 通过 `returnImmediately` 启动长任务
+- GetTask、SubscribeToTask 与 CancelTask
+- 通过 `contextId` 组织会话并读取消息历史
+
+REPL 命令见 [examples/basic/README.md](examples/basic/README.md)。
+
+### 3. 鉴权示例 ([examples/auth](examples/auth))
 
 演示鉴权的完整示例：
 - 支持多种鉴权方式的 server 实现
@@ -165,7 +137,7 @@ go run main.go --auth jwt --jwt-secret-file "path/to/jwt-secret.key"
 go run main.go --auth jwt --message "Custom message" --session-id "session123"
 ```
 
-### 5. v0 兼容示例 ([examples/compat](examples/compat))
+### 4. v0 兼容示例 ([examples/compat](examples/compat))
 
 一个 server，同时服务两代协议：v1.0 客户端走标准 wire，未经改动的 v0.2.x 客户端通过 [compat/v0](compat/v0) 接入——同一个 endpoint、同一条鉴权链。该客户端演示了被保留的 legacy 默认行为（无任何配置的 `message/send` 会立即应答），以及在 legacy wire 上的阻塞式与流式调用。
 
@@ -217,7 +189,7 @@ func (p *myMessageProcessor) ProcessMessage(
     text := extractTextFromMessage(ec.Message)
     if text == "" {
         // A pure-message reply: no task comes into existence this round.
-        handle.Reply(taskmanager.ReplyText("input message must contain text."))
+        handle.Reply(protocol.NewAgentText("input message must contain text."))
         return handle.Events(), nil
     }
 
@@ -233,7 +205,7 @@ func (p *myMessageProcessor) ProcessMessage(
 
     // A terminal status ends the round; the message/send caller receives
     // this final task snapshot (with its artifacts).
-    handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("Processed: "+result))
+    handle.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText("Processed: "+result))
     return handle.Events(), nil
 }
 
@@ -352,7 +324,7 @@ func (p *myProcessor) ProcessMessage(
     handle.UpdateTaskState(protocol.TaskStateWorking, nil)
     result := doWork(ec.Message)
     handle.AddArtifact(result.Artifact, true)
-    handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("done"))
+    handle.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText("done"))
 
     return handle.Events(), nil
 }

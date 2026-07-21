@@ -36,7 +36,7 @@ srv.Start(":8080")   // serves JSON-RPC at "/" and the card at /.well-known/agen
 | `WithJWKSEndpoint(false, "")` | Disable the built-in JWKS route when verification keys are published elsewhere; a non-empty path changes the route. |
 | `WithBasePath(prefix)` | Mount under a subpath. |
 | `WithCompatHandler(h)` | Also serve the legacy v0.2.x wire. |
-| `WithMiddleware(mw...)` | Wrap the HTTP handler chain. |
+| `WithMiddleware(mw...)` | Wrap the HTTP handler chain. → [middleware context example](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/middleware) |
 | `WithCORSEnabled(true)` | Emit CORS headers. |
 | `WithReadTimeout` / `WithWriteTimeout` / `WithIdleTimeout` | HTTP server timeouts. |
 | `WithTelemetryMeterProvider(mp)` / `WithFirstTokenPolicy(p)` | Metrics + TTFT. |
@@ -77,7 +77,7 @@ func (p *proc) ProcessMessage(ctx context.Context, ec *taskmanager.ExecContext) 
     h.UpdateTaskState(protocol.TaskStateWorking, nil)
     result := doWork(ec.Message)
     h.AddArtifact(result.Artifact, true)                              // lastChunk=true
-    h.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("done"))
+    h.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText("done"))
     return h.Events(), nil
 }
 ```
@@ -86,7 +86,7 @@ Verbs: `UpdateTaskState(state, message)`, `AddArtifact(artifact, lastChunk)`,
 `AppendArtifact(artifact, lastChunk)`, `Reply(message)`, plus reads `TaskID()`,
 `GetContextID()`, `GetTask()`, `GetMessageHistory()`. `AddArtifact` starts a
 new artifact (or replaces the same ID); `AppendArtifact` appends a continuation
-chunk, which must reuse that `ArtifactID`. `taskmanager.ReplyText(text)` builds
+chunk, which must reuse that `ArtifactID`. `protocol.NewAgentText(text)` builds
 an agent message.
 
 **`TaskHandle` is just channel operations underneath.** The real contract is
@@ -113,15 +113,17 @@ is a processor written entirely on the raw channel.)
 
 ### Common shapes
 
-- **Pure reply** (no task materializes): `h.Reply(taskmanager.ReplyText("..."))`.
+- **Pure reply** (no task materializes): `h.Reply(protocol.NewAgentText("..."))`.
 - **Live streaming** — run the body in a goroutine so each event reaches
   `SendStreamingMessage` consumers as it happens; check `ctx.Err()` in long
   loops and just close on cancellation (the framework persists `CANCELED`).
-  → [examples/streaming](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/streaming)
+  → [examples/basic](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic)
+  (`/long-task` and client `-stream`)
 - **Multi-turn** — suspend with
-  `h.UpdateTaskState(protocol.TaskStateInputRequired, taskmanager.ReplyText("need more"))`,
+  `h.UpdateTaskState(protocol.TaskStateInputRequired, protocol.NewAgentText("need more"))`,
   close, and handle the follow-up (which echoes the `taskId`) as a new round
   with `ec.Task` set.
+  → [examples/inputrequired](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/inputrequired)
 
 ### Usage constraints
 

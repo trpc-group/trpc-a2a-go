@@ -65,6 +65,31 @@ type sendOutcome struct {
 	message *protocol.Message
 }
 
+// engineStopReason records why this round stopped applying events. The engine
+// still drains the processor channel after stopping so the producer cannot
+// leak on a blocked send.
+type engineStopReason uint8
+
+const (
+	engineStopNone engineStopReason = iota
+	engineStopTerminal
+	engineStopViolation
+	engineStopYield
+)
+
+func (reason engineStopReason) description() string {
+	switch reason {
+	case engineStopTerminal:
+		return "a terminal state"
+	case engineStopViolation:
+		return "a contract violation"
+	case engineStopYield:
+		return "the round yielded (suspended task)"
+	default:
+		return "an unknown stop reason"
+	}
+}
+
 // engine drains one MessageProcessor event channel. It persists every event before
 // broadcasting it (§3.6: GetTask must never lag what a subscriber has seen),
 // applies the close rules (§3.5) at end of stream, and always drains the
@@ -76,42 +101,39 @@ type engine struct {
 	// pipe is the message/stream response channel; nil for unary requests.
 	pipe *taskSubscriber
 
-	// Engine-goroutine-local state (only run() and its callees touch these).
-	terminal            bool
-	violated            bool
-	immediateResultSent bool
-	// yielded records that this round emitted a suspend state (§3.4) and gave
-	// the task up: a continuation may already own it, so later events from this
-	// round are discarded and the close rules are skipped.
-	yielded bool
-	// yieldSnapshot is the task copy taken when the round yielded; it is the
-	// round's unary result (§3.1) — the shared store may already belong to a
-	// continuation by the time finish() runs.
-	yieldSnapshot *protocol.Task
-	// taskTouched records whether THIS round wrote to the task (lazy create,
+	// Drain lifecycle. Only run() and its callees access these fields.
+	stopReason engineStopReason
+	// pendingInlinePush is true for a fresh request carrying an inline config.
+	// The config is registered only when the first task event materializes the
+	// task, so processor startup failures and pure-Message replies leave no orphan.
+	pendingInlinePush bool
+
+	// Unary result derivation.
+	// taskWritten records whether THIS round wrote to the task (lazy create,
 	// status/artifact persist, violation or close-rule write). §3.1 keys the
 	// unary result on it: a continuation round that only emits Messages
 	// answers with the last Message, not the untouched task snapshot.
-	taskTouched bool
-	lastMessage *protocol.Message
-	// lastStatusMsg is the most recent superseded status message moved into the
-	// conversation, compared by identity, so a message reused across several
-	// status updates in this round is not appended to the history more than once.
-	lastStatusMsg *protocol.Message
-	// inlinePushPending is true for a fresh request carrying an inline config.
-	// The config is registered only when the first task event materializes the
-	// task, so processor startup failures and pure-Message replies leave no orphan.
-	inlinePushPending bool
+	taskWritten bool
+	// finalOutcome is the task snapshot or Message returned to a blocking unary
+	// caller after done closes. A yielded task is captured before ownership can
+	// pass to a continuation.
+	finalOutcome sendOutcome
 
+	// Conversation-history deduplication.
+	// lastRolledStatusMessage is compared by identity so a message reused across
+	// several status updates is not appended to history more than once.
+	lastRolledStatusMessage *protocol.Message
+
+	// Immediate-result synchronization.
 	// immediateResult carries the immediate result (first persisted task snapshot
 	// or first Message) to a returnImmediately waiter. Buffered with 1 slot and
 	// written at most once, so the engine never blocks on it.
+	immediateSent   bool
 	immediateResult chan sendOutcome
-	// finalTask is the task snapshot at end of stream; written before done is
-	// closed, read by unary waiters only after done is closed.
-	finalTask *protocol.Task
+
+	// Final-result synchronization.
 	// done is closed when the engine has finished: close rules applied, pipe
-	// closed, execution deregistered.
+	// closed, execution deregistered, and finalOutcome written.
 	done chan struct{}
 }
 
@@ -141,13 +163,19 @@ func (m *TaskManager) prepareExecContext(
 	if err := m.registerExecution(ctx, taskID, exec); err != nil {
 		return nil, err
 	}
+	releaseOnError := true
+	defer func() {
+		if releaseOnError {
+			m.releaseExecution(taskID, exec)
+		}
+	}()
 
 	// Continuation: a message carrying a taskId targets an existing task (§3.4).
 	taskCopy, err := m.resolveContinuation(message)
 	if err != nil {
-		m.releaseExecution(taskID, exec)
 		return nil, err
 	}
+
 	// A follow-up without an explicit contextId continues the task's
 	// conversation; otherwise ec.History would miss the earlier turns.
 	if taskCopy != nil && (message.ContextID == nil || *message.ContextID == "") && taskCopy.ContextID != "" {
@@ -159,6 +187,86 @@ func (m *TaskManager) prepareExecContext(
 		contextID := protocol.GenerateContextID()
 		message.ContextID = &contextID
 	}
+
+	// Finish every fallible validation before recording the request. Rejected
+	// requests must not clear a continuation's current status message or enter
+	// the conversation history.
+	acceptedOutputModes, pushConfig, err := m.prepareExecConfiguration(
+		request.Configuration,
+		taskID,
+		taskCopy != nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	m.commitIncomingMessage(taskID, message, taskCopy)
+	// The manager's history limit shapes the processor snapshot; the request's
+	// historyLength only shapes the task returned to the client.
+	history := m.getConversationHistory(*message.ContextID, m.options.MaxHistoryLength)
+
+	releaseOnError = false
+	return &taskmanager.ExecContext{
+		TaskID:              taskID,
+		Task:                taskCopy,
+		Message:             *message,
+		ContextID:           *message.ContextID,
+		Tenant:              request.Tenant,
+		History:             history,
+		AcceptedOutputModes: acceptedOutputModes,
+		PushConfig:          pushConfig,
+	}, nil
+}
+
+// prepareExecConfiguration snapshots the request configuration and validates
+// its inline push registration. For an existing task the registration can be
+// saved immediately; for a lazy new task the engine defers it until the first
+// task event materializes the task.
+func (m *TaskManager) prepareExecConfiguration(
+	configuration *protocol.SendMessageConfiguration,
+	taskID string,
+	continuation bool,
+) ([]string, *protocol.TaskPushNotificationConfig, error) {
+	if configuration == nil {
+		return nil, nil, nil
+	}
+
+	acceptedOutputModes := append([]string(nil), configuration.AcceptedOutputModes...)
+	if configuration.PushConfig == nil {
+		return acceptedOutputModes, nil, nil
+	}
+	if !m.pushEnabled {
+		return nil, nil, taskmanager.ErrPushNotificationNotSupported()
+	}
+
+	pushConfig := clonePushConfig(*configuration.PushConfig)
+	pushConfig.TaskID = taskID
+	if pushConfig.ID == "" {
+		// Inline registration retains the legacy stable default ID so a
+		// continuation updates the same webhook rather than multiplying it.
+		pushConfig.ID = taskID
+	}
+	if err := push.ValidateConfig(pushConfig); err != nil {
+		return nil, nil, jsonrpc.ErrInvalidParams(err.Error())
+	}
+	if continuation {
+		stored, err := m.pushStore.save(pushConfig)
+		if err != nil {
+			return nil, nil, err
+		}
+		pushConfig = stored
+	}
+	return acceptedOutputModes, &pushConfig, nil
+}
+
+// commitIncomingMessage advances conversation history after all request
+// validation has succeeded. On a continuation, the suspended status message
+// becomes history immediately before the new user turn.
+func (m *TaskManager) commitIncomingMessage(
+	taskID string,
+	message *protocol.Message,
+	taskCopy *protocol.Task,
+) {
 	// A current status message remains on Task.Status until the task advances.
 	// A follow-up advances the conversation: move that message into history
 	// before the new user turn, and clear it from the current status so one Task
@@ -174,53 +282,6 @@ func (m *TaskManager) prepareExecContext(
 		m.storeStatusMessage(taskID, *message.ContextID, statusMessage)
 	}
 	m.storeMessage(*message)
-
-	var acceptedOutputModes []string
-	var pushConfig *protocol.TaskPushNotificationConfig
-	if request.Configuration != nil {
-		acceptedOutputModes = request.Configuration.AcceptedOutputModes
-		pushConfig = request.Configuration.PushConfig
-	}
-	// An inline push config is a registration: reject it when push is not
-	// enabled (the client would otherwise wait on a webhook that can never
-	// fire). For a new lazy task, registration is deferred until the first task
-	// event; a pure-Message exchange must not leave an orphan config behind.
-	if pushConfig != nil {
-		if !m.pushEnabled {
-			m.releaseExecution(taskID, exec)
-			return nil, taskmanager.ErrPushNotificationNotSupported()
-		}
-		cfg := *pushConfig
-		cfg.TaskID = taskID
-		if cfg.ID == "" {
-			// Inline registration retains the legacy stable default ID so a
-			// continuation updates the same webhook rather than multiplying it.
-			cfg.ID = taskID
-		}
-		if err := push.ValidateConfig(cfg); err != nil {
-			m.releaseExecution(taskID, exec)
-			return nil, jsonrpc.ErrInvalidParams(err.Error())
-		}
-		pushConfig = &cfg
-		if taskCopy != nil {
-			if _, err := m.pushStore.save(cfg); err != nil {
-				m.releaseExecution(taskID, exec)
-				return nil, err
-			}
-		}
-	}
-	return &taskmanager.ExecContext{
-		TaskID:    taskID,
-		Task:      taskCopy,
-		Message:   *message,
-		ContextID: *message.ContextID,
-		Tenant:    request.Tenant,
-		// Snapshot truncated per the manager's own limit; the request's
-		// historyLength only shapes the response task, not this snapshot.
-		History:             m.getConversationHistory(*message.ContextID, m.options.MaxHistoryLength),
-		AcceptedOutputModes: acceptedOutputModes,
-		PushConfig:          pushConfig,
-	}, nil
 }
 
 // resolveContinuation loads and validates the task a continuation message
@@ -248,8 +309,7 @@ func (m *TaskManager) resolveContinuation(message *protocol.Message) (*protocol.
 		// A continuation must stay in the task's own conversation: a foreign
 		// contextId would resolve the wrong ec.History and contradict the
 		// task snapshot's ContextID.
-		return nil, jsonrpc.ErrInvalidParams(
-			fmt.Sprintf("message contextId does not match task %s context", taskID))
+		return nil, jsonrpc.ErrInvalidParams(fmt.Sprintf("message contextId does not match task %s context", taskID))
 	}
 	return copyTask(stored), nil
 }
@@ -313,9 +373,9 @@ func (m *TaskManager) startExecution(
 		ec:                ec,
 		exec:              exec,
 		pipe:              exec.pipe,
+		pendingInlinePush: ec.PushConfig != nil && ec.Task == nil,
 		immediateResult:   make(chan sendOutcome, 1),
 		done:              make(chan struct{}),
-		inlinePushPending: ec.PushConfig != nil && ec.Task == nil,
 	}
 	go func() {
 		defer m.engineWg.Done()
@@ -459,9 +519,9 @@ func (m *TaskManager) liveExecution(taskID string) *execution {
 func (eng *engine) run(events <-chan protocol.StreamEvent) {
 	defer eng.finish()
 	for event := range events {
-		if eng.violated || eng.terminal || eng.yielded {
+		if eng.stopReason != engineStopNone {
 			log.Warnf("memory TaskManager: discarding %T for task %s emitted after %s",
-				event, eng.ec.TaskID, eng.stopReason())
+				event, eng.ec.TaskID, eng.stopReason.description())
 			continue
 		}
 		switch e := event.(type) {
@@ -495,17 +555,6 @@ func (eng *engine) run(events <-chan protocol.StreamEvent) {
 			log.Warnf("memory TaskManager: ignoring unknown event %T for task %s", event, eng.ec.TaskID)
 		}
 	}
-}
-
-// stopReason names why the engine stopped applying events (for discard logs).
-func (eng *engine) stopReason() string {
-	if eng.violated {
-		return "a contract violation"
-	}
-	if eng.yielded {
-		return "the round yielded (suspended task)"
-	}
-	return "a terminal state"
 }
 
 // stampTaskEvent fills empty event IDs from the ExecContext and rejects
@@ -551,7 +600,7 @@ func (eng *engine) handleMessage(message *protocol.Message) {
 	m := eng.manager
 	contextID := eng.ec.ContextID
 	m.processReplyMessage(&contextID, message)
-	eng.lastMessage = message
+	eng.finalOutcome = sendOutcome{message: message}
 	eng.offerImmediateResult(sendOutcome{message: message})
 
 	response := protocol.NewStreamResponseMessage(message)
@@ -587,10 +636,12 @@ func (m *TaskManager) storeStatusMessage(taskID, contextID string, message *prot
 // Pointer checks avoid redundant work within a round; storeMessage provides the
 // final MessageID-based idempotency guard.
 func (eng *engine) rollStatusMessage(message *protocol.Message) {
-	if message == nil || message == eng.lastStatusMsg || message == eng.lastMessage {
+	if message == nil ||
+		message == eng.lastRolledStatusMessage ||
+		message == eng.finalOutcome.message {
 		return
 	}
-	eng.lastStatusMsg = message
+	eng.lastRolledStatusMessage = message
 	eng.manager.storeStatusMessage(eng.ec.TaskID, eng.ec.ContextID, message)
 }
 
@@ -632,7 +683,7 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 		}
 		log.Warnf("memory TaskManager: discarding status %s for task %s already in terminal state %s",
 			event.Status.State, eng.ec.TaskID, task.Status.State)
-		eng.terminal = true
+		eng.stopReason = engineStopTerminal
 		return
 	}
 	var previousStatusMessage *protocol.Message
@@ -643,13 +694,14 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 		previousStatusMessage = task.Status.Message
 		task.Status = event.Status
 	}
-	eng.taskTouched = true
+	eng.taskWritten = true
 	snapshot := eng.immediateSnapshotLocked(task)
+	var yieldOutcome sendOutcome
 	if yielding {
 		// The round is about to yield ownership: keep its own copy as the unary
 		// result, since the shared entry may belong to a continuation before
 		// finish() runs.
-		eng.yieldSnapshot = copyTask(task)
+		yieldOutcome.task = copyTask(task)
 	}
 	m.taskMu.Unlock()
 	if err := eng.persistInlinePushConfig(); err != nil {
@@ -666,7 +718,8 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 
 	response := protocol.NewStreamResponseStatusUpdate(event)
 	if yielding {
-		eng.yielded = true
+		eng.finalOutcome = yieldOutcome
+		eng.stopReason = engineStopYield
 		// Queue automatic push before exposing the suspend state. A full bounded
 		// queue may delay publication, but a client can never observe a state it
 		// cannot yet continue. The handoff starts before enqueue so a client that
@@ -684,7 +737,7 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 	eng.broadcast(response, snapshot)
 
 	if final {
-		eng.terminal = true
+		eng.stopReason = engineStopTerminal
 		m.cleanSubscribers(eng.ec.TaskID)
 		// Nothing can follow a terminal frame: end the response stream here
 		// instead of trusting the MessageProcessor to close its channel promptly.
@@ -705,7 +758,7 @@ func (eng *engine) handleArtifact(event *protocol.TaskArtifactUpdateEvent) {
 		m.taskMu.Unlock()
 		log.Warnf("memory TaskManager: discarding artifact for task %s already in terminal state %s",
 			eng.ec.TaskID, task.Status.State)
-		eng.terminal = true
+		eng.stopReason = engineStopTerminal
 		return
 	}
 	if !exists {
@@ -721,7 +774,7 @@ func (eng *engine) handleArtifact(event *protocol.TaskArtifactUpdateEvent) {
 		log.Warnf("memory TaskManager: artifact %s for task %s used append=true with no prior chunk; stored as a new artifact",
 			event.Artifact.ArtifactID, eng.ec.TaskID)
 	}
-	eng.taskTouched = true
+	eng.taskWritten = true
 	snapshot := eng.immediateSnapshotLocked(task)
 	m.taskMu.Unlock()
 	if err := eng.persistInlinePushConfig(); err != nil {
@@ -733,10 +786,10 @@ func (eng *engine) handleArtifact(event *protocol.TaskArtifactUpdateEvent) {
 }
 
 func (eng *engine) persistInlinePushConfig() error {
-	if !eng.inlinePushPending {
+	if !eng.pendingInlinePush {
 		return nil
 	}
-	eng.inlinePushPending = false
+	eng.pendingInlinePush = false
 	if _, err := eng.manager.pushStore.save(*eng.ec.PushConfig); err != nil {
 		return fmt.Errorf("persist inline push config: %w", err)
 	}
@@ -760,7 +813,7 @@ func (eng *engine) newTask(status protocol.TaskStatus) *protocol.Task {
 // immediate result (returnImmediately), or nil once one was already taken.
 // The caller must hold taskMu so the snapshot equals what was just persisted.
 func (eng *engine) immediateSnapshotLocked(task *protocol.Task) *protocol.Task {
-	if eng.immediateResultSent {
+	if eng.immediateSent {
 		return nil
 	}
 	return copyTask(task)
@@ -788,10 +841,10 @@ func (eng *engine) broadcastWithoutPush(response protocol.StreamResponse, snapsh
 
 // offerImmediateResult publishes the immediate result exactly once.
 func (eng *engine) offerImmediateResult(out sendOutcome) {
-	if eng.immediateResultSent {
+	if eng.immediateSent {
 		return
 	}
-	eng.immediateResultSent = true
+	eng.immediateSent = true
 	eng.immediateResult <- out // buffered, single write: never blocks
 }
 
@@ -818,7 +871,7 @@ func (eng *engine) closePipe() {
 // stream is drained and discarded by run().
 func (eng *engine) violate(reason string) {
 	log.Errorf("memory TaskManager: contract violation on task %s: %s", eng.ec.TaskID, reason)
-	eng.violated = true
+	eng.stopReason = engineStopViolation
 
 	m := eng.manager
 	event := eng.statusEvent(protocol.TaskStateFailed, eng.failureStatusMessage(reason))
@@ -829,14 +882,13 @@ func (eng *engine) violate(reason string) {
 		return
 	}
 	task.Status = event.Status
-	eng.taskTouched = true
+	eng.taskWritten = true
 	// The framework-written FAILED is a task event (§3.1): offer it as the
 	// immediateResult outcome so a returnImmediately caller is not left waiting for
 	// the violating processor to close its channel.
 	snapshot := eng.immediateSnapshotLocked(task)
 	m.taskMu.Unlock()
 
-	eng.terminal = true
 	eng.broadcast(protocol.NewStreamResponseStatusUpdate(event), snapshot)
 	m.cleanSubscribers(eng.ec.TaskID)
 	eng.closePipe()
@@ -848,12 +900,11 @@ func (eng *engine) violate(reason string) {
 func (eng *engine) finish() {
 	m := eng.manager
 
-	if eng.yielded {
+	if eng.stopReason == engineStopYield {
 		// The round yielded at suspend (§3.4): ownership moved on — a
 		// continuation or a no-live cancel may already be writing the task, so
-		// no close rule may touch it. The unary result is the suspend-time
+		// no close rule may touch it. finalOutcome already holds the suspend-time
 		// snapshot; the pipe closed and the slot was freed at yield.
-		eng.finalTask = eng.yieldSnapshot
 		eng.exec.cancel() // release the detached ctx resources
 		close(eng.done)
 		return
@@ -873,7 +924,7 @@ func (eng *engine) finish() {
 			// never reached because the task is terminal.
 			closing = eng.statusEvent(protocol.TaskStateCanceled, nil)
 			task.Status = closing.Status
-		case !eng.taskTouched:
+		case !eng.taskWritten:
 			// This round never wrote to the task: it must not apply close rules
 			// to state some other round left behind (§3.5 is round-scoped).
 		case task.Status.State == protocol.TaskStateSubmitted ||
@@ -889,12 +940,12 @@ func (eng *engine) finish() {
 		}
 	}
 	if closing != nil {
-		eng.taskTouched = true
+		eng.taskWritten = true
 	}
 	// §3.1: only rounds that wrote to the task answer with a Task snapshot; a
 	// continuation that merely replied with Messages answers with the Message.
-	if exists && eng.taskTouched {
-		eng.finalTask = copyTask(task)
+	if exists && eng.taskWritten {
+		eng.finalOutcome = sendOutcome{task: copyTask(task)}
 	}
 	m.taskMu.Unlock()
 

@@ -18,7 +18,7 @@ go get trpc.group/trpc-go/trpc-a2a-go/v2
 
 ## 最短体验路径
 
-想先跑起来，推荐从 `examples/basic` 开始：服务端用 `TaskHandle` 写法，客户端覆盖发现、同步/流式调用、多轮、任务查询和取消。
+想先跑起来，推荐从 `examples/basic` 开始：服务端用 `TaskHandle` 写法，客户端覆盖阻塞/流式调用、长任务启动、任务查询、订阅和取消。
 
 ```bash
 # 终端 1：启动 server
@@ -34,9 +34,8 @@ go run main.go
 
 | 示例 | 重点能力 |
 | --- | --- |
-| [`examples/simple`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple) | 最小 server/client、阻塞 send、`returnImmediately`、SSE 流式、裸 channel。 |
-| [`examples/basic`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic) | `TaskHandle` 风格、多轮、任务管理、agent card 发现、CLI。 |
-| [`examples/streaming`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/streaming) | 长任务实时进度和流式消费。 |
+| [`examples/simple`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple) | 裸 channel 最小示例；client 自动演示阻塞 send、`returnImmediately` 加轮询、streaming 和纯 Message。 |
+| [`examples/basic`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic) | `TaskHandle` 交互式 chat；长任务以及 GetTask、SubscribeToTask、CancelTask。 |
 | [`examples/auth`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth) | JWT、API key、OAuth2、鉴权后的 extended agent card。 |
 | [`examples/jwks`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks) | push notification、JWT 签名、JWKS 校验。 |
 | [`examples/redis`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis) | Redis TaskManager、任务/会话持久化。 |

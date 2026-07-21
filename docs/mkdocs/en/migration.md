@@ -118,7 +118,7 @@ func (p *myProcessor) ProcessMessage(
     text := extractText(ec.Message)
     if text == "" {
         // A pure message reply: no task comes into existence this round.
-        handle.Reply(taskmanager.ReplyText("input message must contain text"))
+        handle.Reply(protocol.NewAgentText("input message must contain text"))
         return handle.Events(), nil
     }
 
@@ -131,7 +131,7 @@ func (p *myProcessor) ProcessMessage(
         ArtifactID: "processed-" + handle.TaskID(),
         Parts:      []*protocol.Part{protocol.NewTextPart(result)},
     }, true /* lastChunk */)
-    handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText(result))
+    handle.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText(result))
 
     return handle.Events(), nil
 }

@@ -598,6 +598,29 @@ func (s *A2AServer) unmarshalParams(params json.RawMessage, v interface{}) *json
 	return nil
 }
 
+// validateSendMessageParams checks the shared SendMessage / SendStreamingMessage
+// request shape before either handler opens a task-manager round.
+func (s *A2AServer) validateSendMessageParams(
+	ctx context.Context, params *protocol.SendMessageParams,
+) *jsonrpc.Error {
+	if params.Message.Role != protocol.MessageRoleUser {
+		return jsonrpc.ErrInvalidParams("message role must be ROLE_USER")
+	}
+	if len(params.Message.Parts) == 0 {
+		return jsonrpc.ErrInvalidParams("message with at least one part is required")
+	}
+	for _, part := range params.Message.Parts {
+		if part == nil {
+			return jsonrpc.ErrInvalidParams("message parts must not contain null")
+		}
+	}
+	if params.Configuration != nil && params.Configuration.PushConfig != nil &&
+		!s.pushAvailableForTenant(ctx, params.Tenant) {
+		return taskmanager.ErrPushNotificationNotSupported()
+	}
+	return nil
+}
+
 // handleTasksGet handles the tasks_get method.
 func (s *A2AServer) handleTasksGet(ctx context.Context, w http.ResponseWriter, request jsonrpc.Request) {
 	var params protocol.TaskQueryParams
@@ -714,8 +737,7 @@ func (s *A2AServer) handleTaskManagerError(
 	} else {
 		// Otherwise, wrap it as a generic internal error.
 		log.Errorf("Unexpected error calling %s for task %s: %v", operation, taskID, err)
-		s.writeJSONRPCError(w, id,
-			jsonrpc.ErrInternalError(fmt.Sprintf("%s failed: %v", operation, err)))
+		s.writeJSONRPCError(w, id, jsonrpc.ErrInternalError(fmt.Sprintf("%s failed: %v", operation, err)))
 	}
 }
 
@@ -878,20 +900,19 @@ func (s *A2AServer) handleMessageSend(ctx context.Context, w http.ResponseWriter
 
 	var params protocol.SendMessageParams
 	if err := s.unmarshalParams(request.Params, &params); err != nil {
-		tracker.setError("invalid_params")
+		tracker.setError(errTypeInvalidParams)
 		s.writeJSONRPCError(w, request.ID, err)
 		return
 	}
-	if params.Configuration != nil && params.Configuration.PushConfig != nil &&
-		!s.pushAvailableForTenant(ctx, params.Tenant) {
-		tracker.setError("push_notification_not_supported")
-		s.writeJSONRPCError(w, request.ID, taskmanager.ErrPushNotificationNotSupported())
+	if err := s.validateSendMessageParams(ctx, &params); err != nil {
+		tracker.setValidateSendMessageError(err)
+		s.writeJSONRPCError(w, request.ID, err)
 		return
 	}
 	// Delegate to the task manager.
 	message, err := s.taskManager.OnSendMessage(ctx, params)
 	if err != nil {
-		tracker.setError("message_processing_failed")
+		tracker.setError(errTypeMessageProcessingFailed)
 		s.handleTaskManagerError(w, request.ID, err, "OnSendMessage", params.RPCID)
 		return
 	}
@@ -905,23 +926,15 @@ func (s *A2AServer) handleMessageStream(ctx context.Context, w http.ResponseWrit
 
 	var params protocol.SendMessageParams
 	if err := s.unmarshalParams(request.Params, &params); err != nil {
-		tracker.setError("invalid_params")
+		tracker.setError(errTypeInvalidParams)
 		tracker.record(ctx)
 		s.writeJSONRPCError(w, request.ID, err)
 		return
 	}
-
-	if params.Message.Role == "" || len(params.Message.Parts) == 0 {
-		tracker.setError("invalid_params")
+	if err := s.validateSendMessageParams(ctx, &params); err != nil {
+		tracker.setValidateSendMessageError(err)
 		tracker.record(ctx)
-		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInvalidParams("message with at least one part is required"))
-		return
-	}
-	if params.Configuration != nil && params.Configuration.PushConfig != nil &&
-		!s.pushAvailableForTenant(ctx, params.Tenant) {
-		tracker.setError("push_notification_not_supported")
-		tracker.record(ctx)
-		s.writeJSONRPCError(w, request.ID, taskmanager.ErrPushNotificationNotSupported())
+		s.writeJSONRPCError(w, request.ID, err)
 		return
 	}
 
@@ -929,7 +942,7 @@ func (s *A2AServer) handleMessageStream(ctx context.Context, w http.ResponseWrit
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		log.Error("Streaming is not supported by the underlying http responseWriter")
-		tracker.setError("streaming_not_supported")
+		tracker.setError(errTypeStreamingNotSupported)
 		tracker.record(ctx)
 		s.writeJSONRPCError(w, request.ID, jsonrpc.ErrInternalError("server does not support streaming"))
 		return
@@ -938,7 +951,7 @@ func (s *A2AServer) handleMessageStream(ctx context.Context, w http.ResponseWrit
 	// Get the event channel from the task manager.
 	eventsChan, err := s.taskManager.OnSendMessageStream(ctx, params)
 	if err != nil {
-		tracker.setError("subscribe_failed")
+		tracker.setError(errTypeSubscribeFailed)
 		tracker.record(ctx)
 		// Preserves a core *jsonrpc.Error (e.g. invalid params) and wraps the rest.
 		s.handleTaskManagerError(w, request.ID, err, "OnSendMessageStream", params.RPCID)
@@ -1002,7 +1015,7 @@ func trackStreamEvents(
 		for {
 			select {
 			case <-ctx.Done():
-				tracker.setError("client_disconnected")
+				tracker.setError(errTypeClientDisconnected)
 				// Abandoning the source pipe would wedge a blocking-send engine;
 				// keep draining it to closure (the downstream tunnel drains the
 				// wrapper channel, not this source).
@@ -1015,7 +1028,7 @@ func trackStreamEvents(
 				tracker.onEvent(event)
 				select {
 				case <-ctx.Done():
-					tracker.setError("client_disconnected")
+					tracker.setError(errTypeClientDisconnected)
 					drainToClose(eventsChan)
 					return
 				case tracked <- event:

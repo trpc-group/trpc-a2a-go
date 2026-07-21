@@ -25,10 +25,9 @@ tRPC AI ecosystem
 - [Documentation](#documentation)
 - [Examples](#examples)
   - [Simple Example](#1-simple-example-examplessimple)
-  - [Streaming Examples](#2-streaming-examples-examplesstreaming)
-  - [Basic Example](#3-basic-example-examplesbasic)
-  - [Authentication Examples](#4-authentication-examples-examplesauth)
-  - [v0 Compatibility Example](#5-v0-compatibility-example-examplescompat)
+  - [Basic Example](#2-basic-example-examplesbasic)
+  - [Authentication Examples](#3-authentication-examples-examplesauth)
+  - [v0 Compatibility Example](#4-v0-compatibility-example-examplescompat)
 - [Creating Your Own Agent](#creating-your-own-agent)
 - [Migrating from v0.x](#migrating-from-v0x)
 - [Authentication](#authentication)
@@ -49,13 +48,7 @@ cd examples/basic/server
 go run main.go
 
 # Specify different host and port
-go run main.go --host 0.0.0.0 --port 9000
-
-# Disable streaming capability
-go run main.go --no-stream
-
-# Disable CORS headers
-go run main.go --no-cors
+go run main.go -host 0.0.0.0 -port 9000
 ```
 
 ### Using the Basic CLI Client
@@ -66,16 +59,10 @@ cd examples/basic/client
 go run main.go
 
 # Connect to a specific agent
-go run main.go --agent http://localhost:9000/
+go run main.go -host localhost:9000
 
-# Specify request timeout
-go run main.go --timeout 30s
-
-# Disable streaming mode
-go run main.go --no-stream
-
-# Use a specific context ID (conversation)
-go run main.go --context "your-context-id"
+# Consume ordinary messages through message/stream
+go run main.go -stream
 ```
 
 ## Documentation
@@ -102,53 +89,37 @@ The repository includes several examples demonstrating different aspects of the 
 
 ### 1. Simple Example ([examples/simple](examples/simple))
 
-A minimal example demonstrating the core A2A functionality in the native
-channel style (the raw `MessageProcessor` contract):
-- Simple server that reverses text input, emitting events on the raw channel
-- Client demonstrating the three consumption modes: blocking send,
-  `returnImmediately`, and streaming — all served by one processor
-- Basic task lifecycle (lazy creation, processing, completion) and artifacts
+A minimal example of the native channel style (the raw `MessageProcessor`
+contract). The server reverses text, while the client automatically exercises
+blocking send, `returnImmediately` plus polling, streaming, and a pure-message
+reply without creating a task.
+
+Terminal 1 — start the server from the repository root:
 
 ```bash
-# Start the simple server
 cd examples/simple/server
 go run main.go
-
-# Run the simple client (runs the blocking / returnImmediately / streaming demos)
-cd examples/simple/client
-go run main.go
-
-# Point the client at a different server
-go run main.go -host localhost:8080
 ```
 
-### 2. Streaming Examples ([examples/streaming](examples/streaming))
-
-Examples focused on streaming capabilities:
-- Server implementation with streaming response support
-- Client implementation for handling streaming data
+Terminal 2 — run all four client demos from the repository root:
 
 ```bash
-# Start the streaming server
-cd examples/streaming/server
-go run main.go
-
-# Run the streaming client
-cd examples/streaming/client
+cd examples/simple/client
 go run main.go
 ```
 
-### 3. Basic Example ([examples/basic](examples/basic))
+### 2. Basic Example ([examples/basic](examples/basic))
 
-A comprehensive example showcasing:
-- A versatile text processing server with multiple operations
-- A feature-rich CLI client with support for all core A2A protocol APIs
-- Streaming and non-streaming modes
-- Multi-turn conversations with session management
-- Task management (create, cancel, get)
-- Agent capability discovery
+An interactive `TaskHandle`-based chat example showcasing:
 
-### 4. Authentication Examples ([examples/auth](examples/auth))
+- Blocking `message/send` and streaming `message/stream`
+- Long-running tasks started with `returnImmediately`
+- GetTask, SubscribeToTask, and CancelTask
+- Conversation grouping and message history through `contextId`
+
+See [examples/basic/README.md](examples/basic/README.md) for the REPL commands.
+
+### 3. Authentication Examples ([examples/auth](examples/auth))
 
 Complete examples demonstrating authentication:
 - Server implementation with various authentication methods
@@ -180,7 +151,7 @@ go run main.go --auth jwt --jwt-secret-file "path/to/jwt-secret.key"
 go run main.go --auth jwt --message "Custom message" --session-id "session123"
 ```
 
-### 5. v0 Compatibility Example ([examples/compat](examples/compat))
+### 4. v0 Compatibility Example ([examples/compat](examples/compat))
 
 One server, both protocol generations: v1.0 clients on the standard wire and
 unmodified v0.2.x clients through [compat/v0](compat/v0) — same endpoint,
@@ -236,7 +207,7 @@ func (p *myMessageProcessor) ProcessMessage(
     text := extractTextFromMessage(ec.Message)
     if text == "" {
         // A pure-message reply: no task comes into existence this round.
-        handle.Reply(taskmanager.ReplyText("input message must contain text."))
+        handle.Reply(protocol.NewAgentText("input message must contain text."))
         return handle.Events(), nil
     }
 
@@ -252,7 +223,7 @@ func (p *myMessageProcessor) ProcessMessage(
 
     // A terminal status ends the round; the message/send caller receives
     // this final task snapshot (with its artifacts).
-    handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("Processed: "+result))
+    handle.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText("Processed: "+result))
     return handle.Events(), nil
 }
 
@@ -381,7 +352,7 @@ func (p *myProcessor) ProcessMessage(
     handle.UpdateTaskState(protocol.TaskStateWorking, nil)
     result := doWork(ec.Message)
     handle.AddArtifact(result.Artifact, true)
-    handle.UpdateTaskState(protocol.TaskStateCompleted, taskmanager.ReplyText("done"))
+    handle.UpdateTaskState(protocol.TaskStateCompleted, protocol.NewAgentText("done"))
 
     return handle.Events(), nil
 }
