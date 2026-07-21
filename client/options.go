@@ -23,11 +23,25 @@ type HTTPReqHandler interface {
 	Handle(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error)
 }
 
-// HTTPReqMiddleware wraps an HTTPReqHandler with additional request behavior.
-// Wrap is called once when the A2AClient is constructed. The returned handler
-// may be called concurrently and must be safe for concurrent use.
-type HTTPReqMiddleware interface {
+// Middleware wraps an HTTPReqHandler with additional request behavior.
+// When configured with WithMiddleware, Wrap is called once when the A2AClient
+// is constructed. The returned handler may be called concurrently and must be
+// safe for concurrent use.
+type Middleware interface {
 	Wrap(next HTTPReqHandler) HTTPReqHandler
+}
+
+// MiddlewareChain represents HTTP request middleware that can be composed.
+// Each middleware in the chain must be non-nil.
+type MiddlewareChain []Middleware
+
+// Wrap applies the chain to handler. Middleware is applied in reverse order,
+// so the first middleware in the chain becomes the outermost wrapper.
+func (chain MiddlewareChain) Wrap(handler HTTPReqHandler) HTTPReqHandler {
+	for i := len(chain) - 1; i >= 0; i-- {
+		handler = chain[i].Wrap(handler)
+	}
+	return handler
 }
 
 // WithHTTPClient sets a custom http.Client for the A2AClient.
@@ -135,12 +149,12 @@ func WithHTTPReqHandler(handler HTTPReqHandler) Option {
 	}
 }
 
-// WithHTTPReqMiddleware adds HTTP request middleware to the A2AClient.
+// WithMiddleware adds HTTP request middleware to the A2AClient.
 // Multiple middleware are applied in registration order, with the first
-// middleware becoming the outermost wrapper. Nil middleware is ignored.
-func WithHTTPReqMiddleware(middlewares ...HTTPReqMiddleware) Option {
+// middleware becoming the outermost wrapper. Each middleware must be non-nil.
+func WithMiddleware(middlewares ...Middleware) Option {
 	return func(c *A2AClient) {
-		c.httpReqMiddlewares = append(c.httpReqMiddlewares, middlewares...)
+		c.middlewares = append(c.middlewares, middlewares...)
 	}
 }
 
