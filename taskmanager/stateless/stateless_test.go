@@ -116,13 +116,15 @@ func TestOnSendMessage_MessageOnly(t *testing.T) {
 		ec *taskmanager.ExecContext,
 	) (<-chan protocol.StreamEvent, error) {
 		captured = ec
+		currentTaskID := ec.TaskID
 		return eventChannel(
 			&protocol.Message{
 				Role:  protocol.MessageRoleUser,
 				Parts: []*protocol.Part{protocol.NewTextPart("first")},
 			},
 			&protocol.Message{
-				Parts: []*protocol.Part{protocol.NewTextPart("last")},
+				TaskID: &currentTaskID,
+				Parts:  []*protocol.Part{protocol.NewTextPart("last")},
 			},
 		), nil
 	}))
@@ -373,7 +375,7 @@ func TestOnSendMessage_RejectsNonMessageEventsAndDrains(t *testing.T) {
 
 func TestOnSendMessage_RejectsInvalidMessages(t *testing.T) {
 	foreignContext := "foreign-context"
-	taskID := "task-1"
+	foreignTaskID := "foreign-task"
 	tests := []struct {
 		name    string
 		message *protocol.Message
@@ -386,9 +388,9 @@ func TestOnSendMessage_RejectsInvalidMessages(t *testing.T) {
 			},
 		},
 		{
-			name: "task-bound message",
+			name: "foreign task",
 			message: &protocol.Message{
-				TaskID: &taskID,
+				TaskID: &foreignTaskID,
 				Parts:  []*protocol.Part{protocol.NewTextPart("reply")},
 			},
 		},
@@ -449,12 +451,16 @@ func TestOnSendMessage_RequestCancellationCancelsProcessor(t *testing.T) {
 
 func TestOnSendMessageStream_MessageOnly(t *testing.T) {
 	manager := newManager(t, processorFunc(func(
-		context.Context,
-		*taskmanager.ExecContext,
+		_ context.Context,
+		ec *taskmanager.ExecContext,
 	) (<-chan protocol.StreamEvent, error) {
+		currentTaskID := ec.TaskID
 		return eventChannel(
 			&protocol.Message{Parts: []*protocol.Part{protocol.NewTextPart("one")}},
-			&protocol.Message{Parts: []*protocol.Part{protocol.NewTextPart("two")}},
+			&protocol.Message{
+				TaskID: &currentTaskID,
+				Parts:  []*protocol.Part{protocol.NewTextPart("two")},
+			},
 		), nil
 	}))
 
@@ -473,6 +479,9 @@ func TestOnSendMessageStream_MessageOnly(t *testing.T) {
 		}
 		if message == nil || message.Role != protocol.MessageRoleAgent {
 			t.Errorf("response[%d] = %#v, want agent Message", i, responses[i].Result)
+		}
+		if message != nil && message.TaskID != nil {
+			t.Errorf("response[%d] task ID = %q, want nil", i, *message.TaskID)
 		}
 	}
 }

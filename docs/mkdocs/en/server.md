@@ -245,6 +245,11 @@ status and artifact events are rejected. `GetTask`, `ListTasks`, `CancelTask`,
 `returnImmediately=true` are unsupported. Use memory or Redis when clients
 need any of those task capabilities.
 
+A processor may copy the current `ExecContext.TaskID` onto a reply Message, as
+it can with the task-capable managers. Stateless accepts that execution-local
+ID and removes it before returning the Message because no Task is retained;
+an ID belonging to another execution is rejected.
+
 This also means stateless does not preserve the legacy v0.2.x non-blocking
 unary default. `compat/v0` maps an absent configuration or `blocking=false` to
 `returnImmediately=true`, which stateless rejects. A legacy unary client must

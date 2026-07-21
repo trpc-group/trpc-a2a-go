@@ -198,6 +198,10 @@ processor 只能发 `*protocol.Message`，status 与 artifact 事件会被拒绝
 task continuation，以及一元请求的 `returnImmediately=true` 都不支持。
 客户端需要其中任一任务能力时，请使用 memory 或 Redis。
 
+processor 可以像使用有状态 manager 时一样，把当前 `ExecContext.TaskID`
+写入回复 Message。stateless 会接受这个本轮 ID，并在返回前清掉它，因为并没有
+保存对应的 Task；属于其他执行轮次的 taskId 仍会被拒绝。
+
 因此，stateless 也不保留 legacy v0.2.x 的一元非阻塞默认行为。
 `compat/v0` 会把缺省配置或 `blocking=false` 转成
 `returnImmediately=true`，随后被 stateless 拒绝。legacy 一元客户端必须显式

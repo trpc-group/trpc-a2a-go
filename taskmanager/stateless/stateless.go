@@ -50,6 +50,8 @@ func (*TaskManager) SupportsPushNotifications() bool { return false }
 
 // OnSendMessage runs a request-bound processor round and returns its last
 // Message. Task events, task continuations, and returnImmediately are rejected.
+// A Message may identify the current execution by ExecContext.TaskID; the
+// manager removes that ID before returning because it does not retain a Task.
 func (m *TaskManager) OnSendMessage(
 	ctx context.Context,
 	request protocol.SendMessageParams,
@@ -285,9 +287,10 @@ func normalizeMessage(
 			event,
 		))
 	}
-	if message.TaskID != nil && *message.TaskID != "" {
+	if message.TaskID != nil && *message.TaskID != "" &&
+		*message.TaskID != ec.TaskID {
 		return nil, taskmanager.ErrInvalidAgentResponse(
-			"stateless TaskManager does not accept task-bound Message events",
+			"processor emitted Message for a foreign task",
 		)
 	}
 	if message.ContextID != nil && *message.ContextID != "" &&
