@@ -56,7 +56,7 @@ func (m *TaskManager) OnSendMessage(
 	ctx context.Context,
 	request protocol.SendMessageParams,
 ) (*protocol.SendMessageResponse, error) {
-	events, ec, cancel, err := m.startExecution(ctx, &request, true)
+	events, ec, cancel, err := m.startExecution(ctx, &request, false, true)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +99,7 @@ func (m *TaskManager) OnSendMessageStream(
 	ctx context.Context,
 	request protocol.SendMessageParams,
 ) (<-chan protocol.StreamResponse, error) {
-	events, ec, cancel, err := m.startExecution(ctx, &request, false)
+	events, ec, cancel, err := m.startExecution(ctx, &request, true, false)
 	if err != nil {
 		return nil, err
 	}
@@ -205,12 +205,13 @@ func (*TaskManager) OnResubscribe(
 func (m *TaskManager) startExecution(
 	ctx context.Context,
 	request *protocol.SendMessageParams,
+	streaming bool,
 	rejectReturnImmediately bool,
 ) (<-chan protocol.StreamEvent, *taskmanager.ExecContext, context.CancelFunc, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, nil, err
 	}
-	ec, err := prepareExecContext(request, rejectReturnImmediately)
+	ec, err := prepareExecContext(request, streaming, rejectReturnImmediately)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -232,6 +233,7 @@ func (m *TaskManager) startExecution(
 
 func prepareExecContext(
 	request *protocol.SendMessageParams,
+	streaming bool,
 	rejectReturnImmediately bool,
 ) (*taskmanager.ExecContext, error) {
 	if request.Message.TaskID != nil && *request.Message.TaskID != "" {
@@ -270,6 +272,7 @@ func prepareExecContext(
 	return &taskmanager.ExecContext{
 		TaskID:              protocol.GenerateTaskID(),
 		Message:             message,
+		Streaming:           streaming,
 		ContextID:           contextID,
 		Tenant:              request.Tenant,
 		AcceptedOutputModes: acceptedOutputModes,

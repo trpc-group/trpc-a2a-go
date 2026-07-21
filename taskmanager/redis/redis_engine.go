@@ -294,6 +294,7 @@ func (m *TaskManager) prepareExecution(
 		TaskID:              taskID,
 		Task:                task,
 		Message:             *message,
+		Streaming:           streaming,
 		ContextID:           contextID,
 		Tenant:              request.Tenant,
 		History:             history,

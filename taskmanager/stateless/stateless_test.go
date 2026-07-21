@@ -93,6 +93,20 @@ func collectStream(t *testing.T, stream <-chan protocol.StreamResponse) []protoc
 	}
 }
 
+func checkExecContextStreaming(
+	t *testing.T,
+	ec *taskmanager.ExecContext,
+	want bool,
+) {
+	t.Helper()
+	if ec == nil {
+		t.Fatal("processor did not receive ExecContext")
+	}
+	if ec.Streaming != want {
+		t.Errorf("ExecContext streaming = %v, want %v", ec.Streaming, want)
+	}
+}
+
 func TestNewTaskManager(t *testing.T) {
 	if _, err := NewTaskManager(nil); err == nil {
 		t.Fatal("NewTaskManager(nil) succeeded, want error")
@@ -168,6 +182,7 @@ func TestOnSendMessage_MessageOnly(t *testing.T) {
 	if captured.Task != nil {
 		t.Errorf("ExecContext task = %#v, want nil", captured.Task)
 	}
+	checkExecContextStreaming(t, captured, false)
 	if captured.History != nil {
 		t.Errorf("ExecContext history = %#v, want nil", captured.History)
 	}
@@ -450,10 +465,12 @@ func TestOnSendMessage_RequestCancellationCancelsProcessor(t *testing.T) {
 }
 
 func TestOnSendMessageStream_MessageOnly(t *testing.T) {
+	var captured *taskmanager.ExecContext
 	manager := newManager(t, processorFunc(func(
 		_ context.Context,
 		ec *taskmanager.ExecContext,
 	) (<-chan protocol.StreamEvent, error) {
+		captured = ec
 		currentTaskID := ec.TaskID
 		return eventChannel(
 			&protocol.Message{Parts: []*protocol.Part{protocol.NewTextPart("one")}},
@@ -472,6 +489,7 @@ func TestOnSendMessageStream_MessageOnly(t *testing.T) {
 	if len(responses) != 2 {
 		t.Fatalf("response count = %d, want 2", len(responses))
 	}
+	checkExecContextStreaming(t, captured, true)
 	for i, want := range []string{"one", "two"} {
 		message := responses[i].GetMessage()
 		if got := messageText(message); got != want {

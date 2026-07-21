@@ -33,6 +33,13 @@ type ExecContext struct {
 	// Message is the incoming message to process.
 	Message protocol.Message
 
+	// Streaming reports which RPC shape started this round. It is true for
+	// SendStreamingMessage and false for SendMessage, including a SendMessage
+	// configured with returnImmediately. Processors can use it when their live
+	// stream emits deltas but their unary response must end with a complete
+	// Message.
+	Streaming bool
+
 	// ContextID is the conversation context ID. When the request does not
 	// carry one, the framework generates it before invoking the MessageProcessor.
 	ContextID string
