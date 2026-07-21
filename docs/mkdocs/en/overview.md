@@ -29,32 +29,57 @@ the runtime contract see [Server](server.md) and [Client](client.md).
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    subgraph clients["Clients"]
-        C1["A2A client v1.0"]
-        C2["legacy v0.2.x client"]
-    end
-    subgraph server["server"]
-        direction TB
-        AUTH["auth chain"]
-        RPC["JSON-RPC + SSE dispatch"]
-        CARD["agent cards / discovery"]
-        COMPAT["compat/v0 handler"]
-    end
-    TM["TaskManager<br/>memory or redis"]
-    MP["MessageProcessor<br/>your agent"]
+The diagram below shows the production Redis path. The same server,
+`TaskManager`, and `MessageProcessor` boundaries apply to other storage
+implementations; Redis adds shared state and the optional cross-node event
+transport.
 
-    C1 --> AUTH
-    C2 --> AUTH
-    AUTH --> RPC
-    RPC --> TM
-    COMPAT -.-> TM
-    TM --> MP
-    MP -- "event stream" --> TM
+```mermaid
+flowchart LR
+    subgraph CALLERS["Callers"]
+        APP["A2A application / orchestrator"]
+        LEGACY["legacy v0.2.x caller"]
+    end
+
+    subgraph ADAPTERS["Wire adapters"]
+        CLIENT["client<br/>JSON-RPC / SSE"]
+        SERVER["server<br/>agent card · auth · method dispatch"]
+        COMPAT["compat/v0<br/>v0 wire ↔ v1 types"]
+    end
+
+    subgraph RUNTIME["Task runtime"]
+        PORT["taskmanager.TaskManager<br/>framework port"]
+        RT["redis.TaskManager<br/>round engine · lifecycle · persistence · fan-out"]
+        MP["MessageProcessor<br/>your agent"]
+    end
+
+    subgraph STATE["Shared Redis state and distribution"]
+        STORE[("Task · message · conversation · push config")]
+        TRANSPORT["internal task-event transport"]
+        STREAMS[("per-task Redis Streams")]
+    end
+
+    subgraph DELIVERY["Delivery"]
+        UNARY["JSON-RPC result"]
+        SSE["SSE / SubscribeToTask"]
+        PUSH["push.Sender → webhook"]
+    end
+
+    APP --> CLIENT --> SERVER
+    LEGACY --> SERVER
+    SERVER -->|"v1 methods"| PORT
+    SERVER -->|"v0 methods"| COMPAT --> PORT
+    PORT --> RT
+    RT <-->|"ExecContext / ordered StreamEvent"| MP
+    RT <-->|"Task state"| STORE
+    RT <-->|"commit / read"| TRANSPORT
+    TRANSPORT <--> STREAMS
+    RT --> UNARY
+    RT --> SSE
+    RT --> PUSH
 ```
 
-Three layers, three responsibilities:
+Core responsibility boundaries:
 
 - **`server`** terminates the wire. It authenticates the request, serves agent
   cards for discovery, dispatches JSON-RPC methods and SSE streams, and —
@@ -76,16 +101,31 @@ Every request — unary or streaming — flows through the same pipeline:
 sequenceDiagram
     participant Client
     participant Server as server (auth, dispatch)
-    participant TM as TaskManager
+    participant TM as TaskManager / round engine
+    participant Registry as local execution registry
     participant P as MessageProcessor
+    participant Store as task + conversation store
 
     Client->>Server: SendMessage / SendStreamingMessage
     Server->>Server: authenticate, resolve tenant + agent card
     Server->>TM: OnSendMessage / OnSendMessageStream
-    TM->>P: ProcessMessage(ctx, ec)
-    P-->>TM: <-chan events (working, artifact, completed…)
-    Note over TM: persist each event before broadcast,<br/>create the task lazily on the first task event,<br/>apply the round close rules
-    TM-->>Server: final task snapshot (unary) OR live event stream
+    TM->>Registry: acquire this task's local execution slot
+    TM->>Store: load continuation, persist incoming message
+    TM->>P: ProcessMessage(detachedCtx, ExecContext)
+    P-->>TM: <-chan events (message, status, artifact)
+    loop each event
+        TM->>TM: validate and materialize the Task snapshot
+        TM->>Store: persist before exposure
+        Store-->>TM: committed
+        TM-->>Server: committed StreamResponse when streaming
+    end
+    TM->>TM: apply terminal, suspend, violation, or close rules
+    TM->>Registry: release the execution slot
+    alt SendMessage
+        TM-->>Server: derived Task / Message result
+    else SendStreamingMessage
+        TM-->>Server: close the committed event stream
+    end
     Server-->>Client: JSON-RPC result / SSE frames
 ```
 
