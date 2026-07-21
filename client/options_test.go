@@ -169,7 +169,7 @@ func TestWithAuthProvider(t *testing.T) {
 	assert.Equal(t, mockProvider, client.authProvider)
 }
 
-func TestWithHTTPReqMiddleware(t *testing.T) {
+func TestWithMiddleware(t *testing.T) {
 	var events []string
 	var wrapCalls int
 	terminal := httpReqHandlerFunc(func(
@@ -180,8 +180,8 @@ func TestWithHTTPReqMiddleware(t *testing.T) {
 		events = append(events, "handler")
 		return httptest.NewRecorder().Result(), nil
 	})
-	middleware := func(name string) HTTPReqMiddleware {
-		return httpReqMiddlewareFunc(func(next HTTPReqHandler) HTTPReqHandler {
+	middleware := func(name string) Middleware {
+		return middlewareFunc(func(next HTTPReqHandler) HTTPReqHandler {
 			wrapCalls++
 			return httpReqHandlerFunc(func(
 				ctx context.Context,
@@ -198,12 +198,13 @@ func TestWithHTTPReqMiddleware(t *testing.T) {
 
 	client, err := NewA2AClient(
 		"http://localhost:8080",
-		WithHTTPReqMiddleware(middleware("first")),
+		WithMiddleware(middleware("first")),
 		WithHTTPReqHandler(terminal),
-		WithHTTPReqMiddleware(nil, middleware("second")),
+		WithMiddleware(middleware("second")),
 	)
 	require.NoError(t, err)
 	assert.Equal(t, 2, wrapCalls)
+	assert.Len(t, client.middlewares, 2)
 
 	req := httptest.NewRequest(http.MethodGet, "http://localhost:8080", nil)
 	resp, err := client.httpReqHandler.Handle(
@@ -238,9 +239,9 @@ func (f httpReqHandlerFunc) Handle(
 	return f(ctx, client, req)
 }
 
-type httpReqMiddlewareFunc func(next HTTPReqHandler) HTTPReqHandler
+type middlewareFunc func(next HTTPReqHandler) HTTPReqHandler
 
-func (f httpReqMiddlewareFunc) Wrap(next HTTPReqHandler) HTTPReqHandler {
+func (f middlewareFunc) Wrap(next HTTPReqHandler) HTTPReqHandler {
 	return f(next)
 }
 
