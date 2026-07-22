@@ -19,9 +19,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/pushdispatch"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/taskevent"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
@@ -77,7 +74,7 @@ type TaskManager struct {
 	expiration time.Duration
 	// eventTransport distributes task events between manager instances. It is
 	// nil when cross-node resubscribe is disabled.
-	eventTransport taskevent.Transport
+	eventTransport taskEventTransport
 
 	// subMu is a mutex for the subscribers map.
 	subMu sync.RWMutex
@@ -106,7 +103,7 @@ type TaskManager struct {
 	pushCancel context.CancelFunc
 	// pushDispatcher owns the bounded, ordered automatic-delivery workers. It is
 	// nil when push is disabled or the agent selected manual delivery.
-	pushDispatcher *pushdispatch.Dispatcher
+	pushDispatcher *push.Dispatcher
 
 	// tailerWg counts cross-node resubscribe tailer goroutines so Close joins
 	// them before closing the Redis client. baseCtx is canceled by Close to
@@ -168,7 +165,7 @@ func NewTaskManager(
 	}
 	manager.pushCtx, manager.pushCancel = context.WithCancel(context.Background())
 	if options.Push.Sender != nil && !options.Push.ManualDelivery {
-		manager.pushDispatcher = pushdispatch.New(
+		manager.pushDispatcher = push.NewDispatcher(
 			manager.pushCtx, options.Push.Sender,
 			options.Push.MaxConcurrentDeliveries, options.Push.DeliveryQueueSize,
 			manager.isCurrentPushRegistration,
@@ -328,7 +325,7 @@ func (m *TaskManager) buildSendResponse(
 	if message != nil {
 		return protocol.NewSendMessageResponseMessage(message), nil
 	}
-	return nil, jsonrpc.ErrInternalError("processor produced no result")
+	return nil, taskmanager.ErrInternalError("processor produced no result")
 }
 
 // OnCancelTask handles the tasks/cancel request. For a live execution it
@@ -450,7 +447,7 @@ func (m *TaskManager) OnPushNotificationSet(
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
 	if err := push.ValidateConfig(params); err != nil {
-		return nil, jsonrpc.ErrInvalidParams(err.Error())
+		return nil, taskmanager.ErrInvalidParams(err.Error())
 	}
 	if _, err := m.getTaskInternal(ctx, params.TaskID); err != nil {
 		return nil, err
@@ -472,7 +469,7 @@ func (m *TaskManager) OnPushNotificationGet(
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
 	if params.ID == "" {
-		return nil, jsonrpc.ErrInvalidParams("push notification config ID is required")
+		return nil, taskmanager.ErrInvalidParams("push notification config ID is required")
 	}
 	if _, err := m.getTaskInternal(ctx, params.TaskID); err != nil {
 		return nil, err
@@ -558,7 +555,7 @@ func (m *TaskManager) OnPushNotificationDelete(
 		return taskmanager.ErrPushNotificationNotSupported()
 	}
 	if params.ID == "" {
-		return jsonrpc.ErrInvalidParams("push notification config ID is required")
+		return taskmanager.ErrInvalidParams("push notification config ID is required")
 	}
 	if _, err := m.getTaskInternal(ctx, params.TaskID); err != nil {
 		return err
@@ -587,7 +584,7 @@ func (m *TaskManager) storePushConfig(
 		cfg.ID = "push-" + uuid.New().String()
 	}
 	pushKey := pushNotificationPrefix + cfg.TaskID
-	registration := pushdispatch.Registration{
+	registration := push.Registration{
 		Config:     cfg,
 		Generation: uuid.New().String(),
 	}
@@ -608,23 +605,23 @@ func (m *TaskManager) storePushConfig(
 // decodePushRegistration decodes the current registration envelope while
 // retaining compatibility with push configs written before generations were
 // introduced.
-func decodePushRegistration(data []byte) (pushdispatch.Registration, error) {
+func decodePushRegistration(data []byte) (push.Registration, error) {
 	var envelope struct {
 		Config     json.RawMessage `json:"config"`
 		Generation string          `json:"generation"`
 	}
 	if err := json.Unmarshal(data, &envelope); err != nil {
-		return pushdispatch.Registration{}, err
+		return push.Registration{}, err
 	}
 	if envelope.Config != nil {
 		if envelope.Generation == "" {
-			return pushdispatch.Registration{}, errors.New("push registration generation is required")
+			return push.Registration{}, errors.New("push registration generation is required")
 		}
 		var config protocol.TaskPushNotificationConfig
 		if err := json.Unmarshal(envelope.Config, &config); err != nil {
-			return pushdispatch.Registration{}, err
+			return push.Registration{}, err
 		}
-		return pushdispatch.Registration{
+		return push.Registration{
 			Config:     config,
 			Generation: envelope.Generation,
 		}, nil
@@ -632,9 +629,9 @@ func decodePushRegistration(data []byte) (pushdispatch.Registration, error) {
 
 	var config protocol.TaskPushNotificationConfig
 	if err := json.Unmarshal(data, &config); err != nil {
-		return pushdispatch.Registration{}, err
+		return push.Registration{}, err
 	}
-	return pushdispatch.Registration{Config: config}, nil
+	return push.Registration{Config: config}, nil
 }
 
 // readPushConfigs returns all push configs registered for taskID, ordered by ID.
@@ -656,12 +653,12 @@ func (m *TaskManager) readPushConfigs(
 // taskID, ordered by config ID.
 func (m *TaskManager) readPushRegistrations(
 	ctx context.Context, taskID string,
-) ([]pushdispatch.Registration, error) {
+) ([]push.Registration, error) {
 	entries, err := m.client.HGetAll(ctx, pushNotificationPrefix+taskID).Result()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read push notification configs: %w", err)
 	}
-	registrations := make([]pushdispatch.Registration, 0, len(entries))
+	registrations := make([]push.Registration, 0, len(entries))
 	for _, configJSON := range entries {
 		registration, err := decodePushRegistration([]byte(configJSON))
 		if err != nil {
@@ -679,7 +676,7 @@ func (m *TaskManager) readPushRegistrations(
 // Redis still contains the same generation. Missing or replaced registrations
 // are skipped; read and decode failures fail closed.
 func (m *TaskManager) isCurrentPushRegistration(
-	ctx context.Context, queued pushdispatch.Registration,
+	ctx context.Context, queued push.Registration,
 ) (bool, error) {
 	cfg := queued.Config
 	data, err := m.client.HGet(ctx, pushNotificationPrefix+cfg.TaskID, cfg.ID).Bytes()
@@ -717,7 +714,7 @@ func (m *TaskManager) dispatchPush(taskID string, event protocol.StreamResponse)
 		}
 		return
 	}
-	if err := m.pushDispatcher.Enqueue(registrations, event); err != nil && !errors.Is(err, pushdispatch.ErrClosed) {
+	if err := m.pushDispatcher.Enqueue(registrations, event); err != nil && !errors.Is(err, push.ErrDispatcherClosed) {
 		log.Warnf("RedisTaskManager: push dispatch: enqueue for task %s: %v", taskID, err)
 	}
 }
@@ -836,7 +833,7 @@ func (m *TaskManager) onCrossNodeResubscribe(
 	if m.closed {
 		m.cancelMu.Unlock()
 		subscriber.Close()
-		return nil, jsonrpc.ErrInternalError("task manager is closed")
+		return nil, taskmanager.ErrInternalError("task manager is closed")
 	}
 	m.tailerWg.Add(1)
 	m.cancelMu.Unlock()
@@ -1157,7 +1154,7 @@ func (m *TaskManager) registerExecution(
 		m.cancelMu.Lock()
 		if m.closed {
 			m.cancelMu.Unlock()
-			return jsonrpc.ErrInternalError("task manager is closed")
+			return taskmanager.ErrInternalError("task manager is closed")
 		}
 		current, exists := m.executions[taskID]
 		if !exists {
@@ -1171,7 +1168,7 @@ func (m *TaskManager) registerExecution(
 		yieldDone := current.yieldDone
 		m.cancelMu.Unlock()
 		if yieldDone == nil {
-			return jsonrpc.ErrInvalidParams(
+			return taskmanager.ErrInvalidParams(
 				fmt.Sprintf("task %s already has an active execution", taskID))
 		}
 		select {

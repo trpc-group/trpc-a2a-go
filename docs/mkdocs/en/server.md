@@ -280,8 +280,12 @@ tm, _ := memory.NewTaskManager(proc,
 
 **Redis** — shared across processes, survives restarts:
 
+```bash
+go get trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2@v2.0.0-alpha.3
+```
+
 ```go
-import redistm "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/redis"
+import redistm "trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2"
 
 tm, _ := redistm.NewTaskManager(proc, redisClient,   // note: (processor, client)
     redistm.WithExpireTime(time.Hour),                // key TTL

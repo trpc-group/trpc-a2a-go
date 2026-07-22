@@ -71,6 +71,20 @@ func TestErrorSentinels(t *testing.T) {
 			expectedCode: ErrCodeAuthenticatedExtendedCardNotConfigured,
 			expectedMsg:  "Authenticated extended card not configured",
 		},
+		{
+			name:         "InvalidParams",
+			errorFunc:    func() error { return ErrInvalidParams("bad parameter") },
+			sentinel:     jsonrpc.ErrInvalidParamsSentinel,
+			expectedCode: ErrCodeInvalidParams,
+			expectedMsg:  "Invalid params",
+		},
+		{
+			name:         "InternalError",
+			errorFunc:    func() error { return ErrInternalError("failed operation") },
+			sentinel:     jsonrpc.ErrInternalErrorSentinel,
+			expectedCode: ErrCodeInternalError,
+			expectedMsg:  "Internal error",
+		},
 	}
 
 	for _, tt := range tests {

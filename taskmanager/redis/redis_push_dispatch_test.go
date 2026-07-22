@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
@@ -96,10 +95,7 @@ func waitPushCount(t *testing.T, s *recordingSender, n int) {
 
 func assertPushUnsupported(t *testing.T, err error) {
 	t.Helper()
-	var je *jsonrpc.Error
-	if !errors.As(err, &je) || je.Code != taskmanager.ErrPushNotificationNotSupported().Code {
-		t.Fatalf("want PushNotificationNotSupported, got %v", err)
-	}
+	assertRPCCode(t, err, taskmanager.ErrCodePushNotificationNotSupported)
 }
 
 // TestRedisPushInlineConfigDelivered covers the full loop: a message carrying an

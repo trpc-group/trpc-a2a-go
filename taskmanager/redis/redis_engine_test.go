@@ -9,6 +9,7 @@ package redis
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -16,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
@@ -58,11 +58,28 @@ func collectStream(t *testing.T, ch <-chan protocol.StreamResponse) []protocol.S
 	}
 }
 
-// assertRPCCode fails unless err is a *jsonrpc.Error with the wanted code.
+type rpcErrorPayload struct {
+	Code int `json:"code"`
+	Data any `json:"data"`
+}
+
+func decodeRPCError(t *testing.T, err error) rpcErrorPayload {
+	t.Helper()
+	payload, marshalErr := json.Marshal(err)
+	if marshalErr != nil {
+		t.Fatalf("marshal JSON-RPC error: %v", marshalErr)
+	}
+	var rpcErr rpcErrorPayload
+	if unmarshalErr := json.Unmarshal(payload, &rpcErr); unmarshalErr != nil {
+		t.Fatalf("unmarshal JSON-RPC error: %v", unmarshalErr)
+	}
+	return rpcErr
+}
+
+// assertRPCCode fails unless err carries the wanted JSON-RPC code.
 func assertRPCCode(t *testing.T, err error, code int) {
 	t.Helper()
-	var rpcErr *jsonrpc.Error
-	if !errors.As(err, &rpcErr) || rpcErr.Code != code {
+	if rpcErr := decodeRPCError(t, err); rpcErr.Code != code {
 		t.Fatalf("expected JSON-RPC error code %d, got %v", code, err)
 	}
 }

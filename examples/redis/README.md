@@ -9,8 +9,14 @@ A simple example demonstrating Redis TaskManager with a **Text to Lowercase Conv
 
 ## Prerequisites
 
-1. **Go 1.23.0+**
+1. **Go 1.20+**
 2. **Redis Server** running on localhost:6379
+
+The Redis TaskManager is published as a separate module:
+
+```bash
+go get trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2@v2.0.0-alpha.3
+```
 
 ### Quick Redis Setup
 

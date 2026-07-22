@@ -13,8 +13,8 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/pushdispatch"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 )
 
 // pushConfigStore is the in-memory, multi-config-per-task store backing the
@@ -30,12 +30,12 @@ type pushConfigStore struct {
 	closed bool
 	// configs maps taskID -> configID -> internal registration. Generation is
 	// intentionally kept out of the public protocol type.
-	configs map[string]map[string]pushdispatch.Registration
+	configs map[string]map[string]push.Registration
 }
 
 func newPushConfigStore() *pushConfigStore {
 	return &pushConfigStore{
-		configs: make(map[string]map[string]pushdispatch.Registration),
+		configs: make(map[string]map[string]push.Registration),
 	}
 }
 
@@ -56,9 +56,9 @@ func (s *pushConfigStore) save(
 	}
 	cfg = clonePushConfig(cfg)
 	if s.configs[cfg.TaskID] == nil {
-		s.configs[cfg.TaskID] = make(map[string]pushdispatch.Registration)
+		s.configs[cfg.TaskID] = make(map[string]push.Registration)
 	}
-	s.configs[cfg.TaskID][cfg.ID] = pushdispatch.Registration{
+	s.configs[cfg.TaskID][cfg.ID] = push.Registration{
 		Config:     cfg,
 		Generation: uuid.New().String(),
 	}
@@ -92,11 +92,11 @@ func (s *pushConfigStore) get(taskID, configID string) (protocol.TaskPushNotific
 // registrations returns internal delivery snapshots, ordered by config ID.
 // Generation remains internal and lets the dispatcher discard queued work for
 // a config that was deleted or replaced after enqueue.
-func (s *pushConfigStore) registrations(taskID string) []pushdispatch.Registration {
+func (s *pushConfigStore) registrations(taskID string) []push.Registration {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	byID := s.configs[taskID]
-	out := make([]pushdispatch.Registration, 0, len(byID))
+	out := make([]push.Registration, 0, len(byID))
 	for _, registration := range byID {
 		registration.Config = clonePushConfig(registration.Config)
 		out = append(out, registration)
@@ -112,7 +112,7 @@ func (s *pushConfigStore) registrations(taskID string) []pushdispatch.Registrati
 // ID invalidates already queued deliveries.
 func (s *pushConfigStore) isCurrent(
 	_ context.Context,
-	registration pushdispatch.Registration,
+	registration push.Registration,
 ) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -154,5 +154,5 @@ func (s *pushConfigStore) close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
-	s.configs = make(map[string]map[string]pushdispatch.Registration)
+	s.configs = make(map[string]map[string]push.Registration)
 }

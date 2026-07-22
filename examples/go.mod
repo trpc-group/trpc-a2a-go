@@ -4,9 +4,12 @@ go 1.20
 
 replace trpc.group/trpc-go/trpc-a2a-go/v2 => ../
 
+replace trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2 => ../taskmanager/redis
+
 require (
 	github.com/redis/go-redis/v9 v9.10.0
 	golang.org/x/oauth2 v0.26.0
+	trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2 v2.0.0
 	trpc.group/trpc-go/trpc-a2a-go/v2 v2.0.0
 )
 

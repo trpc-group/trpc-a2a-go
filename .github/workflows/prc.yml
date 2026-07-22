@@ -16,12 +16,22 @@ jobs:
       with:
         go-version: 1.20.14
     - name: Build
-      run: go build -v ./...
+      run: GOWORK=off go build -v ./...
     - name: Test
-      run: go test -v -coverprofile=coverage.out ./...
+      run: GOWORK=off go test -v -coverprofile=coverage.out ./...
     - name: Test examples
       working-directory: examples
-      run: go test ./...
+      run: GOWORK=off go test ./...
+    - name: Configure Redis module workspace
+      run: |
+        go work init . ./taskmanager/redis
+        go work edit -replace=trpc.group/trpc-go/trpc-a2a-go/v2@v2.0.0-alpha.3=${GITHUB_WORKSPACE}
+    - name: Build Redis module
+      working-directory: taskmanager/redis
+      run: go build -v ./...
+    - name: Test Redis module
+      working-directory: taskmanager/redis
+      run: go test -v ./...
     - name: Upload coverage reports to Codecov
       uses: codecov/codecov-action@v3
       with:
@@ -49,13 +59,25 @@ jobs:
       with:
         go-version: 1.24.4
     - name: Check root module
-      run: go mod tidy -diff
+      run: GOWORK=off go mod tidy -diff
+    - name: Check Redis module
+      working-directory: taskmanager/redis
+      run: |
+        cp go.mod go.ci.mod
+        grep -q '^trpc.group/trpc-go/trpc-a2a-go/v2 v2.0.0-alpha.3 h1:' go.sum
+        grep -q '^trpc.group/trpc-go/trpc-a2a-go/v2 v2.0.0-alpha.3/go.mod h1:' go.sum
+        grep -v '^trpc.group/trpc-go/trpc-a2a-go/v2 v2.0.0-alpha.3' \
+          go.sum > go.ci.sum
+        go mod edit -modfile=go.ci.mod \
+          -replace=trpc.group/trpc-go/trpc-a2a-go/v2=${GITHUB_WORKSPACE}
+        go mod tidy -modfile=go.ci.mod -diff
+        rm go.ci.mod go.ci.sum
     - name: Check examples module
       working-directory: examples
-      run: go mod tidy -diff
+      run: GOWORK=off go mod tidy -diff
     - name: Check examples/multi module
       working-directory: examples/multi
-      run: go mod tidy -diff
+      run: GOWORK=off go mod tidy -diff
   golangci:
     name: lint
     runs-on: ubuntu-latest
@@ -64,11 +86,22 @@ jobs:
         with:
           go-version: 1.21
       - uses: actions/checkout@v3
+      - name: Configure Redis module workspace
+        run: |
+          go work init . ./taskmanager/redis
+          go work edit -replace=trpc.group/trpc-go/trpc-a2a-go/v2@v2.0.0-alpha.3=${GITHUB_WORKSPACE}
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v3
         with:
           version: latest 
           only-new-issues: true
+          args: --skip-files=.*_test.go
+      - name: golangci-lint Redis module
+        uses: golangci/golangci-lint-action@v3
+        with:
+          version: latest
+          only-new-issues: true
+          working-directory: taskmanager/redis
           args: --skip-files=.*_test.go
   typos:
     name: typos

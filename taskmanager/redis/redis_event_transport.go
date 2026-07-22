@@ -15,11 +15,46 @@ import (
 
 	redisclient "github.com/redis/go-redis/v9"
 
-	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/taskevent"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
+
+// taskEventTransport distributes Task events between Redis TaskManager
+// instances. Cursors are opaque and implementations must preserve event order.
+// CommitTaskEvent and LoadTaskAndCursor provide the atomic boundaries needed so
+// a concurrent Task-changing event is either reflected by the loaded snapshot
+// and cursor or returned by a subsequent ReadAfter call, never lost between the
+// two.
+type taskEventTransport interface {
+	// CommitTaskEvent atomically stores a Task snapshot and the event that
+	// produced it.
+	CommitTaskEvent(
+		ctx context.Context,
+		task *protocol.Task,
+		event protocol.StreamResponse,
+	) error
+	// AppendEvent stores an event that does not modify the Task snapshot.
+	AppendEvent(
+		ctx context.Context,
+		taskID string,
+		event protocol.StreamResponse,
+	) error
+	// LoadTaskAndCursor atomically loads the current Task snapshot and current
+	// event cursor. A subscriber reads only events committed after that cursor.
+	LoadTaskAndCursor(
+		ctx context.Context,
+		taskID string,
+	) (*protocol.Task, string, error)
+	// ReadAfter returns an ordered batch strictly after cursor and the cursor for
+	// the next call. An empty batch is not an error; callers must wait or back off
+	// when the cursor also did not advance.
+	ReadAfter(
+		ctx context.Context,
+		taskID string,
+		cursor string,
+	) ([]protocol.StreamResponse, string, error)
+}
 
 const (
 	// streamPrefix keys the per-task event stream used for cross-node resubscribe.
@@ -95,7 +130,7 @@ type redisTaskEventTransport struct {
 	expiration time.Duration
 }
 
-var _ taskevent.Transport = (*redisTaskEventTransport)(nil)
+var _ taskEventTransport = (*redisTaskEventTransport)(nil)
 
 func newRedisTaskEventTransport(
 	client redisclient.UniversalClient,

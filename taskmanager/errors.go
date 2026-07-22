@@ -166,3 +166,15 @@ func ErrVersionNotSupported(requested string) *jsonrpc.Error {
 		Data:    fmt.Sprintf("Requested A2A protocol version '%s' is not supported by this agent", requested),
 	}).WithWrappedError(ErrVersionNotSupportedSentinel)
 }
+
+// ErrInvalidParams creates a standard JSON-RPC invalid-params error.
+// It is exposed for TaskManager implementations that live in another module.
+func ErrInvalidParams(details string) error {
+	return jsonrpc.ErrInvalidParams(details)
+}
+
+// ErrInternalError creates a standard JSON-RPC internal error.
+// It is exposed for TaskManager implementations that live in another module.
+func ErrInternalError(details string) error {
+	return jsonrpc.ErrInternalError(details)
+}
