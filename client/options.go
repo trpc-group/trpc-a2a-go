@@ -23,6 +23,30 @@ type HTTPReqHandler interface {
 	Handle(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error)
 }
 
+// Middleware wraps an HTTPReqHandler with additional request behavior.
+// When configured with WithMiddleware, Wrap is called once when the A2AClient
+// is constructed. The returned handler may be called concurrently and must be
+// safe for concurrent use.
+type Middleware interface {
+	Wrap(next HTTPReqHandler) HTTPReqHandler
+}
+
+// MiddlewareChain represents HTTP request middleware that can be composed.
+type MiddlewareChain []Middleware
+
+// Wrap applies the chain to handler. Middleware is applied in reverse order,
+// so the first middleware in the chain becomes the outermost wrapper. Nil
+// middleware is ignored.
+func (chain MiddlewareChain) Wrap(handler HTTPReqHandler) HTTPReqHandler {
+	for i := len(chain) - 1; i >= 0; i-- {
+		if chain[i] == nil {
+			continue
+		}
+		handler = chain[i].Wrap(handler)
+	}
+	return handler
+}
+
 // WithHTTPClient sets a custom http.Client for the A2AClient.
 func WithHTTPClient(client *http.Client) Option {
 	return func(c *A2AClient) {
@@ -119,10 +143,21 @@ func WithAuthProvider(provider auth.ClientProvider) Option {
 	}
 }
 
-// WithHTTPReqHandler sets a custom HTTP request handler for the A2AClient.
+// WithHTTPReqHandler sets the terminal HTTP request handler for the A2AClient.
+// HTTP request middleware is applied around this handler after all client
+// options have been processed.
 func WithHTTPReqHandler(handler HTTPReqHandler) Option {
 	return func(c *A2AClient) {
 		c.httpReqHandler = handler
+	}
+}
+
+// WithMiddleware adds HTTP request middleware to the A2AClient.
+// Multiple middleware are applied in registration order, with the first
+// middleware becoming the outermost wrapper. Nil middleware is ignored.
+func WithMiddleware(middlewares ...Middleware) Option {
+	return func(c *A2AClient) {
+		c.middlewares = append(c.middlewares, middlewares...)
 	}
 }
 

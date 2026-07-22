@@ -41,6 +41,7 @@ type A2AClient struct {
 	userAgent      string              // User-Agent header string.
 	authProvider   auth.ClientProvider // Authentication provider.
 	httpReqHandler HTTPReqHandler      // Custom HTTP request handler.
+	middlewares    []Middleware        // HTTP request middleware.
 
 	maxBufSize     int
 	initialBufSize int
@@ -73,6 +74,9 @@ func NewA2AClient(agentURL string, opts ...Option) (*A2AClient, error) {
 	// Apply functional options.
 	for _, opt := range opts {
 		opt(client)
+	}
+	if len(client.middlewares) > 0 {
+		client.httpReqHandler = MiddlewareChain(client.middlewares).Wrap(client.httpReqHandler)
 	}
 	return client, nil
 }
