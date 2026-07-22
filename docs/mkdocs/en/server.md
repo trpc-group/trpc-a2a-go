@@ -1,7 +1,7 @@
 # Building an Agent (Server)
 
 The server side: how to stand up an A2A server, define your agent as a
-`MessageProcessor`, choose a storage backend, and turn on the framework's
+`MessageProcessor`, choose a TaskManager mode, and turn on the framework's
 server capabilities. For calling agents, see [Client](client.md); the runtime contract these APIs
 rely on is [The round contract](#the-round-contract) below.
 
@@ -12,7 +12,7 @@ go get trpc.group/trpc-go/trpc-a2a-go/v2
 ## The server in three parts
 
 A server binds an **agent card** (identity + capabilities), a **TaskManager**
-(state), and your **MessageProcessor** (logic):
+(execution and state policy), and your **MessageProcessor** (logic):
 
 ```go
 import (
@@ -141,6 +141,11 @@ is a processor written entirely on the raw channel.)
 
 The exact semantics your agent code lives under and clients observe. A
 **round** is one `ProcessMessage` invocation and the drain of its channel.
+The task lifecycle rules below apply to every manager unless qualified.
+Memory and Redis persist tasks and conversation history; the stateless manager
+described under [TaskManager implementations](#taskmanager-implementations)
+applies task events only to a request-local snapshot and retains nothing after
+the request.
 
 ### Round lifecycle
 
@@ -164,30 +169,42 @@ The exact semantics your agent code lives under and clients observe. A
   round emits afterwards is discarded. Deliver the completion from the
   continuation round.
 - **Contract violations fail fast** — emitting an event for a foreign `taskId`,
-  a `*protocol.Task` snapshot (framework-only in v1.0), or a stateless status
-  marks the round's task `FAILED` and discards the rest.
+  a `*protocol.Task` snapshot (framework-only in v1.0), or an invalid status
+  marks an already-materialized task `FAILED` and discards the rest.
+- **Suspension requires retained state** — stateless rejects
+  `input-required`/`auth-required`, because it cannot accept the continuation
+  that those states require.
 
 ### Execution and cancellation
 
-- Rounds run on a **detached context**: a client disconnect does **not** cancel
-  the work; results stay retrievable via `GetTask`/`SubscribeToTask`.
-- Only `CancelTask` (and manager shutdown) cancels the processor's `ctx`. The
-  polite reaction is to **stop emitting and close** — the framework persists
-  `CANCELED`. A terminal event emitted *after* the cancel still wins.
+- Memory and Redis rounds run on a **detached context**: a client disconnect
+  does **not** cancel the work; results stay retrievable via
+  `GetTask`/`SubscribeToTask`.
+- Stateless rounds are request-bound: a disconnect or manager shutdown cancels
+  the processor because there is no retained task to retrieve or resubscribe
+  to.
+- In memory and Redis managers, only `CancelTask` (and manager shutdown)
+  cancels the processor's `ctx`. The polite reaction is to **stop emitting and
+  close** — the framework persists `CANCELED`. A terminal event emitted *after*
+  the cancel still wins.
 - `CancelTask` **returns the snapshot at the moment cancellation was requested**
   (possibly still `working`); the terminal `CANCELED` lands when the round winds
   down. Canceling an already-terminal task returns `-32002`.
 
 ### Response derivation
 
-- **`SendMessage` (blocking, the default)** waits for the round to end, then
-  answers with the **task snapshot** if the round touched a task, else the
-  **last Message**; a round that emitted nothing is a processor bug (`-32603`).
+- **`SendMessage` (blocking, the default)** answers with the **task snapshot**
+  when a round touched a task; memory and Redis wait for the round to end, and
+  stateless waits for a terminal task. A direct **Message** is a complete
+  response; stateless returns the first one immediately. A round that emitted
+  nothing is a processor bug (`-32006`).
 - **`SendMessage` with `returnImmediately=true`** answers with the **earliest
-  usable result**: the first persisted task snapshot or the first Message (which
-  carries no `taskId` — emit a task event first if the client must track it).
-- **`SendStreamingMessage`** forwards every event in order, each **persisted
-  before delivery**. The stream ends at the terminal or suspend frame.
+  usable result**: the first task snapshot or the first Message. Retaining
+  managers can keep a non-terminal task running; stateless cannot.
+- **`SendStreamingMessage`** forwards every event in order. Memory and Redis
+  persist task events before delivery; stateless first emits a request-local
+  Task snapshot and then its status/artifact updates. The stream ends at the
+  terminal or suspend frame.
 - **`SubscribeToTask`** sends the current task snapshot first, then live
   increments; terminal tasks are rejected.
 
@@ -209,14 +226,47 @@ continues the task).
 request's `historyLength`. `ec.History` is a snapshot taken before the round,
 truncated to `MaxHistoryLength` (default 100).
 
-Request `configuration` fields: `returnImmediately` and `historyLength` are
-consumed by the framework; `acceptedOutputModes` (`ec.AcceptedOutputModes`) and
+For memory and Redis, request `configuration` fields `returnImmediately` and
+`historyLength` are consumed by the framework;
+`acceptedOutputModes` (`ec.AcceptedOutputModes`) and
 `taskPushNotificationConfig` (`ec.PushConfig`) are passed through to your
-processor.
+processor. Stateless still passes `acceptedOutputModes`, but rejects push
+configuration. `returnImmediately=true` works for a direct `Message` or a Task
+that is already terminal; a non-terminal Task is rejected because stateless
+cannot continue it in the background.
 
-## Storage backends
+## TaskManager implementations
 
-The `TaskManager` owns task and conversation state. Two backends ship in-tree.
+The `TaskManager` chooses both execution lifetime and state ownership. Three
+implementations ship in-tree.
+
+**Stateless** — request-bound execution with no retained task, event, or
+conversation history:
+
+```go
+import "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/stateless"
+
+tm, _ := stateless.NewTaskManager(proc)
+```
+
+Use this when the application already owns conversation context or deliberately
+does not want A2A state persisted. The processor uses the same event contract
+as every other manager: a direct `*protocol.Message` returns a Message, while
+status/artifact events build an ephemeral Task for the originating unary or
+streaming response. The Task and all events are discarded when that request
+ends.
+
+Because no task survives the request, `GetTask`, `CancelTask`, and
+`SubscribeToTask` return task-not-found, `ListTasks` is empty, and task
+continuations cannot be accepted. Push notifications and suspended tasks are
+unsupported. `returnImmediately=true` works for direct Messages and tasks that
+are already terminal, but not for non-terminal tasks that would have to keep
+running after the request. Use memory or Redis for any cross-request lifecycle.
+
+A direct Message is the complete response, so its returned `taskId` is cleared
+and any later processor events are discarded. For a Task response, stateless
+stamps empty event IDs from `ExecContext` and applies the normal close rule: a
+channel that closes in `submitted` or `working` produces a `FAILED` Task.
 
 **In-memory** — zero dependencies, single process:
 
@@ -249,7 +299,7 @@ that lag beyond that bound may miss intermediate events.
 → [examples/redis](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis).
 Implement the `taskmanager.TaskManager` interface for a custom backend.
 
-Retention:
+Retention for the stateful managers:
 
 | | memory backend | redis backend |
 | --- | --- | --- |
@@ -366,11 +416,13 @@ internal route.
 
 ## Serving legacy v0.2.x clients
 
-Keep unmodified v0.2.x clients working while they migrate: mount `compat/v0` on
-the same endpoint. Legacy slash-method names are disjoint from the v1.0
-PascalCase names, so one endpoint dispatches both — inside the same auth chain,
-against the same `TaskManager`, preserving the old defaults (notably the
-non-blocking `message/send`).
+With memory or Redis, keep unmodified v0.2.x clients working while they
+migrate: mount `compat/v0` on the same endpoint. Legacy slash-method names are
+disjoint from the v1.0 PascalCase names, so one endpoint dispatches both inside
+the same auth chain and against the same `TaskManager`. Memory and Redis
+preserve the old defaults, notably non-blocking `message/send`. Stateless can
+serve that default for direct Message responses, but cannot keep a non-terminal
+Task running in the background.
 
 ```go
 import v0 "trpc.group/trpc-go/trpc-a2a-go/v2/compat/v0"

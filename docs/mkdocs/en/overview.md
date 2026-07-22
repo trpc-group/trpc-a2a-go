@@ -3,9 +3,9 @@
 tRPC-A2A-Go is the Go implementation of the A2A (Agent-to-Agent) protocol,
 v1.0. It gives you both sides of an A2A conversation — a **server** that
 exposes your agent and a **client** that calls other agents — and owns
-everything stateful in between (task lifecycle, streaming, conversation
-history, authentication, push notifications, multi-tenant hosting), so the
-only thing you write is your agent's logic.
+the protocol plumbing in between (task lifecycle, streaming, conversation
+history, authentication, push notifications, multi-tenant hosting). State can
+be retained in memory or Redis, or kept request-local with no persistence.
 
 For the A2A protocol itself see [Protocol](protocol.md); for build recipes and
 the runtime contract see [Server](server.md) and [Client](client.md).
@@ -19,6 +19,7 @@ the runtime contract see [Server](server.md) and [Client](client.md).
 | gRPC / HTTP+JSON (REST) transport bindings | 🗺️ Planned | Defined by the spec; not yet implemented — JSON-RPC only today. |
 | `SendMessage` / `SendStreamingMessage` from one processor | ✅ | One code path serves unary and streaming. |
 | Blocking send, `returnImmediately`, live streaming, `SubscribeToTask` | ✅ | Four client consumption modes over the same agent. |
+| Stateless request-scoped execution | ✅ | Direct Messages and ephemeral Tasks with no retained state or conversation history. |
 | In-memory & Redis task stores | ✅ | Pluggable `TaskManager` interface; bring your own. |
 | Authentication: JWT · API key · OAuth2 | ✅ | Chainable providers, server and client side. |
 | Push notifications (webhooks) signed with JWT + JWKS | ✅ | For disconnected, callback-driven operation. |
@@ -42,7 +43,7 @@ flowchart TB
         CARD["agent cards / discovery"]
         COMPAT["compat/v0 handler"]
     end
-    TM["TaskManager<br/>memory or redis"]
+    TM["TaskManager<br/>stateless, memory, or redis"]
     MP["MessageProcessor<br/>your agent"]
 
     C1 --> AUTH
@@ -60,10 +61,12 @@ Three layers, three responsibilities:
   cards for discovery, dispatches JSON-RPC methods and SSE streams, and —
   optionally — mounts the legacy v0.2.x endpoint on the same port inside the
   same auth chain.
-- **`TaskManager`** owns everything stateful: lazy task creation, the round
-  close rules, cancellation, conversation history, retention, and subscriber
-  fan-out. `taskmanager/memory` and `taskmanager/redis` implement the
-  interface, and you can supply your own.
+- **`TaskManager`** owns execution policy and, when enabled, task state: lazy
+  task creation, round close rules, cancellation, conversation history,
+  retention, and subscriber fan-out. `taskmanager/stateless` derives direct
+  Messages or request-local Tasks without retaining state;
+  `taskmanager/memory` and `taskmanager/redis` provide cross-request task
+  capabilities. You can also supply your own implementation.
 - **`MessageProcessor`** is the only part you write. It reads a read-only
   request snapshot (`ExecContext`) and returns a channel of events. That is
   your agent.
@@ -83,9 +86,9 @@ sequenceDiagram
     Server->>Server: authenticate, resolve tenant + agent card
     Server->>TM: OnSendMessage / OnSendMessageStream
     TM->>P: ProcessMessage(ctx, ec)
-    P-->>TM: <-chan events (working, artifact, completed…)
-    Note over TM: persist each event before broadcast,<br/>create the task lazily on the first task event,<br/>apply the round close rules
-    TM-->>Server: final task snapshot (unary) OR live event stream
+    P-->>TM: <-chan events (Message / status / artifact)
+    Note over TM: memory/Redis persist task events;<br/>stateless applies them to a request-local Task only
+    TM-->>Server: Task or Message (unary) OR live event stream
     Server-->>Client: JSON-RPC result / SSE frames
 ```
 
@@ -103,8 +106,9 @@ A large part of the framework is the protocol work you don't have to do:
 - **Result derivation** — `SendMessage` returns a `Task` or a `Message` (the
   sealed union) from what your processor emitted; `SendStreamingMessage`
   forwards the events live. One processor, every response shape.
-- **Lazy task creation & persistence** — the task materializes on the first
-  task event, and every event is persisted before it is broadcast.
+- **Lazy task creation & optional persistence** — a task materializes on the
+  first task event. Memory and Redis persist it before broadcast; stateless
+  keeps the snapshot only until the originating request ends.
 - **Agent card normalization** — cards carry both the v1.0 fields and their
   deprecated v0.2.x mirrors, so one card is readable by both client
   generations.

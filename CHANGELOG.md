@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Task management
+
+- **A stateless TaskManager is available for applications that own conversation context outside A2A.** `taskmanager/stateless` derives either a direct `Message` or a request-local `Task` from the standard processor event stream without retaining tasks, events, or history after the request. Cross-request task operations, continuations, push notifications, suspended tasks, and background task execution are unavailable; use memory or Redis when clients need those capabilities.
+
 ## 2.0.0-alpha.2 (2026-07-21)
 
 This prerelease hardens task lifecycle handling, adds automatic push delivery,
