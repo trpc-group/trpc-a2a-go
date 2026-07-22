@@ -149,14 +149,7 @@ func TestNewTaskManagerValidation(t *testing.T) {
 // =============================================================================
 
 func TestOnSendMessagePureMessage(t *testing.T) {
-	var streaming bool
-	m, mr := setupTest(t, executorFunc(func(
-		ctx context.Context,
-		ec *taskmanager.ExecContext,
-	) (<-chan protocol.StreamEvent, error) {
-		streaming = ec.Streaming
-		return scriptedExecutor(agentReply("hi there")).ProcessMessage(ctx, ec)
-	}))
+	m, mr := setupTest(t, scriptedExecutor(agentReply("hi there")))
 
 	resp, err := m.OnSendMessage(context.Background(), sendParams("hello", "ctx-pure"))
 	if err != nil {
@@ -171,9 +164,6 @@ func TestOnSendMessagePureMessage(t *testing.T) {
 	}
 	if reply.Role != protocol.MessageRoleAgent {
 		t.Errorf("expected agent role, got %s", reply.Role)
-	}
-	if streaming {
-		t.Error("ExecContext streaming = true, want false")
 	}
 
 	// A pure-message exchange must not leave a task behind in Redis.
@@ -762,14 +752,7 @@ func TestOnSendMessageStreamOrderAndPersistence(t *testing.T) {
 }
 
 func TestOnSendMessageStreamPureMessage(t *testing.T) {
-	var streaming bool
-	m, mr := setupTest(t, executorFunc(func(
-		ctx context.Context,
-		ec *taskmanager.ExecContext,
-	) (<-chan protocol.StreamEvent, error) {
-		streaming = ec.Streaming
-		return scriptedExecutor(agentReply("streamed reply")).ProcessMessage(ctx, ec)
-	}))
+	m, mr := setupTest(t, scriptedExecutor(agentReply("streamed reply")))
 
 	ch, err := m.OnSendMessageStream(context.Background(), sendParams("hello", "ctx-stream-msg"))
 	if err != nil {
@@ -779,9 +762,6 @@ func TestOnSendMessageStreamPureMessage(t *testing.T) {
 	msg := frame.GetMessage()
 	if msg == nil || msg.Parts[0].TextContent() != "streamed reply" {
 		t.Fatalf("expected message frame, got %+v", frame.Result)
-	}
-	if !streaming {
-		t.Error("ExecContext streaming = false, want true")
 	}
 	if _, ok := <-ch; ok {
 		t.Error("expected stream closed")

@@ -4,34 +4,37 @@
 //
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
-// Package stateless provides a request-bound TaskManager for agents that only
-// exchange direct Messages and do not expose A2A task lifecycle operations.
+// Package stateless provides a request-bound TaskManager that retains no task,
+// event, or conversation state after a request finishes.
 package stateless
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
-const (
-	operationTaskContinuation  = "task continuation"
-	operationReturnImmediately = "SendMessage with returnImmediately"
-)
+const operationReturnImmediatelyTask = "SendMessage with returnImmediately for a Task response"
 
-// TaskManager executes request-bound, Message-only processor rounds without
-// retaining tasks or conversation history.
-//
-// It is intended for adapters that keep their own conversation context and do
-// not need GetTask, ListTasks, CancelTask, SubscribeToTask, push notifications,
-// or resumable background execution. Use taskmanager/memory or
-// taskmanager/redis when any of those capabilities are required.
+// TaskManager executes request-bound processor rounds without retaining tasks,
+// events, or conversation history. A round may return either a direct Message
+// or an execution-local Task. Tasks exist only for the originating request and
+// cannot be retrieved, continued, canceled, or resubscribed to later.
 type TaskManager struct {
 	processor taskmanager.MessageProcessor
+
+	executionMu sync.Mutex
+	executions  map[uint64]context.CancelFunc
+	nextID      uint64
+	closed      bool
+	closeOnce   sync.Once
 }
 
 var _ taskmanager.TaskManager = (*TaskManager)(nil)
@@ -41,124 +44,151 @@ func NewTaskManager(processor taskmanager.MessageProcessor) (*TaskManager, error
 	if processor == nil {
 		return nil, errors.New("processor cannot be nil")
 	}
-	return &TaskManager{processor: processor}, nil
+	return &TaskManager{
+		processor:  processor,
+		executions: make(map[uint64]context.CancelFunc),
+	}, nil
 }
 
-// SupportsPushNotifications reports false because stateless managers retain no
-// task or push configuration.
+// SupportsPushNotifications reports false because the manager retains no task
+// or push configuration after the request.
 func (*TaskManager) SupportsPushNotifications() bool { return false }
 
-// OnSendMessage runs a request-bound processor round and returns its last
-// Message. Task events, task continuations, and returnImmediately are rejected.
-// A Message may identify the current execution by ExecContext.TaskID; the
-// manager removes that ID before returning because it does not retain a Task.
+// OnSendMessage runs a request-bound processor round and returns its
+// direct Message or its execution-local Task. returnImmediately has no effect
+// on a direct Message response and is unsupported for a non-terminal Task,
+// because no retained task exists for later observation.
 func (m *TaskManager) OnSendMessage(
 	ctx context.Context,
 	request protocol.SendMessageParams,
 ) (*protocol.SendMessageResponse, error) {
-	events, ec, cancel, err := m.startExecution(ctx, &request, false, true)
+	events, ec, execCtx, cancel, err := m.startExecution(ctx, &request)
 	if err != nil {
 		return nil, err
 	}
 	defer cancel()
 
-	var last *protocol.Message
+	round := newRound(ec)
+	returnImmediately := request.Configuration != nil && !request.Configuration.IsBlocking()
 	for {
 		select {
-		case <-ctx.Done():
+		case <-execCtx.Done():
+			cancel()
 			go drain(events)
-			return nil, ctx.Err()
+			return nil, execCtx.Err()
 		case event, ok := <-events:
 			if !ok {
-				if err := ctx.Err(); err != nil {
+				if err := execCtx.Err(); err != nil {
 					return nil, err
 				}
-				if last == nil {
-					return nil, taskmanager.ErrInvalidAgentResponse(
-						"stateless TaskManager: processor produced no Message",
-					)
+				if round.task != nil {
+					if !round.task.Status.State.Terminal() {
+						round.fail("processor finished without terminal state")
+					}
+					return protocol.NewSendMessageResponseTask(copyTask(round.task)), nil
 				}
-				return protocol.NewSendMessageResponseMessage(last), nil
+				return nil, taskmanager.ErrInvalidAgentResponse(
+					"stateless TaskManager: processor produced no result",
+				)
 			}
-			message, err := normalizeMessage(event, ec)
-			if err != nil {
-				cancel()
-				go drain(events)
-				return nil, err
+
+			response, done, err := round.applyUnaryEvent(event, returnImmediately)
+			if !done {
+				continue
 			}
-			last = message
+			cancel()
+			go drain(events)
+			return response, err
 		}
 	}
 }
 
-// OnSendMessageStream runs a request-bound processor round and forwards each
-// Message until the processor closes its channel or the request context is
-// canceled. If the processor emits a task event, the processor context is
-// canceled and the stream is closed.
+// OnSendMessageStream runs a request-bound processor round. A direct response
+// contains exactly one Message. A Task response starts with an execution-local
+// Task snapshot followed by status and artifact updates until the round ends.
 func (m *TaskManager) OnSendMessageStream(
 	ctx context.Context,
 	request protocol.SendMessageParams,
 ) (<-chan protocol.StreamResponse, error) {
-	events, ec, cancel, err := m.startExecution(ctx, &request, true, false)
+	events, ec, execCtx, cancel, err := m.startExecution(ctx, &request)
 	if err != nil {
 		return nil, err
 	}
 
-	out := make(chan protocol.StreamResponse)
-	go func() {
-		defer cancel()
-		defer close(out)
-		for {
-			select {
-			case <-ctx.Done():
-				go drain(events)
-				return
-			case event, ok := <-events:
-				if !ok {
-					return
-				}
-				message, err := normalizeMessage(event, ec)
-				if err != nil {
-					log.Errorf("stateless TaskManager: closing stream: %v", err)
-					cancel()
-					go drain(events)
-					return
-				}
-				select {
-				case out <- protocol.NewStreamResponseMessage(message):
-				case <-ctx.Done():
-					go drain(events)
-					return
-				}
-			}
+	first, ok, err := receiveEvent(execCtx, events)
+	if err != nil {
+		cancel()
+		go drain(events)
+		return nil, err
+	}
+	if !ok {
+		cancel()
+		return nil, taskmanager.ErrInvalidAgentResponse(
+			"stateless TaskManager: processor produced no result",
+		)
+	}
+
+	if message, ok := first.(*protocol.Message); ok {
+		message, err = normalizeDirectMessage(message, ec)
+		if err != nil {
+			cancel()
+			go drain(events)
+			return nil, err
 		}
-	}()
+		cancel()
+		go drain(events)
+		out := make(chan protocol.StreamResponse, 1)
+		out <- protocol.NewStreamResponseMessage(message)
+		close(out)
+		return out, nil
+	}
+
+	round := newRound(ec)
+	initial := copyTask(round.ensureTask())
+	firstResponse, done, err := round.applyTaskEvent(first)
+	if err != nil {
+		cancel()
+		go drain(events)
+		return nil, err
+	}
+
+	out := make(chan protocol.StreamResponse, 2)
+	out <- protocol.NewStreamResponseTask(initial)
+	out <- firstResponse
+	if done {
+		cancel()
+		go drain(events)
+		close(out)
+		return out, nil
+	}
+
+	go consumeTaskStream(execCtx, events, cancel, round, out)
 	return out, nil
 }
 
-// OnGetTask rejects task lookup because stateless managers retain no tasks.
+// OnGetTask reports not-found because no Task survives its originating request.
 func (*TaskManager) OnGetTask(
-	context.Context,
-	protocol.TaskQueryParams,
+	_ context.Context,
+	params protocol.TaskQueryParams,
 ) (*protocol.Task, error) {
-	return nil, taskmanager.ErrUnsupportedOperation(protocol.MethodTasksGet)
+	return nil, taskmanager.ErrTaskNotFound(params.ID)
 }
 
-// OnCancelTask rejects cancellation because stateless executions are canceled
-// through their request context and have no task identity.
+// OnCancelTask reports not-found because request-local executions have no
+// externally addressable retained Task.
 func (*TaskManager) OnCancelTask(
-	context.Context,
-	protocol.TaskIDParams,
+	_ context.Context,
+	params protocol.TaskIDParams,
 ) (*protocol.Task, error) {
-	return nil, taskmanager.ErrUnsupportedOperation(protocol.MethodTasksCancel)
+	return nil, taskmanager.ErrTaskNotFound(params.ID)
 }
 
-// OnListTasks rejects task listing because stateless managers retain no tasks.
+// OnListTasks returns an empty page because the manager retains no Tasks.
 func (*TaskManager) OnListTasks(
 	context.Context,
 	protocol.ListTasksParams,
 ) (*protocol.ListTasksResult, error) {
-	return nil, taskmanager.ErrUnsupportedOperation(protocol.MethodTasksList)
+	return &protocol.ListTasksResult{Tasks: make([]*protocol.Task, 0)}, nil
 }
 
 // OnPushNotificationSet rejects push registration.
@@ -193,59 +223,97 @@ func (*TaskManager) OnPushNotificationDelete(
 	return taskmanager.ErrPushNotificationNotSupported()
 }
 
-// OnResubscribe rejects subscription because stateless streams are bound to
-// their originating request and cannot be resumed.
+// OnResubscribe reports not-found because no Task survives its originating
+// request.
 func (*TaskManager) OnResubscribe(
-	context.Context,
-	protocol.TaskIDParams,
+	_ context.Context,
+	params protocol.TaskIDParams,
 ) (<-chan protocol.StreamResponse, error) {
-	return nil, taskmanager.ErrUnsupportedOperation(protocol.MethodTasksResubscribe)
+	return nil, taskmanager.ErrTaskNotFound(params.ID)
 }
 
 func (m *TaskManager) startExecution(
 	ctx context.Context,
 	request *protocol.SendMessageParams,
-	streaming bool,
-	rejectReturnImmediately bool,
-) (<-chan protocol.StreamEvent, *taskmanager.ExecContext, context.CancelFunc, error) {
+) (<-chan protocol.StreamEvent, *taskmanager.ExecContext, context.Context, context.CancelFunc, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	ec, err := prepareExecContext(request, streaming, rejectReturnImmediately)
+	ec, err := prepareExecContext(request)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	execCtx, cancel := context.WithCancel(ctx)
-	events, err := m.processor.ProcessMessage(execCtx, ec)
+	release, err := m.registerExecution(cancel)
 	if err != nil {
 		cancel()
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
+	}
+	events, err := m.processor.ProcessMessage(execCtx, ec)
+	if err != nil {
+		release()
+		return nil, nil, nil, nil, err
 	}
 	if events == nil {
-		cancel()
-		return nil, nil, nil, taskmanager.ErrInvalidAgentResponse(
+		release()
+		return nil, nil, nil, nil, taskmanager.ErrInvalidAgentResponse(
 			"stateless TaskManager: processor returned nil channel",
 		)
 	}
-	return events, ec, cancel, nil
+	return events, ec, execCtx, release, nil
+}
+
+func (m *TaskManager) registerExecution(
+	cancel context.CancelFunc,
+) (context.CancelFunc, error) {
+	m.executionMu.Lock()
+	if m.closed {
+		m.executionMu.Unlock()
+		return nil, jsonrpc.ErrInternalError("task manager is closed")
+	}
+	m.nextID++
+	id := m.nextID
+	m.executions[id] = cancel
+	m.executionMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cancel()
+			m.executionMu.Lock()
+			delete(m.executions, id)
+			m.executionMu.Unlock()
+		})
+	}, nil
+}
+
+// Close refuses new requests and cancels every live request-bound execution.
+// It is safe to call Close multiple times.
+func (m *TaskManager) Close() error {
+	m.closeOnce.Do(func() {
+		m.executionMu.Lock()
+		m.closed = true
+		cancels := make([]context.CancelFunc, 0, len(m.executions))
+		for _, cancel := range m.executions {
+			cancels = append(cancels, cancel)
+		}
+		m.executionMu.Unlock()
+		for _, cancel := range cancels {
+			cancel()
+		}
+	})
+	return nil
 }
 
 func prepareExecContext(
 	request *protocol.SendMessageParams,
-	streaming bool,
-	rejectReturnImmediately bool,
 ) (*taskmanager.ExecContext, error) {
 	if request.Message.TaskID != nil && *request.Message.TaskID != "" {
-		return nil, taskmanager.ErrUnsupportedOperation(operationTaskContinuation)
+		return nil, taskmanager.ErrTaskNotFound(*request.Message.TaskID)
 	}
-	if request.Configuration != nil {
-		if request.Configuration.PushConfig != nil {
-			return nil, taskmanager.ErrPushNotificationNotSupported()
-		}
-		if rejectReturnImmediately && !request.Configuration.IsBlocking() {
-			return nil, taskmanager.ErrUnsupportedOperation(operationReturnImmediately)
-		}
+	if request.Configuration != nil && request.Configuration.PushConfig != nil {
+		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
 
 	message := request.Message
@@ -272,34 +340,250 @@ func prepareExecContext(
 	return &taskmanager.ExecContext{
 		TaskID:              protocol.GenerateTaskID(),
 		Message:             message,
-		Streaming:           streaming,
 		ContextID:           contextID,
 		Tenant:              request.Tenant,
 		AcceptedOutputModes: acceptedOutputModes,
 	}, nil
 }
 
-func normalizeMessage(
-	event protocol.StreamEvent,
-	ec *taskmanager.ExecContext,
-) (*protocol.Message, error) {
-	message, ok := event.(*protocol.Message)
-	if !ok || message == nil {
-		return nil, taskmanager.ErrInvalidAgentResponse(fmt.Sprintf(
-			"stateless TaskManager accepts only Message events, got %T",
-			event,
-		))
+type round struct {
+	ec   *taskmanager.ExecContext
+	task *protocol.Task
+}
+
+func newRound(ec *taskmanager.ExecContext) *round { return &round{ec: ec} }
+
+func (r *round) ensureTask() *protocol.Task {
+	if r.task == nil {
+		r.task = protocol.NewTask(r.ec.TaskID, r.ec.ContextID)
 	}
-	if message.TaskID != nil && *message.TaskID != "" &&
-		*message.TaskID != ec.TaskID {
-		return nil, taskmanager.ErrInvalidAgentResponse(
-			"processor emitted Message for a foreign task",
+	return r.task
+}
+
+func (r *round) applyUnaryEvent(
+	event protocol.StreamEvent,
+	returnImmediately bool,
+) (*protocol.SendMessageResponse, bool, error) {
+	switch typed := event.(type) {
+	case *protocol.Message:
+		if r.task == nil {
+			message, err := normalizeDirectMessage(typed, r.ec)
+			if err != nil {
+				return nil, true, err
+			}
+			return protocol.NewSendMessageResponseMessage(message), true, nil
+		}
+		if _, _, err := r.applyTaskEvent(typed); err != nil {
+			return r.failedTaskResponse(err.Error()), true, nil
+		}
+		return nil, false, nil
+
+	case *protocol.TaskStatusUpdateEvent, *protocol.TaskArtifactUpdateEvent:
+		_, terminal, err := r.applyTaskEvent(event)
+		if err != nil {
+			if r.task != nil {
+				return r.failedTaskResponse(err.Error()), true, nil
+			}
+			return nil, true, err
+		}
+		if returnImmediately && !terminal {
+			return nil, true, taskmanager.ErrUnsupportedOperation(operationReturnImmediatelyTask)
+		}
+		if terminal {
+			return protocol.NewSendMessageResponseTask(copyTask(r.task)), true, nil
+		}
+		return nil, false, nil
+
+	case *protocol.Task:
+		if r.task != nil {
+			return r.failedTaskResponse("processor emitted forbidden Task snapshot"), true, nil
+		}
+		return nil, true, taskmanager.ErrInvalidAgentResponse(
+			"stateless TaskManager: processor emitted forbidden Task snapshot",
+		)
+
+	default:
+		reason := fmt.Sprintf("unsupported processor event %T", event)
+		if r.task != nil {
+			return r.failedTaskResponse(reason), true, nil
+		}
+		return nil, true, taskmanager.ErrInvalidAgentResponse(
+			"stateless TaskManager: " + reason,
 		)
 	}
-	if message.ContextID != nil && *message.ContextID != "" &&
-		*message.ContextID != ec.ContextID {
+}
+
+func (r *round) failedTaskResponse(reason string) *protocol.SendMessageResponse {
+	r.fail(reason)
+	return protocol.NewSendMessageResponseTask(copyTask(r.task))
+}
+
+func (r *round) applyTaskEvent(
+	event protocol.StreamEvent,
+) (protocol.StreamResponse, bool, error) {
+	switch typed := event.(type) {
+	case *protocol.TaskStatusUpdateEvent:
+		if typed == nil {
+			return protocol.StreamResponse{}, false, taskmanager.ErrInvalidAgentResponse(
+				"stateless TaskManager: processor emitted nil status event",
+			)
+		}
+		if err := r.stampTaskEventIDs(&typed.TaskID, &typed.ContextID); err != nil {
+			return protocol.StreamResponse{}, false, err
+		}
+		if typed.Status.State == "" || typed.Status.State == protocol.TaskStateUnspecified {
+			return protocol.StreamResponse{}, false, taskmanager.ErrInvalidAgentResponse(
+				"stateless TaskManager: processor emitted status without a state",
+			)
+		}
+		if isSuspended(typed.Status.State) {
+			return protocol.StreamResponse{}, false, taskmanager.ErrUnsupportedOperation(
+				"suspended Task in stateless TaskManager",
+			)
+		}
+		if typed.Status.Message != nil {
+			if err := normalizeTaskMessage(typed.Status.Message, r.ec); err != nil {
+				return protocol.StreamResponse{}, false, err
+			}
+		}
+		if typed.Status.Timestamp == "" {
+			typed.Status.Timestamp = nowTimestamp()
+		}
+		typed.Final = typed.Status.State.Terminal()
+		r.ensureTask().Status = typed.Status
+		return protocol.NewStreamResponseStatusUpdate(typed), typed.Status.State.Terminal(), nil
+
+	case *protocol.TaskArtifactUpdateEvent:
+		if typed == nil {
+			return protocol.StreamResponse{}, false, taskmanager.ErrInvalidAgentResponse(
+				"stateless TaskManager: processor emitted nil artifact event",
+			)
+		}
+		if err := r.stampTaskEventIDs(&typed.TaskID, &typed.ContextID); err != nil {
+			return protocol.StreamResponse{}, false, err
+		}
+		if typed.Artifact.ArtifactID == "" {
+			return protocol.StreamResponse{}, false, taskmanager.ErrInvalidAgentResponse(
+				"stateless TaskManager: processor emitted artifact without an ID",
+			)
+		}
+		appendChunk := typed.Append != nil && *typed.Append
+		task := r.ensureTask()
+		task.Artifacts, _ = protocol.AppendArtifact(task.Artifacts, typed.Artifact, appendChunk)
+		return protocol.NewStreamResponseArtifactUpdate(typed), false, nil
+
+	case *protocol.Message:
+		if err := normalizeTaskMessage(typed, r.ec); err != nil {
+			return protocol.StreamResponse{}, false, err
+		}
+		return protocol.NewStreamResponseMessage(typed), false, nil
+	case *protocol.Task:
+		return protocol.StreamResponse{}, false, taskmanager.ErrInvalidAgentResponse(
+			"stateless TaskManager: processor emitted forbidden Task snapshot",
+		)
+	default:
+		return protocol.StreamResponse{}, false, taskmanager.ErrInvalidAgentResponse(fmt.Sprintf(
+			"stateless TaskManager: unsupported processor event %T", event,
+		))
+	}
+}
+
+func (r *round) stampTaskEventIDs(taskID, contextID *string) error {
+	if *taskID == "" {
+		*taskID = r.ec.TaskID
+	} else if *taskID != r.ec.TaskID {
+		return taskmanager.ErrInvalidAgentResponse(
+			"stateless TaskManager: processor emitted event for a foreign task",
+		)
+	}
+	if *contextID == "" {
+		*contextID = r.ec.ContextID
+	} else if *contextID != r.ec.ContextID {
+		return taskmanager.ErrInvalidAgentResponse(
+			"stateless TaskManager: processor emitted event for a foreign context",
+		)
+	}
+	return nil
+}
+
+func (r *round) fail(reason string) *protocol.TaskStatusUpdateEvent {
+	message := protocol.NewAgentText(reason)
+	_ = normalizeTaskMessage(message, r.ec)
+	event := &protocol.TaskStatusUpdateEvent{
+		TaskID:    r.ec.TaskID,
+		ContextID: r.ec.ContextID,
+		Status: protocol.TaskStatus{
+			State:     protocol.TaskStateFailed,
+			Message:   message,
+			Timestamp: nowTimestamp(),
+		},
+		Final: true,
+	}
+	r.ensureTask().Status = event.Status
+	return event
+}
+
+func consumeTaskStream(
+	ctx context.Context,
+	events <-chan protocol.StreamEvent,
+	cancel context.CancelFunc,
+	round *round,
+	out chan protocol.StreamResponse,
+) {
+	defer cancel()
+	defer close(out)
+	for {
+		select {
+		case <-ctx.Done():
+			go drain(events)
+			return
+		case event, ok := <-events:
+			if !ok {
+				if !round.task.Status.State.Terminal() {
+					sendResponse(ctx, out, protocol.NewStreamResponseStatusUpdate(
+						round.fail("processor finished without terminal state"),
+					))
+				}
+				return
+			}
+			response, done, err := round.applyTaskEvent(event)
+			if err != nil {
+				log.Errorf("stateless TaskManager: task contract violation: %v", err)
+				sendResponse(ctx, out, protocol.NewStreamResponseStatusUpdate(round.fail(err.Error())))
+				cancel()
+				go drain(events)
+				return
+			}
+			if !sendResponse(ctx, out, response) {
+				go drain(events)
+				return
+			}
+			if done {
+				cancel()
+				go drain(events)
+				return
+			}
+		}
+	}
+}
+
+func normalizeDirectMessage(
+	message *protocol.Message,
+	ec *taskmanager.ExecContext,
+) (*protocol.Message, error) {
+	if message == nil {
 		return nil, taskmanager.ErrInvalidAgentResponse(
-			"processor emitted Message for a foreign context",
+			"stateless TaskManager: processor emitted nil Message",
+		)
+	}
+	if message.TaskID != nil && *message.TaskID != "" && *message.TaskID != ec.TaskID {
+		return nil, taskmanager.ErrInvalidAgentResponse(
+			"stateless TaskManager: processor emitted Message for a foreign task",
+		)
+	}
+	if message.ContextID != nil && *message.ContextID != "" && *message.ContextID != ec.ContextID {
+		return nil, taskmanager.ErrInvalidAgentResponse(
+			"stateless TaskManager: processor emitted Message for a foreign context",
 		)
 	}
 
@@ -312,6 +596,71 @@ func normalizeMessage(
 	}
 	return message, nil
 }
+
+func normalizeTaskMessage(message *protocol.Message, ec *taskmanager.ExecContext) error {
+	if message == nil {
+		return taskmanager.ErrInvalidAgentResponse(
+			"stateless TaskManager: processor emitted nil task Message",
+		)
+	}
+	if message.TaskID != nil && *message.TaskID != "" && *message.TaskID != ec.TaskID {
+		return taskmanager.ErrInvalidAgentResponse(
+			"stateless TaskManager: processor emitted status Message for a foreign task",
+		)
+	}
+	if message.ContextID != nil && *message.ContextID != "" && *message.ContextID != ec.ContextID {
+		return taskmanager.ErrInvalidAgentResponse(
+			"stateless TaskManager: processor emitted status Message for a foreign context",
+		)
+	}
+	taskID := ec.TaskID
+	contextID := ec.ContextID
+	message.TaskID = &taskID
+	message.ContextID = &contextID
+	message.Role = protocol.MessageRoleAgent
+	if message.MessageID == "" {
+		message.MessageID = protocol.GenerateMessageID()
+	}
+	return nil
+}
+
+func receiveEvent(
+	ctx context.Context,
+	events <-chan protocol.StreamEvent,
+) (protocol.StreamEvent, bool, error) {
+	select {
+	case <-ctx.Done():
+		return nil, false, ctx.Err()
+	case event, ok := <-events:
+		return event, ok, nil
+	}
+}
+
+func sendResponse(
+	ctx context.Context,
+	out chan<- protocol.StreamResponse,
+	response protocol.StreamResponse,
+) bool {
+	select {
+	case out <- response:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func copyTask(task *protocol.Task) *protocol.Task {
+	snapshot := *task
+	snapshot.Artifacts = append([]protocol.Artifact(nil), task.Artifacts...)
+	snapshot.History = nil
+	return &snapshot
+}
+
+func isSuspended(state protocol.TaskState) bool {
+	return state == protocol.TaskStateInputRequired || state == protocol.TaskStateAuthRequired
+}
+
+func nowTimestamp() string { return time.Now().UTC().Format(time.RFC3339) }
 
 func drain(events <-chan protocol.StreamEvent) {
 	for range events {

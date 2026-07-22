@@ -1,6 +1,6 @@
 # 框架概览
 
-tRPC-A2A-Go 是 A2A（Agent-to-Agent）协议 v1.0 的 Go 实现。它同时提供两端能力：用 **server** 把你的 agent 暴露为标准 A2A 服务，用 **client** 调用其他 A2A agent。框架处理协议对象、SSE、鉴权、多租户和 v0 兼容层；状态既可交给 memory / Redis 管理，也可在只需直接 Message 的 adapter 中完全不留存。
+tRPC-A2A-Go 是 A2A（Agent-to-Agent）协议 v1.0 的 Go 实现。它同时提供两端能力：用 **server** 把你的 agent 暴露为标准 A2A 服务，用 **client** 调用其他 A2A agent。框架处理协议对象、SSE、鉴权、多租户和 v0 兼容层；状态既可交给 memory / Redis 管理，也可只在单次请求内使用而不做任何留存。
 
 如果你还不熟悉 A2A，先看 [协议](protocol.md)。如果已经知道要写服务端或客户端，可以直接看 [服务端](server.md) 与 [客户端](client.md)。
 
@@ -21,7 +21,7 @@ tRPC-A2A-Go 是 A2A（Agent-to-Agent）协议 v1.0 的 Go 实现。它同时提�
 | gRPC / HTTP+JSON（REST）传输绑定 | 规划中 | A2A v1.0 spec 已定义；当前实现只服务 JSON-RPC。 |
 | 一份 processor 服务一元与流式 | 支持 | 同一个 `ProcessMessage` 同时服务 `SendMessage` 与 `SendStreamingMessage`。 |
 | 四种消费模式 | 支持 | 阻塞 send、`returnImmediately`、实时流式、`SubscribeToTask` / Go `ResubscribeTask`。 |
-| Stateless Message-only 执行 | 支持 | 请求绑定，不保存 Task 或会话历史。 |
+| Stateless 请求内执行 | 支持 | 可返回直接 Message 或临时 Task，不保存任何状态或会话历史。 |
 | agent card 发现与扩展 card | 支持 | 公开 card、鉴权后的 extended card、v1/v0 双格式归一化。 |
 | 任务管理 | 支持 | `GetTask`、`ListTasks`、`CancelTask`，Go client 暴露为 `GetTasks`、`ListTasks`、`CancelTasks`。 |
 | 内存与 Redis 任务存储 | 支持 | 可插拔 `TaskManager` 接口；可自带实现。 |
@@ -64,7 +64,7 @@ flowchart TB
 三层职责是固定的：
 
 - **`server`** 终结 wire 层：鉴权、提供 agent card、分发 JSON-RPC 方法和 SSE 流，也可以把 `compat/v0` 挂在同一端点里。
-- **`TaskManager`** 决定执行策略，并按需持有状态：stateless 提供请求绑定的直接 Message，不留存状态；memory 与 Redis 负责懒创建任务、持久化事件、维护会话历史、取消、留存和订阅者扇出。
+- **`TaskManager`** 决定执行策略，并按需持有状态：stateless 在请求内派生直接 Message 或临时 Task，不留存状态；memory 与 Redis 负责持久化事件、维护会话历史、取消、留存和订阅者扇出。
 - **`MessageProcessor`** 是你的 agent：它读取一份只读的 `ExecContext`，返回一个事件 channel。
 
 ## 请求生命周期
@@ -83,7 +83,7 @@ sequenceDiagram
     Server->>TM: OnSendMessage / OnSendMessageStream
     TM->>P: ProcessMessage(ctx, ec)
     P-->>TM: <-chan events（Message / status / artifact）
-    Note over TM: memory/Redis 先持久化任务事件并懒创建 Task；<br/>stateless 只转发 Message
+    Note over TM: memory/Redis 持久化任务事件；<br/>stateless 只在请求内应用事件
     TM-->>Server: Task、Message 或实时事件流
     Server-->>Client: JSON-RPC 结果 / SSE 帧
 ```
@@ -93,7 +93,7 @@ sequenceDiagram
 ## 框架帮你处理的细节
 
 - **结果派生**：`SendMessage` 返回最终 `Task` 或直接 `Message`，`SendStreamingMessage` 返回实时事件。
-- **任务生命周期**：memory 与 Redis 在首个任务事件时创建 Task，并按固定规则处理终态、挂起、取消和异常关闭；stateless 不创建 Task。
+- **任务生命周期**：首个任务事件会创建 Task。memory 与 Redis 将其持久化；stateless 只构造请求内 Task，并在请求结束后丢弃。
 - **会话历史**：memory 与 Redis 会保存请求消息、processor 发出的 `Message` 事件，以及被后续状态或 follow-up 取代的上一条 status message；stateless 不保存会话历史。
 - **agent card 归一化**：同一张 card 同时包含 v1.0 字段和 v0.x 镜像字段，便于两代客户端读取。
 - **兼容层翻译**：`compat/v0` 把 v0.2.x 的斜杠方法名映射到同一个 `TaskManager`。

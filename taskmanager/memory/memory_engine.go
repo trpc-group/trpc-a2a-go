@@ -147,7 +147,6 @@ func (m *TaskManager) prepareExecContext(
 	request *protocol.SendMessageParams,
 	exec *execution,
 	taskID string,
-	streaming bool,
 ) (*taskmanager.ExecContext, error) {
 	message := &request.Message
 	if message.MessageID == "" {
@@ -211,7 +210,6 @@ func (m *TaskManager) prepareExecContext(
 		TaskID:              taskID,
 		Task:                taskCopy,
 		Message:             *message,
-		Streaming:           streaming,
 		ContextID:           *message.ContextID,
 		Tenant:              request.Tenant,
 		History:             history,
@@ -351,7 +349,7 @@ func (m *TaskManager) startExecution(
 	// prepareExecContext registers exec as the task's single live run before
 	// the MessageProcessor is invoked, so OnCancelTask can reach the run from
 	// the very first instant events may be produced.
-	ec, err := m.prepareExecContext(reqCtx, request, exec, taskID, withPipe)
+	ec, err := m.prepareExecContext(reqCtx, request, exec, taskID)
 	if err != nil {
 		cancel()
 		return nil, err

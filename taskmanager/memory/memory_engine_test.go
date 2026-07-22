@@ -207,14 +207,7 @@ func liveExecutionCount(m *TaskManager) int {
 // A pure-message exchange returns the message and leaves no task behind
 // (lazy creation proof).
 func TestOnSendMessage_PureMessageLeavesNoTask(t *testing.T) {
-	var streaming bool
-	manager := newTestManager(t, funcExecutor(func(
-		ctx context.Context,
-		ec *taskmanager.ExecContext,
-	) (<-chan protocol.StreamEvent, error) {
-		streaming = ec.Streaming
-		return eventsExecutor(agentReply("hi there")).ProcessMessage(ctx, ec)
-	}))
+	manager := newTestManager(t, eventsExecutor(agentReply("hi there")))
 
 	response, err := manager.OnSendMessage(context.Background(), userParams("hello"))
 	if err != nil {
@@ -229,9 +222,6 @@ func TestOnSendMessage_PureMessageLeavesNoTask(t *testing.T) {
 	}
 	if message.Role != protocol.MessageRoleAgent {
 		t.Errorf("Expected agent role, got %s", message.Role)
-	}
-	if streaming {
-		t.Error("ExecContext streaming = true, want false")
 	}
 
 	// The reply must be stored in the conversation.
@@ -739,14 +729,7 @@ func TestOnSendMessageStream_OrderAndPersistBeforeBroadcast(t *testing.T) {
 
 // A pure-message execution streams the message and closes; no task is created.
 func TestOnSendMessageStream_PureMessage(t *testing.T) {
-	var streaming bool
-	manager := newTestManager(t, funcExecutor(func(
-		ctx context.Context,
-		ec *taskmanager.ExecContext,
-	) (<-chan protocol.StreamEvent, error) {
-		streaming = ec.Streaming
-		return eventsExecutor(agentReply("hi")).ProcessMessage(ctx, ec)
-	}))
+	manager := newTestManager(t, eventsExecutor(agentReply("hi")))
 
 	ch, err := manager.OnSendMessageStream(context.Background(), userParams("hello"))
 	if err != nil {
@@ -755,9 +738,6 @@ func TestOnSendMessageStream_PureMessage(t *testing.T) {
 	events := collectStream(t, ch)
 	if len(events) != 1 || events[0].GetMessage() == nil {
 		t.Fatalf("Expected exactly one Message event, got %+v", events)
-	}
-	if !streaming {
-		t.Error("ExecContext streaming = false, want true")
 	}
 	manager.taskMu.RLock()
 	taskCount := len(manager.tasks)

@@ -5,7 +5,7 @@ v1.0. It gives you both sides of an A2A conversation — a **server** that
 exposes your agent and a **client** that calls other agents — and owns
 the protocol plumbing in between (task lifecycle, streaming, conversation
 history, authentication, push notifications, multi-tenant hosting). State can
-be retained in memory or Redis, or skipped for direct Message-only adapters.
+be retained in memory or Redis, or kept request-local with no persistence.
 
 For the A2A protocol itself see [Protocol](protocol.md); for build recipes and
 the runtime contract see [Server](server.md) and [Client](client.md).
@@ -19,7 +19,7 @@ the runtime contract see [Server](server.md) and [Client](client.md).
 | gRPC / HTTP+JSON (REST) transport bindings | 🗺️ Planned | Defined by the spec; not yet implemented — JSON-RPC only today. |
 | `SendMessage` / `SendStreamingMessage` from one processor | ✅ | One code path serves unary and streaming. |
 | Blocking send, `returnImmediately`, live streaming, `SubscribeToTask` | ✅ | Four client consumption modes over the same agent. |
-| Stateless Message-only execution | ✅ | Request-bound processing with no retained Task or conversation history. |
+| Stateless request-scoped execution | ✅ | Direct Messages and ephemeral Tasks with no retained state or conversation history. |
 | In-memory & Redis task stores | ✅ | Pluggable `TaskManager` interface; bring your own. |
 | Authentication: JWT · API key · OAuth2 | ✅ | Chainable providers, server and client side. |
 | Push notifications (webhooks) signed with JWT + JWKS | ✅ | For disconnected, callback-driven operation. |
@@ -63,10 +63,10 @@ Three layers, three responsibilities:
   same auth chain.
 - **`TaskManager`** owns execution policy and, when enabled, task state: lazy
   task creation, round close rules, cancellation, conversation history,
-  retention, and subscriber fan-out. `taskmanager/stateless` provides
-  request-bound direct Messages without retained state; `taskmanager/memory`
-  and `taskmanager/redis` provide the task capabilities. You can also supply
-  your own implementation.
+  retention, and subscriber fan-out. `taskmanager/stateless` derives direct
+  Messages or request-local Tasks without retaining state;
+  `taskmanager/memory` and `taskmanager/redis` provide cross-request task
+  capabilities. You can also supply your own implementation.
 - **`MessageProcessor`** is the only part you write. It reads a read-only
   request snapshot (`ExecContext`) and returns a channel of events. That is
   your agent.
@@ -87,7 +87,7 @@ sequenceDiagram
     Server->>TM: OnSendMessage / OnSendMessageStream
     TM->>P: ProcessMessage(ctx, ec)
     P-->>TM: <-chan events (Message / status / artifact)
-    Note over TM: task-capable managers persist task events,<br/>create tasks lazily, and apply close rules;<br/>stateless forwards Messages only
+    Note over TM: memory/Redis persist task events;<br/>stateless applies them to a request-local Task only
     TM-->>Server: Task or Message (unary) OR live event stream
     Server-->>Client: JSON-RPC result / SSE frames
 ```
@@ -106,9 +106,9 @@ A large part of the framework is the protocol work you don't have to do:
 - **Result derivation** — `SendMessage` returns a `Task` or a `Message` (the
   sealed union) from what your processor emitted; `SendStreamingMessage`
   forwards the events live. One processor, every response shape.
-- **Lazy task creation & persistence** — in memory and Redis managers, the task
-  materializes on the first task event, and task events are persisted before
-  broadcast. The stateless manager deliberately skips this layer.
+- **Lazy task creation & optional persistence** — a task materializes on the
+  first task event. Memory and Redis persist it before broadcast; stateless
+  keeps the snapshot only until the originating request ends.
 - **Agent card normalization** — cards carry both the v1.0 fields and their
   deprecated v0.2.x mirrors, so one card is readable by both client
   generations.

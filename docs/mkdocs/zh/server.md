@@ -113,9 +113,9 @@ return out, nil
 ## 轮次生命周期
 
 一个**轮次**就是一次 `ProcessMessage` 调用，以及框架把它返回的 channel 读完的过程。可以把它理解为“agent 推进一次任务”的最小执行单位。
-下面的任务生命周期和持久化规则适用于 memory 与 Redis manager；
-[TaskManager 实现](#taskmanager)中的 stateless manager 只接受直接
-`Message` 事件，不保存 Task 或会话历史。
+下面的任务生命周期规则默认适用于所有 manager。memory 与 Redis 会持久化
+Task 和会话历史；[TaskManager 实现](#taskmanager)中的 stateless manager
+只在当前请求内应用任务事件，请求结束后不保留任何内容。
 
 轮次大致按这个顺序发生：
 
@@ -139,12 +139,13 @@ return out, nil
 
 - **挂起会立刻让出任务。** 发出 `input-required` / `auth-required` 后，框架允许续跑轮次开始。旧轮次之后再发出的事件会被丢弃；完成结果应该由续跑轮次交付。
 - **违反事件契约会失败。** 例如给别的 `taskId` 发事件、发 `*protocol.Task` 快照、发没有状态的 status，都会让本轮任务失败，并丢弃后续事件。
+- **挂起必须有可留存的状态。** stateless 会拒绝 `input-required` / `auth-required`，因为它无法接受这些状态要求的后续 continuation。
 
 ## 执行与取消
 
 memory 与 Redis manager 中，client 断开连接不会自动取消 agent 的工作。框架会让轮次在一个与请求连接分离的 context 上继续跑，结果仍然可以通过 `GetTask` 或 `SubscribeToTask` 取回。
 
-stateless manager 的轮次与请求绑定：client 断开后会取消 processor，因为此时没有可供后续查询的 Task，也没有可重新订阅的流。
+stateless manager 的轮次与请求绑定：client 断开或 manager 停机时会取消 processor，因为此时没有可供后续查询的 Task，也没有可重新订阅的流。
 
 对于 memory 与 Redis，真正会取消 processor `ctx` 的只有两类动作：client 调 `CancelTask`，或者 manager / server 停机。收到取消后，推荐做法是停止继续发送普通进度，尽快关闭 channel；如果你需要收尾，也可以发出自己的终态事件，框架会尊重它。
 
@@ -156,9 +157,9 @@ stateless manager 的轮次与请求绑定：client 断开后会取消 processor
 
 | 调用方式 | 框架如何响应 |
 | --- | --- |
-| `SendMessage`（默认阻塞） | 等本轮结束。只要本轮创建过任务，就返回最终任务快照；如果只是纯回复，则返回最后一条 `Message`。没有任何事件是 processor bug，返回 `-32603`。 |
-| `SendMessage` + `returnImmediately=true` | 返回最早可用结果：第一个已落库的任务快照，或第一条 `Message`。如果 client 需要后续跟踪任务，processor 应先发任务事件。 |
-| `SendStreamingMessage` | 按事件顺序实时转发；每个事件都会先持久化再投递。流在终态或挂起帧结束。 |
+| `SendMessage`（默认阻塞） | 本轮创建过任务时返回任务快照：memory / Redis 等轮次结束，stateless 等到终态。直接 `Message` 本身就是完整响应，stateless 收到第一条后立即返回。没有任何事件是 processor bug，返回 `-32006`。 |
+| `SendMessage` + `returnImmediately=true` | 返回最早可用的任务快照或第一条 `Message`。有状态 manager 可以让非终态任务继续后台运行；stateless 不可以。 |
+| `SendStreamingMessage` | 按事件顺序实时转发。memory / Redis 在投递前持久化任务事件；stateless 先发请求内 Task 快照，再发 status / artifact 更新。流在终态或挂起帧结束。 |
 | `SubscribeToTask` | 先发送当前任务快照，再发送实时增量。终态任务不能订阅。 |
 
 ## 会话、历史，以及什么会被记住
@@ -178,13 +179,13 @@ stateless manager 的轮次与请求绑定：client 断开后会取消 processor
 
 `Task.history` 是响应时按 `historyLength` 从会话里临时组出来的；`ec.History` 是本轮开始前拍下的快照，并按 `MaxHistoryLength`（默认 100）截断。
 
-memory 与 Redis 会消费请求 `configuration` 里的 `returnImmediately` 和 `historyLength`；`acceptedOutputModes` 会进入 `ec.AcceptedOutputModes`，`taskPushNotificationConfig` 会进入 `ec.PushConfig`。stateless 仍会传递 `acceptedOutputModes`，但拒绝 push 配置和 `returnImmediately=true`。
+memory 与 Redis 会消费请求 `configuration` 里的 `returnImmediately` 和 `historyLength`；`acceptedOutputModes` 会进入 `ec.AcceptedOutputModes`，`taskPushNotificationConfig` 会进入 `ec.PushConfig`。stateless 仍会传递 `acceptedOutputModes`，但拒绝 push 配置。`returnImmediately=true` 可用于直接 `Message` 或已经终态的 Task；非终态 Task 会被拒绝，因为 stateless 无法让它脱离请求继续执行。
 
 ## TaskManager 实现
 
 `TaskManager` 同时决定执行生命周期和状态归属。项目内置三种实现。
 
-**Stateless**——请求绑定，只返回直接 Message，不保存 Task 或会话历史：
+**Stateless**——请求绑定，不保存 Task、事件或会话历史：
 
 ```go
 import "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/stateless"
@@ -192,20 +193,20 @@ import "trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/stateless"
 tm, _ := stateless.NewTaskManager(proc)
 ```
 
-适合应用已经自行管理会话上下文、且不希望启用 A2A 任务管理的场景。
-processor 只能发 `*protocol.Message`，status 与 artifact 事件会被拒绝；
-`GetTask`、`ListTasks`、`CancelTask`、`SubscribeToTask`、push notification、
-task continuation，以及一元请求的 `returnImmediately=true` 都不支持。
-客户端需要其中任一任务能力时，请使用 memory 或 Redis。
+适合应用已经自行管理会话上下文，或明确不希望由 A2A 持久化状态的场景。
+processor 使用与其他 manager 完全相同的事件契约：直接
+`*protocol.Message` 得到 Message 响应；status / artifact 事件则为当前一元或
+流式请求构造一个临时 Task。请求结束后，Task 和事件全部丢弃。
 
-processor 可以像使用有状态 manager 时一样，把当前 `ExecContext.TaskID`
-写入回复 Message。stateless 会接受这个本轮 ID，并在返回前清掉它，因为并没有
-保存对应的 Task；属于其他执行轮次的 taskId 仍会被拒绝。
+因为 Task 不会跨请求存在，`GetTask`、`CancelTask`、`SubscribeToTask` 返回
+task-not-found，`ListTasks` 返回空列表，task continuation 无法被接受；push
+notification 和挂起态也不支持。`returnImmediately=true` 可用于直接 Message
+和已经终态的 Task，但不能用于需要脱离请求继续执行的非终态 Task。任何能力需要
+跨请求时，请使用 memory 或 Redis。
 
-因此，stateless 也不保留 legacy v0.2.x 的一元非阻塞默认行为。
-`compat/v0` 会把缺省配置或 `blocking=false` 转成
-`returnImmediately=true`，随后被 stateless 拒绝。legacy 一元客户端必须显式
-设置 `blocking=true`；如果必须保留原来的非阻塞行为，请使用 memory 或 Redis。
+直接 Message 就是完整响应，因此返回前会清掉其中的 `taskId`，processor 后续再发的
+事件也会被丢弃。Task 响应则会按普通规则补齐事件 ID；如果 channel 在
+`submitted` / `working` 状态关闭，返回的是 `FAILED` Task。
 
 **内存**——零依赖、单进程:
 
@@ -336,7 +337,7 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 
 ## 服务 legacy v0.2.x 客户端
 
-使用 memory 或 Redis 时，可以在迁移期间让未修改的 v0.2.x 客户端继续工作：把 `compat/v0` 挂到同一端点。legacy 斜杠方法名与 v1.0 的 PascalCase 名不相交，所以一个端点可以在同一鉴权链内、对同一个 `TaskManager` 分发两代请求。memory 与 Redis 会保留老默认，尤其是非阻塞的 `message/send`；stateless 与请求绑定，不支持这个默认行为，legacy 一元调用方必须显式设置 `blocking=true`。
+使用 memory 或 Redis 时，可以在迁移期间让未修改的 v0.2.x 客户端继续工作：把 `compat/v0` 挂到同一端点。legacy 斜杠方法名与 v1.0 的 PascalCase 名不相交，所以一个端点可以在同一鉴权链内、对同一个 `TaskManager` 分发两代请求。memory 与 Redis 会保留老默认，尤其是非阻塞的 `message/send`；stateless 可处理其中的直接 Message 响应，但不能让非终态 Task 脱离请求继续执行。
 
 ```go
 import v0 "trpc.group/trpc-go/trpc-a2a-go/v2/compat/v0"
