@@ -592,14 +592,12 @@ func TestEngine_TaskSnapshotEventFailsTask(t *testing.T) {
 	}
 }
 
-// A Message event naming a foreign task is a violation like any other event.
-func TestEngine_ForeignMessageEventFailsTask(t *testing.T) {
-	foreignTaskID := "someone-elses-task"
-	leaked := agentReply("leaked reply")
-	leaked.TaskID = &foreignTaskID
+// A Message after the task lifecycle starts violates the one-response-shape
+// contract and fails the task.
+func TestEngine_MessageAfterTaskEventFailsTask(t *testing.T) {
 	manager := newTestManager(t, eventsExecutor(
 		workingEvent(),
-		leaked,
+		agentReply("invalid reply"),
 		statusUpdate(protocol.TaskStateCompleted, nil), // must be discarded
 	))
 
@@ -611,7 +609,7 @@ func TestEngine_ForeignMessageEventFailsTask(t *testing.T) {
 	if task == nil || task.Status.State != protocol.TaskStateFailed {
 		t.Fatalf("Expected a FAILED task, got %+v", response)
 	}
-	if got := statusMessageText(task); !strings.Contains(got, "processor emitted event for foreign task") {
+	if got := statusMessageText(task); !strings.Contains(got, "Message after Task response started") {
 		t.Errorf("Unexpected violation message: %q", got)
 	}
 }
@@ -686,10 +684,14 @@ func TestOnSendMessageStream_OrderAndPersistBeforeBroadcast(t *testing.T) {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 
-	first := recvEvent(t, ch)
-	working := first.GetStatusUpdate()
+	initial := recvEvent(t, ch)
+	if task := initial.GetTask(); task == nil || task.Status.State != protocol.TaskStateSubmitted {
+		t.Fatalf("Expected a submitted Task first, got %+v", initial)
+	}
+	firstUpdate := recvEvent(t, ch)
+	working := firstUpdate.GetStatusUpdate()
 	if working == nil || working.Status.State != protocol.TaskStateWorking {
-		t.Fatalf("Expected the WORKING status first, got %+v", first)
+		t.Fatalf("Expected WORKING after the initial Task, got %+v", firstUpdate)
 	}
 	if working.TaskID == "" || working.ContextID == "" {
 		t.Errorf("Expected stamped IDs, got taskID=%q contextID=%q", working.TaskID, working.ContextID)
@@ -701,10 +703,10 @@ func TestOnSendMessageStream_OrderAndPersistBeforeBroadcast(t *testing.T) {
 	}
 	close(gate)
 
-	second := recvEvent(t, ch)
-	artifact := second.GetArtifactUpdate()
+	secondUpdate := recvEvent(t, ch)
+	artifact := secondUpdate.GetArtifactUpdate()
 	if artifact == nil || artifact.Artifact.ArtifactID != "art-1" {
-		t.Fatalf("Expected the artifact event second, got %+v", second)
+		t.Fatalf("Expected the artifact update second, got %+v", secondUpdate)
 	}
 	manager.taskMu.RLock()
 	artifactCount := len(manager.tasks[working.TaskID].Artifacts)
@@ -713,10 +715,10 @@ func TestOnSendMessageStream_OrderAndPersistBeforeBroadcast(t *testing.T) {
 		t.Errorf("Expected 1 persisted artifact when the event is received, got %d", artifactCount)
 	}
 
-	third := recvEvent(t, ch)
-	completed := third.GetStatusUpdate()
+	thirdUpdate := recvEvent(t, ch)
+	completed := thirdUpdate.GetStatusUpdate()
 	if completed == nil || completed.Status.State != protocol.TaskStateCompleted {
-		t.Fatalf("Expected the COMPLETED status third, got %+v", third)
+		t.Fatalf("Expected the COMPLETED status third, got %+v", thirdUpdate)
 	}
 	if state, _ := storedTaskState(manager, working.TaskID); state != protocol.TaskStateCompleted {
 		t.Errorf("Expected the store at COMPLETED when the event is received, got %s", state)
@@ -727,9 +729,31 @@ func TestOnSendMessageStream_OrderAndPersistBeforeBroadcast(t *testing.T) {
 	}
 }
 
-// A pure-message execution streams the message and closes; no task is created.
+// A direct Message completes the response stream; later processor events are
+// discarded and no task is created.
 func TestOnSendMessageStream_PureMessage(t *testing.T) {
-	manager := newTestManager(t, eventsExecutor(agentReply("hi")))
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseProducer := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseProducer()
+	processorCanceled := make(chan struct{})
+	producerDone := make(chan struct{})
+	manager := newTestManager(t, funcExecutor(func(
+		ctx context.Context,
+		_ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent)
+		go func() {
+			defer close(out)
+			defer close(producerDone)
+			out <- agentReply("hi")
+			<-ctx.Done()
+			close(processorCanceled)
+			<-release
+			out <- workingEvent()
+		}()
+		return out, nil
+	}))
 
 	ch, err := manager.OnSendMessageStream(context.Background(), userParams("hello"))
 	if err != nil {
@@ -738,6 +762,17 @@ func TestOnSendMessageStream_PureMessage(t *testing.T) {
 	events := collectStream(t, ch)
 	if len(events) != 1 || events[0].GetMessage() == nil {
 		t.Fatalf("Expected exactly one Message event, got %+v", events)
+	}
+	select {
+	case <-processorCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("direct Message did not cancel the processor context")
+	}
+	releaseProducer()
+	select {
+	case <-producerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("manager did not drain events after the direct Message")
 	}
 	manager.taskMu.RLock()
 	taskCount := len(manager.tasks)
@@ -1099,20 +1134,20 @@ func TestEngine_ArtifactChunksMergeByID(t *testing.T) {
 	}
 }
 
-// A message reused as a reply and then as a status message is indexed only once
-// when a later status supersedes it — including DIFFERENT objects carrying the
-// same MessageID, which pointer dedup alone would miss.
+// A status message reused across updates is indexed only once when later
+// statuses supersede it — including DIFFERENT objects carrying the same
+// MessageID, which pointer dedup alone would miss.
 func TestEngine_StatusMessageDedupByID(t *testing.T) {
-	reply := protocol.NewMessage(protocol.MessageRoleAgent, []*protocol.Part{protocol.NewTextPart("hold on")})
-	status := reply // value copy: same MessageID, different address
+	first := protocol.NewMessage(protocol.MessageRoleAgent, []*protocol.Part{protocol.NewTextPart("hold on")})
+	second := first // value copy: same MessageID, different address
 	processor := funcExecutor(
 		func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
 			h := taskmanager.NewTaskHandle(ctx, ec)
 			go func() {
 				defer h.Close()
-				h.Reply(&reply)
-				h.UpdateTaskState(protocol.TaskStateWorking, &status)
-				// Supersedes status, causing the same-MessageID copy above to roll.
+				h.UpdateTaskState(protocol.TaskStateWorking, &first)
+				h.UpdateTaskState(protocol.TaskStateWorking, &second)
+				// Supersedes the second same-MessageID copy, exercising store dedup.
 				h.UpdateTaskState(protocol.TaskStateInputRequired, agentReply("need input"))
 			}()
 			return h.Events(), nil
@@ -1340,7 +1375,7 @@ func TestOnSendMessage_ConcurrentContinuationRejected(t *testing.T) {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 	first := recvEvent(t, pipe)
-	taskID := first.GetStatusUpdate().TaskID
+	taskID := first.GetTask().ID
 
 	followUp := userParams("again")
 	followUp.Message.TaskID = &taskID
@@ -1386,7 +1421,7 @@ func TestOnCancelTask_LiveButTerminalNotCancelable(t *testing.T) {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 	first := recvEvent(t, pipe)
-	taskID := first.GetStatusUpdate().TaskID
+	taskID := first.GetTask().ID
 	waitTaskState(t, manager, taskID, protocol.TaskStateCompleted)
 
 	_, err = manager.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: taskID})
@@ -1555,7 +1590,7 @@ func TestOnSendMessageStream_DisconnectKeepsRunning(t *testing.T) {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 	first := recvEvent(t, pipe)
-	taskID := first.GetStatusUpdate().TaskID
+	taskID := first.GetTask().ID
 	cancel() // client disconnects; the pipe is abandoned from here on
 	close(disconnected)
 

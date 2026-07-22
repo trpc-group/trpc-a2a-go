@@ -294,10 +294,14 @@ func TestCancelBeforeSuspendClosePersistsCanceled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OnSendMessageStream: %v", err)
 	}
+	initial := recvEvent(t, stream)
+	if task := initial.GetTask(); task == nil || task.Status.State != protocol.TaskStateSubmitted {
+		t.Fatalf("first stream event = %+v, want submitted Task", initial)
+	}
 	workingEvent := recvEvent(t, stream)
 	working := workingEvent.GetStatusUpdate()
 	if working == nil || working.Status.State != protocol.TaskStateWorking {
-		t.Fatalf("first stream event = %+v, want WORKING", working)
+		t.Fatalf("first task update = %+v, want WORKING", working)
 	}
 	taskID := working.TaskID
 

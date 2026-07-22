@@ -592,9 +592,9 @@ func TestCrossNode_WrongTypeStreamFailsAtomically(t *testing.T) {
 	}
 }
 
-// A Message emitted for an existing Task is not reported to the RPC or local
-// subscribers unless its cross-node stream append succeeds.
-func TestCrossNode_MessageAppendFailureIsNotExposedAsSuccess(t *testing.T) {
+// A direct Message continuation is a complete response, not a Task lifecycle
+// event: it does not touch the Task event stream or its subscribers.
+func TestCrossNode_DirectMessageDoesNotUseTaskEventStream(t *testing.T) {
 	manager, _ := setupTest(
 		t,
 		scriptedExecutor(agentReply("reply")),
@@ -613,23 +613,27 @@ func TestCrossNode_MessageAppendFailureIsNotExposedAsSuccess(t *testing.T) {
 	params := sendParams("continue", task.ContextID)
 	params.Message.TaskID = &task.ID
 	response, err := manager.OnSendMessage(context.Background(), params)
-	if err == nil {
-		t.Fatalf("message append failure was exposed as success: %+v", response)
+	if err != nil {
+		t.Fatalf("direct Message unexpectedly touched the Task event stream: %v", err)
 	}
-	if !strings.Contains(err.Error(), "task event stream has wrong type") {
-		t.Fatalf("message append returned the wrong error: %v", err)
+	if message := response.GetMessage(); message == nil || message.Parts[0].TextContent() != "reply" {
+		t.Fatalf("direct response = %+v, want reply Message", response.Result)
 	}
 	if buffered := len(subscriber.Channel()); buffered != 0 {
-		t.Fatalf("message append failure reached local subscriber: buffered=%d", buffered)
+		t.Fatalf("direct Message reached Task subscriber: buffered=%d", buffered)
 	}
 	history, err := manager.getConversationHistory(context.Background(), task.ContextID, 100)
 	if err != nil {
 		t.Fatalf("getConversationHistory: %v", err)
 	}
+	var found bool
 	for _, message := range history {
-		if message.Role == protocol.MessageRoleAgent {
-			t.Fatalf("message append failure persisted an agent reply: %+v", message)
+		if message.Role == protocol.MessageRoleAgent && message.Parts[0].TextContent() == "reply" {
+			found = true
 		}
+	}
+	if !found {
+		t.Fatal("direct Message was not recorded in conversation history")
 	}
 }
 

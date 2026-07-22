@@ -191,7 +191,9 @@ func (h *TaskHandle) AppendArtifact(artifact protocol.Artifact, lastChunk bool) 
 	})
 }
 
-// Reply emits a direct message reply (the former pure-Message result path).
+// Reply emits a complete direct message reply (the former pure-Message result
+// path). It must be the first and only event shape in the round; do not combine
+// it with task status or artifact events.
 func (h *TaskHandle) Reply(message *protocol.Message) error {
 	return h.emit(message)
 }

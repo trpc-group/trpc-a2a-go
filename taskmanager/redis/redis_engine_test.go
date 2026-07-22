@@ -219,7 +219,7 @@ func TestOnSendMessage_ConcurrentContinuationRejected(t *testing.T) {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 	first := recvEvent(t, pipe)
-	taskID := first.GetStatusUpdate().TaskID
+	taskID := first.GetTask().ID
 
 	// Second live run on the same task must be rejected atomically.
 	followUp := sendParams("again", "ctx-concurrent")
@@ -270,7 +270,7 @@ func TestOnCancelTask_LiveButTerminalNotCancelable(t *testing.T) {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 	first := recvEvent(t, pipe)
-	taskID := first.GetStatusUpdate().TaskID
+	taskID := first.GetTask().ID
 	waitTaskState(t, m, taskID, protocol.TaskStateCompleted)
 
 	// The round is still live (channel not yet closed) but the stored state is
@@ -430,17 +430,15 @@ func TestEngine_UnspecifiedStateIsViolation(t *testing.T) {
 }
 
 // =============================================================================
-// Parity: a foreign Message event fails the task (violation)
+// Parity: a Message after task selection fails the task (violation)
 // =============================================================================
 
-// A Message event naming a foreign task is a violation like any other event.
-func TestEngine_ForeignMessageEventFailsTask(t *testing.T) {
-	foreignTaskID := "someone-elses-task"
-	leaked := agentReply("leaked reply")
-	leaked.TaskID = &foreignTaskID
+// A Message after the task lifecycle starts violates the one-response-shape
+// contract and fails the task.
+func TestEngine_MessageAfterTaskEventFailsTask(t *testing.T) {
 	m, _ := setupTest(t, scriptedExecutor(
 		statusEvent(protocol.TaskStateWorking, nil),
-		leaked,
+		agentReply("invalid reply"),
 		statusEvent(protocol.TaskStateCompleted, nil), // must be discarded
 	))
 
@@ -452,7 +450,7 @@ func TestEngine_ForeignMessageEventFailsTask(t *testing.T) {
 	if task == nil || task.Status.State != protocol.TaskStateFailed {
 		t.Fatalf("expected a FAILED task, got %+v", resp.Result)
 	}
-	if got := statusMessageText(task); !strings.Contains(got, "processor emitted event for foreign task") {
+	if got := statusMessageText(task); !strings.Contains(got, "Message after Task response started") {
 		t.Errorf("unexpected violation message: %q", got)
 	}
 	stored, err := m.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: task.ID})
@@ -522,7 +520,7 @@ func TestOnSendMessageStream_DisconnectKeepsRunning(t *testing.T) {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 	first := recvEvent(t, pipe)
-	taskID := first.GetStatusUpdate().TaskID
+	taskID := first.GetTask().ID
 	cancel() // client disconnects; the pipe is abandoned from here on
 	close(disconnected)
 

@@ -305,7 +305,7 @@ slash-delimited names, shown for reference):
 | Method (v1.0) | Kind | Purpose | v0.2.x name |
 | --- | --- | --- | --- |
 | `SendMessage` | unary | Send a message; the response is a **`Task` or a `Message`** (a union). By default it **waits** for the round to finish. | `message/send` |
-| `SendStreamingMessage` | SSE | Same request; every event streams live. | `message/stream` |
+| `SendStreamingMessage` | SSE | Same request; one Message, or Task first then live status/artifact updates. | `message/stream` |
 | `GetTask` | unary | Fetch a task snapshot; `historyLength` shapes attached history. | `tasks/get` |
 | `ListTasks` | unary | Enumerate tasks: filter by `contextId`/state, paginate. | — (new in v1.0) |
 | `CancelTask` | unary | Request cancellation. | `tasks/cancel` |
@@ -351,7 +351,9 @@ plus the A2A-specific range:
 
 ### The canonical event paradigm
 
-The typical shape of a task-producing round, and what is actually mandatory:
+Every streaming response has one of two shapes: exactly one `Message`, or an
+initial `Task` followed only by status/artifact updates. The typical shape of a
+task-producing round, and what is actually mandatory:
 
 ```
 status  -> submitted     optional: creation implies submitted

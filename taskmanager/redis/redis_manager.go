@@ -232,9 +232,10 @@ func (m *TaskManager) OnSendMessage(
 	}
 }
 
-// OnSendMessageStream handles message/stream requests. Every event emitted
-// by the MessageProcessor is persisted and then forwarded, in order, on the returned
-// channel; the channel is closed when the round ends.
+// OnSendMessageStream handles message/stream requests. The returned channel
+// carries either one direct Message, or an initial Task snapshot followed by
+// persisted task updates in order. It closes at the terminal/suspend frame or
+// a direct Message.
 func (m *TaskManager) OnSendMessageStream(
 	ctx context.Context,
 	request protocol.SendMessageParams,

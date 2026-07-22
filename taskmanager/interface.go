@@ -66,14 +66,20 @@ type ExecContext struct {
 // behavior: process one message and report progress by sending events on the
 // returned channel.
 //
-// Accepted event types:
-//   - *protocol.Message is a direct reply. No task comes into existence for a
-//     pure-message exchange.
-//   - *protocol.TaskStatusUpdateEvent and *protocol.TaskArtifactUpdateEvent
-//     drive the task identified by ExecContext.TaskID. The manager creates the
-//     task on the first task event and derives the unary result from the stream.
-//     Retaining managers persist events before broadcasting them; a stateless
-//     manager applies them only to the request-local task snapshot.
+// The first valid event selects exactly one response shape for the round:
+//   - *protocol.Message is a complete direct reply. No task comes into existence
+//     for a fresh round, the response stream contains that one Message, and all
+//     later processor events are discarded.
+//   - *protocol.TaskStatusUpdateEvent or *protocol.TaskArtifactUpdateEvent starts
+//     a task lifecycle. For message/stream, the manager first emits a Task
+//     snapshot, then forwards only status and artifact updates. A Message after
+//     the task lifecycle has started is a contract violation.
+//
+// Retaining managers persist task events before broadcasting them; a stateless
+// manager applies them only to the request-local task snapshot. In both cases,
+// the manager creates or materializes the Task on the first task event.
+//
+// Other event rules:
 //   - *protocol.Task is never accepted: task snapshots are materialized by
 //     managers from the event stream. Emitting one is a contract violation.
 //
@@ -86,8 +92,9 @@ type ExecContext struct {
 // retain and mutate an event (or its Parts/Message) after sending it.
 //
 // Closing the channel ends the round:
-//   - with the task in a terminal state, or after a pure-message reply: a
-//     normal end;
+//   - with the task in a terminal state: a normal end;
+//   - after a direct Message: a normal drain completion; the response stream
+//     already closed at that Message;
 //   - in input-required / auth-required: a retaining manager keeps the task
 //     suspended awaiting a follow-up message; a request-local manager may reject
 //     suspension because it cannot accept a continuation;
@@ -104,11 +111,12 @@ type ExecContext struct {
 // suspending). The message/stream response stream ends at the terminal or
 // suspend frame; the channel itself is still drained until closed.
 //
-// For retaining managers, ctx is canceled when the task is canceled via
-// CancelTask. A client disconnect does NOT cancel ctx: the work keeps running
-// and its results remain retrievable (GetTask / SubscribeToTask). A stateless
-// manager cancels ctx on disconnect and discards its request-local task. The
-// framework always drains the channel until it is closed, so senders never leak.
+// For retaining managers, ctx is canceled after a complete direct Message, when
+// the task is canceled via CancelTask, or during manager shutdown. A client
+// disconnect does NOT cancel ctx: task work keeps running and its results remain
+// retrievable (GetTask / SubscribeToTask). A stateless manager also cancels ctx
+// on disconnect and discards its request-local task. The framework always drains
+// the channel until it is closed, so senders never leak.
 //
 // The framework starts consuming the channel only after ProcessMessage
 // returns: sends beyond the channel buffer from inside ProcessMessage itself
@@ -147,10 +155,12 @@ type TaskManager interface {
 	) (*protocol.SendMessageResponse, error)
 
 	// OnSendMessageStream handles a request corresponding to the 'message/stream' RPC method.
-	// It invokes the MessageProcessor and returns a channel that carries emitted
-	// events. Retaining managers persist task events before delivery; stateless
-	// managers apply them only to the request-local task. The channel is closed
-	// when the round ends; setup errors are returned directly.
+	// It invokes the MessageProcessor and returns either exactly one Message, or
+	// a Task snapshot followed by status/artifact updates. Retaining managers
+	// persist task events before delivery; stateless managers apply them only to
+	// the request-local task. The response channel closes at the direct Message
+	// or terminal/suspend task update while the processor channel is still
+	// drained to closure; setup errors are returned directly.
 	OnSendMessageStream(
 		ctx context.Context,
 		request protocol.SendMessageParams,

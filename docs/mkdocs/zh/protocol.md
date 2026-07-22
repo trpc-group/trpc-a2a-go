@@ -103,7 +103,7 @@ agentCard := server.AgentCard{
 | 问一句、直接拿回答 | `SendMessage`，agent 返回 `Message` | 没有 `Task`，不能查询或取消。 |
 | 提交任务并等到结束 | `SendMessage` 默认模式 | 最终 `Task` 快照，包含状态和 artifacts。 |
 | 提交后马上返回 | `SendMessage` + `returnImmediately=true` | 最早可用的 `Task` 或 `Message`；任务可继续跑。 |
-| 实时看进度 | `SendStreamingMessage` | SSE 事件流：status / artifact / message。 |
+| 实时看进度 | `SendStreamingMessage` | SSE：唯一一条 `Message`，或 `Task` 快照后跟 status / artifact。 |
 | 断线后接回任务 | `SubscribeToTask` | 先给当前 `Task` 快照，再给实时增量。 |
 | 不在线也要拿进展 | push notification | 服务端回调 client 的 webhook。 |
 
@@ -323,6 +323,6 @@ status   -> completed      必须：以合法状态收尾；终态即关闭流
 
 强制项：产生任务后，要以合法状态结束（终态，或多轮场景的挂起态）并标注 artifact 分块；终态（或中断态）的那一帧即流的最后一帧，之后 SSE 流关闭。其余——要不要显式 `submitted`、发几帧 `working`、进度文字挂不挂在 status message 上——都由 agent 自定。
 
-实现层面还有一个重要边界：`TaskStatus.message` 更适合放进度解释，它会被下一个 status 覆盖；需要跨轮进入会话历史的最终回答，应作为独立 `Message` 事件发出。详见 [服务端](server.md)。
+实现层面还有一个重要边界：一轮只能选择直接 `Message`，或 `Task` + status/artifact 两种形态之一。`TaskStatus.message` 适合放进度解释，Task 输出放 artifact；Task 启动后不能再追加独立 `Message`。详见 [服务端](server.md)。
 
 下一步：[服务端](server.md) 讲本框架如何把这条事件流变成持久化任务与派生响应；[客户端](client.md) 展示如何从 Go 代码消费这些响应。
