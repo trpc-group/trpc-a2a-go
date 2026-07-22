@@ -417,10 +417,6 @@ func TestRedisPushBackpressureSerializesSuspendContinuation(t *testing.T) { //no
 	if !yielding {
 		t.Fatal("input-required became visible before the suspend handoff barrier")
 	}
-	initial := recvEvent(t, stream)
-	if task := initial.GetTask(); task == nil || task.ID != taskID || task.Status.State != protocol.TaskStateSubmitted {
-		t.Fatalf("initial stream event = %+v, want submitted Task", initial)
-	}
 
 	type continuationResult struct {
 		response *protocol.SendMessageResponse

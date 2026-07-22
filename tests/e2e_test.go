@@ -435,9 +435,9 @@ func TestE2E_MessageAPI_Resubscribe(t *testing.T) {
 
 	first, ok := <-firstChan
 	require.True(t, ok, "Should have received a first stream event")
-	initialTask := first.GetTask()
-	require.NotNil(t, initialTask, "First event should be a Task snapshot")
-	taskID := initialTask.ID
+	firstStatus := first.GetStatusUpdate()
+	require.NotNil(t, firstStatus, "First event should be a status update")
+	taskID := firstStatus.TaskID
 	require.NotEmpty(t, taskID, "Server should have assigned a task ID")
 
 	// Resubscribe to streaming message events using the new API
@@ -635,9 +635,7 @@ func TestE2E_StreamDisconnect_BlockingSendDoesNotWedge(t *testing.T) {
 
 	first, ok := <-eventChan
 	require.True(t, ok, "should receive a first event")
-	initialTask := first.GetTask()
-	require.NotNil(t, initialTask, "first event should be a Task snapshot")
-	taskID := initialTask.ID
+	taskID := first.GetStatusUpdate().TaskID
 	require.NotEmpty(t, taskID)
 	cancelStream() // client disconnects here; buffer(1) will fill server-side
 

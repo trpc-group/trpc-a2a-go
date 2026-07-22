@@ -72,7 +72,6 @@ func (le *liveExecution) requestCancel() {
 // discarded.
 const (
 	engineConsuming = iota
-	engineDrainDirect
 	engineDrainTerminal
 	engineDrainViolation
 	engineDrainYielded
@@ -374,10 +373,6 @@ func (ex *execution) run(events <-chan protocol.StreamEvent) {
 			continue
 		}
 		switch mode {
-		case engineDrainDirect:
-			log.Warnf("RedisTaskManager: discarding %T for task %s emitted after a direct Message response",
-				event, ex.ec.TaskID)
-			continue
 		case engineDrainTerminal:
 			log.Warnf("RedisTaskManager: discarding %T for task %s emitted after terminal state",
 				event, ex.ec.TaskID)
@@ -429,12 +424,8 @@ func (ex *execution) handleEvent(event protocol.StreamEvent) int {
 			ex.violate("processor emitted event for foreign task")
 			return engineDrainViolation
 		}
-		if ex.taskTouched {
-			ex.violate("processor emitted Message after Task response started")
-			return engineDrainViolation
-		}
 		ex.processMessageEvent(ev)
-		return engineDrainDirect
+		return engineConsuming
 	case *protocol.TaskStatusUpdateEvent:
 		if ev == nil {
 			log.Warnf("RedisTaskManager: ignoring nil status event for task %s", ex.ec.TaskID)
@@ -579,23 +570,27 @@ func (ex *execution) stampTaskEventIDs(taskID, contextID *string) bool {
 	return true
 }
 
-// processMessageEvent stores a complete direct reply into the conversation,
-// forwards it to the request pipe, and closes that response stream. The
-// processor channel is still drained after cancellation.
+// processMessageEvent stores a reply Message into the conversation and
+// forwards it to the request pipe and, when a task exists, its subscribers.
+// The immediateResult outcome is offered before the fan-out so a returnImmediately
+// waiter is never stalled behind a slow subscriber.
 func (ex *execution) processMessageEvent(msg *protocol.Message) {
 	contextID := ex.ec.ContextID
 	ex.manager.stampReplyMessage(&contextID, msg)
 	response := protocol.NewStreamResponseMessage(msg)
+	if ex.task != nil {
+		if err := ex.manager.appendTaskEvent(context.Background(), ex.ec.TaskID, response); err != nil {
+			ex.failRun(fmt.Errorf("failed to store message event for task %s: %w", ex.ec.TaskID, err))
+			return
+		}
+	}
+	// The event journal is the success boundary for a reply attached to a Task.
+	// Store conversation history only after the append succeeds, so a failed
+	// request cannot leave behind an agent reply that no stream observed.
 	ex.manager.storeMessage(context.Background(), *msg)
 	ex.lastMessage = msg
 	ex.offerImmediateResult(sendOutcome{message: msg})
-	if ex.pipe != nil {
-		if err := ex.pipe.Send(response); err != nil {
-			log.Warnf("RedisTaskManager: failed to send direct Message for task %s: %v", ex.ec.TaskID, err)
-		}
-	}
-	ex.closePipe()
-	ex.live.cancel()
+	ex.broadcast(response)
 }
 
 // storeStatusMessage stores a stamped copy without mutating the processor's
@@ -655,14 +650,6 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		Message:   ev.Status.Message,
 		Timestamp: timestamp,
 	}
-	var initial *protocol.Task
-	if !ex.taskTouched {
-		if ex.task == nil {
-			initial = protocol.NewTask(ex.ec.TaskID, ex.ec.ContextID)
-		} else {
-			initial = copyTask(ex.task)
-		}
-	}
 	var previousStatusMessage *protocol.Message
 	if ex.task == nil {
 		ex.task = ex.newTask(ev.TaskID, ev.ContextID, status)
@@ -694,11 +681,6 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		}
 		ex.failRun(fmt.Errorf("failed to store task %s status %s: %w", ev.TaskID, status.State, err))
 		return
-	}
-	if initial != nil && ex.pipe != nil {
-		if err := ex.pipe.Send(protocol.NewStreamResponseTask(initial)); err != nil {
-			log.Warnf("RedisTaskManager: failed to send initial Task for task %s: %v", ex.ec.TaskID, err)
-		}
 	}
 	// The old status message is durably superseded only after the Task/event
 	// commit succeeds. Moving it earlier would leave failed updates reflected in
@@ -749,14 +731,6 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 			ex.ec.TaskID, ex.task.Status.State)
 		return
 	}
-	var initial *protocol.Task
-	if !ex.taskTouched {
-		if ex.task == nil {
-			initial = protocol.NewTask(ex.ec.TaskID, ex.ec.ContextID)
-		} else {
-			initial = copyTask(ex.task)
-		}
-	}
 	if ex.task == nil {
 		ex.task = ex.newTask(ev.TaskID, ev.ContextID, protocol.TaskStatus{
 			State:     protocol.TaskStateSubmitted,
@@ -775,11 +749,6 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 	if err := ex.manager.commitTaskEvent(context.Background(), ex.task, response); err != nil {
 		ex.failRun(fmt.Errorf("failed to store task %s artifact: %w", ev.TaskID, err))
 		return
-	}
-	if initial != nil && ex.pipe != nil {
-		if err := ex.pipe.Send(protocol.NewStreamResponseTask(initial)); err != nil {
-			log.Warnf("RedisTaskManager: failed to send initial Task for task %s: %v", ex.ec.TaskID, err)
-		}
 	}
 	if err := ex.persistInlinePushConfig(); err != nil {
 		log.Errorf("RedisTaskManager: failed to persist inline push config for task %s: %v", ex.ec.TaskID, err)

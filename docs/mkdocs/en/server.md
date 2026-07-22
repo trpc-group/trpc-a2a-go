@@ -132,15 +132,10 @@ is a processor written entirely on the raw channel.)
 - End every round in a terminal or suspend state; closing in `working` marks
   the task `FAILED`.
 - One round drives exactly one task; never emit `*protocol.Task`.
-- Choose one response shape per round. `Reply` / `*protocol.Message` is a
-  complete direct response and must come first; any later events are discarded.
-  Once a status or artifact starts a Task, only status/artifact events may
-  follow. A later standalone Message fails that Task as a contract violation.
 - The current `status.message` stays only on `Task.Status`. When a later status
   or follow-up user message supersedes it, the previous message moves into
-  history. A terminal status message stays current forever; artifacts never
-  enter history. Put Task output in an artifact and explanatory text in
-  `status.message`; use a direct Message only when no Task lifecycle is needed.
+  history. A terminal status message stays current forever. Emit a final answer
+  worth remembering as a `Message`; artifacts never enter history.
 
 ## The round contract
 
@@ -159,10 +154,8 @@ the request.
   (`GetTask` for that round's pre-allocated ID returns not-found).
 - **One active run per task** — a second message for a task whose round is
   still running is rejected (`-32602`, "already has an active execution").
-- **The processor round ends when you close the channel** — and only then. A
-  direct Message, terminal status, or suspend status may close the client
-  response earlier while the framework keeps draining discarded events. The
-  close rules applied when the processor channel ends:
+- **The round ends when you close the channel** — and only then. The close
+  rules applied at that moment:
 
   | Task state at close | Outcome |
   | --- | --- |
@@ -176,9 +169,8 @@ the request.
   round emits afterwards is discarded. Deliver the completion from the
   continuation round.
 - **Contract violations fail fast** — emitting an event for a foreign `taskId`,
-  a `*protocol.Task` snapshot (framework-only in v1.0), an invalid status, or a
-  standalone Message after the Task lifecycle started marks an
-  already-materialized task `FAILED` and discards the rest.
+  a `*protocol.Task` snapshot (framework-only in v1.0), or an invalid status
+  marks an already-materialized task `FAILED` and discards the rest.
 - **Suspension requires retained state** — stateless rejects
   `input-required`/`auth-required`, because it cannot accept the continuation
   that those states require.
@@ -191,11 +183,10 @@ the request.
 - Stateless rounds are request-bound: a disconnect or manager shutdown cancels
   the processor because there is no retained task to retrieve or resubscribe
   to.
-- In memory and Redis managers, `CancelTask` and manager shutdown cancel the
-  processor's `ctx`; a complete direct Message also cancels it as round cleanup
-  because all later events are discarded. After `CancelTask`, the polite
-  reaction is to **stop emitting and close** — the framework persists
-  `CANCELED`. A terminal event emitted *after* the cancel still wins.
+- In memory and Redis managers, only `CancelTask` (and manager shutdown)
+  cancels the processor's `ctx`. The polite reaction is to **stop emitting and
+  close** — the framework persists `CANCELED`. A terminal event emitted *after*
+  the cancel still wins.
 - `CancelTask` **returns the snapshot at the moment cancellation was requested**
   (possibly still `working`); the terminal `CANCELED` lands when the round winds
   down. Canceling an already-terminal task returns `-32002`.
@@ -210,11 +201,10 @@ the request.
 - **`SendMessage` with `returnImmediately=true`** answers with the **earliest
   usable result**: the first task snapshot or the first Message. Retaining
   managers can keep a non-terminal task running; stateless cannot.
-- **`SendStreamingMessage`** returns exactly one direct Message, or starts with
-  a Task snapshot and then forwards status/artifact updates in order. Memory
-  and Redis persist task updates before delivery; stateless applies them only
-  to the request-local Task. The Task stream ends at the terminal or suspend
-  frame.
+- **`SendStreamingMessage`** forwards every event in order. Memory and Redis
+  persist task events before delivery; stateless first emits a request-local
+  Task snapshot and then its status/artifact updates. The stream ends at the
+  terminal or suspend frame.
 - **`SubscribeToTask`** sends the current task snapshot first, then live
   increments; terminal tasks are rejected.
 
@@ -222,16 +212,15 @@ the request.
 
 Storage is two-level: **message bodies by `messageId`**, and per-`contextId`
 **conversation indexes**. What enters the conversation: every round's request
-message, every direct **`Message` response** the processor emits, and every
+message, every **`Message` event** the processor emits, and every
 **superseded `status.message`** (e.g. an input-required question once the user
 continues the task).
 
 > The **current** `status.message` is not in history. A later status transition
 > or follow-up user message moves the previous one into history before the next
 > turn; a **terminal** status message is never superseded and stays on
-> `status.Message` only. **Artifacts never enter history.** A Task round cannot
-> add a standalone Message after it starts; retain Task output in its artifact
-> or status, and use a direct Message round for a conversational reply.
+> `status.Message` only. **Artifacts never enter history.** Emit an LLM's final
+> answer as a `Message` event if it must survive into another conversation.
 
 `Task.history` is virtual: filled at response time from the conversation per the
 request's `historyLength`. `ec.History` is a snapshot taken before the round,

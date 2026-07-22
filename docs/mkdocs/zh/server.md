@@ -108,8 +108,7 @@ return out, nil
 - **谁发事件，谁负责关闭。** 如果你在 goroutine 里发事件，就在那个 goroutine 里关闭 channel 或 `TaskHandle`。channel 不关闭，轮次就不会结束，任务也会一直占着执行槽。
 - **每轮都要给出结论。** 正常结束用 `completed` / `failed` / `canceled` / `rejected`；需要用户继续输入时用 `input-required` / `auth-required`。如果还停在 `submitted` 或 `working` 就关闭，框架会把任务标成 `FAILED`。
 - **一轮只属于一个任务。** 事件默认属于 `ec.TaskID`。不要发其他 `taskId` 的事件，也不要自己发 `*protocol.Task` 快照；任务快照只由框架生成。
-- **每轮只能选择一种响应形态。** `Reply` / `*protocol.Message` 是完整的直接响应，必须是首个事件，之后的事件会被丢弃；一旦 status 或 artifact 启动 Task，后面只能继续发 status/artifact，独立 `Message` 会让 Task 因契约违规而失败。
-- 当前 `status.message` 只留在 `Task.Status`；后续状态或 follow-up 用户消息取代它时，上一条 status message 才会移入历史。终态 status message 不会再被取代，只留在 `status.Message`；artifact 也永不进历史。Task 输出放 artifact，解释文字放 `status.message`；只有不需要 Task 生命周期的对话回复才使用直接 `Message`。
+- **要让后续对话记住终答，就发 `Message`。** 当前 `status.message` 只留在 `Task.Status`；后续状态或 follow-up 用户消息取代它时，上一条 status message 才会移入历史。终态 status message 不会再被取代，只留在 `status.Message`；artifact 也永不进历史。需要保留的回答，尤其是 LLM 最终回复，请作为 `Message` 事件发出。
 
 ## 轮次生命周期
 
@@ -122,14 +121,14 @@ Task 和会话历史；[TaskManager 实现](#taskmanager)中的 stateless manage
 
 1. 框架收到 `SendMessage` 或 `SendStreamingMessage`，准备好 `ExecContext`，然后调用你的 `ProcessMessage`。
 2. 你的 processor 返回事件 channel。
-3. 框架读取事件：Task 事件先持久化再投递；直接 `Message` 作为完整响应返回。
-4. channel 关闭时，processor 轮次结束；框架根据最后的任务状态收尾。直接 `Message`、终态或挂起态可以更早关闭客户端响应，后续事件仍会被读完并丢弃。
+3. 框架读取事件：每个事件都会先持久化，再返回给调用方或订阅者。
+4. channel 关闭时，本轮结束；框架根据最后的任务状态收尾。
 
 关键语义如下：
 
 - **任务是懒创建的。** 只有发出 status 或 artifact 这类任务事件后，任务才真正落库。只发 `Message` 的轮次不会留下任务；对该轮预分配 ID 调 `GetTask` 会得到 not-found。
 - **同一任务同一时间只能跑一轮。** 上一轮还没结束时，针对同一个 `taskId` 的后续消息会被拒绝：`-32602`，`"already has an active execution"`。
-- **processor channel 关闭才算轮次结束。** 客户端响应可能更早关闭；channel 关闭时框架应用下面的规则：
+- **channel 关闭才算结束。** 关闭时框架应用下面的规则：
 
   | 关闭时的情况 | 结果 |
   | --- | --- |
@@ -139,7 +138,7 @@ Task 和会话历史；[TaskManager 实现](#taskmanager)中的 stateless manage
   | 收到取消且没有发出终态 | 标记为 `CANCELED` |
 
 - **挂起会立刻让出任务。** 发出 `input-required` / `auth-required` 后，框架允许续跑轮次开始。旧轮次之后再发出的事件会被丢弃；完成结果应该由续跑轮次交付。
-- **违反事件契约会失败。** 例如给别的 `taskId` 发事件、发 `*protocol.Task` 快照、发没有状态的 status，或在 Task 启动后发独立 `Message`，都会让本轮任务失败，并丢弃后续事件。
+- **违反事件契约会失败。** 例如给别的 `taskId` 发事件、发 `*protocol.Task` 快照、发没有状态的 status，都会让本轮任务失败，并丢弃后续事件。
 - **挂起必须有可留存的状态。** stateless 会拒绝 `input-required` / `auth-required`，因为它无法接受这些状态要求的后续 continuation。
 
 ## 执行与取消
@@ -148,7 +147,7 @@ memory 与 Redis manager 中，client 断开连接不会自动取消 agent 的�
 
 stateless manager 的轮次与请求绑定：client 断开或 manager 停机时会取消 processor，因为此时没有可供后续查询的 Task，也没有可重新订阅的流。
 
-对于 memory 与 Redis，client 调 `CancelTask`、manager / server 停机都会取消 processor `ctx`；直接 `Message` 完成响应时也会把 `ctx` 作为轮次清理而取消，因为后续事件必然丢弃。收到 `CancelTask` 后，推荐做法是停止继续发送普通进度，尽快关闭 channel；如果你需要收尾，也可以发出自己的终态事件，框架会尊重它。
+对于 memory 与 Redis，真正会取消 processor `ctx` 的只有两类动作：client 调 `CancelTask`，或者 manager / server 停机。收到取消后，推荐做法是停止继续发送普通进度，尽快关闭 channel；如果你需要收尾，也可以发出自己的终态事件，框架会尊重它。
 
 `CancelTask` 返回的是“发起取消那一刻”的任务快照，所以它可能仍然是 `working`。最终是否落成 `CANCELED`，要等 processor 停下并关闭 channel。已经终态的任务不能取消，会返回 `-32002`。
 
@@ -160,7 +159,7 @@ stateless manager 的轮次与请求绑定：client 断开或 manager 停机时�
 | --- | --- |
 | `SendMessage`（默认阻塞） | 本轮创建过任务时返回任务快照：memory / Redis 等轮次结束，stateless 等到终态。直接 `Message` 本身就是完整响应，stateless 收到第一条后立即返回。没有任何事件是 processor bug，返回 `-32006`。 |
 | `SendMessage` + `returnImmediately=true` | 返回最早可用的任务快照或第一条 `Message`。有状态 manager 可以让非终态任务继续后台运行；stateless 不可以。 |
-| `SendStreamingMessage` | 返回唯一一条直接 `Message`，或者先发 `Task` 快照，再按顺序发 status / artifact 更新。memory / Redis 在投递更新前持久化；stateless 只应用到请求内 Task。Task 流在终态或挂起帧结束。 |
+| `SendStreamingMessage` | 按事件顺序实时转发。memory / Redis 在投递前持久化任务事件；stateless 先发请求内 Task 快照，再发 status / artifact 更新。流在终态或挂起帧结束。 |
 | `SubscribeToTask` | 先发送当前任务快照，再发送实时增量。终态任务不能订阅。 |
 
 ## 会话、历史，以及什么会被记住
@@ -168,7 +167,7 @@ stateless manager 的轮次与请求绑定：client 断开或 manager 停机时�
 会话历史只记录“对话”，不记录所有运行细节。框架按 `messageId` 保存消息本体，再按 `contextId` 维护会话索引。会进入会话历史的内容：
 
 - 每一轮的请求消息；
-- processor 主动发出的直接 `Message` 响应；
+- processor 主动发出的 `Message` 事件；
 - 被后续状态或 follow-up 用户消息取代的 **上一条 `status.message`**；例如用户继续 `input-required` 任务时，提问会在新用户消息之前移入历史。
 
 不会进入会话历史的内容也很重要：
@@ -176,7 +175,7 @@ stateless manager 的轮次与请求绑定：client 断开或 manager 停机时�
 - **当前** `status.message` 只留在 `Task.Status`，不会同时出现在 history；终态消息不会再被取代，因此始终只留在 `status.Message`；
 - artifact 是任务交付物，只挂在任务上，永不进历史。
 
-Task 轮次启动后不能再追加独立 `Message`。需要可靠取回的 Task 输出应放在 artifact 或 status 中；不需要 Task 生命周期的对话回复则直接返回 `Message`，它会进入会话历史。
+所以，如果你希望下一轮还能看到某段内容，例如 LLM 的最终回答、用户确认后的摘要、工具调用后的结论，就把它作为 `Message` 事件发出。否则下一轮的 `ec.History` 可能只有用户输入，看不到 agent 上一轮真正说了什么。
 
 `Task.history` 是响应时按 `historyLength` 从会话里临时组出来的；`ec.History` 是本轮开始前拍下的快照，并按 `MaxHistoryLength`（默认 100）截断。
 

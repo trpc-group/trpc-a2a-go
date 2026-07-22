@@ -333,27 +333,6 @@ func TestOnSendMessage_NonTerminalCloseFailsRequestLocalTask(t *testing.T) {
 	}
 }
 
-func TestOnSendMessage_MessageAfterTaskFailsRequestLocalTask(t *testing.T) {
-	manager := newManager(t, processorFunc(func(
-		context.Context,
-		*taskmanager.ExecContext,
-	) (<-chan protocol.StreamEvent, error) {
-		return eventChannel(
-			statusEvent(protocol.TaskStateWorking, "working"),
-			protocol.NewAgentText("invalid"),
-		), nil
-	}))
-
-	response, err := manager.OnSendMessage(context.Background(), messageParams("run"))
-	if err != nil {
-		t.Fatalf("OnSendMessage failed: %v", err)
-	}
-	task := response.GetTask()
-	if task == nil || task.Status.State != protocol.TaskStateFailed {
-		t.Fatalf("result = %#v, want failed Task", response.Result)
-	}
-}
-
 func TestOnSendMessage_ReturnImmediatelyTask(t *testing.T) {
 	returnImmediately := true
 	request := messageParams("run")
@@ -580,6 +559,7 @@ func TestOnSendMessageStream_RequestLocalTask(t *testing.T) {
 	) (<-chan protocol.StreamEvent, error) {
 		return eventChannel(
 			statusEvent(protocol.TaskStateWorking, "working"),
+			protocol.NewAgentText("progress"),
 			artifactEvent("artifact-1", "result", false),
 			statusEvent(protocol.TaskStateCompleted, "done"),
 		), nil
@@ -590,24 +570,29 @@ func TestOnSendMessageStream_RequestLocalTask(t *testing.T) {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 	responses := collectStream(t, stream)
-	if len(responses) != 4 {
-		t.Fatalf("response count = %d, want 4", len(responses))
+	if len(responses) != 5 {
+		t.Fatalf("response count = %d, want 5", len(responses))
 	}
 	initial := responses[0].GetTask()
 	working := responses[1].GetStatusUpdate()
-	artifact := responses[2].GetArtifactUpdate()
-	completed := responses[3].GetStatusUpdate()
+	message := responses[2].GetMessage()
+	artifact := responses[3].GetArtifactUpdate()
+	completed := responses[4].GetStatusUpdate()
 	if initial == nil || initial.Status.State != protocol.TaskStateSubmitted {
 		t.Fatalf("initial response = %#v, want submitted Task", responses[0].Result)
 	}
 	if working == nil || working.Status.State != protocol.TaskStateWorking {
 		t.Fatalf("working response = %#v", responses[1].Result)
 	}
+	if message == nil || messageText(message) != "progress" || message.TaskID == nil ||
+		*message.TaskID != initial.ID {
+		t.Fatalf("message response = %#v", responses[2].Result)
+	}
 	if artifact == nil || artifact.Artifact.ArtifactID != "artifact-1" {
-		t.Fatalf("artifact response = %#v", responses[2].Result)
+		t.Fatalf("artifact response = %#v", responses[3].Result)
 	}
 	if completed == nil || completed.Status.State != protocol.TaskStateCompleted || !completed.Final {
-		t.Fatalf("completed response = %#v", responses[3].Result)
+		t.Fatalf("completed response = %#v", responses[4].Result)
 	}
 	for i := 1; i < len(responses); i++ {
 		var taskID, contextID string
@@ -615,6 +600,9 @@ func TestOnSendMessageStream_RequestLocalTask(t *testing.T) {
 			taskID, contextID = event.TaskID, event.ContextID
 		} else if event := responses[i].GetArtifactUpdate(); event != nil {
 			taskID, contextID = event.TaskID, event.ContextID
+		} else if event := responses[i].GetMessage(); event != nil {
+			taskID = *event.TaskID
+			contextID = *event.ContextID
 		}
 		if taskID != initial.ID || contextID != initial.ContextID {
 			t.Errorf("response[%d] IDs = %q/%q, want %q/%q",
@@ -646,13 +634,17 @@ func TestOnSendMessageStream_NonTerminalCloseEmitsFailure(t *testing.T) {
 }
 
 func TestOnSendMessageStream_LaterViolationEmitsFailure(t *testing.T) {
+	foreignTaskID := "foreign-task"
 	manager := newManager(t, processorFunc(func(
 		context.Context,
 		*taskmanager.ExecContext,
 	) (<-chan protocol.StreamEvent, error) {
 		return eventChannel(
 			statusEvent(protocol.TaskStateWorking, "working"),
-			protocol.NewAgentText("invalid"),
+			&protocol.Message{
+				TaskID: &foreignTaskID,
+				Parts:  []*protocol.Part{protocol.NewTextPart("invalid")},
+			},
 		), nil
 	}))
 

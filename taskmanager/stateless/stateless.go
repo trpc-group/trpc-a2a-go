@@ -473,9 +473,10 @@ func (r *round) applyTaskEvent(
 		return protocol.NewStreamResponseArtifactUpdate(typed), false, nil
 
 	case *protocol.Message:
-		return protocol.StreamResponse{}, false, taskmanager.ErrInvalidAgentResponse(
-			"stateless TaskManager: processor emitted Message after Task response started",
-		)
+		if err := normalizeTaskMessage(typed, r.ec); err != nil {
+			return protocol.StreamResponse{}, false, err
+		}
+		return protocol.NewStreamResponseMessage(typed), false, nil
 	case *protocol.Task:
 		return protocol.StreamResponse{}, false, taskmanager.ErrInvalidAgentResponse(
 			"stateless TaskManager: processor emitted forbidden Task snapshot",

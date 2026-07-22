@@ -300,9 +300,9 @@ func (m *TaskManager) OnSendMessage(
 }
 
 // OnSendMessageStream handles the message/stream request. The returned channel
-// carries either one direct Message, or an initial Task snapshot followed by
-// task updates in order. Task updates are persisted before delivery (§3.6).
-// The channel closes at the terminal/suspend frame or a direct Message.
+// carries every MessageProcessor event in order, each persisted before delivery
+// (§3.6), and is closed when the engine finishes — including after the
+// synthetic terminal status from the close rules (§3.5).
 func (m *TaskManager) OnSendMessageStream(
 	ctx context.Context,
 	request protocol.SendMessageParams,
