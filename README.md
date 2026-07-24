@@ -154,10 +154,10 @@ go run main.go --auth jwt --message "Custom message" --session-id "session123"
 ### 4. v0 Compatibility Example ([examples/compat](examples/compat))
 
 One server, both protocol generations: v1.0 clients on the standard wire and
-unmodified v0.2.x clients through [compat/v0](compat/v0) — same endpoint,
-same authentication chain. The client demonstrates the preserved legacy
-defaults (a configuration-less `message/send` answers immediately) plus
-blocking and streaming over the legacy wire.
+unmodified v0.2.x core task calls through [compat/v0](compat/v0) — same
+endpoint, same authentication chain. The client demonstrates the preserved
+legacy defaults (a configuration-less `message/send` answers immediately)
+plus blocking and streaming over the legacy wire.
 
 ```bash
 # Start the v0-compatible server

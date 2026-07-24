@@ -24,7 +24,7 @@ v1.0 用**单一事件流契约**取代了**多出口回调**。在 v0.x 中，`
 **迁移策略分两半：**
 
 - **服务端代码必须迁移。** `ProcessMessage` 签名变了，`TaskHandler` 接口没了。熟悉的名字以一层薄兼容层（`TaskHandle`）的形式保留，所以大多数 v0.x 方法体——包括常见的全同步写法——都能靠机械改动完成迁移。
-- **既有的 v0.x *客户端*照常工作，无需改动。** 把 `compat/v0` 挂到同一端点，legacy v0.2.x 客户端就与 v1.0 客户端并肩服务，走同一条认证链，并保留 legacy 默认行为。见下文「保持 v0.x 客户端可用」一节。
+- **既有的 v0.x *客户端*执行核心任务操作时照常工作，无需改动。** 把 `compat/v0` 挂到同一端点，legacy v0.2.x 客户端就与 v1.0 客户端并肩服务，走同一条认证链，并保留 legacy 默认行为。见下文「保持 v0.x 客户端可用」一节。
 
 ## 心智转变
 
@@ -234,7 +234,7 @@ v1.0 的 JSON-RPC 绑定使用 PascalCase 方法名。斜杠分隔的名字是 v
 
 ## 保持 v0.x 客户端可用
 
-迁移服务端无需动你的客户端。用 `server.WithCompatHandler` 把 [compat/v0](https://github.com/trpc-group/trpc-a2a-go/tree/v2/compat/v0) handler 挂到同一个 JSON-RPC 端点上，未经改动的 v0.2.x 客户端就照常工作：
+迁移服务端无需改动客户端的任务发送、流式调用、查询、取消和重新订阅代码。用 `server.WithCompatHandler` 把 [compat/v0](https://github.com/trpc-group/trpc-a2a-go/tree/v2/compat/v0) handler 挂到同一个 JSON-RPC 端点上即可：
 
 ```go
 import (
@@ -258,6 +258,8 @@ srv, err := server.NewA2AServer(tm,
 ```
 
 agent 本身只写一次，基于 v1.0 的 `MessageProcessor` 契约；compat handler 负责在 legacy wire 与它之间来回翻译。关键在于，**legacy 路径上保留了 v0.x 的非阻塞默认**：不带 configuration 的 legacy `message/send` 仍然立即返回，尽管原生 v1.0 的 `message/send` 现在默认阻塞。可运行的服务端与 legacy-wire 客户端见 [examples/compat](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/compat)。
+
+compat handler 还会为未签名 Agent Card 同时填充 v1.0 与 v0.2.x 的发现字段。签名 card 一经修改就会使签名失效，因此必须在签名前自行填好两套字段。该 adapter 不负责转换自动 push callback 的 payload。
 
 ## 迁移清单
 
