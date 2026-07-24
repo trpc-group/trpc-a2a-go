@@ -95,7 +95,7 @@ sequenceDiagram
 - **结果派生**：`SendMessage` 返回最终 `Task` 或直接 `Message`，`SendStreamingMessage` 返回实时事件。
 - **任务生命周期**：首个任务事件会创建 Task。memory 与 Redis 将其持久化；stateless 只构造请求内 Task，并在请求结束后丢弃。
 - **会话历史**：memory 与 Redis 会保存请求消息、processor 发出的 `Message` 事件，以及被后续状态或 follow-up 取代的上一条 status message；stateless 不保存会话历史。
-- **agent card 归一化**：同一张 card 同时包含 v1.0 字段和 v0.x 镜像字段，便于两代客户端读取。
+- **agent card 归一化**：挂载 `compat/v0` 后，未签名 card 会同时包含 v1.0 字段和 v0.x 镜像字段，便于两代客户端读取；签名 card 必须在签名前自行包含两套字段。
 - **兼容层翻译**：`compat/v0` 把 v0.2.x 的斜杠方法名映射到同一个 `TaskManager`。
 - **生产能力封装**：鉴权、CORS、子路径、JWKS、push notification、遥测和多租户都通过 server option 接入。
 

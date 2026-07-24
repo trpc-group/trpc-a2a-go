@@ -74,6 +74,11 @@ func WithJSONRPCEndpoint(path string) Option {
 func WithCompatHandler(h http.Handler) Option {
 	return func(s *A2AServer) {
 		s.compatHandler = h
+		if adapter, ok := h.(interface {
+			AdaptAgentCard(*protocol.AgentCard)
+		}); ok {
+			s.compatAgentCardAdapter = adapter.AdaptAgentCard
+		}
 	}
 }
 
@@ -89,7 +94,10 @@ func WithAgentCard(card AgentCard) Option {
 	return func(s *A2AServer) {
 		// Ensure the served card carries a v1.0-conformant supportedInterfaces list,
 		// deriving it from the deprecated URL/PreferredTransport fields when needed.
-		card.NormalizeInterfaces()
+		// Signed cards must already have their final wire shape.
+		if len(card.Signatures) == 0 {
+			card.NormalizeInterfaces()
+		}
 		s.agentCard = card
 		s.agentCardSet = true
 	}
@@ -106,10 +114,13 @@ func WithTenantCard(tenant string, card AgentCard) Option {
 		if s.tenantCards == nil {
 			s.tenantCards = make(map[string]AgentCard)
 		}
-		card.NormalizeInterfaces()
-		// Stamp the tenant onto the card's interfaces so clients see who to address.
-		for i := range card.SupportedInterfaces {
-			card.SupportedInterfaces[i].Tenant = tenant
+		// Signed cards must already have their final wire shape.
+		if len(card.Signatures) == 0 {
+			card.NormalizeInterfaces()
+			// Stamp the tenant onto the card's interfaces so clients see who to address.
+			for i := range card.SupportedInterfaces {
+				card.SupportedInterfaces[i].Tenant = tenant
+			}
 		}
 		s.tenantCards[tenant] = card
 	}

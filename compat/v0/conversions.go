@@ -479,7 +479,7 @@ func ToV1SendMessageParams(p SendMessageParams) protocol.SendMessageParams {
 	if p.Configuration != nil {
 		cfg := &protocol.SendMessageConfiguration{
 			AcceptedOutputModes: p.Configuration.AcceptedOutputModes,
-			HistoryLength:       p.Configuration.HistoryLength,
+			HistoryLength:       toV1HistoryLength(p.Configuration.HistoryLength),
 		}
 		// blocking=true -> wait for completion -> returnImmediately=false.
 		returnImmediately := !(p.Configuration.Blocking != nil && *p.Configuration.Blocking)
@@ -495,8 +495,10 @@ func ToV1SendMessageParams(p SendMessageParams) protocol.SendMessageParams {
 		// v1.0 returnImmediately means blocking — falling through would
 		// silently invert the most common legacy request shape.
 		returnImmediately := true
+		historyLength := 0
 		res.Configuration = &protocol.SendMessageConfiguration{
 			ReturnImmediately: &returnImmediately,
+			HistoryLength:     &historyLength,
 		}
 	}
 	return res
@@ -530,7 +532,7 @@ func ToV1TaskQueryParams(p TaskQueryParams) protocol.TaskQueryParams {
 	return protocol.TaskQueryParams{
 		RPCID:         p.RPCID,
 		ID:            p.ID,
-		HistoryLength: p.HistoryLength,
+		HistoryLength: toV1HistoryLength(p.HistoryLength),
 		Metadata:      p.Metadata,
 	}
 }
@@ -621,4 +623,14 @@ func optString(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// toV1HistoryLength preserves the legacy response-shaping default. V0 treated
+// an omitted historyLength as zero messages, while v1 treats it as unlimited.
+func toV1HistoryLength(length *int) *int {
+	if length != nil {
+		return length
+	}
+	zero := 0
+	return &zero
 }

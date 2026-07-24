@@ -109,9 +109,10 @@ A large part of the framework is the protocol work you don't have to do:
 - **Lazy task creation & optional persistence** — a task materializes on the
   first task event. Memory and Redis persist it before broadcast; stateless
   keeps the snapshot only until the originating request ends.
-- **Agent card normalization** — cards carry both the v1.0 fields and their
-  deprecated v0.2.x mirrors, so one card is readable by both client
-  generations.
+- **Agent card normalization** — when `compat/v0` is mounted, unsigned cards
+  carry both the v1.0 fields and their deprecated v0.2.x mirrors, so one card
+  is readable by both client generations. Signed cards must contain both
+  representations before signing.
 - **Legacy translation** — `compat/v0` maps the v0.2.x slash-method wire onto
   the same `TaskManager`, preserving the old defaults.
 

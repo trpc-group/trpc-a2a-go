@@ -29,10 +29,11 @@ There is no longer a streaming/non-streaming branch in agent code.
   the `TaskHandler` interface is gone. The familiar names survive as a thin
   compatibility layer (`TaskHandle`), so most v0.x bodies — including the
   common fully synchronous style — port with mechanical edits.
-- **Existing v0.x *clients* keep working, unchanged.** Mount `compat/v0` on the
-  same endpoint and legacy v0.2.x clients are served side by side with v1.0
-  clients, through the same authentication chain, with the legacy defaults
-  preserved. See [Keeping v0.x clients working](#keeping-v0x-clients-working).
+- **Existing v0.x *clients* keep working for core task operations, unchanged.**
+  Mount `compat/v0` on the same endpoint and legacy v0.2.x clients are served
+  side by side with v1.0 clients, through the same authentication chain, with
+  the legacy defaults preserved. See
+  [Keeping v0.x clients working](#keeping-v0x-clients-working).
 
 ## The mental shift
 
@@ -309,7 +310,8 @@ For the full runtime contract behind these rules, see [Server: the round contrac
 Porting the server does not require touching your clients. Mount the
 [compat/v0](https://github.com/trpc-group/trpc-a2a-go/tree/v2/compat/v0) handler
 on the same JSON-RPC endpoint with `server.WithCompatHandler`, and unmodified
-v0.2.x clients keep working:
+v0.2.x clients keep working for task send, streaming, query, cancellation and
+resubscription:
 
 ```go
 import (
@@ -339,6 +341,11 @@ legacy `message/send` still returns immediately, even though the native v1.0
 `message/send` now blocks by default. See
 [examples/compat](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/compat)
 for a runnable server and legacy-wire client.
+
+The compat handler also publishes unsigned Agent Cards with both v1.0 and
+v0.2.x discovery fields. A signed card cannot be changed without invalidating
+its signature, so populate both representations before signing it. Automatic
+push callback payload translation is not covered by this adapter.
 
 ## Migration checklist
 

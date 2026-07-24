@@ -162,6 +162,9 @@ func TestSendMessageParamsBlockingMapping(t *testing.T) {
 	v1 := ToV1SendMessageParams(legacy)
 	require.NotNil(t, v1.Configuration)
 	require.NotNil(t, v1.Configuration.ReturnImmediately)
+	require.NotNil(t, v1.Configuration.HistoryLength)
+	assert.Zero(t, *v1.Configuration.HistoryLength,
+		"absent legacy historyLength must not become unlimited v1 history")
 	assert.False(t, *v1.Configuration.ReturnImmediately, "blocking=true -> returnImmediately=false")
 	assert.True(t, v1.Configuration.IsBlocking())
 
@@ -177,6 +180,8 @@ func TestSendMessageParamsBlockingMapping(t *testing.T) {
 	v1 = ToV1SendMessageParams(legacy)
 	require.NotNil(t, v1.Configuration)
 	require.NotNil(t, v1.Configuration.ReturnImmediately)
+	require.NotNil(t, v1.Configuration.HistoryLength)
+	assert.Zero(t, *v1.Configuration.HistoryLength)
 	assert.True(t, *v1.Configuration.ReturnImmediately, "absent legacy configuration -> returnImmediately=true")
 	assert.False(t, v1.Configuration.IsBlocking())
 
@@ -184,6 +189,30 @@ func TestSendMessageParamsBlockingMapping(t *testing.T) {
 	back := FromV1SendMessageParams(v1)
 	require.NotNil(t, back.Configuration.Blocking)
 	assert.False(t, *back.Configuration.Blocking)
+}
+
+func TestHistoryLengthMapping(t *testing.T) {
+	query := ToV1TaskQueryParams(TaskQueryParams{ID: "task-1"})
+	require.NotNil(t, query.HistoryLength)
+	assert.Zero(t, *query.HistoryLength,
+		"absent legacy historyLength must map to explicit v1 zero")
+
+	want := 3
+	query = ToV1TaskQueryParams(TaskQueryParams{ID: "task-1", HistoryLength: &want})
+	require.NotNil(t, query.HistoryLength)
+	assert.Equal(t, want, *query.HistoryLength)
+
+	params := SendMessageParams{
+		Message: Message{
+			Kind: KindMessage, MessageID: "m1", Role: MessageRoleUser,
+			Parts: []Part{TextPart{Kind: KindText, Text: "x"}},
+		},
+		Configuration: &SendMessageConfiguration{HistoryLength: &want},
+	}
+	converted := ToV1SendMessageParams(params)
+	require.NotNil(t, converted.Configuration)
+	require.NotNil(t, converted.Configuration.HistoryLength)
+	assert.Equal(t, want, *converted.Configuration.HistoryLength)
 }
 
 func TestPushConfigRoundTrip(t *testing.T) {

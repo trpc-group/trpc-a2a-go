@@ -426,7 +426,10 @@ disjoint from the v1.0 PascalCase names, so one endpoint dispatches both inside
 the same auth chain and against the same `TaskManager`. Memory and Redis
 preserve the old defaults, notably non-blocking `message/send`. Stateless can
 serve that default for direct Message responses, but cannot keep a non-terminal
-Task running in the background.
+Task running in the background. The handler also backfills legacy discovery
+fields on unsigned Agent Cards. Signed cards must contain both v1.0 and v0.2.x
+fields before signing. Automatic push callback payload translation is outside
+the compatibility adapter.
 
 ```go
 import v0 "trpc.group/trpc-go/trpc-a2a-go/v2/compat/v0"

@@ -341,7 +341,7 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 
 ## 服务 legacy v0.2.x 客户端
 
-使用 memory 或 Redis 时，可以在迁移期间让未修改的 v0.2.x 客户端继续工作：把 `compat/v0` 挂到同一端点。legacy 斜杠方法名与 v1.0 的 PascalCase 名不相交，所以一个端点可以在同一鉴权链内、对同一个 `TaskManager` 分发两代请求。memory 与 Redis 会保留老默认，尤其是非阻塞的 `message/send`；stateless 可处理其中的直接 Message 响应，但不能让非终态 Task 脱离请求继续执行。
+使用 memory 或 Redis 时，可以在迁移期间让未修改的 v0.2.x 客户端继续执行核心任务操作：把 `compat/v0` 挂到同一端点。legacy 斜杠方法名与 v1.0 的 PascalCase 名不相交，所以一个端点可以在同一鉴权链内、对同一个 `TaskManager` 分发两代请求。memory 与 Redis 会保留老默认，尤其是非阻塞的 `message/send`；stateless 可处理其中的直接 Message 响应，但不能让非终态 Task 脱离请求继续执行。handler 还会为未签名 Agent Card 补齐 legacy 发现字段；签名 card 必须在签名前自行包含 v1.0 和 v0.2.x 两套字段。兼容层不负责转换自动 push callback 的 payload。
 
 ```go
 import v0 "trpc.group/trpc-go/trpc-a2a-go/v2/compat/v0"

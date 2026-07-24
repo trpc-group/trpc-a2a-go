@@ -37,6 +37,9 @@ const (
 	MethodTasksPushNotificationConfigGet = "tasks/pushNotificationConfig/get"
 	MethodTasksResubscribe               = "tasks/resubscribe"
 	MethodAgentAuthenticatedExtendedCard = "agent/getAuthenticatedExtendedCard"
+	// methodAgentAuthenticatedExtendedCardOld is the method name used by
+	// trpc-a2a-go v0.2.0 through v0.2.4.
+	methodAgentAuthenticatedExtendedCardOld = "agent/authenticatedExtendedCard"
 )
 
 // Legacy SSE event type strings (v1.0 renamed these to statusUpdate /
@@ -77,6 +80,13 @@ func NewJSONRPCHandler(tm taskmanager.TaskManager, opts ...HandlerOption) *Handl
 		opt(h)
 	}
 	return h
+}
+
+// AdaptAgentCard fills the legacy discovery fields on a card copy served by
+// A2AServer. Signed cards are kept immutable by the server and do not reach
+// this hook.
+func (*Handler) AdaptAgentCard(card *protocol.AgentCard) {
+	FillLegacyCardFields(card)
 }
 
 // IsLegacyMethod reports whether the JSON-RPC method name belongs to the
@@ -123,7 +133,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handlePushSet(ctx, w, &req)
 	case MethodTasksPushNotificationConfigGet:
 		h.handlePushGet(ctx, w, &req)
-	case MethodAgentAuthenticatedExtendedCard:
+	case MethodAgentAuthenticatedExtendedCard, methodAgentAuthenticatedExtendedCardOld:
 		h.handleExtendedCard(ctx, w, &req)
 	default:
 		writeError(w, req.ID,

@@ -27,6 +27,7 @@ import (
 // compat translation.
 type fakeTaskManager struct {
 	gotSendParams *protocol.SendMessageParams
+	gotGetParams  *protocol.TaskQueryParams
 	sendResponse  *protocol.SendMessageResponse
 	streamEvents  []protocol.StreamResponse
 	task          *protocol.Task
@@ -57,6 +58,7 @@ func (f *fakeTaskManager) OnSendMessageStream(
 func (f *fakeTaskManager) OnGetTask(
 	ctx context.Context, p protocol.TaskQueryParams,
 ) (*protocol.Task, error) {
+	f.gotGetParams = &p
 	return f.task, nil
 }
 
@@ -148,6 +150,9 @@ func TestHandler_MessageSend_LegacyWire(t *testing.T) {
 	assert.Equal(t, "hello", fake.gotSendParams.Message.Parts[0].TextContent())
 	require.NotNil(t, fake.gotSendParams.Configuration)
 	assert.True(t, fake.gotSendParams.Configuration.IsBlocking())
+	require.NotNil(t, fake.gotSendParams.Configuration.HistoryLength)
+	assert.Zero(t, *fake.gotSendParams.Configuration.HistoryLength,
+		"omitted v0 historyLength must not request full v1 history")
 
 	// Outbound: legacy wire shape (kind + lowercase role, no v1 wrapper).
 	var resp struct {
@@ -174,6 +179,10 @@ func TestHandler_TasksGet_LegacyWire(t *testing.T) {
 
 	w := postJSON(t, h, `{"jsonrpc":"2.0","id":"req-2","method":"tasks/get","params":{"id":"task-1"}}`)
 	require.Equal(t, http.StatusOK, w.Code)
+	require.NotNil(t, fake.gotGetParams)
+	require.NotNil(t, fake.gotGetParams.HistoryLength)
+	assert.Zero(t, *fake.gotGetParams.HistoryLength,
+		"omitted v0 historyLength must not request full v1 history")
 
 	body := w.Body.String()
 	assert.Contains(t, body, `"kind":"task"`)
@@ -333,4 +342,9 @@ func TestHandler_ExtendedCard(t *testing.T) {
 	body := w.Body.String()
 	assert.Contains(t, body, `"url":"https://a.example.com"`)
 	assert.True(t, strings.Contains(body, `"protocolVersion":"0.2.5"`), "body: %s", body)
+
+	// v0.2.0 through v0.2.4 used the earlier method name.
+	w = postJSON(t, h, `{"jsonrpc":"2.0","id":"2","method":"agent/authenticatedExtendedCard"}`)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"url":"https://a.example.com"`)
 }

@@ -65,6 +65,9 @@ type A2AServer struct {
 	// on the same endpoint and INSIDE the authentication middleware chain, so
 	// the legacy protocol path is authenticated exactly like the v1 path.
 	compatHandler http.Handler
+	// compatAgentCardAdapter fills legacy discovery fields on unsigned card
+	// copies when the installed compatibility handler supports that capability.
+	compatAgentCardAdapter func(*protocol.AgentCard)
 
 	// Authentication related fields
 	middleWare        []Middleware // Authentication middlewares.
@@ -381,6 +384,9 @@ func (s *A2AServer) dispatchByProtocol(v1Handler, legacyHandler http.Handler) ht
 			Method string `json:"method"`
 		}
 		if json.Unmarshal(body, &probe) == nil && strings.Contains(probe.Method, "/") {
+			if s.corsEnabled {
+				setCORSHeaders(w)
+			}
 			legacyHandler.ServeHTTP(w, r)
 			return
 		}
@@ -427,6 +433,21 @@ func (s *A2AServer) finalizePushCapability(card AgentCard) AgentCard {
 	return card
 }
 
+// finalizeAgentCard applies serving-time derived fields to an AgentCard copy.
+// Signed cards remain immutable because changing either v1 or legacy fields
+// would invalidate their JWS.
+func (s *A2AServer) finalizeAgentCard(card AgentCard) AgentCard {
+	if len(card.Signatures) > 0 {
+		return card
+	}
+	card.NormalizeInterfaces()
+	card = s.finalizePushCapability(card)
+	if s.compatAgentCardAdapter != nil {
+		s.compatAgentCardAdapter(&card)
+	}
+	return card
+}
+
 // resolveAgentCard returns the AgentCard for the given tenant (from "?tenant=").
 // The bool reports whether a card was found: a successful lookup returns
 // (card, true), while a missing default or unknown tenant returns (AgentCard{},
@@ -438,17 +459,17 @@ func (s *A2AServer) resolveAgentCard(ctx context.Context, tenant string) (AgentC
 		if !s.agentCardSet {
 			return AgentCard{}, false
 		}
-		return s.finalizePushCapability(s.agentCard), true
+		return s.finalizeAgentCard(s.agentCard), true
 	}
 	if c, ok := s.tenantCards[tenant]; ok {
-		return s.finalizePushCapability(c), true
+		return s.finalizeAgentCard(c), true
 	}
 	if s.tenantCardProvider != nil {
 		c, err := s.tenantCardProvider(ctx, tenant)
 		if err != nil {
 			return AgentCard{}, false
 		}
-		return s.finalizePushCapability(c), true
+		return s.finalizeAgentCard(c), true
 	}
 	if len(s.tenantCards) > 0 {
 		// Multi-tenant server, but no such tenant.
@@ -458,7 +479,7 @@ func (s *A2AServer) resolveAgentCard(ctx context.Context, tenant string) (AgentC
 	if !s.agentCardSet {
 		return AgentCard{}, false
 	}
-	return s.finalizePushCapability(s.agentCard), true
+	return s.finalizeAgentCard(s.agentCard), true
 }
 
 func (s *A2AServer) pushAvailableForTenant(ctx context.Context, tenant string) bool {
