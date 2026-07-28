@@ -162,6 +162,72 @@ func TestHandler_MessageSend_LegacyWire(t *testing.T) {
 	assert.Equal(t, "hi from v1 core", part["text"])
 }
 
+func TestHandler_MessageSend_DefaultBlocking(t *testing.T) {
+	tests := []struct {
+		name              string
+		option            HandlerOption
+		configurationJSON string
+		wantBlocking      bool
+	}{
+		{
+			name:              "legacy default remains non-blocking",
+			configurationJSON: "",
+		},
+		{
+			name:              "option adapts omitted configuration",
+			option:            WithDefaultBlocking(),
+			configurationJSON: "",
+			wantBlocking:      true,
+		},
+		{
+			name:              "option adapts omitted blocking field",
+			option:            WithDefaultBlocking(),
+			configurationJSON: `,"configuration":{}`,
+			wantBlocking:      true,
+		},
+		{
+			name:              "option preserves explicit false",
+			option:            WithDefaultBlocking(),
+			configurationJSON: `,"configuration":{"blocking":false}`,
+		},
+		{
+			name:              "option preserves explicit true",
+			option:            WithDefaultBlocking(),
+			configurationJSON: `,"configuration":{"blocking":true}`,
+			wantBlocking:      true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			agentMsg := protocol.NewMessage(
+				protocol.MessageRoleAgent,
+				[]*protocol.Part{protocol.NewTextPart("done")},
+			)
+			fake := &fakeTaskManager{
+				sendResponse: protocol.NewSendMessageResponseMessage(&agentMsg),
+			}
+			var opts []HandlerOption
+			if test.option != nil {
+				opts = append(opts, test.option)
+			}
+			h := NewJSONRPCHandler(fake, opts...)
+			w := postJSON(t, h, `{
+				"jsonrpc":"2.0","id":"req-default","method":"message/send",
+				"params":{
+					"message":{"kind":"message","messageId":"m1","role":"user",
+						"parts":[{"kind":"text","text":"hello"}]}
+					`+test.configurationJSON+`
+				}
+			}`)
+			require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+			require.NotNil(t, fake.gotSendParams)
+			require.NotNil(t, fake.gotSendParams.Configuration)
+			assert.Equal(t, test.wantBlocking, fake.gotSendParams.Configuration.IsBlocking())
+		})
+	}
+}
+
 func TestHandler_TasksGet_LegacyWire(t *testing.T) {
 	fake := &fakeTaskManager{
 		task: &protocol.Task{
