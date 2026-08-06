@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
 // Version is the JSON-RPC version.
@@ -31,6 +33,19 @@ const (
 	// CodeInternalError indicates an internal JSON-RPC error.
 	CodeInternalError = -32603
 	// -32000 to -32099 are reserved for implementation-defined server-errors.
+)
+
+// A2A-specific JSON-RPC server error codes.
+const (
+	CodeTaskNotFound                           = -32001
+	CodeTaskNotCancelable                      = -32002
+	CodePushNotificationNotSupported           = -32003
+	CodeUnsupportedOperation                   = -32004
+	CodeContentTypeNotSupported                = -32005
+	CodeInvalidAgentResponse                   = -32006
+	CodeAuthenticatedExtendedCardNotConfigured = -32007
+	CodeExtensionSupportRequired               = -32008
+	CodeVersionNotSupported                    = -32009
 )
 
 // Message is the base structure embedding common fields for JSON-RPC
@@ -154,4 +169,37 @@ func ErrInvalidParams(data interface{}) *Error {
 func ErrInternalError(data interface{}) *Error {
 	return (&Error{Code: CodeInternalError, Message: "Internal error", Data: data}).
 		WithWrappedError(ErrInternalErrorSentinel)
+}
+
+// FromTaskManagerError maps a binding-neutral TaskManager error to its
+// JSON-RPC representation.
+func FromTaskManagerError(err error) *Error {
+	var taskErr *taskmanager.Error
+	if !errors.As(err, &taskErr) {
+		return ErrInternalError(err.Error())
+	}
+	code := CodeInternalError
+	switch taskErr.Code {
+	case taskmanager.ErrCodeInvalidParams:
+		code = CodeInvalidParams
+	case taskmanager.ErrCodeTaskNotFound:
+		code = CodeTaskNotFound
+	case taskmanager.ErrCodeTaskNotCancelable:
+		code = CodeTaskNotCancelable
+	case taskmanager.ErrCodePushNotificationNotSupported:
+		code = CodePushNotificationNotSupported
+	case taskmanager.ErrCodeUnsupportedOperation:
+		code = CodeUnsupportedOperation
+	case taskmanager.ErrCodeContentTypeNotSupported:
+		code = CodeContentTypeNotSupported
+	case taskmanager.ErrCodeInvalidAgentResponse:
+		code = CodeInvalidAgentResponse
+	case taskmanager.ErrCodeAuthenticatedExtendedCardNotConfigured:
+		code = CodeAuthenticatedExtendedCardNotConfigured
+	case taskmanager.ErrCodeExtensionSupportRequired:
+		code = CodeExtensionSupportRequired
+	case taskmanager.ErrCodeVersionNotSupported:
+		code = CodeVersionNotSupported
+	}
+	return (&Error{Code: code, Message: taskErr.Message, Data: taskErr.Data}).WithWrappedError(err)
 }

@@ -116,9 +116,9 @@ type ExecContext struct {
 // a synchronous body — its emits before Events() never block.
 //
 // Returning a non-nil error means the round failed to start: no events are
-// consumed and the error is mapped to a JSON-RPC error. To report a business
-// failure, emit a TASK_STATE_FAILED status or a direct agent Message and close
-// the channel.
+// consumed and the error is mapped to the active protocol binding's error
+// representation. To report a business failure, emit a TASK_STATE_FAILED status
+// or a direct agent Message and close the channel.
 type MessageProcessor interface {
 	ProcessMessage(ctx context.Context, ec *ExecContext) (<-chan protocol.StreamEvent, error)
 }

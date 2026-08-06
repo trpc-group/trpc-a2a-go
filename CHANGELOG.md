@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### HTTP+JSON protocol binding
+
+- **The v2 client and server now implement the A2A v1.0 HTTP+JSON/REST binding.** It uses the standard operation routes, `application/a2a+json` request and response bodies, direct protocol objects instead of JSON-RPC envelopes, raw `StreamResponse` SSE data, and `google.rpc.Status` JSON errors. JSON-RPC remains the default for direct client construction and continues to use `application/json`.
+- `client.WithProtocolBinding` selects a direct endpoint binding, while `client.NewA2AClientFromAgentCard` follows the ordered `supportedInterfaces` list without mutating signed cards. `server.WithHTTPJSONEndpoint` explicitly enables and locates the REST binding; a static Agent Card that advertises `HTTP+JSON` also enables it automatically.
+- **TaskManager errors are now binding-neutral.** `taskmanager.Error` and semantic `ErrorCode` values replace the leaked internal JSON-RPC error representation so JSON-RPC and HTTP+JSON adapters can map the same failure independently. This is an intentional prerelease API change.
+
 ## 2.0.0-alpha.3 (2026-07-22)
 
 This prerelease adds request-scoped stateless execution and restores Redis

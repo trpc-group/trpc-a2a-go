@@ -23,6 +23,17 @@ type HTTPReqHandler interface {
 	Handle(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error)
 }
 
+// WithProtocolBinding selects the protocol binding used with the URL passed to
+// NewA2AClient. Supported values are protocol.ProtocolBindingJSONRPC and
+// protocol.ProtocolBindingHTTPJSON. With NewA2AClientFromAgentCard it filters
+// SupportedInterfaces while preserving their preference order.
+func WithProtocolBinding(binding string) Option {
+	return func(c *A2AClient) {
+		c.protocolBinding = binding
+		c.bindingExplicit = true
+	}
+}
+
 // WithHTTPClient sets a custom http.Client for the A2AClient.
 func WithHTTPClient(client *http.Client) Option {
 	return func(c *A2AClient) {

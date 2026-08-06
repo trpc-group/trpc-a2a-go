@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
@@ -321,7 +320,7 @@ func TestOnSendMessage_EmptyExecutionIsInternalError(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected an error for an empty execution")
 	}
-	if !errors.Is(err, jsonrpc.ErrInternalErrorSentinel) {
+	if !errors.Is(err, taskmanager.ErrInternalErrorSentinel) {
 		t.Errorf("Expected InternalError, got %v", err)
 	}
 }
@@ -334,7 +333,7 @@ func TestOnSendMessage_NilChannelIsInternalError(t *testing.T) {
 		}))
 
 	_, err := manager.OnSendMessage(context.Background(), userParams("nil"))
-	if !errors.Is(err, jsonrpc.ErrInternalErrorSentinel) {
+	if !errors.Is(err, taskmanager.ErrInternalErrorSentinel) {
 		t.Errorf("Expected InternalError for nil channel, got %v", err)
 	}
 	if n := liveExecutionCount(manager); n != 0 {
@@ -519,7 +518,7 @@ func TestOnSendMessage_TerminalTaskRejected(t *testing.T) {
 	taskID := "done-task"
 	params.Message.TaskID = &taskID
 	_, err := manager.OnSendMessage(context.Background(), params)
-	if !errors.Is(err, jsonrpc.ErrInvalidParamsSentinel) {
+	if !errors.Is(err, taskmanager.ErrInvalidParamsSentinel) {
 		t.Errorf("Expected InvalidParams for a terminal task, got %v", err)
 	}
 	if invoked.Load() {
@@ -1306,12 +1305,12 @@ func TestEngine_SynchronousTaskHandle(t *testing.T) {
 // Review-fix regressions: single-writer, terminal immutability, immediateResult
 // =============================================================================
 
-// assertRPCCode fails unless err is a *jsonrpc.Error with the wanted code.
-func assertRPCCode(t *testing.T, err error, code int) {
+// assertRPCCode fails unless err is a *taskmanager.Error with the wanted code.
+func assertRPCCode(t *testing.T, err error, code taskmanager.ErrorCode) {
 	t.Helper()
-	var rpcErr *jsonrpc.Error
+	var rpcErr *taskmanager.Error
 	if !errors.As(err, &rpcErr) || rpcErr.Code != code {
-		t.Fatalf("expected JSON-RPC error code %d, got %v", code, err)
+		t.Fatalf("expected task-manager error code %s, got %v", code, err)
 	}
 }
 

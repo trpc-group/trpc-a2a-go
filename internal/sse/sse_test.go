@@ -15,7 +15,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
 func TestNewEventReader(t *testing.T) {
@@ -341,6 +343,25 @@ func TestFormatJSONRPCEventBatch(t *testing.T) {
 	}
 
 	assert.Equal(t, 3, eventCount, "Should have processed 3 events")
+}
+
+func TestFormatEventBatchWritesRawData(t *testing.T) {
+	var buf bytes.Buffer
+	events := []EventBatch{{
+		EventType: protocol.EventMessage,
+		ID:        "request-id",
+		Data: &protocol.StreamResponse{Result: func() protocol.StreamEvent {
+			message := protocol.NewMessage(protocol.MessageRoleAgent, []*protocol.Part{protocol.NewTextPart("hello")})
+			return &message
+		}()},
+	}}
+
+	require.NoError(t, FormatEventBatch(&buf, events))
+	output := buf.String()
+	assert.Contains(t, output, "data: {\"message\":")
+	assert.NotContains(t, output, "jsonrpc")
+	assert.NotContains(t, output, "result")
+	assert.NotContains(t, output, "event:")
 }
 
 func TestFormatJSONRPCEventBatch_EmptySlice(t *testing.T) {

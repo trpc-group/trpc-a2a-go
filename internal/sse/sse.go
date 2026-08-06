@@ -141,6 +141,30 @@ type EventBatch struct {
 	Data      interface{}
 }
 
+// FormatEventBatch formats multiple raw SSE events in a single write. It is
+// used by the HTTP+JSON binding, whose data field contains StreamResponse JSON
+// directly rather than a JSON-RPC response envelope.
+func FormatEventBatch(w io.Writer, events []EventBatch) error {
+	if len(events) == 0 {
+		return nil
+	}
+
+	var buf bytes.Buffer
+	for _, event := range events {
+		jsonData, err := json.Marshal(event.Data)
+		if err != nil {
+			return fmt.Errorf("failed to marshal SSE event data: %w", err)
+		}
+		if _, err := fmt.Fprintf(&buf, "data: %s\n\n", jsonData); err != nil {
+			return fmt.Errorf("failed to format SSE event: %w", err)
+		}
+	}
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		return fmt.Errorf("failed to write SSE event batch: %w", err)
+	}
+	return nil
+}
+
 // FormatJSONRPCEventBatch formats multiple JSON-RPC events in a single write operation.
 // This reduces the number of write calls and improves performance for high-frequency event streams.
 // All events are formatted into a single buffer and written once.

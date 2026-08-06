@@ -20,11 +20,7 @@ how it is built:
 - an **orchestrator agent** fanning work out to specialist agents,
 - **cross-organization** calls that need authentication and webhooks.
 
-The transport is deliberately boring: the client fetches the agent's **agent
-card** to learn its identity, skills and capabilities, then speaks JSON-RPC —
-unary calls over HTTP POST, streaming over SSE. trpc-a2a-go implements A2A
-**v1.0** (the legacy v0.2.x wire is kept alive by
-[compat/v0](https://github.com/trpc-group/trpc-a2a-go/tree/v2/compat/v0)).
+The transport is deliberately boring: the client fetches the agent's **agent card** to learn its identity, skills, capabilities, and ordered `supportedInterfaces`, then selects JSON-RPC or HTTP+JSON; both use SSE for streaming. trpc-a2a-go implements A2A **v1.0** (the legacy v0.2.x wire is kept alive by [compat/v0](https://github.com/trpc-group/trpc-a2a-go/tree/v2/compat/v0)).
 
 ## The mental model
 
@@ -313,10 +309,7 @@ slash-delimited names, shown for reference):
 | `CreateTaskPushNotificationConfig` / `Get…` / `List…` / `Delete…` | unary | Webhook config CRUD, for disconnected operation. | `tasks/pushNotificationConfig/*` |
 | `GetExtendedAgentCard` | unary | Authenticated agent card with extended metadata. | `agent/getAuthenticatedExtendedCard` |
 
-The v1.0 specification defines three functionally equivalent transport
-bindings — JSON-RPC, gRPC, and HTTP+JSON/REST — with binding-specific method
-naming. This framework implements the JSON-RPC binding (the names above); the
-agent card's `supportedInterfaces` declares which bindings an agent offers.
+The v1.0 specification defines three functionally equivalent transport bindings — JSON-RPC, gRPC, and HTTP+JSON/REST — with binding-specific method naming. This framework implements JSON-RPC and HTTP+JSON; the agent card's ordered `supportedInterfaces` declares which bindings and endpoint URLs an agent offers. gRPC remains planned.
 
 ### Blocking vs `returnImmediately`
 
@@ -331,23 +324,21 @@ agent card's `supportedInterfaces` declares which bindings an agent offers.
 > layer preserves the old default for legacy clients; migrating clients must
 > opt in explicitly (see [Migrating from v0.x](migration.md)).
 
-### Error codes
+### Error mapping
 
-Standard JSON-RPC codes apply (`-32700` parse error, `-32600` invalid request,
-`-32601` method not found, `-32602` invalid params, `-32603` internal error),
-plus the A2A-specific range:
+Standard JSON-RPC codes apply (`-32700` parse error, `-32600` invalid request, `-32601` method not found, `-32602` invalid params, `-32603` internal error). A2A-specific failures map by binding; HTTP+JSON uses a `google.rpc.Status` JSON body and includes `google.rpc.ErrorInfo` to distinguish failures that share an HTTP status:
 
-| Code | Meaning |
-| --- | --- |
-| `-32001` | Task not found |
-| `-32002` | Task cannot be canceled (already terminal) |
-| `-32003` | Push notifications not supported |
-| `-32004` | Operation not supported |
-| `-32005` | Incompatible content types |
-| `-32006` | Invalid agent response |
-| `-32007` | Extended agent card not configured |
-| `-32008` | A required extension was not opted into by the client |
-| `-32009` | The requested A2A protocol version is not supported |
+| Meaning | JSON-RPC code | HTTP status |
+| --- | --- | --- |
+| Task not found | `-32001` | `404` |
+| Task cannot be canceled (already terminal) | `-32002` | `400` |
+| Push notifications not supported | `-32003` | `400` |
+| Operation not supported | `-32004` | `400` |
+| Incompatible content types | `-32005` | `400` |
+| Invalid agent response | `-32006` | `500` |
+| Extended agent card not configured | `-32007` | `400` |
+| A required extension was not opted into by the client | `-32008` | `400` |
+| The requested A2A protocol version is not supported | `-32009` | `400` |
 
 ### The canonical event paradigm
 

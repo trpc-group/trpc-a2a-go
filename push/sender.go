@@ -158,7 +158,7 @@ func (s *HTTPSender) SendPush(
 	}
 	// The A2A spec (§4.3.3 Push Notification Payload) uses application/a2a+json
 	// for the delivered StreamResponse body.
-	req.Header.Set("Content-Type", "application/a2a+json")
+	req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
 
 	if err := s.applyAuthorization(ctx, cfg, body, req); err != nil {
 		return err

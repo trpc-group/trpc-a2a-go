@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"time"
 
@@ -23,10 +24,16 @@ type sseTunnel struct {
 	batchSize     int
 	flushInterval time.Duration
 	batch         []protocol.StreamResponse
+	formatBatch   func(io.Writer, []sse.EventBatch) error
 }
 
 // newSSETunnel creates a new SSE tunnel with default settings
-func newSSETunnel(w http.ResponseWriter, flusher http.Flusher, rpcID interface{}) *sseTunnel {
+func newSSETunnel(
+	w http.ResponseWriter,
+	flusher http.Flusher,
+	rpcID interface{},
+	formatBatch func(io.Writer, []sse.EventBatch) error,
+) *sseTunnel {
 	return &sseTunnel{
 		w:             w,
 		flusher:       flusher,
@@ -34,6 +41,7 @@ func newSSETunnel(w http.ResponseWriter, flusher http.Flusher, rpcID interface{}
 		batchSize:     defaultSSEBatchSize,
 		flushInterval: defaultSSEFlushInterval,
 		batch:         make([]protocol.StreamResponse, 0, defaultSSEBatchSize),
+		formatBatch:   formatBatch,
 	}
 }
 
@@ -124,7 +132,7 @@ func (t *sseTunnel) flushBatch() bool {
 	}
 
 	// Write the entire batch using optimized batch function
-	if err := sse.FormatJSONRPCEventBatch(t.w, events); err != nil {
+	if err := t.formatBatch(t.w, events); err != nil {
 		log.Errorf("Error writing SSE batch for request ID: %s (client likely disconnected): %v", t.rpcID, err)
 		return false
 	}

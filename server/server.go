@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/sse"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
@@ -33,7 +34,8 @@ import (
 )
 
 // A2AServer implements the HTTP server for the A2A protocol.
-// It handles agent card requests and routes JSON-RPC calls to the TaskManager.
+// It handles Agent Card requests and routes JSON-RPC and HTTP+JSON operations
+// to the TaskManager.
 type A2AServer struct {
 	agentCard        AgentCard               // Default (single-agent) card; optional when multi-tenant.
 	agentCardSet     bool                    // Whether a default card was provided (WithAgentCard).
@@ -42,13 +44,16 @@ type A2AServer struct {
 	httpServerMu     sync.Mutex              // Guards httpServer: Start writes it, Stop reads it.
 	corsEnabled      bool                    // Flag to enable/disable CORS headers.
 	jsonRPCEndpoint  string                  // Path for the JSON-RPC endpoint.
+	httpJSONBasePath string                  // Base path for HTTP+JSON/REST endpoints.
+	httpJSONEnabled  bool                    // Whether the HTTP+JSON binding is mounted.
 	agentCardPath    string                  // Path for the agent card endpoint.
 	oldAgentCardPath string                  // Path for the old agent card endpoint.
 	// pathsExplicitlySet records whether serving paths were configured via an
 	// option (WithBasePath / WithJSONRPCEndpoint / WithJWKSEndpoint). When false,
 	// the base path is derived from the agent card URL. This replaces a fragile
 	// "did the paths change from their defaults?" heuristic.
-	pathsExplicitlySet bool
+	pathsExplicitlySet        bool
+	httpJSONPathExplicitlySet bool
 	// tenantCards is the static tenant -> AgentCard registry (WithTenantCards).
 	// tenantCardProvider resolves a tenant's card dynamically (WithTenantCardProvider).
 	// When either is set the server is multi-tenant: it routes by params.Tenant
@@ -102,6 +107,7 @@ func NewA2AServer(taskManager taskmanager.TaskManager, opts ...Option) (*A2AServ
 		taskManager:      taskManager,
 		corsEnabled:      true, // Enable CORS by default for easier development.
 		jsonRPCEndpoint:  protocol.DefaultJSONRPCPath,
+		httpJSONBasePath: "",
 		agentCardPath:    protocol.AgentCardPath,
 		oldAgentCardPath: protocol.OldAgentCardPath,
 		readTimeout:      defaultReadTimeout,
@@ -130,12 +136,28 @@ func NewA2AServer(taskManager taskmanager.TaskManager, opts ...Option) (*A2AServ
 	// A pure multi-tenant server (no default card) defaults to the root paths;
 	// tenant cards share that single endpoint and use WithBasePath when needed.
 	if !server.pathsExplicitlySet && server.agentCardSet {
-		if basePath := extractBasePathFromURL(server.agentCard.PrimaryURL()); basePath != "" {
-			server.jsonRPCEndpoint = basePath + "/"
-			server.agentCardPath = basePath + protocol.AgentCardPath
-			server.jwksEndpoint = basePath + protocol.JWKSPath
-			server.oldAgentCardPath = basePath + protocol.OldAgentCardPath
+		primaryBasePath := extractBasePathFromURL(server.agentCard.PrimaryURL())
+		if primaryBasePath != "" {
+			server.agentCardPath = primaryBasePath + protocol.AgentCardPath
+			server.jwksEndpoint = primaryBasePath + protocol.JWKSPath
+			server.oldAgentCardPath = primaryBasePath + protocol.OldAgentCardPath
+			if !server.httpJSONPathExplicitlySet {
+				server.httpJSONBasePath = primaryBasePath
+			}
 		}
+		if endpoint := agentInterfaceURL(server.agentCard, protocol.ProtocolBindingJSONRPC); endpoint != "" {
+			if basePath := extractBasePathFromURL(endpoint); basePath != "" {
+				server.jsonRPCEndpoint = basePath + "/"
+			}
+		}
+	}
+	if !server.httpJSONPathExplicitlySet && server.agentCardSet {
+		if endpoint := agentInterfaceURL(server.agentCard, protocol.ProtocolBindingHTTPJSON); endpoint != "" {
+			server.httpJSONBasePath = extractBasePathFromURL(endpoint)
+		}
+	}
+	if agentCardsAdvertiseBinding(server, protocol.ProtocolBindingHTTPJSON) {
+		server.httpJSONEnabled = true
 	}
 
 	if err := server.resolvePushPosture(taskManager); err != nil {
@@ -347,11 +369,38 @@ func (s *A2AServer) Handler() http.Handler {
 		jsonRPCHandler = s.dispatchByProtocol(jsonRPCHandler, s.compatHandler)
 	}
 
-	// Mount the JSON-RPC endpoint inside the authentication middleware chain.
+	if !s.httpJSONEnabled {
+		if len(s.middleWare) > 0 {
+			jsonRPCHandler = MiddlewareChain(s.middleWare).Wrap(jsonRPCHandler)
+		}
+		router.Handle(s.jsonRPCEndpoint, jsonRPCHandler)
+		return router
+	}
+
+	httpJSONHandler := http.Handler(http.HandlerFunc(s.handleHTTPJSON))
+	httpJSONPattern := httpJSONServeMuxPattern(s.httpJSONBasePath)
+	if httpJSONPattern == s.jsonRPCEndpoint {
+		combined := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == s.jsonRPCEndpoint {
+				jsonRPCHandler.ServeHTTP(w, r)
+				return
+			}
+			httpJSONHandler.ServeHTTP(w, r)
+		}))
+		if len(s.middleWare) > 0 {
+			combined = MiddlewareChain(s.middleWare).Wrap(combined)
+		}
+		router.Handle(s.jsonRPCEndpoint, combined)
+		return router
+	}
+
 	if len(s.middleWare) > 0 {
-		jsonRPCHandler = MiddlewareChain(s.middleWare).Wrap(jsonRPCHandler)
+		chain := MiddlewareChain(s.middleWare)
+		jsonRPCHandler = chain.Wrap(jsonRPCHandler)
+		httpJSONHandler = chain.Wrap(httpJSONHandler)
 	}
 	router.Handle(s.jsonRPCEndpoint, jsonRPCHandler)
+	router.Handle(httpJSONPattern, httpJSONHandler)
 	return router
 }
 
@@ -404,7 +453,7 @@ func (s *A2AServer) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Type", protocol.MediaTypeJSON+"; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(card); err != nil {
 		log.Errorf("Failed to encode agent card: %v", err)
 		// Avoid writing JSON-RPC error here; it's a standard HTTP endpoint.
@@ -510,7 +559,7 @@ func (s *A2AServer) validateJSONRPCRequest(w http.ResponseWriter, r *http.Reques
 	// Check Content-Type using mime parsing
 	contentType := r.Header.Get("Content-Type")
 	mediaType, _, err := mime.ParseMediaType(contentType)
-	if err != nil || mediaType != "application/json" {
+	if err != nil || mediaType != protocol.MediaTypeJSON {
 		log.Warnf("Rejecting request due to invalid Content-Type: '%s' (Parse Err: %v)", contentType, err)
 		s.writeJSONRPCError(w, nil,
 			jsonrpc.ErrInvalidRequest(
@@ -602,16 +651,16 @@ func (s *A2AServer) unmarshalParams(params json.RawMessage, v interface{}) *json
 // request shape before either handler opens a task-manager round.
 func (s *A2AServer) validateSendMessageParams(
 	ctx context.Context, params *protocol.SendMessageParams,
-) *jsonrpc.Error {
+) error {
 	if params.Message.Role != protocol.MessageRoleUser {
-		return jsonrpc.ErrInvalidParams("message role must be ROLE_USER")
+		return taskmanager.ErrInvalidParams("message role must be ROLE_USER")
 	}
 	if len(params.Message.Parts) == 0 {
-		return jsonrpc.ErrInvalidParams("message with at least one part is required")
+		return taskmanager.ErrInvalidParams("message with at least one part is required")
 	}
 	for _, part := range params.Message.Parts {
 		if part == nil {
-			return jsonrpc.ErrInvalidParams("message parts must not contain null")
+			return taskmanager.ErrInvalidParams("message parts must not contain null")
 		}
 	}
 	if params.Configuration != nil && params.Configuration.PushConfig != nil &&
@@ -665,7 +714,7 @@ func (s *A2AServer) handleTasksPushNotificationList(
 		return
 	}
 	if !s.pushAvailableForTenant(ctx, params.Tenant) {
-		s.writeJSONRPCError(w, request.ID, taskmanager.ErrPushNotificationNotSupported())
+		s.writeJSONRPCError(w, request.ID, jsonrpc.FromTaskManagerError(taskmanager.ErrPushNotificationNotSupported()))
 		return
 	}
 	result, err := s.taskManager.OnPushNotificationList(ctx, params)
@@ -695,7 +744,7 @@ func (s *A2AServer) handleTasksPushNotificationDelete(
 		return
 	}
 	if !s.pushAvailableForTenant(ctx, params.Tenant) {
-		s.writeJSONRPCError(w, request.ID, taskmanager.ErrPushNotificationNotSupported())
+		s.writeJSONRPCError(w, request.ID, jsonrpc.FromTaskManagerError(taskmanager.ErrPushNotificationNotSupported()))
 		return
 	}
 	if err := s.taskManager.OnPushNotificationDelete(ctx, params); err != nil {
@@ -721,8 +770,7 @@ func (s *A2AServer) handleTasksCancel(ctx context.Context, w http.ResponseWriter
 	s.writeJSONRPCResponse(w, request.ID, task)
 }
 
-// handleTaskManagerError handles errors from task manager operations.
-// It checks if the error is already a JSON-RPC error and logs/writes it appropriately.
+// handleTaskManagerError maps a binding-neutral TaskManager error to JSON-RPC.
 func (s *A2AServer) handleTaskManagerError(
 	w http.ResponseWriter,
 	id interface{},
@@ -730,21 +778,26 @@ func (s *A2AServer) handleTaskManagerError(
 	operation string,
 	taskID string,
 ) {
-	// Check if the error is already a JSONRPCError (e.g., TaskNotFound, TaskNotCancelable).
-	if rpcErr, ok := err.(*jsonrpc.Error); ok {
+	var taskErr *taskmanager.Error
+	if errors.As(err, &taskErr) {
+		log.Errorf("Error calling %s for task %s: %v", operation, taskID, taskErr)
+		s.writeJSONRPCError(w, id, jsonrpc.FromTaskManagerError(taskErr))
+		return
+	}
+	var rpcErr *jsonrpc.Error
+	if errors.As(err, &rpcErr) {
 		log.Errorf("Error calling %s for task %s: %v", operation, taskID, rpcErr)
 		s.writeJSONRPCError(w, id, rpcErr)
-	} else {
-		// Otherwise, wrap it as a generic internal error.
-		log.Errorf("Unexpected error calling %s for task %s: %v", operation, taskID, err)
-		s.writeJSONRPCError(w, id, jsonrpc.ErrInternalError(fmt.Sprintf("%s failed: %v", operation, err)))
+		return
 	}
+	log.Errorf("Unexpected error calling %s for task %s: %v", operation, taskID, err)
+	s.writeJSONRPCError(w, id, jsonrpc.ErrInternalError(fmt.Sprintf("%s failed: %v", operation, err)))
 }
 
 // writeJSONRPCResponse encodes and writes a successful JSON-RPC response.
 func (s *A2AServer) writeJSONRPCResponse(w http.ResponseWriter, id interface{}, result interface{}) {
 	response := jsonrpc.NewResponse(id, result)
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Type", protocol.MediaTypeJSON+"; charset=utf-8")
 	w.WriteHeader(http.StatusOK) // Success is always 200 OK for JSON-RPC itself.
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		// Log error, but can't change response if headers are already sent.
@@ -761,7 +814,7 @@ func (s *A2AServer) writeJSONRPCError(w http.ResponseWriter, id interface{}, err
 		log.Errorf("Programming ERROR: writeJSONRPCError called with nil error (Request ID: %v)", id)
 	}
 	response := jsonrpc.NewErrorResponse(id, err)
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Type", protocol.MediaTypeJSON+"; charset=utf-8")
 	// Map JSON-RPC error codes to HTTP status codes where appropriate.
 	httpStatus := http.StatusInternalServerError // Default for Internal errors.
 	switch err.Code {
@@ -773,15 +826,15 @@ func (s *A2AServer) writeJSONRPCError(w http.ResponseWriter, id interface{}, err
 		httpStatus = http.StatusNotFound
 	case jsonrpc.CodeInvalidParams:
 		httpStatus = http.StatusBadRequest
-	case taskmanager.ErrCodeTaskNotFound:
+	case jsonrpc.CodeTaskNotFound:
 		httpStatus = http.StatusNotFound
-	case taskmanager.ErrCodeTaskNotCancelable,
-		taskmanager.ErrCodePushNotificationNotSupported,
-		taskmanager.ErrCodeUnsupportedOperation,
-		taskmanager.ErrCodeContentTypeNotSupported,
-		taskmanager.ErrCodeAuthenticatedExtendedCardNotConfigured,
-		taskmanager.ErrCodeExtensionSupportRequired,
-		taskmanager.ErrCodeVersionNotSupported:
+	case jsonrpc.CodeTaskNotCancelable,
+		jsonrpc.CodePushNotificationNotSupported,
+		jsonrpc.CodeUnsupportedOperation,
+		jsonrpc.CodeContentTypeNotSupported,
+		jsonrpc.CodeAuthenticatedExtendedCardNotConfigured,
+		jsonrpc.CodeExtensionSupportRequired,
+		jsonrpc.CodeVersionNotSupported:
 		httpStatus = http.StatusBadRequest
 		// ErrCodeInvalidAgentResponse and other internal errors keep the 500 default.
 	}
@@ -796,8 +849,8 @@ func (s *A2AServer) writeJSONRPCError(w http.ResponseWriter, id interface{}, err
 // WARNING: This is insecure for production. Configure origins explicitly.
 func setCORSHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*") // INSECURE
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, A2A-Version, A2A-Extensions")
 	// Max-Age might be useful but not strictly necessary here.
 }
 
@@ -816,7 +869,7 @@ func (s *A2AServer) handleTasksPushNotificationSet(
 		return
 	}
 	if !s.pushAvailableForTenant(ctx, params.Tenant) {
-		s.writeJSONRPCError(w, request.ID, taskmanager.ErrPushNotificationNotSupported())
+		s.writeJSONRPCError(w, request.ID, jsonrpc.FromTaskManagerError(taskmanager.ErrPushNotificationNotSupported()))
 		return
 	}
 	result, err := s.taskManager.OnPushNotificationSet(ctx, params)
@@ -848,7 +901,7 @@ func (s *A2AServer) handleTasksPushNotificationGet(
 		return
 	}
 	if !s.pushAvailableForTenant(ctx, params.Tenant) {
-		s.writeJSONRPCError(w, request.ID, taskmanager.ErrPushNotificationNotSupported())
+		s.writeJSONRPCError(w, request.ID, jsonrpc.FromTaskManagerError(taskmanager.ErrPushNotificationNotSupported()))
 		return
 	}
 	result, err := s.taskManager.OnPushNotificationGet(ctx, params)
@@ -890,7 +943,7 @@ func (s *A2AServer) handleTasksResubscribe(ctx context.Context, w http.ResponseW
 
 	// Use the helper function to handle the SSE stream
 	log.Debugf("SSE stream reopened for request ID: %v)", request.ID)
-	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, request.ID, nil)
+	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, request.ID, nil, sse.FormatJSONRPCEventBatch)
 }
 
 // handleMessageSend handles the message_send method.
@@ -906,7 +959,7 @@ func (s *A2AServer) handleMessageSend(ctx context.Context, w http.ResponseWriter
 	}
 	if err := s.validateSendMessageParams(ctx, &params); err != nil {
 		tracker.setValidateSendMessageError(err)
-		s.writeJSONRPCError(w, request.ID, err)
+		s.writeJSONRPCError(w, request.ID, jsonrpc.FromTaskManagerError(err))
 		return
 	}
 	// Delegate to the task manager.
@@ -934,7 +987,7 @@ func (s *A2AServer) handleMessageStream(ctx context.Context, w http.ResponseWrit
 	if err := s.validateSendMessageParams(ctx, &params); err != nil {
 		tracker.setValidateSendMessageError(err)
 		tracker.record(ctx)
-		s.writeJSONRPCError(w, request.ID, err)
+		s.writeJSONRPCError(w, request.ID, jsonrpc.FromTaskManagerError(err))
 		return
 	}
 
@@ -960,7 +1013,7 @@ func (s *A2AServer) handleMessageStream(ctx context.Context, w http.ResponseWrit
 
 	// Use the helper function to handle the SSE stream
 	log.Debugf("SSE stream opened for request ID: %v)", request.ID)
-	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, request.ID, tracker)
+	handleSSEStream(ctx, s.corsEnabled, w, flusher, eventsChan, request.ID, tracker, sse.FormatJSONRPCEventBatch)
 }
 
 // handleSSEStream handles an SSE stream for a task, including setup and event forwarding.
@@ -973,6 +1026,7 @@ func handleSSEStream(
 	eventsChan <-chan protocol.StreamResponse,
 	rpcID interface{},
 	tracker *metricsTracker,
+	formatBatch func(io.Writer, []sse.EventBatch) error,
 ) {
 	if tracker != nil {
 		defer tracker.record(ctx)
@@ -981,7 +1035,7 @@ func handleSSEStream(
 		rpcID = ""
 	}
 	// Set headers for SSE.
-	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Content-Type", protocol.MediaTypeEventStream)
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	if corsEnabled {
@@ -1000,7 +1054,7 @@ func handleSSEStream(
 	}
 
 	// Use optimized tunnel for batching events
-	tunnel := newSSETunnel(w, flusher, rpcID)
+	tunnel := newSSETunnel(w, flusher, rpcID, formatBatch)
 	tunnel.start(ctx, eventsChan, clientClosed)
 }
 
@@ -1082,25 +1136,21 @@ func (s *A2AServer) handleAgentGetAuthenticatedExtendedCard(
 	w http.ResponseWriter,
 	request jsonrpc.Request,
 ) {
-	if !s.agentCard.ExtendedAgentCardEnabled() {
-		rpcErr := taskmanager.ErrAuthenticatedExtendedCardNotConfigured()
-		log.Warnf("Authenticated extended card unavailable (Request ID: %v): %v", request.ID, rpcErr)
-		s.writeJSONRPCError(w, request.ID, rpcErr)
-		return
+	var params struct {
+		Tenant string `json:"tenant,omitempty"`
 	}
-	cardToServe := s.agentCard
-	if s.authenticatedCardHandler != nil {
-		var err error
-		cardToServe, err = s.authenticatedCardHandler(ctx, s.agentCard)
-		if err != nil {
-			log.Errorf("Error applying authenticated card handler: %v", err)
-			s.writeJSONRPCError(w, request.ID,
-				jsonrpc.ErrInternalError(fmt.Sprintf("failed to handle extended card: %v", err)))
+	if len(request.Params) != 0 {
+		if err := s.unmarshalParams(request.Params, &params); err != nil {
+			s.writeJSONRPCError(w, request.ID, err)
 			return
 		}
 	}
-
-	cardToServe = s.finalizePushCapability(cardToServe)
+	cardToServe, err := s.resolveExtendedAgentCard(ctx, params.Tenant)
+	if err != nil {
+		log.Warnf("Authenticated extended card unavailable (Request ID: %v): %v", request.ID, err)
+		s.handleTaskManagerError(w, request.ID, err, "GetExtendedAgentCard", "")
+		return
+	}
 	log.Debugf("Serving authenticated extended card (Request ID: %v)", request.ID)
 	s.writeJSONRPCResponse(w, request.ID, cardToServe)
 }

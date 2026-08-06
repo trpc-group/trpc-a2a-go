@@ -63,6 +63,18 @@ func WithJSONRPCEndpoint(path string) Option {
 	}
 }
 
+// WithHTTPJSONEndpoint enables the HTTP+JSON/REST binding and sets its base path.
+// The standard operation paths, such as /message:send and /tasks/{id}, are
+// appended to this base path. The binding is also enabled automatically when a
+// static Agent Card advertises an HTTP+JSON interface.
+func WithHTTPJSONEndpoint(basePath string) Option {
+	return func(s *A2AServer) {
+		s.httpJSONBasePath = normalizeHTTPJSONBasePath(basePath)
+		s.httpJSONPathExplicitlySet = true
+		s.httpJSONEnabled = true
+	}
+}
+
 // WithCompatHandler installs a fallback handler for JSON-RPC requests whose
 // method name is not a v1.0 method (e.g. the legacy slash-delimited names
 // served by compat/v0). The handler is mounted on the same JSON-RPC endpoint
@@ -198,11 +210,13 @@ func WithPushNotificationJWKSHandler(handler http.Handler) Option {
 // The base path will be automatically prepended to all standard A2A endpoints:
 // - Agent card: basePath + "/.well-known/agent-card.json"
 // - JSON-RPC: basePath + "/"
+// - HTTP+JSON: basePath + "/message:send", basePath + "/tasks/{id}", etc.
 // - JWKS: basePath + "/.well-known/jwks.json"
 //
 // Example: WithBasePath("/api/v1/agent") creates endpoints:
 // - /api/v1/agent/.well-known/agent-card.json
 // - /api/v1/agent/
+// - /api/v1/agent/message:send
 // - /api/v1/agent/.well-known/jwks.json
 //
 // The base path should start with "/" and not end with "/".
@@ -228,13 +242,15 @@ func WithBasePath(basePath string) Option {
 		s.agentCardPath = basePath + protocol.AgentCardPath
 		s.oldAgentCardPath = basePath + protocol.OldAgentCardPath
 		s.jwksEndpoint = basePath + protocol.JWKSPath
+		s.httpJSONBasePath = basePath
+		s.httpJSONPathExplicitlySet = true
 	}
 }
 
 // WithMiddleware adds HTTP middleware(s) to the server's chain.
 // Multiple middlewares can be provided and will be chained together.
 // The first middleware in the slice will be the outermost wrapper.
-// Middlewares only take effect on the JSON-RPC endpoint.
+// Middlewares take effect on both JSON-RPC and HTTP+JSON protocol endpoints.
 func WithMiddleware(middlewares ...Middleware) Option {
 	return func(s *A2AServer) {
 		s.middleWare = append(s.middleWare, middlewares...)

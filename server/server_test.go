@@ -360,7 +360,7 @@ func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 
 		assert.Nil(t, resp.Result, "Response result should be nil")
 		require.NotNil(t, resp.Error, "Response error should not be nil")
-		assert.Equal(t, taskmanager.ErrCodeTaskNotFound, resp.Error.Code)
+		assert.Equal(t, jsonrpc.CodeTaskNotFound, resp.Error.Code)
 	})
 
 	// --- Test tasks/cancel ---
@@ -397,7 +397,7 @@ func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 
 		assert.Nil(t, resp.Result, "Response result should be nil")
 		require.NotNil(t, resp.Error, "Response error should not be nil")
-		assert.Equal(t, taskmanager.ErrCodeTaskNotFound, resp.Error.Code)
+		assert.Equal(t, jsonrpc.CodeTaskNotFound, resp.Error.Code)
 	})
 
 	// --- Test unknown method ---
@@ -944,13 +944,13 @@ func TestA2AServer_HandleAgentGetAuthenticatedExtendedCard(t *testing.T) {
 			name:                 "not_configured",
 			supportsExtendedCard: nil,
 			expectedError:        true,
-			expectedErrorCode:    taskmanager.ErrCodeAuthenticatedExtendedCardNotConfigured,
+			expectedErrorCode:    jsonrpc.CodeAuthenticatedExtendedCardNotConfigured,
 		},
 		{
 			name:                 "disabled",
 			supportsExtendedCard: func() *bool { b := false; return &b }(),
 			expectedError:        true,
-			expectedErrorCode:    taskmanager.ErrCodeAuthenticatedExtendedCardNotConfigured,
+			expectedErrorCode:    jsonrpc.CodeAuthenticatedExtendedCardNotConfigured,
 		},
 		{
 			name:                 "enabled_no_handler",

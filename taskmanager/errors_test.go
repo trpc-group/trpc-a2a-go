@@ -10,7 +10,6 @@ import (
 	"errors"
 	"testing"
 
-	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
@@ -19,7 +18,7 @@ func TestErrorSentinels(t *testing.T) {
 		name         string
 		errorFunc    func() error
 		sentinel     error
-		expectedCode int
+		expectedCode ErrorCode
 		expectedMsg  string
 	}{
 		{
@@ -72,16 +71,30 @@ func TestErrorSentinels(t *testing.T) {
 			expectedMsg:  "Authenticated extended card not configured",
 		},
 		{
+			name:         "ExtensionSupportRequired",
+			errorFunc:    func() error { return ErrExtensionSupportRequired("urn:example:extension") },
+			sentinel:     ErrExtensionSupportRequiredSentinel,
+			expectedCode: ErrCodeExtensionSupportRequired,
+			expectedMsg:  "Extension support required",
+		},
+		{
+			name:         "VersionNotSupported",
+			errorFunc:    func() error { return ErrVersionNotSupported("2.0") },
+			sentinel:     ErrVersionNotSupportedSentinel,
+			expectedCode: ErrCodeVersionNotSupported,
+			expectedMsg:  "Version not supported",
+		},
+		{
 			name:         "InvalidParams",
 			errorFunc:    func() error { return ErrInvalidParams("bad parameter") },
-			sentinel:     jsonrpc.ErrInvalidParamsSentinel,
+			sentinel:     ErrInvalidParamsSentinel,
 			expectedCode: ErrCodeInvalidParams,
 			expectedMsg:  "Invalid params",
 		},
 		{
 			name:         "InternalError",
 			errorFunc:    func() error { return ErrInternalError("failed operation") },
-			sentinel:     jsonrpc.ErrInternalErrorSentinel,
+			sentinel:     ErrInternalErrorSentinel,
 			expectedCode: ErrCodeInternalError,
 			expectedMsg:  "Internal error",
 		},
@@ -96,14 +109,14 @@ func TestErrorSentinels(t *testing.T) {
 				t.Errorf("errors.Is() failed: expected error to wrap %v", tt.sentinel)
 			}
 
-			// Test error code and message by type asserting to *jsonrpc.Error
-			jErr, ok := err.(*jsonrpc.Error)
+			// Test error code and message by type asserting to *Error.
+			jErr, ok := err.(*Error)
 			if !ok {
-				t.Fatalf("error is not *jsonrpc.Error, got %T", err)
+				t.Fatalf("error is not *taskmanager.Error, got %T", err)
 			}
 
 			if jErr.Code != tt.expectedCode {
-				t.Errorf("expected code %d, got %d", tt.expectedCode, jErr.Code)
+				t.Errorf("expected code %s, got %s", tt.expectedCode, jErr.Code)
 			}
 			if jErr.Message != tt.expectedMsg {
 				t.Errorf("expected message %q, got %q", tt.expectedMsg, jErr.Message)

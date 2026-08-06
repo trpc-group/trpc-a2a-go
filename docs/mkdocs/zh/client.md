@@ -11,7 +11,19 @@ if err != nil {
 }
 ```
 
-`NewA2AClient` 接收 agent 的 JSON-RPC endpoint。默认没有超时；生产代码通常会传 `client.WithTimeout(...)` 或自定义 `http.Client`。
+`NewA2AClient` 接收 agent endpoint，默认继续使用 JSON-RPC。直接指定 HTTP+JSON 时传 `client.WithProtocolBinding(protocol.ProtocolBindingHTTPJSON)`；更推荐先获取 Agent Card，再让 client 按有序的 `supportedInterfaces` 选择第一个自己支持的 binding：
+
+```go
+restClient, _ := client.NewA2AClient(
+    "https://agent.example.com/a2a",
+    client.WithProtocolBinding(protocol.ProtocolBindingHTTPJSON),
+)
+
+card, _ := c.GetAgentCard(ctx, "")
+discoveredClient, _ := client.NewA2AClientFromAgentCard(card)
+```
+
+JSON-RPC 请求继续使用 `application/json`。HTTP+JSON 使用 REST 路由并发送 `application/a2a+json`；一元响应同时接受 `application/a2a+json` 与兼容 1.0.0 实现的 `application/json`。默认没有超时；生产代码通常会传 `client.WithTimeout(...)` 或自定义 `http.Client`。
 
 ## 先发现 Agent
 

@@ -8,13 +8,13 @@ package server
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
-	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/telemetry"
@@ -99,8 +99,8 @@ func (t *metricsTracker) setError(errType string) {
 }
 
 // setValidateSendMessageError classifies errors from validateSendMessageParams.
-func (t *metricsTracker) setValidateSendMessageError(err *jsonrpc.Error) {
-	if err != nil && err.Code == taskmanager.ErrCodePushNotificationNotSupported {
+func (t *metricsTracker) setValidateSendMessageError(err error) {
+	if errors.Is(err, taskmanager.ErrPushNotificationNotSupportedSentinel) {
 		t.setError(errTypePushNotificationNotSupported)
 		return
 	}
