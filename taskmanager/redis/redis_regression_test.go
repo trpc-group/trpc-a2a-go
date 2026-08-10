@@ -41,7 +41,7 @@ func pollTaskState(t *testing.T, m *TaskManager, taskID string, want protocol.Ta
 	deadline := time.Now().Add(2 * time.Second)
 	var last protocol.TaskState
 	for time.Now().Before(deadline) {
-		if task, err := m.getTaskInternal(context.Background(), taskID); err == nil {
+		if task, err := m.getTaskInternal(context.Background(), "", taskID); err == nil {
 			last = task.Status.State
 			if last == want {
 				return
@@ -100,7 +100,7 @@ func TestTerminal_NotResurrectedByYieldedRound(t *testing.T) {
 	openGate()
 	deadline := time.Now().Add(100 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		stored, err := manager.getTaskInternal(context.Background(), taskID)
+		stored, err := manager.getTaskInternal(context.Background(), "", taskID)
 		if err != nil {
 			t.Fatalf("getTaskInternal failed: %v", err)
 		}
@@ -201,21 +201,21 @@ func TestRequestExecutionCancelReturnsWinningYieldHandoff(t *testing.T) {
 	const taskID = "task-yield-wins-cancel-race"
 	var canceled atomic.Bool
 	live := &liveExecution{cancel: func() { canceled.Store(true) }}
-	if err := manager.registerExecution(context.Background(), taskID, live); err != nil {
+	if err := manager.registerExecution(context.Background(), "", taskID, live); err != nil {
 		t.Fatalf("registerExecution: %v", err)
 	}
 	released := false
 	defer func() {
 		if !released {
-			manager.releaseExecution(taskID, live)
+			manager.releaseExecution("", taskID, live)
 		}
 	}()
 
-	if !manager.beginExecutionYield(taskID, live) {
+	if !manager.beginExecutionYield("", taskID, live) {
 		t.Fatal("beginExecutionYield did not claim the live execution")
 	}
 	wantHandoff := live.yieldDone
-	handoff, accepted := manager.requestExecutionCancel(taskID, live)
+	handoff, accepted := manager.requestExecutionCancel("", taskID, live)
 	if accepted {
 		t.Fatal("cancellation was accepted after yield won")
 	}
@@ -226,7 +226,7 @@ func TestRequestExecutionCancelReturnsWinningYieldHandoff(t *testing.T) {
 		t.Fatal("yield-winning execution was canceled")
 	}
 
-	manager.releaseExecution(taskID, live)
+	manager.releaseExecution("", taskID, live)
 	released = true
 	select {
 	case <-handoff:
@@ -377,7 +377,7 @@ func TestResubscribe_ClientDisconnectDropsSubscriber(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		manager.subMu.RLock()
-		left := len(manager.subscribers[taskID])
+		left := len(manager.subscribers[newScopedID("", taskID)])
 		manager.subMu.RUnlock()
 		if left == 0 {
 			return

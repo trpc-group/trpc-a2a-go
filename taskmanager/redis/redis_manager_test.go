@@ -100,7 +100,7 @@ func storedTask(t *testing.T, m *TaskManager, id, contextID string, state protoc
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		},
 	}
-	if err := m.storeTask(context.Background(), task); err != nil {
+	if err := m.storeTask(context.Background(), "", task); err != nil {
 		t.Fatalf("storeTask failed: %v", err)
 	}
 	return task
@@ -110,7 +110,7 @@ func waitTaskState(t *testing.T, m *TaskManager, taskID string, state protocol.T
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		task, err := m.getTaskInternal(context.Background(), taskID)
+		task, err := m.getTaskInternal(context.Background(), "", taskID)
 		if err == nil && task.Status.State == state {
 			return
 		}
@@ -173,7 +173,7 @@ func TestOnSendMessagePureMessage(t *testing.T) {
 	}
 
 	// Both the user message and the reply live in the conversation.
-	history, err := m.getConversationHistory(context.Background(), "ctx-pure", 10)
+	history, err := m.getConversationHistory(context.Background(), "", "ctx-pure", 10)
 	if err != nil {
 		t.Fatalf("getConversationHistory failed: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestOnSendMessageHistoryLength(t *testing.T) {
 	for _, text := range []string{"m1", "m2"} {
 		msg := protocol.NewMessage(protocol.MessageRoleUser, []*protocol.Part{protocol.NewTextPart(text)})
 		msg.ContextID = &contextID
-		m.storeMessage(context.Background(), msg)
+		m.storeMessage(context.Background(), "", msg)
 	}
 
 	send := func(text string, historyLength *int) *protocol.Task {
@@ -699,7 +699,7 @@ func TestOnSendMessageStreamOrderAndPersistence(t *testing.T) {
 	if taskID == "" || statusUpdate.ContextID != "ctx-stream" {
 		t.Fatalf("frame 1: expected stamped IDs, got %+v", statusUpdate)
 	}
-	stored, err := m.getTaskInternal(context.Background(), taskID)
+	stored, err := m.getTaskInternal(context.Background(), "", taskID)
 	if err != nil {
 		t.Fatalf("task not persisted before broadcast: %v", err)
 	}
@@ -714,7 +714,7 @@ func TestOnSendMessageStreamOrderAndPersistence(t *testing.T) {
 	if artifactUpdate == nil || artifactUpdate.Artifact.ArtifactID != "artifact-1" {
 		t.Fatalf("frame 2: expected artifact update, got %+v", frame2.Result)
 	}
-	stored, err = m.getTaskInternal(context.Background(), taskID)
+	stored, err = m.getTaskInternal(context.Background(), "", taskID)
 	if err != nil {
 		t.Fatalf("getTaskInternal failed: %v", err)
 	}
@@ -729,7 +729,7 @@ func TestOnSendMessageStreamOrderAndPersistence(t *testing.T) {
 	if statusUpdate == nil || statusUpdate.Status.State != protocol.TaskStateCompleted {
 		t.Fatalf("frame 3: expected completed status, got %+v", frame3.Result)
 	}
-	stored, err = m.getTaskInternal(context.Background(), taskID)
+	stored, err = m.getTaskInternal(context.Background(), "", taskID)
 	if err != nil {
 		t.Fatalf("getTaskInternal failed: %v", err)
 	}
@@ -995,7 +995,7 @@ func TestOnCancelTaskWithoutLiveExecution(t *testing.T) {
 		t.Error("expected subscriber closed after terminal broadcast")
 	}
 
-	stored, err := m.getTaskInternal(context.Background(), "task-idle")
+	stored, err := m.getTaskInternal(context.Background(), "", "task-idle")
 	if err != nil {
 		t.Fatalf("getTaskInternal failed: %v", err)
 	}
@@ -1157,7 +1157,7 @@ func TestOnGetTaskHistoryLength(t *testing.T) {
 	for _, text := range []string{"m1", "m2", "m3"} {
 		msg := protocol.NewMessage(protocol.MessageRoleUser, []*protocol.Part{protocol.NewTextPart(text)})
 		msg.ContextID = &contextID
-		m.storeMessage(context.Background(), msg)
+		m.storeMessage(context.Background(), "", msg)
 	}
 	storedTask(t, m, "task-hist", contextID, protocol.TaskStateWorking)
 
@@ -1359,7 +1359,7 @@ func TestTaskWriteRefreshesPushConfigTTL(t *testing.T) {
 	if got := mr.TTL(pushNotificationPrefix + task.ID); got != 20*time.Minute {
 		t.Fatalf("push config TTL before refresh = %v, want 20m", got)
 	}
-	if err := m.storeTask(context.Background(), task); err != nil {
+	if err := m.storeTask(context.Background(), "", task); err != nil {
 		t.Fatal(err)
 	}
 	if got := mr.TTL(pushNotificationPrefix + task.ID); got != expire {
@@ -1442,12 +1442,12 @@ func TestStoreMessage_IdempotentByMessageID(t *testing.T) {
 	for i := 0; i < writers; i++ {
 		go func() {
 			defer wg.Done()
-			m.storeMessage(ctx, msg)
+			m.storeMessage(ctx, "", msg)
 		}()
 	}
 	wg.Wait()
 
-	hist, err := m.getConversationHistory(ctx, cid, 100)
+	hist, err := m.getConversationHistory(ctx, "", cid, 100)
 	if err != nil {
 		t.Fatalf("getConversationHistory: %v", err)
 	}

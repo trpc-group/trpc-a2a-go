@@ -67,6 +67,7 @@ type nonBlockingEmptyTransport struct {
 
 func (*nonBlockingEmptyTransport) CommitTaskEvent(
 	context.Context,
+	string,
 	*protocol.Task,
 	protocol.StreamResponse,
 ) error {
@@ -76,6 +77,7 @@ func (*nonBlockingEmptyTransport) CommitTaskEvent(
 func (*nonBlockingEmptyTransport) AppendEvent(
 	context.Context,
 	string,
+	string,
 	protocol.StreamResponse,
 ) error {
 	return nil
@@ -83,6 +85,7 @@ func (*nonBlockingEmptyTransport) AppendEvent(
 
 func (*nonBlockingEmptyTransport) LoadTaskAndCursor(
 	context.Context,
+	string,
 	string,
 ) (*protocol.Task, string, error) {
 	return &protocol.Task{
@@ -95,6 +98,7 @@ func (*nonBlockingEmptyTransport) LoadTaskAndCursor(
 
 func (t *nonBlockingEmptyTransport) ReadAfter(
 	context.Context,
+	string,
 	string,
 	string,
 ) ([]protocol.StreamResponse, string, error) {
@@ -210,7 +214,7 @@ func TestCrossNode_ResubscribeReceivesSubsequentEvents(t *testing.T) {
 	if !drainForState(t, chB, protocol.TaskStateCompleted) {
 		t.Fatal("cross-node resubscriber never received the completed event before the stream closed")
 	}
-	if got, err := nodeA.client.XLen(context.Background(), streamKey(taskA.ID)).Result(); err != nil || got != 2 {
+	if got, err := nodeA.client.XLen(context.Background(), streamKey("", taskA.ID)).Result(); err != nil || got != 2 {
 		t.Fatalf("each status must be appended exactly once: xlen=%d err=%v", got, err)
 	}
 }
@@ -220,7 +224,7 @@ func TestCrossNode_ResubscribeReceivesSubsequentEvents(t *testing.T) {
 func TestCrossNode_DeliversEventPublishedRightAfterResubscribe(t *testing.T) {
 	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor())
 	task := storedTask(t, nodeA, "task-gap", "ctx-gap", protocol.TaskStateWorking)
-	if err := nodeA.appendTaskEvent(context.Background(), task.ID, protocol.NewStreamResponseStatusUpdate(
+	if err := nodeA.appendTaskEvent(context.Background(), "", task.ID, protocol.NewStreamResponseStatusUpdate(
 		statusEvent(protocol.TaskStateWorking, agentReply("w1")))); err != nil {
 		t.Fatalf("append working event: %v", err)
 	}
@@ -230,7 +234,7 @@ func TestCrossNode_DeliversEventPublishedRightAfterResubscribe(t *testing.T) {
 		t.Fatalf("OnResubscribe: %v", err)
 	}
 	// Publish the terminal event immediately after resubscribe.
-	if err := nodeA.appendTaskEvent(context.Background(), task.ID, protocol.NewStreamResponseStatusUpdate(
+	if err := nodeA.appendTaskEvent(context.Background(), "", task.ID, protocol.NewStreamResponseStatusUpdate(
 		statusEvent(protocol.TaskStateCompleted, agentReply("done")))); err != nil {
 		t.Fatalf("append completed event: %v", err)
 	}
@@ -343,12 +347,12 @@ func TestCrossNode_AtomicSnapshotCursorHasNoOverlapOrGap(t *testing.T) {
 	first.ContextID = task.ContextID
 	task.Artifacts, _ = protocol.AppendArtifact(task.Artifacts, first.Artifact, false)
 	if err := nodeA.commitTaskEvent(
-		context.Background(), task, protocol.NewStreamResponseArtifactUpdate(first),
+		context.Background(), "", task, protocol.NewStreamResponseArtifactUpdate(first),
 	); err != nil {
 		t.Fatalf("store first task event: %v", err)
 	}
 
-	snapshot, cursor, err := nodeB.eventTransport.LoadTaskAndCursor(context.Background(), task.ID)
+	snapshot, cursor, err := nodeB.eventTransport.LoadTaskAndCursor(context.Background(), "", task.ID)
 	if err != nil {
 		t.Fatalf("loadTaskAndCursor: %v", err)
 	}
@@ -356,7 +360,7 @@ func TestCrossNode_AtomicSnapshotCursorHasNoOverlapOrGap(t *testing.T) {
 		t.Fatalf("snapshot must contain the committed artifact exactly once, got %+v", snapshot)
 	}
 	if duplicate, err := nodeB.client.XRead(context.Background(), &redis.XReadArgs{
-		Streams: []string{streamKey(task.ID), cursor},
+		Streams: []string{streamKey("", task.ID), cursor},
 		Count:   1,
 		Block:   -1,
 	}).Result(); !errors.Is(err, redis.Nil) {
@@ -370,12 +374,12 @@ func TestCrossNode_AtomicSnapshotCursorHasNoOverlapOrGap(t *testing.T) {
 	second.Append = &appendChunk
 	task.Artifacts, _ = protocol.AppendArtifact(task.Artifacts, second.Artifact, true)
 	if err := nodeA.commitTaskEvent(
-		context.Background(), task, protocol.NewStreamResponseArtifactUpdate(second),
+		context.Background(), "", task, protocol.NewStreamResponseArtifactUpdate(second),
 	); err != nil {
 		t.Fatalf("store second task event: %v", err)
 	}
 	streams, err := nodeB.client.XRead(context.Background(), &redis.XReadArgs{
-		Streams: []string{streamKey(task.ID), cursor},
+		Streams: []string{streamKey("", task.ID), cursor},
 		Count:   2,
 		Block:   -1,
 	}).Result()
@@ -405,7 +409,7 @@ func TestCrossNode_InputRequiredDoesNotCloseResubscribe(t *testing.T) {
 	input.ContextID = task.ContextID
 	task.Status = input.Status
 	if err := nodeA.commitTaskEvent(
-		context.Background(), task, protocol.NewStreamResponseStatusUpdate(input),
+		context.Background(), "", task, protocol.NewStreamResponseStatusUpdate(input),
 	); err != nil {
 		t.Fatalf("store input-required: %v", err)
 	}
@@ -418,7 +422,7 @@ func TestCrossNode_InputRequiredDoesNotCloseResubscribe(t *testing.T) {
 	completed.ContextID = task.ContextID
 	task.Status = completed.Status
 	if err := nodeA.commitTaskEvent(
-		context.Background(), task, protocol.NewStreamResponseStatusUpdate(completed),
+		context.Background(), "", task, protocol.NewStreamResponseStatusUpdate(completed),
 	); err != nil {
 		t.Fatalf("store completed: %v", err)
 	}
@@ -435,7 +439,7 @@ func TestCrossNode_ContinuationStatusMessageClearIsJournaled(t *testing.T) {
 	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor(agentReply("clarification")))
 	task := storedTask(t, nodeA, "task-clear-status", "ctx-clear-status", protocol.TaskStateInputRequired)
 	task.Status.Message = agentReply("need input")
-	if err := nodeA.storeTask(context.Background(), task); err != nil {
+	if err := nodeA.storeTask(context.Background(), "", task); err != nil {
 		t.Fatalf("store task status message: %v", err)
 	}
 
@@ -493,7 +497,7 @@ func TestCrossNode_SlowConsumerDoesNotLoseStream(t *testing.T) {
 		update := protocol.NewStreamResponseStatusUpdate(
 			statusEvent(protocol.TaskStateWorking, agentReply("still working")),
 		)
-		if err := nodeA.appendTaskEvent(context.Background(), task.ID, update); err != nil {
+		if err := nodeA.appendTaskEvent(context.Background(), "", task.ID, update); err != nil {
 			t.Fatalf("append stream event %d: %v", i, err)
 		}
 	}
@@ -572,7 +576,7 @@ func TestCrossNode_IdleTailerDoesNotStarveTaskStoragePool(t *testing.T) {
 func TestCrossNode_WrongTypeStreamFailsAtomically(t *testing.T) {
 	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor())
 	task := storedTask(t, nodeA, "task-wrongtype", "ctx-wrongtype", protocol.TaskStateWorking)
-	if err := nodeA.client.Set(context.Background(), streamKey(task.ID), "not-a-stream", 0).Err(); err != nil {
+	if err := nodeA.client.Set(context.Background(), streamKey("", task.ID), "not-a-stream", 0).Err(); err != nil {
 		t.Fatalf("seed wrong-type stream key: %v", err)
 	}
 
@@ -601,14 +605,14 @@ func TestCrossNode_MessageAppendFailureIsNotExposedAsSuccess(t *testing.T) {
 		WithCrossNodeResubscribe(true),
 	)
 	task := storedTask(t, manager, "task-message-fail", "ctx-message-fail", protocol.TaskStateWorking)
-	if err := manager.client.Set(context.Background(), streamKey(task.ID), "not-a-stream", 0).Err(); err != nil {
+	if err := manager.client.Set(context.Background(), streamKey("", task.ID), "not-a-stream", 0).Err(); err != nil {
 		t.Fatalf("seed wrong-type stream key: %v", err)
 	}
 	subscriber := newTaskSubscriber(task.ID, 1, false)
 	manager.subMu.Lock()
-	manager.subscribers[task.ID] = []*taskSubscriber{subscriber}
+	manager.subscribers[newScopedID("", task.ID)] = []*taskSubscriber{subscriber}
 	manager.subMu.Unlock()
-	defer manager.cleanupFailedSubscribers(task.ID, []*taskSubscriber{subscriber})
+	defer manager.cleanupFailedSubscribers("", task.ID, []*taskSubscriber{subscriber})
 
 	params := sendParams("continue", task.ContextID)
 	params.Message.TaskID = &task.ID
@@ -622,7 +626,7 @@ func TestCrossNode_MessageAppendFailureIsNotExposedAsSuccess(t *testing.T) {
 	if buffered := len(subscriber.Channel()); buffered != 0 {
 		t.Fatalf("message append failure reached local subscriber: buffered=%d", buffered)
 	}
-	history, err := manager.getConversationHistory(context.Background(), task.ContextID, 100)
+	history, err := manager.getConversationHistory(context.Background(), "", task.ContextID, 100)
 	if err != nil {
 		t.Fatalf("getConversationHistory: %v", err)
 	}
@@ -659,7 +663,7 @@ func TestCrossNode_TaskCommitFailureIsNotExposedAsSuccess(t *testing.T) {
 			taskID := "task-" + test.name + "-fail"
 			contextID := "ctx-" + test.name + "-fail"
 			task := storedTask(t, manager, taskID, contextID, protocol.TaskStateWorking)
-			if err := manager.client.Set(context.Background(), streamKey(task.ID), "not-a-stream", 0).Err(); err != nil {
+			if err := manager.client.Set(context.Background(), streamKey("", task.ID), "not-a-stream", 0).Err(); err != nil {
 				t.Fatalf("seed wrong-type stream key: %v", err)
 			}
 
@@ -708,7 +712,7 @@ func TestCrossNode_PersistenceFailureReturnsBeforeProcessorCloses(t *testing.T) 
 	})
 	manager, _ := setupTest(t, processor, WithCrossNodeResubscribe(true))
 	task := storedTask(t, manager, "task-fast-failure", "ctx-fast-failure", protocol.TaskStateWorking)
-	if err := manager.client.Set(context.Background(), streamKey(task.ID), "not-a-stream", 0).Err(); err != nil {
+	if err := manager.client.Set(context.Background(), streamKey("", task.ID), "not-a-stream", 0).Err(); err != nil {
 		t.Fatalf("seed wrong-type stream key: %v", err)
 	}
 
@@ -755,7 +759,7 @@ func TestCrossNode_PersistenceFailureClosesStreamBeforeProcessorCloses(t *testin
 	})
 	manager, _ := setupTest(t, processor, WithCrossNodeResubscribe(true))
 	task := storedTask(t, manager, "task-stream-failure", "ctx-stream-failure", protocol.TaskStateWorking)
-	if err := manager.client.Set(context.Background(), streamKey(task.ID), "not-a-stream", 0).Err(); err != nil {
+	if err := manager.client.Set(context.Background(), streamKey("", task.ID), "not-a-stream", 0).Err(); err != nil {
 		t.Fatalf("seed wrong-type stream key: %v", err)
 	}
 
@@ -811,7 +815,7 @@ func TestCrossNode_FailedStatusCommitDoesNotAdvanceHistory(t *testing.T) {
 
 	deadline := time.Now().Add(time.Second)
 	for {
-		stored, err := manager.getTaskInternal(context.Background(), id)
+		stored, err := manager.getTaskInternal(context.Background(), "", id)
 		if err == nil && stored.Status.Message != nil &&
 			stored.Status.Message.Parts[0].TextContent() == "first" {
 			break
@@ -821,7 +825,7 @@ func TestCrossNode_FailedStatusCommitDoesNotAdvanceHistory(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if err := manager.client.Set(context.Background(), streamKey(id), "not-a-stream", 0).Err(); err != nil {
+	if err := manager.client.Set(context.Background(), streamKey("", id), "not-a-stream", 0).Err(); err != nil {
 		t.Fatalf("replace stream with wrong type: %v", err)
 	}
 	releaseProcessor()
@@ -829,7 +833,7 @@ func TestCrossNode_FailedStatusCommitDoesNotAdvanceHistory(t *testing.T) {
 		t.Fatalf("unexpected failed status result: %v", err)
 	}
 
-	stored, err := manager.getTaskInternal(context.Background(), id)
+	stored, err := manager.getTaskInternal(context.Background(), "", id)
 	if err != nil {
 		t.Fatalf("get stored task: %v", err)
 	}
@@ -837,7 +841,7 @@ func TestCrossNode_FailedStatusCommitDoesNotAdvanceHistory(t *testing.T) {
 		stored.Status.Message.Parts[0].TextContent() != "first" {
 		t.Fatalf("failed commit changed stored status: %+v", stored.Status)
 	}
-	history, err := manager.getConversationHistory(context.Background(), stored.ContextID, 100)
+	history, err := manager.getConversationHistory(context.Background(), "", stored.ContextID, 100)
 	if err != nil {
 		t.Fatalf("get conversation history: %v", err)
 	}
@@ -866,11 +870,11 @@ func TestCrossNode_SubMillisecondExpirationIsClamped(t *testing.T) {
 	update.ContextID = task.ContextID
 	task.Status = update.Status
 	if err := manager.commitTaskEvent(
-		context.Background(), task, protocol.NewStreamResponseStatusUpdate(update),
+		context.Background(), "", task, protocol.NewStreamResponseStatusUpdate(update),
 	); err != nil {
 		t.Fatalf("commitTaskEvent with sub-millisecond configured TTL: %v", err)
 	}
-	if got, err := manager.client.XLen(context.Background(), streamKey(task.ID)).Result(); err != nil || got != 1 {
+	if got, err := manager.client.XLen(context.Background(), streamKey("", task.ID)).Result(); err != nil || got != 1 {
 		t.Fatalf("stream event missing after clamped TTL: xlen=%d err=%v", got, err)
 	}
 }
@@ -892,7 +896,7 @@ func TestCrossNode_TaskCommitRefreshesPushConfigExpiration(t *testing.T) {
 	update.ContextID = task.ContextID
 	task.Status = update.Status
 	if err := manager.commitTaskEvent(
-		context.Background(), task, protocol.NewStreamResponseStatusUpdate(update),
+		context.Background(), "", task, protocol.NewStreamResponseStatusUpdate(update),
 	); err != nil {
 		t.Fatalf("commitTaskEvent: %v", err)
 	}
@@ -906,7 +910,7 @@ func TestCrossNode_TaskCommitRefreshesPushConfigExpiration(t *testing.T) {
 func TestCrossNode_CloseRejectsTailerAfterSnapshotRead(t *testing.T) {
 	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor())
 	task := storedTask(t, nodeA, "task-close-admission", "ctx-close-admission", protocol.TaskStateWorking)
-	if _, _, err := nodeB.eventTransport.LoadTaskAndCursor(context.Background(), task.ID); err != nil {
+	if _, _, err := nodeB.eventTransport.LoadTaskAndCursor(context.Background(), "", task.ID); err != nil {
 		t.Fatalf("warm loadTaskAndCursor script: %v", err)
 	}
 	hook := &blockAfterCommandHook{

@@ -9,11 +9,13 @@ package redis
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -30,7 +32,9 @@ const (
 	messagePrefix          = "msg:"
 	conversationPrefix     = "conv:"
 	taskPrefix             = "task:"
+	taskIndexPrefix        = "taskidx:"
 	pushNotificationPrefix = "push:"
+	tenantNamespacePrefix  = "tenant:"
 
 	// Default expiration time for Redis keys (1 hour).
 	defaultExpiration = 1 * time.Hour
@@ -41,6 +45,45 @@ const (
 	taskEventReadIdleInitialDelay   = 100 * time.Millisecond
 	taskEventReadIdleMaxDelay       = time.Second
 )
+
+// scopedID is the process-local identity of tenant-owned runtime state.
+type scopedID struct {
+	tenant string
+	id     string
+}
+
+func newScopedID(tenant, id string) scopedID {
+	return scopedID{tenant: tenant, id: id}
+}
+
+// tenantKeyPrefix namespaces Redis data without changing legacy empty-tenant
+// keys. Raw URL-safe base64 makes tenant values unambiguous key segments.
+func tenantKeyPrefix(tenant string) string {
+	if tenant == "" {
+		return ""
+	}
+	return tenantNamespacePrefix + base64.RawURLEncoding.EncodeToString([]byte(tenant)) + ":"
+}
+
+func messageKey(tenant, messageID string) string {
+	return tenantKeyPrefix(tenant) + messagePrefix + messageID
+}
+
+func conversationKey(tenant, contextID string) string {
+	return tenantKeyPrefix(tenant) + conversationPrefix + contextID
+}
+
+func taskKey(tenant, taskID string) string {
+	return tenantKeyPrefix(tenant) + taskPrefix + taskID
+}
+
+func taskIndexKey(tenant string) string {
+	return tenantKeyPrefix(tenant) + taskIndexPrefix + "all"
+}
+
+func pushNotificationKey(tenant, taskID string) string {
+	return tenantKeyPrefix(tenant) + pushNotificationPrefix + taskID
+}
 
 // appendConversationMessageScript appends a MessageID exactly once, trims the
 // history window, and refreshes its TTL as one atomic Redis operation. It uses
@@ -78,14 +121,14 @@ type TaskManager struct {
 
 	// subMu is a mutex for the subscribers map.
 	subMu sync.RWMutex
-	// subscribers is a map of task IDs to subscriber channels.
-	subscribers map[string][]*taskSubscriber
+	// subscribers is indexed by tenant and task ID.
+	subscribers map[scopedID][]*taskSubscriber
 
 	// cancelMu is a mutex for the executions map and the closed flag.
 	cancelMu sync.RWMutex
-	// executions maps task IDs to live execution handles so OnCancelTask can
+	// executions maps tenant-scoped task IDs to live execution handles so OnCancelTask can
 	// cancel the MessageProcessor's context.
-	executions map[string]*liveExecution
+	executions map[scopedID]*liveExecution
 	// closed rejects new runs once Close has begun tearing the manager down.
 	closed bool
 	// engineWg counts live drain engines so Close can wait for their final
@@ -155,8 +198,8 @@ func NewTaskManager(
 		processor:   processor,
 		client:      client,
 		expiration:  expiration,
-		subscribers: make(map[string][]*taskSubscriber),
-		executions:  make(map[string]*liveExecution),
+		subscribers: make(map[scopedID][]*taskSubscriber),
+		executions:  make(map[scopedID]*liveExecution),
 		pushEnabled: options.Push.Sender != nil || options.Push.ManualDelivery,
 		options:     options,
 	}
@@ -199,7 +242,7 @@ func (m *TaskManager) OnSendMessage(
 		// background and results stay retrievable via GetTask/subscriptions.
 		select {
 		case out := <-ex.immediateResult:
-			return m.buildSendResponse(out.task, out.message, historyLength)
+			return m.buildSendResponse(request.Tenant, out.task, out.message, historyLength)
 		case err := <-ex.runFailed:
 			return nil, err
 		case <-ex.done:
@@ -208,7 +251,7 @@ func (m *TaskManager) OnSendMessage(
 			if ex.runErr != nil {
 				return nil, ex.runErr
 			}
-			return m.buildSendResponse(ex.finalTask, ex.lastMessage, historyLength)
+			return m.buildSendResponse(request.Tenant, ex.finalTask, ex.lastMessage, historyLength)
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -221,7 +264,7 @@ func (m *TaskManager) OnSendMessage(
 		if ex.runErr != nil {
 			return nil, ex.runErr
 		}
-		return m.buildSendResponse(ex.finalTask, ex.lastMessage, historyLength)
+		return m.buildSendResponse(request.Tenant, ex.finalTask, ex.lastMessage, historyLength)
 	case <-ctx.Done():
 		// The request died first. The execution is detached: it keeps running
 		// and its results stay retrievable via GetTask/resubscribe.
@@ -263,7 +306,7 @@ func (m *TaskManager) OnGetTask(
 	ctx context.Context,
 	params protocol.TaskQueryParams,
 ) (*protocol.Task, error) {
-	task, err := m.getTaskInternal(ctx, params.ID)
+	task, err := m.getTaskInternal(ctx, params.Tenant, params.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -272,7 +315,7 @@ func (m *TaskManager) OnGetTask(
 	//   - historyLength unset -> no limit (full history)
 	//   - historyLength == 0  -> no messages
 	//   - historyLength > 0   -> the most recent N messages
-	m.fillTaskHistory(ctx, task, params.HistoryLength)
+	m.fillTaskHistory(ctx, params.Tenant, task, params.HistoryLength)
 
 	return task, nil
 }
@@ -280,7 +323,12 @@ func (m *TaskManager) OnGetTask(
 // fillTaskHistory shapes a response task's History per the v1.0 historyLength
 // semantics: unset means the full conversation history, 0 (or negative) means
 // none, N means the most recent N messages.
-func (m *TaskManager) fillTaskHistory(ctx context.Context, task *protocol.Task, historyLength *int) {
+func (m *TaskManager) fillTaskHistory(
+	ctx context.Context,
+	tenant string,
+	task *protocol.Task,
+	historyLength *int,
+) {
 	if task.ContextID == "" {
 		return
 	}
@@ -293,7 +341,7 @@ func (m *TaskManager) fillTaskHistory(ctx context.Context, task *protocol.Task, 
 		task.History = nil
 		return
 	}
-	history, err := m.getConversationHistory(ctx, task.ContextID, length)
+	history, err := m.getConversationHistory(ctx, tenant, task.ContextID, length)
 	if err != nil {
 		log.Warnf("Failed to retrieve message history for task %s: %v", task.ID, err)
 		// Continue without history rather than failing the whole request.
@@ -314,12 +362,13 @@ func historyLengthFromConfig(config *protocol.SendMessageConfiguration) *int {
 // exists (history shaped per the request's historyLength), otherwise the last
 // message; an execution that produced neither is an MessageProcessor bug.
 func (m *TaskManager) buildSendResponse(
+	tenant string,
 	task *protocol.Task,
 	message *protocol.Message,
 	historyLength *int,
 ) (*protocol.SendMessageResponse, error) {
 	if task != nil {
-		m.fillTaskHistory(context.Background(), task, historyLength)
+		m.fillTaskHistory(context.Background(), tenant, task, historyLength)
 		return protocol.NewSendMessageResponseTask(task), nil
 	}
 	if message != nil {
@@ -340,7 +389,7 @@ func (m *TaskManager) OnCancelTask(
 	params protocol.TaskIDParams,
 ) (*protocol.Task, error) {
 	for {
-		live, sentinel, yieldDone := m.claimCancelSlot(params.ID)
+		live, sentinel, yieldDone := m.claimCancelSlot(params.Tenant, params.ID)
 		if yieldDone != nil {
 			select {
 			case <-yieldDone:
@@ -350,13 +399,13 @@ func (m *TaskManager) OnCancelTask(
 			}
 		}
 		if live == nil {
-			defer m.deregisterExecution(params.ID, sentinel)
+			defer m.deregisterExecution(params.Tenant, params.ID, sentinel)
 			return m.cancelWithoutLiveRun(ctx, params)
 		}
 
 		// A stored terminal state is immutable even while the round is still
 		// draining: canceling it must fail like the no-live path does.
-		task, err := m.getTaskInternal(ctx, params.ID)
+		task, err := m.getTaskInternal(ctx, params.Tenant, params.ID)
 		if err != nil && !errors.Is(err, taskmanager.ErrTaskNotFoundSentinel) {
 			// Storage error, not a missing task: canceling is irreversible, so
 			// do not cancel a healthy run because the lookup blipped.
@@ -368,7 +417,7 @@ func (m *TaskManager) OnCancelTask(
 		// Linearize cancellation against a concurrent suspend handoff. If the
 		// handoff won, wait for it and retry as a no-live cancel; otherwise the
 		// close rule is guaranteed to observe cancelRequested.
-		yieldDone, accepted := m.requestExecutionCancel(params.ID, live)
+		yieldDone, accepted := m.requestExecutionCancel(params.Tenant, params.ID, live)
 		if yieldDone != nil {
 			select {
 			case <-yieldDone:
@@ -381,7 +430,7 @@ func (m *TaskManager) OnCancelTask(
 			continue
 		}
 
-		if m.liveRun(params.ID) != live {
+		if m.liveRun(params.Tenant, params.ID) != live {
 			// The run yielded (suspend) or finished while we were canceling, so
 			// its close rule will not persist CANCELED on our behalf. Reassess:
 			// the next pass either claims the free slot and persists CANCELED
@@ -405,7 +454,7 @@ func (m *TaskManager) cancelWithoutLiveRun(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (*protocol.Task, error) {
-	task, err := m.getTaskInternal(ctx, params.ID)
+	task, err := m.getTaskInternal(ctx, params.Tenant, params.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -428,12 +477,12 @@ func (m *TaskManager) cancelWithoutLiveRun(
 	response := protocol.NewStreamResponseStatusUpdate(event)
 	// Persist with a background context (like every engine write): the CANCELED
 	// state must land even if the cancel request's own context is already done.
-	if err := m.commitTaskEvent(context.Background(), task, response); err != nil {
+	if err := m.commitTaskEvent(context.Background(), params.Tenant, task, response); err != nil {
 		log.Errorf("Error storing cancelled task %s: %v", params.ID, err)
 		return nil, err
 	}
-	m.notifySubscribers(params.ID, response)
-	m.cleanSubscribers(params.ID)
+	m.notifySubscribers(params.Tenant, params.ID, response)
+	m.cleanSubscribers(params.Tenant, params.ID)
 
 	return task, nil
 }
@@ -449,7 +498,7 @@ func (m *TaskManager) OnPushNotificationSet(
 	if err := push.ValidateConfig(params); err != nil {
 		return nil, taskmanager.ErrInvalidParams(err.Error())
 	}
-	if _, err := m.getTaskInternal(ctx, params.TaskID); err != nil {
+	if _, err := m.getTaskInternal(ctx, params.Tenant, params.TaskID); err != nil {
 		return nil, err
 	}
 	stored, err := m.storePushConfig(ctx, params)
@@ -471,10 +520,10 @@ func (m *TaskManager) OnPushNotificationGet(
 	if params.ID == "" {
 		return nil, taskmanager.ErrInvalidParams("push notification config ID is required")
 	}
-	if _, err := m.getTaskInternal(ctx, params.TaskID); err != nil {
+	if _, err := m.getTaskInternal(ctx, params.Tenant, params.TaskID); err != nil {
 		return nil, err
 	}
-	configBytes, err := m.client.HGet(ctx, pushNotificationPrefix+params.TaskID, params.ID).Bytes()
+	configBytes, err := m.client.HGet(ctx, pushNotificationKey(params.Tenant, params.TaskID), params.ID).Bytes()
 	if err == nil {
 		registration, err := decodePushRegistration(configBytes)
 		if err != nil {
@@ -491,8 +540,8 @@ func (m *TaskManager) OnPushNotificationGet(
 // a v1.0 request leaves historyLength unset (spec: unset means no limit).
 const unlimitedHistoryLength = 1 << 30
 
-// OnListTasks handles the v1.0 ListTasks request by scanning stored tasks,
-// filtering, and applying offset-based pagination.
+// OnListTasks handles the v1.0 ListTasks request from the tenant-local task
+// index, filtering and applying offset-based pagination without a keyspace SCAN.
 func (m *TaskManager) OnListTasks(
 	ctx context.Context,
 	params protocol.ListTasksParams,
@@ -502,25 +551,53 @@ func (m *TaskManager) OnListTasks(
 		return nil, err
 	}
 
-	// Scan all task keys and collect matching tasks.
+	indexKey := taskIndexKey(params.Tenant)
+	nowMillis := time.Now().UnixMilli()
+	if err := m.client.ZRemRangeByScore(ctx, indexKey, "-inf", strconv.FormatInt(nowMillis, 10)).Err(); err != nil {
+		return nil, fmt.Errorf("failed to prune expired task index entries: %w", err)
+	}
+	taskIDs, err := m.client.ZRangeByScore(ctx, indexKey, &redis.ZRangeBy{
+		Min: "(" + strconv.FormatInt(nowMillis, 10),
+		Max: "+inf",
+	}).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load task index: %w", err)
+	}
+
+	// Pipeline the task loads. ClusterClient splits the pipeline by node, so
+	// task records may stay distributed even though the tenant index is one key.
+	loads := make([]*redis.StringCmd, len(taskIDs))
+	_, pipelineErr := m.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		for i, taskID := range taskIDs {
+			loads[i] = pipe.Get(ctx, taskKey(params.Tenant, taskID))
+		}
+		return nil
+	})
+	if pipelineErr != nil && !errors.Is(pipelineErr, redis.Nil) {
+		return nil, fmt.Errorf("failed to load indexed tasks: %w", pipelineErr)
+	}
+
 	var filtered []*protocol.Task
-	iter := m.client.Scan(ctx, 0, taskPrefix+"*", 0).Iterator()
-	for iter.Next(ctx) {
-		taskBytes, err := m.client.Get(ctx, iter.Val()).Bytes()
+	for i, load := range loads {
+		taskBytes, err := load.Bytes()
+		if errors.Is(err, redis.Nil) {
+			// The index is written before the task. A failed or still-in-flight
+			// task write can therefore leave a temporary member; its score expires
+			// automatically. Do not ZREM here: the same task ID may have been
+			// concurrently recreated after this GET observed a miss.
+			continue
+		}
 		if err != nil {
-			continue // Key expired between SCAN and GET.
+			return nil, fmt.Errorf("failed to load task %s: %w", taskIDs[i], err)
 		}
 		var task protocol.Task
 		if err := json.Unmarshal(taskBytes, &task); err != nil {
-			log.Errorf("RedisTaskManager: skip malformed task at %s: %v", iter.Val(), err)
+			log.Errorf("RedisTaskManager: skip malformed indexed task %s: %v", taskIDs[i], err)
 			continue
 		}
 		if taskmanager.TaskMatchesListFilter(&task, params, afterTime) {
 			filtered = append(filtered, &task)
 		}
-	}
-	if err := iter.Err(); err != nil {
-		return nil, fmt.Errorf("failed to scan tasks: %w", err)
 	}
 	return taskmanager.PaginateTasks(filtered, params)
 }
@@ -534,11 +611,11 @@ func (m *TaskManager) OnPushNotificationList(
 	if !m.pushEnabled {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
-	if _, err := m.getTaskInternal(ctx, params.TaskID); err != nil {
+	if _, err := m.getTaskInternal(ctx, params.Tenant, params.TaskID); err != nil {
 		return nil, err
 	}
 
-	configs, err := m.readPushConfigs(ctx, params.TaskID)
+	configs, err := m.readPushConfigs(ctx, params.Tenant, params.TaskID)
 	if err != nil {
 		return nil, err
 	}
@@ -557,10 +634,10 @@ func (m *TaskManager) OnPushNotificationDelete(
 	if params.ID == "" {
 		return taskmanager.ErrInvalidParams("push notification config ID is required")
 	}
-	if _, err := m.getTaskInternal(ctx, params.TaskID); err != nil {
+	if _, err := m.getTaskInternal(ctx, params.Tenant, params.TaskID); err != nil {
 		return err
 	}
-	pushKey := pushNotificationPrefix + params.TaskID
+	pushKey := pushNotificationKey(params.Tenant, params.TaskID)
 	if err := m.client.HDel(ctx, pushKey, params.ID).Err(); err != nil {
 		return fmt.Errorf("failed to delete push notification config: %w", err)
 	}
@@ -583,7 +660,7 @@ func (m *TaskManager) storePushConfig(
 	if cfg.ID == "" {
 		cfg.ID = "push-" + uuid.New().String()
 	}
-	pushKey := pushNotificationPrefix + cfg.TaskID
+	pushKey := pushNotificationKey(cfg.Tenant, cfg.TaskID)
 	registration := push.Registration{
 		Config:     cfg,
 		Generation: uuid.New().String(),
@@ -636,9 +713,9 @@ func decodePushRegistration(data []byte) (push.Registration, error) {
 
 // readPushConfigs returns all push configs registered for taskID, ordered by ID.
 func (m *TaskManager) readPushConfigs(
-	ctx context.Context, taskID string,
+	ctx context.Context, tenant, taskID string,
 ) ([]protocol.TaskPushNotificationConfig, error) {
-	registrations, err := m.readPushRegistrations(ctx, taskID)
+	registrations, err := m.readPushRegistrations(ctx, tenant, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -652,9 +729,9 @@ func (m *TaskManager) readPushConfigs(
 // readPushRegistrations returns all persisted push registration snapshots for
 // taskID, ordered by config ID.
 func (m *TaskManager) readPushRegistrations(
-	ctx context.Context, taskID string,
+	ctx context.Context, tenant, taskID string,
 ) ([]push.Registration, error) {
-	entries, err := m.client.HGetAll(ctx, pushNotificationPrefix+taskID).Result()
+	entries, err := m.client.HGetAll(ctx, pushNotificationKey(tenant, taskID)).Result()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read push notification configs: %w", err)
 	}
@@ -679,7 +756,7 @@ func (m *TaskManager) isCurrentPushRegistration(
 	ctx context.Context, queued push.Registration,
 ) (bool, error) {
 	cfg := queued.Config
-	data, err := m.client.HGet(ctx, pushNotificationPrefix+cfg.TaskID, cfg.ID).Bytes()
+	data, err := m.client.HGet(ctx, pushNotificationKey(cfg.Tenant, cfg.TaskID), cfg.ID).Bytes()
 	if errors.Is(err, redis.Nil) {
 		return false, nil
 	}
@@ -697,7 +774,7 @@ func (m *TaskManager) isCurrentPushRegistration(
 // are read at event time before the event enters the bounded queue, so a later
 // registration change cannot retroactively change recipients. A full queue
 // applies backpressure rather than silently dropping an event.
-func (m *TaskManager) dispatchPush(taskID string, event protocol.StreamResponse) {
+func (m *TaskManager) dispatchPush(tenant, taskID string, event protocol.StreamResponse) {
 	if m.pushDispatcher == nil {
 		return
 	}
@@ -707,7 +784,7 @@ func (m *TaskManager) dispatchPush(taskID string, event protocol.StreamResponse)
 	if closed {
 		return
 	}
-	registrations, err := m.readPushRegistrations(m.pushCtx, taskID)
+	registrations, err := m.readPushRegistrations(m.pushCtx, tenant, taskID)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
 			log.Warnf("RedisTaskManager: push dispatch: load config for task %s: %v", taskID, err)
@@ -730,7 +807,7 @@ func (m *TaskManager) OnResubscribe(
 	// The snapshot read happens OUTSIDE subMu: getTaskInternal is a network
 	// round-trip and subMu sits on every broadcast's fan-out path — holding it
 	// across a slow Redis call would stall every stream in the process.
-	task, err := m.getTaskInternal(ctx, params.ID)
+	task, err := m.getTaskInternal(ctx, params.Tenant, params.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -755,7 +832,8 @@ func (m *TaskManager) OnResubscribe(
 		return nil, err
 	}
 	m.subMu.Lock()
-	m.subscribers[params.ID] = append(m.subscribers[params.ID], subscriber)
+	key := newScopedID(params.Tenant, params.ID)
+	m.subscribers[key] = append(m.subscribers[key], subscriber)
 	m.subMu.Unlock()
 
 	// The snapshot predates the registration, so an update persisted between
@@ -764,14 +842,14 @@ func (m *TaskManager) OnResubscribe(
 	// guarantees the re-read covers every event broadcast before registration.
 	// (Boundary events may be delivered both in a snapshot and as themselves —
 	// at-least-once, as before.)
-	current, err := m.getTaskInternal(ctx, params.ID)
+	current, err := m.getTaskInternal(ctx, params.Tenant, params.ID)
 	if err == nil && taskChanged(task, current) {
 		if isFinalState(current.Status.State) {
 			// The task ended between the two reads: its terminal broadcast (and
 			// cleanSubscribers) may have run before the registration, which
 			// would leave this subscriber open forever. Reject like the
 			// up-front terminal check does; nothing was delivered to the caller.
-			m.cleanupFailedSubscribers(params.ID, []*taskSubscriber{subscriber})
+			m.cleanupFailedSubscribers(params.Tenant, params.ID, []*taskSubscriber{subscriber})
 			return nil, taskmanager.ErrUnsupportedOperation(
 				fmt.Sprintf("subscribe to task %s in terminal state %s", params.ID, current.Status.State))
 		}
@@ -787,7 +865,7 @@ func (m *TaskManager) OnResubscribe(
 	go func() {
 		select {
 		case <-ctx.Done():
-			m.cleanupFailedSubscribers(params.ID, []*taskSubscriber{subscriber})
+			m.cleanupFailedSubscribers(params.Tenant, params.ID, []*taskSubscriber{subscriber})
 		case <-subscriber.done:
 		}
 	}()
@@ -805,7 +883,7 @@ func (m *TaskManager) onCrossNodeResubscribe(
 	// The transport loads the Task and event cursor at one atomic boundary. A
 	// concurrent task-event commit is therefore either reflected by both values
 	// or by neither: the snapshot and subsequent read contain no gap or overlap.
-	task, startID, err := m.eventTransport.LoadTaskAndCursor(ctx, params.ID)
+	task, startID, err := m.eventTransport.LoadTaskAndCursor(ctx, params.Tenant, params.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -837,7 +915,7 @@ func (m *TaskManager) onCrossNodeResubscribe(
 	}
 	m.tailerWg.Add(1)
 	m.cancelMu.Unlock()
-	go m.tailTaskEvents(ctx, params.ID, startID, subscriber)
+	go m.tailTaskEvents(ctx, params.Tenant, params.ID, startID, subscriber)
 
 	return subscriber.Channel(), nil
 }
@@ -845,7 +923,11 @@ func (m *TaskManager) onCrossNodeResubscribe(
 // tailTaskEvents feeds a resubscriber from the configured event transport,
 // reading strictly after startID. It closes the subscriber and returns on the
 // terminal status frame, when the request ends, or when the manager closes.
-func (m *TaskManager) tailTaskEvents(ctx context.Context, taskID, startID string, sub *taskSubscriber) {
+func (m *TaskManager) tailTaskEvents(
+	ctx context.Context,
+	tenant, taskID, startID string,
+	sub *taskSubscriber,
+) {
 	defer m.tailerWg.Done()
 	defer sub.Close()
 
@@ -880,7 +962,7 @@ func (m *TaskManager) tailTaskEvents(ctx context.Context, taskID, startID string
 		default:
 		}
 		previousID := startID
-		events, nextID, err := m.eventTransport.ReadAfter(readCtx, taskID, startID)
+		events, nextID, err := m.eventTransport.ReadAfter(readCtx, tenant, taskID, startID)
 		if err != nil {
 			return // read context canceled, transport closed, or a storage error.
 		}
@@ -929,13 +1011,14 @@ func (m *TaskManager) tailTaskEvents(ctx context.Context, taskID, startID string
 // one atomic commit. It is a no-op when no event transport is configured.
 func (m *TaskManager) appendTaskEvent(
 	ctx context.Context,
+	tenant string,
 	taskID string,
 	event protocol.StreamResponse,
 ) error {
 	if m.eventTransport == nil {
 		return nil
 	}
-	return m.eventTransport.AppendEvent(ctx, taskID, event)
+	return m.eventTransport.AppendEvent(ctx, tenant, taskID, event)
 }
 
 // taskChanged reports whether two snapshots of the same task differ in what a
@@ -970,9 +1053,9 @@ func (m *TaskManager) stampReplyMessage(ctxID *string, message *protocol.Message
 }
 
 // storeMessage stores a message in Redis and updates conversation history.
-func (m *TaskManager) storeMessage(ctx context.Context, message protocol.Message) {
+func (m *TaskManager) storeMessage(ctx context.Context, tenant string, message protocol.Message) {
 	// Store the message.
-	msgKey := messagePrefix + message.MessageID
+	msgKey := messageKey(tenant, message.MessageID)
 	msgBytes, err := json.Marshal(message)
 	if err != nil {
 		log.Errorf("Failed to serialize message %s: %v", message.MessageID, err)
@@ -987,7 +1070,7 @@ func (m *TaskManager) storeMessage(ctx context.Context, message protocol.Message
 	// If the message has a contextID, add it to conversation history.
 	if message.ContextID != nil {
 		contextID := *message.ContextID
-		convKey := conversationPrefix + contextID
+		convKey := conversationKey(tenant, contextID)
 
 		// The same MessageID may reach this path concurrently from a reply and a
 		// superseded status. Keep the membership check, append, trim, and TTL
@@ -1009,6 +1092,7 @@ func (m *TaskManager) storeMessage(ctx context.Context, message protocol.Message
 // getConversationHistory retrieves conversation history for a context.
 func (m *TaskManager) getConversationHistory(
 	ctx context.Context,
+	tenant string,
 	contextID string,
 	length int,
 ) ([]protocol.Message, error) {
@@ -1016,7 +1100,7 @@ func (m *TaskManager) getConversationHistory(
 		return nil, nil
 	}
 
-	convKey := conversationPrefix + contextID
+	convKey := conversationKey(tenant, contextID)
 
 	// Get the message count.
 	count, err := m.client.LLen(ctx, convKey).Result()
@@ -1039,7 +1123,7 @@ func (m *TaskManager) getConversationHistory(
 	// Retrieve messages.
 	messages := make([]protocol.Message, 0, len(messageIDs))
 	for _, msgID := range messageIDs {
-		msgKey := messagePrefix + msgID
+		msgKey := messageKey(tenant, msgID)
 		msgBytes, err := m.client.Get(ctx, msgKey).Bytes()
 		if err != nil {
 			log.Warnf("Message %s not found in Redis", msgID)
@@ -1062,9 +1146,8 @@ func (m *TaskManager) getConversationHistory(
 // ErrTaskNotFound; any other failure is a storage error and is reported as
 // such — callers that take irreversible actions on not-found (cancel paths)
 // must be able to tell the two apart.
-func (m *TaskManager) getTaskInternal(ctx context.Context, taskID string) (*protocol.Task, error) {
-	taskKey := taskPrefix + taskID
-	taskBytes, err := m.client.Get(ctx, taskKey).Bytes()
+func (m *TaskManager) getTaskInternal(ctx context.Context, tenant, taskID string) (*protocol.Task, error) {
+	taskBytes, err := m.client.Get(ctx, taskKey(tenant, taskID)).Bytes()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return nil, taskmanager.ErrTaskNotFound(taskID)
@@ -1080,26 +1163,33 @@ func (m *TaskManager) getTaskInternal(ctx context.Context, taskID string) (*prot
 	return &task, nil
 }
 
-// storeTask stores a task in Redis.
-func (m *TaskManager) storeTask(ctx context.Context, task *protocol.Task) error {
-	taskKey := taskPrefix + task.ID
-	taskBytes, err := json.Marshal(task)
-	if err != nil {
-		return fmt.Errorf("failed to serialize task: %w", err)
+// ensureTaskIndexed records taskID in the tenant-local listing index before
+// the Task write. A later Task-write failure may leave a stale member, which
+// ListTasks removes lazily; the reverse ordering could make a successfully
+// persisted task permanently invisible.
+func (m *TaskManager) ensureTaskIndexed(ctx context.Context, tenant, taskID string) error {
+	indexKey := taskIndexKey(tenant)
+	indexExpiration := m.expiration
+	if indexExpiration <= time.Duration(1<<63-1)/2 {
+		indexExpiration *= 2
 	}
-
-	_, err = m.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-		pipe.Set(ctx, taskKey, taskBytes, m.expiration)
-		// A task continuation refreshes its registered push configs as well.
-		// Expire on a missing hash is intentionally a no-op.
-		pipe.Expire(ctx, pushNotificationPrefix+task.ID, m.expiration)
+	expiresAt := time.Now().Add(indexExpiration).UnixMilli()
+	if _, err := m.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.ZAdd(ctx, indexKey, redis.Z{Score: float64(expiresAt), Member: taskID})
+		pipe.Expire(ctx, indexKey, indexExpiration)
 		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("failed to store task: %w", err)
+	}); err != nil {
+		return fmt.Errorf("failed to index task %s: %w", taskID, err)
 	}
-
 	return nil
+}
+
+// storeTask stores a task in Redis.
+func (m *TaskManager) storeTask(ctx context.Context, tenant string, task *protocol.Task) error {
+	if err := m.ensureTaskIndexed(ctx, tenant, task.ID); err != nil {
+		return err
+	}
+	return m.storeTaskWithoutIndex(ctx, tenant, task)
 }
 
 // commitTaskEvent atomically persists a Task snapshot and distributes the event
@@ -1107,21 +1197,43 @@ func (m *TaskManager) storeTask(ctx context.Context, task *protocol.Task) error 
 // the original single-key Task persistence path.
 func (m *TaskManager) commitTaskEvent(
 	ctx context.Context,
+	tenant string,
 	task *protocol.Task,
 	event protocol.StreamResponse,
 ) error {
-	if m.eventTransport == nil {
-		return m.storeTask(ctx, task)
+	if err := m.ensureTaskIndexed(ctx, tenant, task.ID); err != nil {
+		return err
 	}
-	if err := m.eventTransport.CommitTaskEvent(ctx, task, event); err != nil {
+	if m.eventTransport == nil {
+		return m.storeTaskWithoutIndex(ctx, tenant, task)
+	}
+	if err := m.eventTransport.CommitTaskEvent(ctx, tenant, task, event); err != nil {
 		return err
 	}
 	// Keep the latest v2 storeTask behavior: every Task write refreshes its push
 	// registrations. This key cannot join the atomic script because the existing
 	// push key is in a different Redis Cluster slot; failure here must not turn an
 	// already-committed Task/event pair into a false negative result.
-	if err := m.client.Expire(ctx, pushNotificationPrefix+task.ID, m.expiration).Err(); err != nil {
+	if err := m.client.Expire(ctx, pushNotificationKey(tenant, task.ID), m.expiration).Err(); err != nil {
 		log.Warnf("RedisTaskManager: failed to refresh push config expiration for task %s: %v", task.ID, err)
+	}
+	return nil
+}
+
+// storeTaskWithoutIndex persists the Task after ensureTaskIndexed succeeded.
+func (m *TaskManager) storeTaskWithoutIndex(ctx context.Context, tenant string, task *protocol.Task) error {
+	key := taskKey(tenant, task.ID)
+	taskBytes, err := json.Marshal(task)
+	if err != nil {
+		return fmt.Errorf("failed to serialize task: %w", err)
+	}
+	_, err = m.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.Set(ctx, key, taskBytes, m.expiration)
+		pipe.Expire(ctx, pushNotificationKey(tenant, task.ID), m.expiration)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to store task: %w", err)
 	}
 	return nil
 }
@@ -1147,18 +1259,20 @@ func isSuspendedState(state protocol.TaskState) bool {
 // round's short suspend handoff, while any other concurrent round is rejected.
 func (m *TaskManager) registerExecution(
 	ctx context.Context,
+	tenant string,
 	taskID string,
 	live *liveExecution,
 ) error {
+	key := newScopedID(tenant, taskID)
 	for {
 		m.cancelMu.Lock()
 		if m.closed {
 			m.cancelMu.Unlock()
 			return taskmanager.ErrInternalError("task manager is closed")
 		}
-		current, exists := m.executions[taskID]
+		current, exists := m.executions[key]
 		if !exists {
-			m.executions[taskID] = live
+			m.executions[key] = live
 			// Counted under the registry lock so Close (which flips m.closed first)
 			// can never begin waiting before a just-admitted run is counted.
 			m.engineWg.Add(1)
@@ -1182,8 +1296,8 @@ func (m *TaskManager) registerExecution(
 
 // releaseExecution aborts a registered run whose engine never started: it
 // undoes registerExecution's registration and engine count.
-func (m *TaskManager) releaseExecution(taskID string, live *liveExecution) {
-	m.deregisterExecution(taskID, live)
+func (m *TaskManager) releaseExecution(tenant, taskID string, live *liveExecution) {
+	m.deregisterExecution(tenant, taskID, live)
 	m.engineWg.Done()
 }
 
@@ -1192,18 +1306,20 @@ func (m *TaskManager) releaseExecution(taskID string, live *liveExecution) {
 // CANCELED write gets the same single-writer guarantee as a run: no
 // continuation can register (and then write) concurrently with it.
 func (m *TaskManager) claimCancelSlot(
+	tenant string,
 	taskID string,
 ) (live *liveExecution, sentinel *liveExecution, yieldDone <-chan struct{}) {
+	key := newScopedID(tenant, taskID)
 	m.cancelMu.Lock()
 	defer m.cancelMu.Unlock()
-	if exec, ok := m.executions[taskID]; ok {
+	if exec, ok := m.executions[key]; ok {
 		if exec.yieldDone != nil {
 			return nil, nil, exec.yieldDone
 		}
 		return exec, nil, nil
 	}
 	sentinel = &liveExecution{cancel: func() {}}
-	m.executions[taskID] = sentinel
+	m.executions[key] = sentinel
 	return nil, sentinel, nil
 }
 
@@ -1211,11 +1327,13 @@ func (m *TaskManager) claimCancelSlot(
 // suspend handoff. It returns the handoff channel when yield won, or accepted
 // after publishing cancelRequested under the registry lock.
 func (m *TaskManager) requestExecutionCancel(
+	tenant string,
 	taskID string,
 	live *liveExecution,
 ) (yieldDone <-chan struct{}, accepted bool) {
+	key := newScopedID(tenant, taskID)
 	m.cancelMu.Lock()
-	if m.executions[taskID] != live {
+	if m.executions[key] != live {
 		m.cancelMu.Unlock()
 		return nil, false
 	}
@@ -1231,19 +1349,20 @@ func (m *TaskManager) requestExecutionCancel(
 }
 
 // liveRun returns the task's currently registered execution handle, if any.
-func (m *TaskManager) liveRun(taskID string) *liveExecution {
+func (m *TaskManager) liveRun(tenant, taskID string) *liveExecution {
 	m.cancelMu.RLock()
 	defer m.cancelMu.RUnlock()
-	return m.executions[taskID]
+	return m.executions[newScopedID(tenant, taskID)]
 }
 
 // deregisterExecution removes the handle at engine end. It only removes its
 // own entry so a follow-up round on the same task is never evicted.
-func (m *TaskManager) deregisterExecution(taskID string, live *liveExecution) {
+func (m *TaskManager) deregisterExecution(tenant, taskID string, live *liveExecution) {
+	key := newScopedID(tenant, taskID)
 	m.cancelMu.Lock()
 	defer m.cancelMu.Unlock()
-	if current, ok := m.executions[taskID]; ok && current == live {
-		delete(m.executions, taskID)
+	if current, ok := m.executions[key]; ok && current == live {
+		delete(m.executions, key)
 		if live.yieldDone != nil {
 			close(live.yieldDone)
 			live.yieldDone = nil
@@ -1254,10 +1373,11 @@ func (m *TaskManager) deregisterExecution(taskID string, live *liveExecution) {
 // beginExecutionYield turns an active slot into a short handoff barrier. The
 // slot remains owned by live until its suspend frame has reached every local
 // observer, but continuations wait for the handoff instead of failing.
-func (m *TaskManager) beginExecutionYield(taskID string, live *liveExecution) bool {
+func (m *TaskManager) beginExecutionYield(tenant, taskID string, live *liveExecution) bool {
+	key := newScopedID(tenant, taskID)
 	m.cancelMu.Lock()
 	defer m.cancelMu.Unlock()
-	if m.executions[taskID] == live && live.yieldDone == nil && !live.cancelRequested.Load() {
+	if m.executions[key] == live && live.yieldDone == nil && !live.cancelRequested.Load() {
 		live.yieldDone = make(chan struct{})
 		return true
 	}
@@ -1266,10 +1386,11 @@ func (m *TaskManager) beginExecutionYield(taskID string, live *liveExecution) bo
 
 // abortExecutionYield restores an active slot when committing the suspended
 // state fails. Waiters wake and re-evaluate it as an ordinary active run.
-func (m *TaskManager) abortExecutionYield(taskID string, live *liveExecution) {
+func (m *TaskManager) abortExecutionYield(tenant, taskID string, live *liveExecution) {
+	key := newScopedID(tenant, taskID)
 	m.cancelMu.Lock()
 	defer m.cancelMu.Unlock()
-	if m.executions[taskID] == live && live.yieldDone != nil {
+	if m.executions[key] == live && live.yieldDone != nil {
 		close(live.yieldDone)
 		live.yieldDone = nil
 	}
@@ -1278,14 +1399,15 @@ func (m *TaskManager) abortExecutionYield(taskID string, live *liveExecution) {
 // cleanSubscribers closes and removes all subscribers for a task. Subscribers
 // are closed outside subMu so a stuck blocking send can never wedge the
 // manager-wide lock.
-func (m *TaskManager) cleanSubscribers(taskID string) {
+func (m *TaskManager) cleanSubscribers(tenant, taskID string) {
+	key := newScopedID(tenant, taskID)
 	m.subMu.Lock()
-	subs, exists := m.subscribers[taskID]
+	subs, exists := m.subscribers[key]
 	if !exists {
 		m.subMu.Unlock()
 		return
 	}
-	delete(m.subscribers, taskID)
+	delete(m.subscribers, key)
 	m.subMu.Unlock()
 
 	for _, sub := range subs {
@@ -1295,18 +1417,19 @@ func (m *TaskManager) cleanSubscribers(taskID string) {
 }
 
 // notifySubscribers notifies all subscribers of a task.
-func (m *TaskManager) notifySubscribers(taskID string, event protocol.StreamResponse) {
+func (m *TaskManager) notifySubscribers(tenant, taskID string, event protocol.StreamResponse) {
 	// Deliver push notifications independently of live SSE subscribers: reaching
 	// clients that are not currently streaming is the whole point of push.
-	m.dispatchPush(taskID, event)
-	m.notifyLiveSubscribers(taskID, event)
+	m.dispatchPush(tenant, taskID, event)
+	m.notifyLiveSubscribers(tenant, taskID, event)
 }
 
 // notifyLiveSubscribers fans out to process-local task subscribers without
 // dispatching push a second time.
-func (m *TaskManager) notifyLiveSubscribers(taskID string, event protocol.StreamResponse) {
+func (m *TaskManager) notifyLiveSubscribers(tenant, taskID string, event protocol.StreamResponse) {
+	key := newScopedID(tenant, taskID)
 	m.subMu.RLock()
-	subs, exists := m.subscribers[taskID]
+	subs, exists := m.subscribers[key]
 	if !exists || len(subs) == 0 {
 		m.subMu.RUnlock()
 		return
@@ -1336,7 +1459,7 @@ func (m *TaskManager) notifyLiveSubscribers(taskID string, event protocol.Stream
 
 	// Clean up failed or closed subscribers.
 	if len(failedSubscribers) > 0 {
-		m.cleanupFailedSubscribers(taskID, failedSubscribers)
+		m.cleanupFailedSubscribers(tenant, taskID, failedSubscribers)
 	}
 }
 
@@ -1344,10 +1467,14 @@ func (m *TaskManager) notifyLiveSubscribers(taskID string, event protocol.Stream
 // and closes them. Removed subscribers are closed outside subMu so a stuck
 // blocking send can never wedge the manager-wide lock; an evicted subscriber
 // must be closed or its consumer's range loop never ends.
-func (m *TaskManager) cleanupFailedSubscribers(taskID string, failedSubscribers []*taskSubscriber) {
+func (m *TaskManager) cleanupFailedSubscribers(
+	tenant, taskID string,
+	failedSubscribers []*taskSubscriber,
+) {
+	key := newScopedID(tenant, taskID)
 	m.subMu.Lock()
 
-	subs, exists := m.subscribers[taskID]
+	subs, exists := m.subscribers[key]
 	if !exists {
 		m.subMu.Unlock()
 		return
@@ -1372,12 +1499,12 @@ func (m *TaskManager) cleanupFailedSubscribers(taskID string, failedSubscribers 
 	}
 
 	if len(removedSubs) > 0 {
-		m.subscribers[taskID] = filteredSubs
+		m.subscribers[key] = filteredSubs
 		log.Debugf("Removed %d failed subscribers for task %s", len(removedSubs), taskID)
 
 		// If there are no subscribers left, delete the entire entry.
 		if len(filteredSubs) == 0 {
-			delete(m.subscribers, taskID)
+			delete(m.subscribers, key)
 		}
 	}
 	m.subMu.Unlock()
@@ -1424,7 +1551,7 @@ func (m *TaskManager) Close() error {
 		for _, subscribers := range m.subscribers {
 			subsToClose = append(subsToClose, subscribers...)
 		}
-		m.subscribers = make(map[string][]*taskSubscriber)
+		m.subscribers = make(map[scopedID][]*taskSubscriber)
 		m.subMu.Unlock()
 		for _, sub := range subsToClose {
 			sub.Close()

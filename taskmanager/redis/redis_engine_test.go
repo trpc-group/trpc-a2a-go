@@ -172,13 +172,13 @@ func TestNotifySubscribers_EvictedSlowSubscriberChannelIsClosed(t *testing.T) {
 	// Register a non-blocking subscriber with a tiny buffer directly.
 	sub := newTaskSubscriber(taskID, 1, false)
 	m.subMu.Lock()
-	m.subscribers[taskID] = []*taskSubscriber{sub}
+	m.subscribers[newScopedID("", taskID)] = []*taskSubscriber{sub}
 	m.subMu.Unlock()
 
 	event := protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{TaskID: taskID})
 	// First fills the buffer, second overflows and evicts the subscriber.
-	m.notifySubscribers(taskID, event)
-	m.notifySubscribers(taskID, event)
+	m.notifySubscribers("", taskID, event)
+	m.notifySubscribers("", taskID, event)
 
 	// The evicted subscriber's channel must be closed: draining it must end.
 	done := make(chan struct{})
@@ -198,7 +198,7 @@ func TestNotifySubscribers_EvictedSlowSubscriberChannelIsClosed(t *testing.T) {
 
 	// It must also be gone from the map.
 	m.subMu.RLock()
-	_, exists := m.subscribers[taskID]
+	_, exists := m.subscribers[newScopedID("", taskID)]
 	m.subMu.RUnlock()
 	if exists {
 		t.Error("evicted subscriber must be removed from the map")
