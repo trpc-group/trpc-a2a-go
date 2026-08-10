@@ -122,6 +122,7 @@ func (httpJSONBinding) decodeSSEData(data []byte) ([]byte, error) {
 	return data, nil
 }
 
+//nolint:gocyclo // Keeping the protocol operation-to-route mapping in one switch makes completeness auditable.
 func buildHTTPJSONRequest(operation string, params any) (httpJSONRequest, error) {
 	switch operation {
 	case protocol.MethodMessageSend, protocol.MethodMessageStream:

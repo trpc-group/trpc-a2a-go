@@ -9,6 +9,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"mime"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
 func TestParseHTTPJSONRoute(t *testing.T) {
@@ -170,4 +172,162 @@ func TestHTTPJSONStreamUsesRawSSEData(t *testing.T) {
 	assert.Contains(t, recorder.Body.String(), "data: {\"message\":")
 	assert.NotContains(t, recorder.Body.String(), "jsonrpc")
 	assert.NotContains(t, recorder.Body.String(), "\"result\"")
+}
+
+func TestHTTPJSONTaskPushAndExtendedCardRoutes(t *testing.T) {
+	manager := newMockTaskManager()
+	manager.pushSupported = true
+	manager.tasks["task-1"] = &protocol.Task{
+		ID:        "task-1",
+		ContextID: "context-1",
+		Status:    protocol.TaskStatus{State: protocol.TaskStateWorking},
+	}
+	manager.pushNotificationGetResponse = &protocol.TaskPushNotificationConfig{
+		ID:     "config-1",
+		TaskID: "task-1",
+		URL:    "https://example.com/webhook",
+	}
+	extended := true
+	card := defaultAgentCard()
+	card.Capabilities.ExtendedAgentCard = &extended
+	srv, err := NewA2AServer(manager, WithAgentCard(card), WithHTTPJSONEndpoint("/"))
+	require.NoError(t, err)
+
+	request := func(method, target string, body any) *httptest.ResponseRecorder {
+		t.Helper()
+		var encoded []byte
+		if body != nil {
+			encoded, err = json.Marshal(body)
+			require.NoError(t, err)
+		}
+		req := httptest.NewRequest(method, target, bytes.NewReader(encoded))
+		if body != nil {
+			req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
+		}
+		recorder := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	recorder := request(
+		http.MethodGet,
+		"/tasks?contextId=context-1&status=TASK_STATE_WORKING&pageSize=5&historyLength=2&includeArtifacts=true",
+		nil,
+	)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "\"tasks\"")
+
+	recorder = request(http.MethodGet, "/tasks?pageSize=invalid", nil)
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	recorder = request(http.MethodGet, "/tasks?includeArtifacts=invalid", nil)
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+
+	recorder = request(http.MethodPost, "/tasks/task-1:cancel", protocol.TaskIDParams{ID: "task-1"})
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "TASK_STATE_CANCELED")
+	recorder = request(http.MethodPost, "/tasks/task-1:cancel", protocol.TaskIDParams{ID: "other-task"})
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+
+	recorder = request(http.MethodPost, "/tasks/task-1:subscribe", nil)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, protocol.MediaTypeEventStream, recorder.Header().Get("Content-Type"))
+	assert.Contains(t, recorder.Body.String(), "data:")
+
+	config := protocol.TaskPushNotificationConfig{
+		ID:     "config-1",
+		TaskID: "task-1",
+		URL:    "https://example.com/webhook",
+	}
+	recorder = request(http.MethodPost, "/tasks/task-1/pushNotificationConfigs", config)
+	assert.Equal(t, http.StatusCreated, recorder.Code)
+	recorder = request(http.MethodGet, "/tasks/task-1/pushNotificationConfigs/config-1", nil)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	recorder = request(http.MethodGet, "/tasks/task-1/pushNotificationConfigs?pageSize=5&pageToken=next", nil)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	recorder = request(http.MethodDelete, "/tasks/task-1/pushNotificationConfigs/config-1", nil)
+	assert.Equal(t, http.StatusNoContent, recorder.Code)
+
+	recorder = request(http.MethodGet, "/extendedAgentCard", nil)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "Test Agent")
+
+	recorder = request(http.MethodPut, "/tasks", nil)
+	assert.Equal(t, http.StatusMethodNotAllowed, recorder.Code)
+	assert.Equal(t, http.MethodGet, recorder.Header().Get("Allow"))
+	recorder = request(http.MethodGet, "/unknown", nil)
+	assert.Equal(t, http.StatusNotFound, recorder.Code)
+}
+
+func TestHTTPJSONValidationAndCapabilityErrors(t *testing.T) {
+	manager := newMockTaskManager()
+	srv, err := NewA2AServer(manager, WithAgentCard(defaultAgentCard()), WithHTTPJSONEndpoint("/"))
+	require.NoError(t, err)
+
+	request := func(method, target, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, bytes.NewBufferString(body))
+		if body != "" {
+			req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
+		}
+		recorder := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	recorder := request(http.MethodPost, "/message:send", "")
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	recorder = request(http.MethodPost, "/message:send", `{}`)
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	recorder = request(http.MethodPost, "/message:send", `{"message":{"role":"ROLE_AGENT","parts":[{"text":"bad"}]}}`)
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	recorder = request(http.MethodPost, "/tasks/task-1:cancel", `{invalid`)
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	recorder = request(http.MethodPost, "/tenant-a/tasks/task-1:cancel", `{"tenant":"tenant-b"}`)
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+
+	recorder = request(
+		http.MethodPost,
+		"/tasks/task-1/pushNotificationConfigs",
+		`{"taskId":"task-1","url":"not-a-url"}`,
+	)
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	recorder = request(http.MethodGet, "/tasks/task-1/pushNotificationConfigs/config-1", "")
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "PUSH_NOTIFICATION_NOT_SUPPORTED")
+
+	recorder = request(http.MethodGet, "/extendedAgentCard", "")
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "EXTENDED_AGENT_CARD_NOT_CONFIGURED")
+}
+
+func TestHTTPJSONErrorMapping(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		statusCode int
+		status     string
+		reason     string
+	}{
+		{name: "plain error", err: errors.New("boom"), statusCode: http.StatusInternalServerError, status: "INTERNAL"},
+		{name: "invalid params", err: taskmanager.ErrInvalidParams("bad"), statusCode: http.StatusBadRequest, status: "INVALID_ARGUMENT"},
+		{name: "task not found", err: taskmanager.ErrTaskNotFound("task"), statusCode: http.StatusNotFound, status: "NOT_FOUND", reason: "TASK_NOT_FOUND"},
+		{name: "not cancelable", err: taskmanager.ErrTaskNotCancelable("task", protocol.TaskStateCompleted), statusCode: http.StatusBadRequest, status: "FAILED_PRECONDITION", reason: "TASK_NOT_CANCELABLE"},
+		{name: "push unsupported", err: taskmanager.ErrPushNotificationNotSupported(), statusCode: http.StatusBadRequest, status: "FAILED_PRECONDITION", reason: "PUSH_NOTIFICATION_NOT_SUPPORTED"},
+		{name: "unsupported", err: taskmanager.ErrUnsupportedOperation("operation"), statusCode: http.StatusBadRequest, status: "FAILED_PRECONDITION", reason: "UNSUPPORTED_OPERATION"},
+		{name: "content type", err: taskmanager.ErrContentTypeNotSupported("type"), statusCode: http.StatusBadRequest, status: "INVALID_ARGUMENT", reason: "CONTENT_TYPE_NOT_SUPPORTED"},
+		{name: "invalid agent response", err: taskmanager.ErrInvalidAgentResponse("bad"), statusCode: http.StatusInternalServerError, status: "INTERNAL", reason: "INVALID_AGENT_RESPONSE"},
+		{name: "extended card", err: taskmanager.ErrAuthenticatedExtendedCardNotConfigured(), statusCode: http.StatusBadRequest, status: "FAILED_PRECONDITION", reason: "EXTENDED_AGENT_CARD_NOT_CONFIGURED"},
+		{name: "extension", err: taskmanager.ErrExtensionSupportRequired("extension"), statusCode: http.StatusBadRequest, status: "FAILED_PRECONDITION", reason: "EXTENSION_SUPPORT_REQUIRED"},
+		{name: "version", err: taskmanager.ErrVersionNotSupported("2.0"), statusCode: http.StatusBadRequest, status: "FAILED_PRECONDITION", reason: "VERSION_NOT_SUPPORTED"},
+		{name: "internal", err: taskmanager.ErrInternalError("boom"), statusCode: http.StatusInternalServerError, status: "INTERNAL"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			statusCode, status, reason, message := httpJSONErrorMapping(tt.err)
+			assert.Equal(t, tt.statusCode, statusCode)
+			assert.Equal(t, tt.status, status)
+			assert.Equal(t, tt.reason, reason)
+			assert.NotEmpty(t, message)
+		})
+	}
 }

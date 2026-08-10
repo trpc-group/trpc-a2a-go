@@ -14,7 +14,41 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
+
+func TestFromTaskManagerError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		code     int
+		sentinel error
+	}{
+		{name: "plain error", err: errors.New("failed"), code: CodeInternalError, sentinel: ErrInternalErrorSentinel},
+		{name: "invalid params", err: taskmanager.ErrInvalidParams("invalid"), code: CodeInvalidParams, sentinel: taskmanager.ErrInvalidParamsSentinel},
+		{name: "task not found", err: taskmanager.ErrTaskNotFound("task-1"), code: CodeTaskNotFound, sentinel: taskmanager.ErrTaskNotFoundSentinel},
+		{name: "task not cancelable", err: taskmanager.ErrTaskNotCancelable("task-1", protocol.TaskStateCompleted), code: CodeTaskNotCancelable, sentinel: taskmanager.ErrTaskNotCancelableSentinel},
+		{name: "push unsupported", err: taskmanager.ErrPushNotificationNotSupported(), code: CodePushNotificationNotSupported, sentinel: taskmanager.ErrPushNotificationNotSupportedSentinel},
+		{name: "unsupported operation", err: taskmanager.ErrUnsupportedOperation("operation"), code: CodeUnsupportedOperation, sentinel: taskmanager.ErrUnsupportedOperationSentinel},
+		{name: "content type", err: taskmanager.ErrContentTypeNotSupported("text/plain"), code: CodeContentTypeNotSupported, sentinel: taskmanager.ErrContentTypeNotSupportedSentinel},
+		{name: "invalid response", err: taskmanager.ErrInvalidAgentResponse("invalid"), code: CodeInvalidAgentResponse, sentinel: taskmanager.ErrInvalidAgentResponseSentinel},
+		{name: "extended card", err: taskmanager.ErrAuthenticatedExtendedCardNotConfigured(), code: CodeAuthenticatedExtendedCardNotConfigured, sentinel: taskmanager.ErrAuthenticatedExtendedCardNotConfiguredSentinel},
+		{name: "extension", err: taskmanager.ErrExtensionSupportRequired("extension"), code: CodeExtensionSupportRequired, sentinel: taskmanager.ErrExtensionSupportRequiredSentinel},
+		{name: "version", err: taskmanager.ErrVersionNotSupported("2.0"), code: CodeVersionNotSupported, sentinel: taskmanager.ErrVersionNotSupportedSentinel},
+		{name: "task manager internal", err: taskmanager.ErrInternalError("failed"), code: CodeInternalError, sentinel: taskmanager.ErrInternalErrorSentinel},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rpcErr := FromTaskManagerError(tt.err)
+			require.NotNil(t, rpcErr)
+			assert.Equal(t, tt.code, rpcErr.Code)
+			assert.ErrorIs(t, rpcErr, tt.sentinel)
+		})
+	}
+}
 
 func TestJSONRPCRequest_MarshalUnmarshal(t *testing.T) {
 	tests := []struct {

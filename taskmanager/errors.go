@@ -18,6 +18,7 @@ import (
 // adapters map these codes to JSON-RPC codes, HTTP statuses, or gRPC statuses.
 type ErrorCode string
 
+// ErrCodeInvalidParams and the remaining values identify binding-neutral A2A operation errors.
 const (
 	ErrCodeInvalidParams                          ErrorCode = "INVALID_PARAMS"
 	ErrCodeInternalError                          ErrorCode = "INTERNAL_ERROR"

@@ -9,9 +9,12 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -211,14 +214,317 @@ func TestBuildHTTPJSONRequestRoutes(t *testing.T) {
 	}
 }
 
-func TestDecodeHTTPJSONError(t *testing.T) {
-	body := []byte(`{"error":{"code":404,"status":"NOT_FOUND","message":"missing","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"TASK_NOT_FOUND","domain":"a2a-protocol.org","metadata":{"taskId":"task-1"}}]}}`)
-	err := decodeHTTPJSONError(http.StatusNotFound, body)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, taskmanager.ErrTaskNotFoundSentinel)
+func TestBuildHTTPJSONRequestErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation string
+		params    any
+	}{
+		{name: "send type", operation: protocol.MethodMessageSend, params: struct{}{}},
+		{name: "get type", operation: protocol.MethodTasksGet, params: struct{}{}},
+		{name: "get metadata", operation: protocol.MethodTasksGet, params: protocol.TaskQueryParams{Metadata: map[string]any{"key": "value"}}},
+		{name: "list type", operation: protocol.MethodTasksList, params: struct{}{}},
+		{name: "list metadata", operation: protocol.MethodTasksList, params: protocol.ListTasksParams{Metadata: map[string]any{"key": "value"}}},
+		{name: "cancel type", operation: protocol.MethodTasksCancel, params: struct{}{}},
+		{name: "subscribe type", operation: protocol.MethodTasksResubscribe, params: struct{}{}},
+		{name: "subscribe metadata", operation: protocol.MethodTasksResubscribe, params: protocol.TaskIDParams{Metadata: map[string]any{"key": "value"}}},
+		{name: "create push type", operation: protocol.MethodTasksPushNotificationConfigSet, params: struct{}{}},
+		{name: "get push type", operation: protocol.MethodTasksPushNotificationConfigGet, params: struct{}{}},
+		{name: "list push type", operation: protocol.MethodTasksPushNotificationConfigList, params: struct{}{}},
+		{name: "delete push type", operation: protocol.MethodTasksPushNotificationConfigDelete, params: struct{}{}},
+		{name: "unsupported", operation: "unsupported", params: struct{}{}},
+	}
 
-	body = []byte(`{"error":{"code":400,"status":"FAILED_PRECONDITION","message":"not cancelable","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"TASK_NOT_CANCELABLE","domain":"a2a-protocol.org","metadata":{"taskId":"task-1"}}]}}`)
-	err = decodeHTTPJSONError(http.StatusBadRequest, body)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := buildHTTPJSONRequest(tt.operation, tt.params)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestHTTPJSONBindingRequestValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		handle      func(context.Context, *http.Client, *http.Request) (*http.Response, error)
+		result      any
+		expectError string
+	}{
+		{
+			name: "handler error",
+			handle: func(context.Context, *http.Client, *http.Request) (*http.Response, error) {
+				return nil, errors.New("request failed")
+			},
+			expectError: "HTTP+JSON request failed",
+		},
+		{
+			name: "nil response",
+			handle: func(context.Context, *http.Client, *http.Request) (*http.Response, error) {
+				return nil, nil
+			},
+			expectError: "unexpected nil response",
+		},
+		{
+			name: "nil body",
+			handle: func(context.Context, *http.Client, *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK}, nil
+			},
+			expectError: "unexpected nil response",
+		},
+		{
+			name: "error response",
+			handle: func(context.Context, *http.Client, *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"bad request"}}`)),
+				}, nil
+			},
+			expectError: "Invalid params",
+		},
+		{
+			name: "no content",
+			handle: func(context.Context, *http.Client, *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody}, nil
+			},
+		},
+		{
+			name: "nil result",
+			handle: func(context.Context, *http.Client, *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+			},
+			result: nil,
+		},
+		{
+			name: "invalid content type",
+			handle: func(context.Context, *http.Client, *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/plain"}},
+					Body:       io.NopCloser(strings.NewReader(`{}`)),
+				}, nil
+			},
+			result:      &map[string]any{},
+			expectError: "unexpected HTTP+JSON response Content-Type",
+		},
+		{
+			name: "invalid JSON",
+			handle: func(context.Context, *http.Client, *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{protocol.MediaTypeJSON}},
+					Body:       io.NopCloser(strings.NewReader(`{`)),
+				}, nil
+			},
+			result:      &map[string]any{},
+			expectError: "failed to decode HTTP+JSON response",
+		},
+		{
+			name: "success",
+			handle: func(context.Context, *http.Client, *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{protocol.MediaTypeA2AJSON + "; charset=utf-8"}},
+					Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+				}, nil
+			},
+			result: &map[string]any{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, err := NewA2AClient(
+				"https://example.com/a2a",
+				WithProtocolBinding(protocol.ProtocolBindingHTTPJSON),
+				WithHTTPReqHandler(&mockHTTPReqHandler{handleFunc: tt.handle}),
+			)
+			require.NoError(t, err)
+			result := tt.result
+			if result == nil && tt.name != "nil result" {
+				result = &map[string]any{}
+			}
+			err = httpJSONBinding{}.request(
+				context.Background(), client, "request-id", protocol.MethodMessageSend,
+				protocol.SendMessageParams{}, result,
+			)
+			if tt.expectError == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+		})
+	}
+}
+
+func TestHTTPJSONBindingStreamValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		handle      func(context.Context, *http.Client, *http.Request) (*http.Response, error)
+		expectError string
+	}{
+		{
+			name: "handler error",
+			handle: func(context.Context, *http.Client, *http.Request) (*http.Response, error) {
+				return nil, errors.New("stream failed")
+			},
+			expectError: "HTTP+JSON stream request failed",
+		},
+		{
+			name: "nil response",
+			handle: func(context.Context, *http.Client, *http.Request) (*http.Response, error) {
+				return nil, nil
+			},
+			expectError: "unexpected nil response",
+		},
+		{
+			name: "nil body",
+			handle: func(context.Context, *http.Client, *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK}, nil
+			},
+			expectError: "unexpected nil response",
+		},
+		{
+			name: "error response",
+			handle: func(context.Context, *http.Client, *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusInternalServerError,
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"failed"}}`)),
+				}, nil
+			},
+			expectError: "Internal error",
+		},
+		{
+			name: "invalid content type",
+			handle: func(context.Context, *http.Client, *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{protocol.MediaTypeJSON}},
+					Body:       http.NoBody,
+				}, nil
+			},
+			expectError: "server did not respond with Content-Type",
+		},
+		{
+			name: "success",
+			handle: func(context.Context, *http.Client, *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{protocol.MediaTypeEventStream + "; charset=utf-8"}},
+					Body:       http.NoBody,
+				}, nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, err := NewA2AClient(
+				"https://example.com/a2a",
+				WithProtocolBinding(protocol.ProtocolBindingHTTPJSON),
+				WithHTTPReqHandler(&mockHTTPReqHandler{handleFunc: tt.handle}),
+			)
+			require.NoError(t, err)
+			resp, err := httpJSONBinding{}.stream(
+				context.Background(), client, "request-id", protocol.MethodMessageStream,
+				protocol.SendMessageParams{},
+			)
+			if tt.expectError == "" {
+				require.NoError(t, err)
+				require.NotNil(t, resp)
+				require.NoError(t, resp.Body.Close())
+				return
+			}
+			require.Error(t, err)
+			assert.Nil(t, resp)
+			assert.Contains(t, err.Error(), tt.expectError)
+		})
+	}
+
+	_, err := httpJSONBinding{}.decodeSSEData([]byte(" \n\t"))
 	require.Error(t, err)
-	assert.ErrorIs(t, err, taskmanager.ErrTaskNotCancelableSentinel)
+	data, err := httpJSONBinding{}.decodeSSEData([]byte(`{"message":{}}`))
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"message":{}}`, string(data))
+}
+
+func TestHTTPJSONRequestConstructionErrors(t *testing.T) {
+	client, err := NewA2AClient("https://example.com/base", WithProtocolBinding(protocol.ProtocolBindingHTTPJSON))
+	require.NoError(t, err)
+
+	_, err = client.newHTTPJSONRequest(context.Background(), httpJSONRequest{
+		method: http.MethodPost,
+		path:   "/message:send",
+		body:   func() {},
+	}, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to marshal HTTP+JSON request")
+
+	assert.NoError(t, validateHTTPJSONResponseType(protocol.MediaTypeJSON+"; charset=utf-8"))
+	assert.NoError(t, validateHTTPJSONResponseType(protocol.MediaTypeA2AJSON))
+	require.Error(t, validateHTTPJSONResponseType("not a media type"))
+}
+
+func TestJSONRPCBindingDecodeSSEData(t *testing.T) {
+	binding := jsonRPCBinding{}
+
+	_, err := binding.decodeSSEData([]byte(`{`))
+	require.Error(t, err)
+
+	raw := []byte(`{"message":{"role":"agent","parts":[]}}`)
+	decoded, err := binding.decodeSSEData(raw)
+	require.NoError(t, err)
+	assert.Equal(t, raw, decoded)
+
+	_, err = binding.decodeSSEData([]byte(`{"jsonrpc":"1.0","result":{}}`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid JSON-RPC SSE response version")
+
+	_, err = binding.decodeSSEData([]byte(`{"jsonrpc":"2.0","error":{"code":-32603,"message":"failed"}}`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "jsonrpc error -32603")
+
+	_, err = binding.decodeSSEData([]byte(`{"jsonrpc":"2.0"}`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing result")
+
+	decoded, err = binding.decodeSSEData([]byte(`{"jsonrpc":"2.0","result":{"task":{"id":"task-1"}}}`))
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"task":{"id":"task-1"}}`, string(decoded))
+}
+
+func TestDecodeHTTPJSONError(t *testing.T) {
+	errorBody := func(code taskmanager.ErrorCode) string {
+		return fmt.Sprintf(`{"error":{"message":"failed","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":%q,"metadata":{"taskId":"task-1"}}]}}`, code)
+	}
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+		sentinel   error
+	}{
+		{name: "malformed", statusCode: http.StatusBadRequest, body: `{`, sentinel: nil},
+		{name: "missing message", statusCode: http.StatusBadRequest, body: `{}`, sentinel: nil},
+		{name: "invalid params", statusCode: http.StatusBadRequest, body: `{"error":{"message":"invalid"}}`, sentinel: taskmanager.ErrInvalidParamsSentinel},
+		{name: "internal", statusCode: http.StatusInternalServerError, body: `{"error":{"message":"failed"}}`, sentinel: taskmanager.ErrInternalErrorSentinel},
+		{name: "task not found", statusCode: http.StatusNotFound, body: errorBody(taskmanager.ErrCodeTaskNotFound), sentinel: taskmanager.ErrTaskNotFoundSentinel},
+		{name: "task not cancelable", statusCode: http.StatusBadRequest, body: errorBody(taskmanager.ErrCodeTaskNotCancelable), sentinel: taskmanager.ErrTaskNotCancelableSentinel},
+		{name: "push unsupported", statusCode: http.StatusBadRequest, body: errorBody(taskmanager.ErrCodePushNotificationNotSupported), sentinel: taskmanager.ErrPushNotificationNotSupportedSentinel},
+		{name: "operation unsupported", statusCode: http.StatusBadRequest, body: errorBody(taskmanager.ErrCodeUnsupportedOperation), sentinel: taskmanager.ErrUnsupportedOperationSentinel},
+		{name: "content type", statusCode: http.StatusBadRequest, body: errorBody(taskmanager.ErrCodeContentTypeNotSupported), sentinel: taskmanager.ErrContentTypeNotSupportedSentinel},
+		{name: "invalid response", statusCode: http.StatusBadRequest, body: errorBody(taskmanager.ErrCodeInvalidAgentResponse), sentinel: taskmanager.ErrInvalidAgentResponseSentinel},
+		{name: "extended card", statusCode: http.StatusBadRequest, body: errorBody(taskmanager.ErrCodeAuthenticatedExtendedCardNotConfigured), sentinel: taskmanager.ErrAuthenticatedExtendedCardNotConfiguredSentinel},
+		{name: "extension", statusCode: http.StatusBadRequest, body: errorBody(taskmanager.ErrCodeExtensionSupportRequired), sentinel: taskmanager.ErrExtensionSupportRequiredSentinel},
+		{name: "version", statusCode: http.StatusBadRequest, body: errorBody(taskmanager.ErrCodeVersionNotSupported), sentinel: taskmanager.ErrVersionNotSupportedSentinel},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := decodeHTTPJSONError(tt.statusCode, []byte(tt.body))
+			require.Error(t, err)
+			if tt.sentinel != nil {
+				assert.ErrorIs(t, err, tt.sentinel)
+			}
+		})
+	}
 }
