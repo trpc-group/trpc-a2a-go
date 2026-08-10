@@ -220,12 +220,8 @@ func (s *A2AServer) handleHTTPJSON(w http.ResponseWriter, r *http.Request) {
 		s.writeHTTPJSONStatus(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "HTTP method not allowed")
 		return
 	}
-	requestedVersion := r.Header.Get("A2A-Version")
-	if requestedVersion == "" {
-		requestedVersion = r.URL.Query().Get("A2A-Version")
-	}
-	if requestedVersion != "" && requestedVersion != protocol.ProtocolVersionV1 {
-		s.writeHTTPJSONError(w, taskmanager.ErrVersionNotSupported(requestedVersion), route.taskID)
+	if versionErr := validateA2AVersion(r); versionErr != nil {
+		s.writeHTTPJSONError(w, versionErr, route.taskID)
 		return
 	}
 	if err := validateHTTPJSONContentType(r); err != nil {
@@ -660,10 +656,10 @@ func (s *A2AServer) resolveExtendedAgentCard(ctx context.Context, tenant string)
 		return AgentCard{}, taskmanager.ErrInvalidParams("unknown tenant")
 	}
 	if !baseCard.ExtendedAgentCardEnabled() {
-		return AgentCard{}, taskmanager.ErrAuthenticatedExtendedCardNotConfigured()
+		return AgentCard{}, taskmanager.ErrUnsupportedOperation(protocol.MethodAgentAuthenticatedExtendedCard)
 	}
 	if s.authenticatedCardHandler == nil {
-		return s.finalizePushCapability(baseCard), nil
+		return AgentCard{}, taskmanager.ErrAuthenticatedExtendedCardNotConfigured()
 	}
 	card, err := s.authenticatedCardHandler(ctx, baseCard)
 	if err != nil {

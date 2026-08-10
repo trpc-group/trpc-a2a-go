@@ -17,6 +17,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -433,10 +434,10 @@ func (s *A2AServer) withMiddleware(h http.Handler) http.Handler {
 }
 
 // dispatchByProtocol returns a handler that routes a JSON-RPC POST to the
-// legacy handler when its "method" is a legacy (slash-delimited) name and to
-// the v1 handler otherwise. The v1.0 PascalCase method names never contain a
-// slash, so the two sets are disjoint. Non-POST requests and unreadable
-// bodies fall through to the v1 handler.
+// legacy handler when its "method" is a legacy (slash-delimited) name and no
+// protocol version was supplied. An explicit version must be validated by the
+// v1 handler and cannot bypass negotiation merely by using a legacy method.
+// Non-POST requests and unreadable bodies fall through to the v1 handler.
 func (s *A2AServer) dispatchByProtocol(v1Handler, legacyHandler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.Body == nil {
@@ -457,7 +458,8 @@ func (s *A2AServer) dispatchByProtocol(v1Handler, legacyHandler http.Handler) ht
 		var probe struct {
 			Method string `json:"method"`
 		}
-		if json.Unmarshal(body, &probe) == nil && strings.Contains(probe.Method, "/") {
+		if json.Unmarshal(body, &probe) == nil &&
+			strings.Contains(probe.Method, "/") && requestedA2AVersion(r) == "" {
 			legacyHandler.ServeHTTP(w, r)
 			return
 		}
@@ -595,7 +597,63 @@ func (s *A2AServer) validateJSONRPCRequest(w http.ResponseWriter, r *http.Reques
 		return false
 	}
 
+	// Spec §9.2 routes the A2A service parameters through HTTP headers on this
+	// binding too, so an unsupported version must be rejected here.
+	if versionErr := validateA2AVersion(r); versionErr != nil {
+		s.writeJSONRPCError(w, nil, jsonrpc.FromTaskManagerError(versionErr))
+		return false
+	}
+
 	return true
+}
+
+// validateA2AVersion rejects a request that asks for a protocol version this
+// build does not speak. Per spec §3.6.1 the version may travel as the
+// A2A-Version header or as a request parameter. Per §3.6.2 an absent value is
+// interpreted as 0.3, and patch versions do not participate in negotiation.
+func validateA2AVersion(r *http.Request) *taskmanager.Error {
+	requested := requestedA2AVersion(r)
+	if requested == "" {
+		requested = "0.3"
+	}
+	parts := strings.Split(requested, ".")
+	if len(parts) != 2 && len(parts) != 3 {
+		return taskmanager.ErrVersionNotSupported(requested)
+	}
+	values := make([]uint64, len(parts))
+	for i, part := range parts {
+		if part == "" {
+			return taskmanager.ErrVersionNotSupported(requested)
+		}
+		value, err := strconv.ParseUint(part, 10, 32)
+		if err != nil {
+			return taskmanager.ErrVersionNotSupported(requested)
+		}
+		values[i] = value
+	}
+	supported := strings.Split(protocol.ProtocolVersionV1, ".")
+	if len(supported) != 2 ||
+		strconv.FormatUint(values[0], 10) != supported[0] ||
+		strconv.FormatUint(values[1], 10) != supported[1] {
+		return taskmanager.ErrVersionNotSupported(requested)
+	}
+	return nil
+}
+
+func requestedA2AVersion(r *http.Request) string {
+	requested := r.Header.Get("A2A-Version")
+	if requested == "" {
+		requested = r.URL.Query().Get("A2A-Version")
+		if requested == "" {
+			for name, values := range r.URL.Query() {
+				if strings.EqualFold(name, "A2A-Version") && len(values) > 0 {
+					requested = values[0]
+					break
+				}
+			}
+		}
+	}
+	return requested
 }
 
 // parseJSONRPCRequest reads the request body and parses it into a JSON-RPC request.

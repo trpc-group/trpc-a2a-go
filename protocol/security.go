@@ -7,6 +7,7 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 )
@@ -216,53 +217,126 @@ func (s *SecurityScheme) UnmarshalJSON(data []byte) error {
 // SecurityRequirements is a list of alternative security requirement sets. Each
 // entry maps a security-scheme name to the required scopes.
 //
-// The JSON wire form follows v1.0: each entry is wrapped as
-// {"schemes": {"name": ["scope"]}}. UnmarshalJSON also accepts the v0 flat form
-// ({"name": ["scope"]}). The deprecated v0 "security" key is mirrored separately
-// on AgentCard (see AgentCard.Security and NormalizeSecurity).
+// The JSON wire form is the ProtoJSON encoding of
+// SecurityRequirement.schemes (map<string, StringList>): each entry is
+// {"schemes": {"name": {"list": ["scope"]}}}. UnmarshalJSON also accepts the
+// scopes as a bare array — the shape earlier v2 prereleases emitted — and the
+// v0 flat form ({"name": ["scope"]}). The deprecated v0 "security" key is
+// mirrored separately on AgentCard (see AgentCard.Security and
+// NormalizeSecurity).
 type SecurityRequirements []map[string][]string
 
-type securityRequirementWire struct {
-	Schemes map[string][]string `json:"schemes"`
+// stringListWire is the ProtoJSON form of the StringList message that wraps a
+// requirement's scopes. It also decodes a bare array so cards written by
+// earlier v2 prereleases still parse.
+type stringListWire struct {
+	List []string `json:"list"`
 }
 
-// MarshalJSON emits the v1.0 wrapped form: [{"schemes": {...}}, ...].
+func (l stringListWire) MarshalJSON() ([]byte, error) {
+	list := l.List
+	if list == nil {
+		list = []string{}
+	}
+	return json.Marshal(struct {
+		List []string `json:"list"`
+	}{List: list})
+}
+
+func (l *stringListWire) UnmarshalJSON(data []byte) error {
+	var wrapped map[string]json.RawMessage
+	if err := json.Unmarshal(data, &wrapped); err == nil && wrapped != nil {
+		if len(wrapped) == 0 {
+			l.List = nil
+			return nil
+		}
+		list, ok := wrapped["list"]
+		if !ok {
+			// StringList.list is not required. After discarding unknown fields,
+			// an object without it is equivalent to an empty StringList.
+			l.List = nil
+			return nil
+		}
+		if err := json.Unmarshal(list, &l.List); err != nil {
+			return fmt.Errorf("invalid security requirement scopes: %w", err)
+		}
+		return nil
+	}
+	var bare []string
+	if err := json.Unmarshal(data, &bare); err != nil {
+		return fmt.Errorf("invalid security requirement scopes: %w", err)
+	}
+	l.List = bare
+	return nil
+}
+
+type securityRequirementWire struct {
+	Schemes map[string]stringListWire `json:"schemes"`
+}
+
+// MarshalJSON emits the v1.0 wrapped form: [{"schemes": {"name": {"list": [...]}}}, ...].
 func (r SecurityRequirements) MarshalJSON() ([]byte, error) {
 	out := make([]securityRequirementWire, 0, len(r))
 	for _, req := range r {
-		out = append(out, securityRequirementWire{Schemes: req})
+		schemes := make(map[string]stringListWire, len(req))
+		for name, scopes := range req {
+			schemes[name] = stringListWire{List: scopes}
+		}
+		out = append(out, securityRequirementWire{Schemes: schemes})
 	}
 	return json.Marshal(out)
 }
 
-// UnmarshalJSON accepts both the v1.0 wrapped form and the v0 flat form.
+// UnmarshalJSON accepts the v1.0 wrapped form, the wrapped form with bare
+// arrays emitted by earlier v2 prereleases, and the v0 flat form. Each entry
+// is decoded independently so a mixed compatibility document cannot silently
+// lose one of its security alternatives.
 func (r *SecurityRequirements) UnmarshalJSON(data []byte) error {
-	var wrapped []securityRequirementWire
-	if err := json.Unmarshal(data, &wrapped); err == nil && hasSchemesKey(wrapped) {
-		result := make(SecurityRequirements, 0, len(wrapped))
-		for _, w := range wrapped {
-			result = append(result, w.Schemes)
-		}
-		*r = result
-		return nil
-	}
-	// Fall back to the v0 flat form.
-	var flat []map[string][]string
-	if err := json.Unmarshal(data, &flat); err != nil {
+	var entries []json.RawMessage
+	if err := json.Unmarshal(data, &entries); err != nil {
 		return fmt.Errorf("invalid security requirements: %w", err)
 	}
-	*r = flat
-	return nil
-}
-
-// hasSchemesKey reports whether at least one entry decoded a non-nil schemes
-// map, distinguishing the wrapped form from the flat form (whose objects have
-// no "schemes" key and therefore decode to a nil map).
-func hasSchemesKey(wrapped []securityRequirementWire) bool {
-	for _, w := range wrapped {
-		if w.Schemes != nil {
-			return true
+	result := make(SecurityRequirements, 0, len(entries))
+	for i, entry := range entries {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(entry, &object); err != nil || object == nil {
+			return fmt.Errorf("invalid security requirement at index %d", i)
 		}
+		if schemesJSON, ok := object["schemes"]; ok {
+			trimmed := bytes.TrimSpace(schemesJSON)
+			var wrappedObject map[string]json.RawMessage
+			if string(trimmed) == "null" {
+				result = append(result, map[string][]string{})
+				continue
+			}
+			if err := json.Unmarshal(schemesJSON, &wrappedObject); err == nil && wrappedObject != nil {
+				var wire map[string]stringListWire
+				if err := json.Unmarshal(schemesJSON, &wire); err != nil {
+					return fmt.Errorf("invalid security requirement at index %d: %w", i, err)
+				}
+				schemes := make(map[string][]string, len(wire))
+				for name, scopes := range wire {
+					schemes[name] = scopes.List
+				}
+				result = append(result, schemes)
+				continue
+			}
+			if len(trimmed) == 0 || trimmed[0] != '[' {
+				return fmt.Errorf("invalid security requirement at index %d", i)
+			}
+		}
+		flat := make(map[string][]string)
+		for name, scopesJSON := range object {
+			var scopes []string
+			if err := json.Unmarshal(scopesJSON, &scopes); err != nil {
+				// Unknown v1 fields are discarded. Array-valued properties remain
+				// accepted as the legacy flat security-requirement form.
+				continue
+			}
+			flat[name] = scopes
+		}
+		result = append(result, flat)
 	}
-	return len(wrapped) == 0
+	*r = result
+	return nil
 }

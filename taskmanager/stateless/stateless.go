@@ -184,10 +184,10 @@ func (*TaskManager) OnCancelTask(
 
 // OnListTasks returns an empty page because the manager retains no Tasks.
 func (*TaskManager) OnListTasks(
-	context.Context,
-	protocol.ListTasksParams,
+	_ context.Context,
+	params protocol.ListTasksParams,
 ) (*protocol.ListTasksResult, error) {
-	return &protocol.ListTasksResult{Tasks: make([]*protocol.Task, 0)}, nil
+	return taskmanager.PaginateTasks(nil, params)
 }
 
 // OnPushNotificationSet rejects push registration.

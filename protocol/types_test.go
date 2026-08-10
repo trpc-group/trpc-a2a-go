@@ -19,6 +19,17 @@ import (
 func boolPtr(b bool) *bool       { return &b }
 func stringPtr(s string) *string { return &s }
 
+func TestListTasksResultRequiredFields(t *testing.T) {
+	payload, err := json.Marshal(ListTasksResult{Tasks: []*Task{}})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"tasks": [],
+		"nextPageToken": "",
+		"pageSize": 0,
+		"totalSize": 0
+	}`, string(payload))
+}
+
 func TestTaskState(t *testing.T) {
 	tests := []struct {
 		state    TaskState

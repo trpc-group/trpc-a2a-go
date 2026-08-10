@@ -526,7 +526,7 @@ func (m *TaskManager) OnPushNotificationGet(
 	return &config, nil
 }
 
-// OnListTasks handles the v1.0 ListTasks request with filtering and offset-based pagination.
+// OnListTasks handles the v1.0 ListTasks request with filtering and keyset pagination.
 func (m *TaskManager) OnListTasks(
 	ctx context.Context,
 	params protocol.ListTasksParams,

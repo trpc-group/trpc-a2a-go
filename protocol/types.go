@@ -332,9 +332,9 @@ type ListTasksParams struct {
 // ListTasksResult is the result of the ListTasks method.
 type ListTasksResult struct {
 	Tasks         []*Task `json:"tasks"`
-	NextPageToken string  `json:"nextPageToken,omitempty"`
-	PageSize      int     `json:"pageSize,omitempty"`
-	TotalSize     int     `json:"totalSize,omitempty"`
+	NextPageToken string  `json:"nextPageToken"`
+	PageSize      int     `json:"pageSize"`
+	TotalSize     int     `json:"totalSize"`
 }
 
 // ListTaskPushNotificationConfigsParams defines the parameters for the

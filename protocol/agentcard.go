@@ -141,6 +141,9 @@ type AgentSkill struct {
 	Examples    []string `json:"examples,omitempty"`
 	InputModes  []string `json:"inputModes,omitempty"`
 	OutputModes []string `json:"outputModes,omitempty"`
+	// SecurityRequirements are the schemes needed for this skill specifically,
+	// overriding the card-level requirements.
+	SecurityRequirements SecurityRequirements `json:"securityRequirements,omitempty"`
 }
 
 // AgentExtension represents an agent extension.

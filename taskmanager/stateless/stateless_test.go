@@ -21,6 +21,8 @@ type processorFunc func(
 	*taskmanager.ExecContext,
 ) (<-chan protocol.StreamEvent, error)
 
+func intPtr(i int) *int { return &i }
+
 func (f processorFunc) ProcessMessage(
 	ctx context.Context,
 	ec *taskmanager.ExecContext,
@@ -708,8 +710,18 @@ func TestTaskAndPushMethods(t *testing.T) {
 		t.Errorf("OnCancelTask error = %v", err)
 	}
 	list, err := manager.OnListTasks(ctx, protocol.ListTasksParams{})
-	if err != nil || list == nil || list.Tasks == nil || len(list.Tasks) != 0 {
+	if err != nil || list == nil || list.Tasks == nil || len(list.Tasks) != 0 ||
+		list.PageSize != taskmanager.ListTasksDefaultPageSize || list.TotalSize != 0 || list.NextPageToken != "" {
 		t.Errorf("OnListTasks = %+v, %v", list, err)
+	}
+	for _, params := range []protocol.ListTasksParams{
+		{PageSize: intPtr(0)},
+		{PageSize: intPtr(taskmanager.ListTasksMaxPageSize + 1)},
+		{HistoryLength: intPtr(-1)},
+	} {
+		if _, err := manager.OnListTasks(ctx, params); !errors.Is(err, taskmanager.ErrInvalidParamsSentinel) {
+			t.Errorf("OnListTasks(%+v) error = %v, want invalid params", params, err)
+		}
 	}
 	if _, err := manager.OnResubscribe(ctx, protocol.TaskIDParams{ID: "task-1"}); !errors.Is(
 		err, taskmanager.ErrTaskNotFoundSentinel,

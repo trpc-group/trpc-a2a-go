@@ -8,8 +8,10 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"mime"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +24,12 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
+
+func newV1HTTPRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Header.Set("A2A-Version", protocol.ProtocolVersionV1)
+	return req
+}
 
 func TestParseHTTPJSONRoute(t *testing.T) {
 	tests := []struct {
@@ -111,7 +119,7 @@ func TestHTTPJSONMediaTypesAndRawResponse(t *testing.T) {
 		protocol.MediaTypeJSON,
 	} {
 		t.Run(contentType, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/message:send", bytes.NewReader(body))
+			req := newV1HTTPRequest(http.MethodPost, "/message:send", bytes.NewReader(body))
 			req.Header.Set("Content-Type", contentType)
 			recorder := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(recorder, req)
@@ -129,14 +137,14 @@ func TestHTTPJSONMediaTypesAndRawResponse(t *testing.T) {
 		})
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/message:send", bytes.NewReader(body))
+	req := newV1HTTPRequest(http.MethodPost, "/message:send", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/xml")
 	recorder := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recorder, req)
 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
 	assert.Contains(t, recorder.Body.String(), "CONTENT_TYPE_NOT_SUPPORTED")
 
-	req = httptest.NewRequest(http.MethodPost, "/message:send", bytes.NewReader(body))
+	req = newV1HTTPRequest(http.MethodPost, "/message:send", bytes.NewReader(body))
 	req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
 	req.Header.Set("A2A-Version", "2.0")
 	recorder = httptest.NewRecorder()
@@ -144,12 +152,31 @@ func TestHTTPJSONMediaTypesAndRawResponse(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
 	assert.Contains(t, recorder.Body.String(), "VERSION_NOT_SUPPORTED")
 
-	req = httptest.NewRequest(http.MethodPost, "/message:send?A2A-Version=2.0", bytes.NewReader(body))
+	req = newV1HTTPRequest(http.MethodPost, "/message:send?A2A-Version=2.0", bytes.NewReader(body))
+	req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
+	req.Header.Del("A2A-Version")
+	recorder = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, req)
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "VERSION_NOT_SUPPORTED")
+
+	// An absent version is interpreted as 0.3, which this v1-only interface
+	// does not support.
+	req = httptest.NewRequest(http.MethodPost, "/message:send", bytes.NewReader(body))
 	req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
 	recorder = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recorder, req)
 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
 	assert.Contains(t, recorder.Body.String(), "VERSION_NOT_SUPPORTED")
+
+	for _, version := range []string{"1.0.0", "1.0.7"} {
+		req = newV1HTTPRequest(http.MethodPost, "/message:send", bytes.NewReader(body))
+		req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
+		req.Header.Set("A2A-Version", version)
+		recorder = httptest.NewRecorder()
+		srv.Handler().ServeHTTP(recorder, req)
+		assert.Equal(t, http.StatusOK, recorder.Code, version)
+	}
 }
 
 func TestHTTPJSONTaskNotFoundError(t *testing.T) {
@@ -160,7 +187,7 @@ func TestHTTPJSONTaskNotFoundError(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodGet, "/tasks/missing-task", nil)
+	req := newV1HTTPRequest(http.MethodGet, "/tasks/missing-task", nil)
 	recorder := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recorder, req)
 
@@ -197,7 +224,7 @@ func TestHTTPJSONErrorBodyCarriesDetail(t *testing.T) {
 	}}
 	body, err := json.Marshal(params)
 	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/message:send", bytes.NewReader(body))
+	req := newV1HTTPRequest(http.MethodPost, "/message:send", bytes.NewReader(body))
 	req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
 	recorder := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recorder, req)
@@ -214,7 +241,7 @@ func TestHTTPJSONErrorBodyCarriesDetail(t *testing.T) {
 	assert.Equal(t, "message role must be ROLE_USER", response.Error.Message)
 
 	// A tenant conflict is likewise reported by cause, not as bare "Invalid params".
-	req = httptest.NewRequest(http.MethodPost, "/tenant-a/message:send", bytes.NewReader(
+	req = newV1HTTPRequest(http.MethodPost, "/tenant-a/message:send", bytes.NewReader(
 		[]byte(`{"tenant":"tenant-b","message":{"messageId":"m","role":"ROLE_USER","parts":[{"text":"hi"}]}}`)))
 	req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
 	recorder = httptest.NewRecorder()
@@ -240,7 +267,7 @@ func TestHTTPJSONRequiresExplicitEndpointOption(t *testing.T) {
 	assert.False(t, srv.httpJSONEnabled)
 
 	rpcBody := []byte(`{"jsonrpc":"2.0","id":"1","method":"` + protocol.MethodTasksGet + `","params":{"id":"missing-task"}}`)
-	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(rpcBody))
+	req := newV1HTTPRequest(http.MethodPost, "/", bytes.NewReader(rpcBody))
 	req.Header.Set("Content-Type", protocol.MediaTypeJSON)
 	recorder := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recorder, req)
@@ -251,7 +278,7 @@ func TestHTTPJSONRequiresExplicitEndpointOption(t *testing.T) {
 	assert.True(t, srv.httpJSONEnabled)
 	assert.Equal(t, "/agent", srv.httpJSONBasePath)
 
-	req = httptest.NewRequest(http.MethodGet, "/agent/tasks/missing-task", nil)
+	req = newV1HTTPRequest(http.MethodGet, "/agent/tasks/missing-task", nil)
 	recorder = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recorder, req)
 	assert.Equal(t, http.StatusNotFound, recorder.Code)
@@ -270,7 +297,7 @@ func TestHTTPJSONTenantShadowingRouteKeyword(t *testing.T) {
 	require.NoError(t, err)
 
 	body := []byte(`{"message":{"messageId":"m","role":"ROLE_USER","parts":[{"text":"hi"}]}}`)
-	req := httptest.NewRequest(http.MethodPost, "/tasks/message:send", bytes.NewReader(body))
+	req := newV1HTTPRequest(http.MethodPost, "/tasks/message:send", bytes.NewReader(body))
 	req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
 	recorder := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recorder, req)
@@ -295,7 +322,7 @@ func TestHTTPJSONStreamUsesRawSSEData(t *testing.T) {
 	}}
 	body, err := json.Marshal(params)
 	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/message:stream", bytes.NewReader(body))
+	req := newV1HTTPRequest(http.MethodPost, "/message:stream", bytes.NewReader(body))
 	req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
 	recorder := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recorder, req)
@@ -323,7 +350,14 @@ func TestHTTPJSONTaskPushAndExtendedCardRoutes(t *testing.T) {
 	extended := true
 	card := defaultAgentCard()
 	card.Capabilities.ExtendedAgentCard = &extended
-	srv, err := NewA2AServer(manager, WithAgentCard(card), WithHTTPJSONEndpoint("/"))
+	srv, err := NewA2AServer(
+		manager,
+		WithAgentCard(card),
+		WithHTTPJSONEndpoint("/"),
+		WithAuthenticatedExtendedCardHandler(func(_ context.Context, base AgentCard) (AgentCard, error) {
+			return base, nil
+		}),
+	)
 	require.NoError(t, err)
 
 	request := func(method, target string, body any) *httptest.ResponseRecorder {
@@ -333,7 +367,7 @@ func TestHTTPJSONTaskPushAndExtendedCardRoutes(t *testing.T) {
 			encoded, err = json.Marshal(body)
 			require.NoError(t, err)
 		}
-		req := httptest.NewRequest(method, target, bytes.NewReader(encoded))
+		req := newV1HTTPRequest(method, target, bytes.NewReader(encoded))
 		if body != nil {
 			req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
 		}
@@ -403,7 +437,7 @@ func TestHTTPJSONValidationAndCapabilityErrors(t *testing.T) {
 	require.NoError(t, err)
 
 	request := func(method, target, body string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(method, target, bytes.NewBufferString(body))
+		req := newV1HTTPRequest(method, target, bytes.NewBufferString(body))
 		if body != "" {
 			req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
 		}
@@ -442,7 +476,7 @@ func TestHTTPJSONValidationAndCapabilityErrors(t *testing.T) {
 
 	recorder = request(http.MethodGet, "/extendedAgentCard", "")
 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
-	assert.Contains(t, recorder.Body.String(), "EXTENDED_AGENT_CARD_NOT_CONFIGURED")
+	assert.Contains(t, recorder.Body.String(), "UNSUPPORTED_OPERATION")
 
 	limited, err := NewA2AServer(
 		manager,
@@ -451,7 +485,7 @@ func TestHTTPJSONValidationAndCapabilityErrors(t *testing.T) {
 		WithHTTPJSONMaxBodyBytes(32),
 	)
 	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/message:send", strings.NewReader(strings.Repeat(" ", 33)))
+	req := newV1HTTPRequest(http.MethodPost, "/message:send", strings.NewReader(strings.Repeat(" ", 33)))
 	req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
 	recorder = httptest.NewRecorder()
 	limited.Handler().ServeHTTP(recorder, req)
@@ -462,7 +496,7 @@ func TestHTTPJSONValidationAndCapabilityErrors(t *testing.T) {
 func TestDecodeHTTPJSONBodyLimitCanBeDisabled(t *testing.T) {
 	srv := &A2AServer{httpJSONMaxBody: defaultHTTPJSONMaxBodyBytes}
 	WithHTTPJSONMaxBodyBytes(0)(srv)
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"value":"accepted"}`))
+	req := newV1HTTPRequest(http.MethodPost, "/", strings.NewReader(`{"value":"accepted"}`))
 
 	var body map[string]string
 	err := srv.decodeHTTPJSONBody(httptest.NewRecorder(), req, &body, true)
@@ -519,7 +553,7 @@ func TestHTTPJSONInternalErrorDetailIsNotLeaked(t *testing.T) {
 		Parts:     []*protocol.Part{protocol.NewTextPart("hello")},
 	}})
 	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/message:send", bytes.NewReader(body))
+	req := newV1HTTPRequest(http.MethodPost, "/message:send", bytes.NewReader(body))
 	req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
 	recorder := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recorder, req)
