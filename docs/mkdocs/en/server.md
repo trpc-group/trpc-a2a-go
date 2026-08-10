@@ -399,6 +399,11 @@ srv, _ := server.NewA2AServer(tm,
 // in ProcessMessage: switch ec.Tenant { … }
 ```
 
+On JSON-RPC the tenant travels in `params`. On HTTP+JSON it is the leading
+`/{tenant}/…` path segment that the specification's Protocol Buffer definition
+binds for every operation, and POST bodies carry the `tenant` field as well.
+The server also accepts the tenant as a `tenant` query parameter.
+
 → [examples/tenant](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/tenant).
 
 ## Serving on a subpath

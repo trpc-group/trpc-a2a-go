@@ -100,6 +100,16 @@ func NewA2AClientFromAgentCard(card *protocol.AgentCard, opts ...Option) (*A2ACl
 
 	interfaces := card.SupportedInterfaces
 	if len(interfaces) == 0 && card.URL != "" {
+		// Deriving an interface from the deprecated top-level fields must not
+		// invent a version: a card that says it speaks 0.x really does, and
+		// driving it with v1.0 method names would only fail as MethodNotFound
+		// on the first call. Only an absent or v1.0 value can be adopted.
+		if v := card.ProtocolVersion; v != nil && *v != "" && *v != protocol.ProtocolVersionV1 {
+			return nil, fmt.Errorf(
+				"agent card declares protocol version %q, which this client does not speak; "+
+					"use the compat/v0 client for a 0.x agent", *v,
+			)
+		}
 		binding := protocol.ProtocolBindingJSONRPC
 		if card.PreferredTransport != nil && *card.PreferredTransport != "" {
 			binding = *card.PreferredTransport

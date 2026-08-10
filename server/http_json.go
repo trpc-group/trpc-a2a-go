@@ -60,7 +60,13 @@ func agentInterfaceURL(card AgentCard, binding string) string {
 	return ""
 }
 
-func parseHTTPJSONRoute(requestPath, basePath string) (httpJSONRoute, bool) {
+// parseHTTPJSONRoute resolves an escaped request path to an operation. The
+// leading {tenant} segment is a trpc-a2a-go extension (the spec carries the
+// tenant in the request itself), so the tenant-less reading is tried first and
+// the prefixed form only as a fallback — except when the first segment names a
+// registered tenant, which knownTenant reports. Without that check a tenant
+// literally named "tasks" would be shadowed by the /tasks/{id} route.
+func parseHTTPJSONRoute(requestPath, basePath string, knownTenant func(string) bool) (httpJSONRoute, bool) {
 	basePath = normalizeHTTPJSONBasePath(basePath)
 	escapedBasePath := (&url.URL{Path: basePath}).EscapedPath()
 	if escapedBasePath != "" {
@@ -83,6 +89,11 @@ func parseHTTPJSONRoute(requestPath, basePath string) (httpJSONRoute, bool) {
 		segments[i] = decoded
 	}
 
+	if len(segments) > 1 && knownTenant != nil && knownTenant(segments[0]) {
+		if route, ok := matchHTTPJSONRouteSegments(segments[1:], segments[0]); ok {
+			return route, true
+		}
+	}
 	if route, ok := matchHTTPJSONRouteSegments(segments, ""); ok {
 		return route, true
 	}
@@ -90,6 +101,14 @@ func parseHTTPJSONRoute(requestPath, basePath string) (httpJSONRoute, bool) {
 		return matchHTTPJSONRouteSegments(segments[1:], segments[0])
 	}
 	return httpJSONRoute{}, false
+}
+
+// registeredTenant reports whether tenant has a statically registered card. A
+// dynamic WithTenantCardProvider cannot be enumerated, so tenants it serves
+// keep the fallback ordering.
+func (s *A2AServer) registeredTenant(tenant string) bool {
+	_, ok := s.tenantCards[tenant]
+	return ok
 }
 
 func agentCardsAdvertiseBinding(s *A2AServer, binding string) bool {
@@ -174,7 +193,7 @@ func (s *A2AServer) handleHTTPJSON(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	route, ok := parseHTTPJSONRoute(r.URL.EscapedPath(), s.httpJSONBasePath)
+	route, ok := parseHTTPJSONRoute(r.URL.EscapedPath(), s.httpJSONBasePath, s.registeredTenant)
 	if !ok {
 		s.writeHTTPJSONStatus(w, http.StatusNotFound, "NOT_FOUND", "HTTP+JSON endpoint not found")
 		return
@@ -505,7 +524,10 @@ func (s *A2AServer) handleHTTPJSONPushConfigCreate(w http.ResponseWriter, r *htt
 		s.writeHTTPJSONError(w, err, route.taskID)
 		return
 	}
-	s.writeHTTPJSONResponse(w, http.StatusCreated, result)
+	// 200, not 201: the proto transcoding rule returns the created
+	// TaskPushNotificationConfig, and the reference clients treat any non-200
+	// as a failure.
+	s.writeHTTPJSONResponse(w, http.StatusOK, result)
 }
 
 func (s *A2AServer) handleHTTPJSONPushConfigGet(w http.ResponseWriter, r *http.Request, route httpJSONRoute) {
@@ -577,7 +599,9 @@ func (s *A2AServer) handleHTTPJSONPushConfigDelete(w http.ResponseWriter, r *htt
 		s.writeHTTPJSONError(w, err, route.taskID)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	// DeleteTaskPushNotificationConfig returns google.protobuf.Empty, which
+	// transcodes to 200 with an empty JSON object rather than 204.
+	s.writeHTTPJSONResponse(w, http.StatusOK, struct{}{})
 }
 
 func (s *A2AServer) handleHTTPJSONExtendedAgentCard(w http.ResponseWriter, r *http.Request, route httpJSONRoute) {
@@ -607,7 +631,8 @@ func (s *A2AServer) resolveExtendedAgentCard(ctx context.Context, tenant string)
 	}
 	card, err := s.authenticatedCardHandler(ctx, baseCard)
 	if err != nil {
-		return AgentCard{}, taskmanager.ErrInternalError("failed to handle extended card")
+		log.Errorf("Error applying authenticated card handler: %v", err)
+		return AgentCard{}, taskmanager.ErrInternalError(fmt.Sprintf("failed to handle extended card: %v", err))
 	}
 	return s.finalizePushCapability(card), nil
 }
@@ -686,25 +711,38 @@ func (s *A2AServer) writeHTTPJSONErrorBody(w http.ResponseWriter, statusCode int
 func httpJSONErrorMapping(err error) (int, string, string, string) {
 	var taskErr *taskmanager.Error
 	if !errors.As(err, &taskErr) {
+		// An error a TaskManager raised outside the A2A model: log it, because
+		// the opaque body below is all the client will ever see.
+		log.Errorf("HTTP+JSON operation failed with a non-A2A error: %v", err)
 		return http.StatusInternalServerError, "INTERNAL", "", "Internal error"
+	}
+	// The A2A error constructors keep the generic wording in Message and the
+	// specific cause in Data. Spec §11.6 maps the human-readable string to
+	// error.message, so the cause is what belongs there.
+	message := taskErr.Message
+	if detail, ok := taskErr.Data.(string); ok && detail != "" {
+		message = detail
 	}
 	switch taskErr.Code {
 	case taskmanager.ErrCodeInvalidParams:
-		return http.StatusBadRequest, "INVALID_ARGUMENT", "", taskErr.Message
+		return http.StatusBadRequest, "INVALID_ARGUMENT", "", message
 	case taskmanager.ErrCodeTaskNotFound:
-		return http.StatusNotFound, "NOT_FOUND", string(taskErr.Code), taskErr.Message
+		return http.StatusNotFound, "NOT_FOUND", string(taskErr.Code), message
 	case taskmanager.ErrCodeTaskNotCancelable,
 		taskmanager.ErrCodePushNotificationNotSupported,
 		taskmanager.ErrCodeUnsupportedOperation,
 		taskmanager.ErrCodeAuthenticatedExtendedCardNotConfigured,
 		taskmanager.ErrCodeExtensionSupportRequired,
 		taskmanager.ErrCodeVersionNotSupported:
-		return http.StatusBadRequest, "FAILED_PRECONDITION", string(taskErr.Code), taskErr.Message
+		return http.StatusBadRequest, "FAILED_PRECONDITION", string(taskErr.Code), message
 	case taskmanager.ErrCodeContentTypeNotSupported:
-		return http.StatusBadRequest, "INVALID_ARGUMENT", string(taskErr.Code), taskErr.Message
+		return http.StatusBadRequest, "INVALID_ARGUMENT", string(taskErr.Code), message
 	case taskmanager.ErrCodeInvalidAgentResponse:
-		return http.StatusInternalServerError, "INTERNAL", string(taskErr.Code), taskErr.Message
+		return http.StatusInternalServerError, "INTERNAL", string(taskErr.Code), message
+	case taskmanager.ErrCodeInternalError:
+		return http.StatusInternalServerError, "INTERNAL", "", message
 	default:
+		log.Errorf("HTTP+JSON operation failed with an unmapped A2A error code %s: %v", taskErr.Code, err)
 		return http.StatusInternalServerError, "INTERNAL", "", "Internal error"
 	}
 }

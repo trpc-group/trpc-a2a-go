@@ -55,10 +55,15 @@ type Error struct {
 	cause   error
 }
 
-// Error implements the standard error interface.
+// Error implements the standard error interface. A string Data is appended so
+// the diagnostic detail survives logging and %v formatting: the constructors
+// put the generic A2A wording in Message and the specific cause in Data.
 func (e *Error) Error() string {
 	if e == nil {
 		return "<nil taskmanager error>"
+	}
+	if detail, ok := e.Data.(string); ok && detail != "" {
+		return fmt.Sprintf("a2a error %s: %s: %s", e.Code, e.Message, detail)
 	}
 	return fmt.Sprintf("a2a error %s: %s", e.Code, e.Message)
 }
@@ -73,6 +78,47 @@ func (e *Error) Unwrap() error {
 
 func newError(code ErrorCode, message string, data any, cause error) *Error {
 	return &Error{Code: code, Message: message, Data: data, cause: cause}
+}
+
+// NewError builds an error for an already-known code, attaching the sentinel
+// that errors.Is matches. Protocol adapters use it to rebuild the semantic
+// error carried by a wire response; the constructors below remain the way to
+// raise one. An unrecognized code yields an error with no sentinel.
+func NewError(code ErrorCode, message string, data any) *Error {
+	return newError(code, message, data, sentinelForCode(code))
+}
+
+// SentinelForCode reports the sentinel associated with code, or nil when the
+// code is not one of the standard A2A errors.
+func SentinelForCode(code ErrorCode) error { return sentinelForCode(code) }
+
+func sentinelForCode(code ErrorCode) error {
+	switch code {
+	case ErrCodeInvalidParams:
+		return ErrInvalidParamsSentinel
+	case ErrCodeInternalError:
+		return ErrInternalErrorSentinel
+	case ErrCodeTaskNotFound:
+		return ErrTaskNotFoundSentinel
+	case ErrCodeTaskNotCancelable:
+		return ErrTaskNotCancelableSentinel
+	case ErrCodePushNotificationNotSupported:
+		return ErrPushNotificationNotSupportedSentinel
+	case ErrCodeUnsupportedOperation:
+		return ErrUnsupportedOperationSentinel
+	case ErrCodeContentTypeNotSupported:
+		return ErrContentTypeNotSupportedSentinel
+	case ErrCodeInvalidAgentResponse:
+		return ErrInvalidAgentResponseSentinel
+	case ErrCodeAuthenticatedExtendedCardNotConfigured:
+		return ErrAuthenticatedExtendedCardNotConfiguredSentinel
+	case ErrCodeExtensionSupportRequired:
+		return ErrExtensionSupportRequiredSentinel
+	case ErrCodeVersionNotSupported:
+		return ErrVersionNotSupportedSentinel
+	default:
+		return nil
+	}
 }
 
 // Sentinel errors for type checking with errors.Is().

@@ -323,6 +323,8 @@ srv, _ := server.NewA2AServer(tm,
 // 在 ProcessMessage 里:switch ec.Tenant { … }
 ```
 
+JSON-RPC 下 `tenant` 放在 `params` 里；HTTP+JSON 下走 `/{tenant}/…` 路径前缀——规范的 Protocol Buffer 定义为每个 operation 都绑定了这个路径，POST 类操作的请求体同时也带 `tenant` 字段。服务端另外也接受 `tenant` query 参数。
+
 纯多租户 server 可以不提供默认 `WithAgentCard`；此时不带 `?tenant=` 获取 card 会返回 404。若需要一个目录型默认 card，再额外传 `WithAgentCard(card)`。
 
 → [examples/tenant](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/tenant)。

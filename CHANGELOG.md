@@ -6,7 +6,12 @@
 
 - **The v2 client and server now implement the A2A v1.0 HTTP+JSON/REST binding.** It uses the standard operation routes, `application/a2a+json` request and response bodies, direct protocol objects instead of JSON-RPC envelopes, raw `StreamResponse` SSE data, and `google.rpc.Status` JSON errors. JSON-RPC remains the default for direct client construction and continues to use `application/json`.
 - `client.WithProtocolBinding` selects a direct endpoint binding, while `client.NewA2AClientFromAgentCard` follows the ordered `supportedInterfaces` list without mutating signed cards. `server.WithHTTPJSONEndpoint` explicitly enables and locates the REST binding; a static Agent Card that advertises `HTTP+JSON` also enables it automatically.
-- **TaskManager errors are now binding-neutral.** `taskmanager.Error` and semantic `ErrorCode` values replace the leaked internal JSON-RPC error representation so JSON-RPC and HTTP+JSON adapters can map the same failure independently. This is an intentional prerelease API change.
+- **TaskManager errors are now binding-neutral.** `taskmanager.Error` and semantic `ErrorCode` values replace the leaked internal JSON-RPC error representation so JSON-RPC and HTTP+JSON adapters can map the same failure independently. This is an intentional prerelease API change. `taskmanager.NewError` rebuilds one of these errors from wire values, and `taskmanager.Error.Error()` now includes the diagnostic detail the constructors keep in `Data`.
+- A statically registered tenant now takes precedence over an HTTP+JSON route keyword it collides with, so a tenant named `tasks` is reachable.
+- Push notification config create and delete answer `200`, matching the transcoding of their Protocol Buffer definitions, instead of `201` and `204` which the reference clients reject.
+- `SubscribeToTask` retries with `GET` when a server rejects `POST`: the v1.0 specification text and the reference clients use `POST`, while the normative Protocol Buffer definition binds `GET`.
+- `NewA2AClientFromAgentCard` rejects a card whose deprecated top-level `protocolVersion` declares a 0.x agent instead of driving it with v1.0 method names.
+- HTTP+JSON errors report the specific cause in `error.message` (spec §11.6) rather than the generic A2A heading, so validation failures are as diagnosable over REST as over JSON-RPC. The REST client rebuilds errors from the wire values instead of re-running the server-side constructors.
 
 ## 2.0.0-alpha.3 (2026-07-22)
 

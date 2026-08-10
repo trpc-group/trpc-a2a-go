@@ -145,10 +145,17 @@ func NewA2AServer(taskManager taskmanager.TaskManager, opts ...Option) (*A2AServ
 				server.httpJSONBasePath = primaryBasePath
 			}
 		}
+		// Prefer the path the card advertises for JSON-RPC specifically, so a
+		// card that offers the two bindings at different URLs mounts each where
+		// it says. Fall back to the primary URL — a card that advertises only
+		// HTTP+JSON (or only gRPC) must not silently relocate the JSON-RPC
+		// endpoint to the root and hand its old path to another binding.
+		jsonRPCBasePath := primaryBasePath
 		if endpoint := agentInterfaceURL(server.agentCard, protocol.ProtocolBindingJSONRPC); endpoint != "" {
-			if basePath := extractBasePathFromURL(endpoint); basePath != "" {
-				server.jsonRPCEndpoint = basePath + "/"
-			}
+			jsonRPCBasePath = extractBasePathFromURL(endpoint)
+		}
+		if jsonRPCBasePath != "" {
+			server.jsonRPCEndpoint = jsonRPCBasePath + "/"
 		}
 	}
 	if !server.httpJSONPathExplicitlySet && server.agentCardSet {

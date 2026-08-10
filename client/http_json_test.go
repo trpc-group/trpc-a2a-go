@@ -138,8 +138,12 @@ func TestHTTPJSONRequestHeadersAndBody(t *testing.T) {
 		if r.Method != http.MethodPost {
 			recordRequestErr(fmt.Errorf("method = %s", r.Method))
 		}
+		// The tenant is a path segment, matching the proto's additional binding.
 		if r.URL.EscapedPath() != "/tenant%2Fa/message:send" {
 			recordRequestErr(fmt.Errorf("path = %s", r.URL.EscapedPath()))
+		}
+		if r.URL.RawQuery != "" {
+			recordRequestErr(fmt.Errorf("query = %s", r.URL.RawQuery))
 		}
 		if r.Header.Get("Content-Type") != protocol.MediaTypeA2AJSON {
 			recordRequestErr(fmt.Errorf("Content-Type = %s", r.Header.Get("Content-Type")))
@@ -156,6 +160,9 @@ func TestHTTPJSONRequestHeadersAndBody(t *testing.T) {
 		}
 		if _, ok := body["jsonrpc"]; ok {
 			recordRequestErr(fmt.Errorf("request contains JSON-RPC envelope"))
+		}
+		if body["tenant"] != "tenant/a" {
+			recordRequestErr(fmt.Errorf("body tenant = %v", body["tenant"]))
 		}
 		w.Header().Set("Content-Type", protocol.MediaTypeA2AJSON)
 		_ = json.NewEncoder(w).Encode(map[string]any{"message": body["message"]})
@@ -200,6 +207,7 @@ func TestBuildHTTPJSONRequestRoutes(t *testing.T) {
 		{name: "list push", operation: protocol.MethodTasksPushNotificationConfigList, params: protocol.ListTaskPushNotificationConfigsParams{TaskID: "task", PageSize: &pageSize}, method: http.MethodGet, path: "/tasks/task/pushNotificationConfigs", query: "pageSize=10"},
 		{name: "delete push", operation: protocol.MethodTasksPushNotificationConfigDelete, params: protocol.DeleteTaskPushNotificationConfigParams{TaskID: "task", ID: "config"}, method: http.MethodDelete, path: "/tasks/task/pushNotificationConfigs/config"},
 		{name: "extended card", operation: protocol.MethodAgentAuthenticatedExtendedCard, params: extendedCardParams{Tenant: "tenant"}, method: http.MethodGet, path: "/tenant/extendedAgentCard"},
+		{name: "get task tenant", operation: protocol.MethodTasksGet, params: protocol.TaskQueryParams{ID: "task", Tenant: "tenant"}, method: http.MethodGet, path: "/tenant/tasks/task"},
 	}
 
 	for _, tt := range tests {
@@ -279,7 +287,7 @@ func TestHTTPJSONBindingRequestValidation(t *testing.T) {
 					Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"bad request"}}`)),
 				}, nil
 			},
-			expectError: "Invalid params",
+			expectError: "bad request",
 		},
 		{
 			name: "no content",
@@ -392,7 +400,7 @@ func TestHTTPJSONBindingStreamValidation(t *testing.T) {
 					Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"failed"}}`)),
 				}, nil
 			},
-			expectError: "Internal error",
+			expectError: "failed",
 		},
 		{
 			name: "invalid content type",
@@ -525,6 +533,55 @@ func TestDecodeHTTPJSONError(t *testing.T) {
 			if tt.sentinel != nil {
 				assert.ErrorIs(t, err, tt.sentinel)
 			}
+		})
+	}
+}
+
+// The server's message must reach the caller verbatim, and must not be recycled
+// into a constructor that expects a specific value (a version, a content type).
+func TestDecodeHTTPJSONErrorPreservesMessage(t *testing.T) {
+	body := []byte(`{"error":{"code":400,"status":"FAILED_PRECONDITION",` +
+		`"message":"Requested A2A protocol version '0.5' is not supported by this agent",` +
+		`"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"VERSION_NOT_SUPPORTED","domain":"a2a-protocol.org"}]}}`)
+	err := decodeHTTPJSONError(http.StatusBadRequest, body)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, taskmanager.ErrVersionNotSupportedSentinel)
+	var taskErr *taskmanager.Error
+	require.ErrorAs(t, err, &taskErr)
+	assert.Equal(t, "Requested A2A protocol version '0.5' is not supported by this agent", taskErr.Message)
+	assert.Contains(t, err.Error(), "'0.5'")
+
+	// An unrecognized reason falls back on the HTTP status, keeping the message.
+	body = []byte(`{"error":{"code":503,"status":"UNAVAILABLE","message":"upstream is down"}}`)
+	err = decodeHTTPJSONError(http.StatusServiceUnavailable, body)
+	require.ErrorAs(t, err, &taskErr)
+	assert.Equal(t, taskmanager.ErrCodeInternalError, taskErr.Code)
+	assert.Equal(t, "upstream is down", taskErr.Message)
+}
+
+// An empty path parameter must be rejected before it can address the collection
+// resource: GET /tasks/ is ListTasks, whose body would decode into an empty Task.
+func TestBuildHTTPJSONRequestRejectsEmptyIDs(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation string
+		params    any
+	}{
+		{"get task", protocol.MethodTasksGet, protocol.TaskQueryParams{}},
+		{"cancel", protocol.MethodTasksCancel, protocol.TaskIDParams{}},
+		{"subscribe", protocol.MethodTasksResubscribe, protocol.TaskIDParams{}},
+		{"create push", protocol.MethodTasksPushNotificationConfigSet, protocol.TaskPushNotificationConfig{}},
+		{"get push no task", protocol.MethodTasksPushNotificationConfigGet, protocol.GetTaskPushNotificationConfigParams{ID: "config"}},
+		{"get push no config", protocol.MethodTasksPushNotificationConfigGet, protocol.GetTaskPushNotificationConfigParams{TaskID: "task"}},
+		{"list push", protocol.MethodTasksPushNotificationConfigList, protocol.ListTaskPushNotificationConfigsParams{}},
+		{"delete push no task", protocol.MethodTasksPushNotificationConfigDelete, protocol.DeleteTaskPushNotificationConfigParams{ID: "config"}},
+		{"delete push no config", protocol.MethodTasksPushNotificationConfigDelete, protocol.DeleteTaskPushNotificationConfigParams{TaskID: "task"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := buildHTTPJSONRequest(tt.operation, tt.params)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, taskmanager.ErrInvalidParamsSentinel)
 		})
 	}
 }

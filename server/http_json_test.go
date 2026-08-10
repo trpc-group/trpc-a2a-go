@@ -27,6 +27,7 @@ func TestParseHTTPJSONRoute(t *testing.T) {
 		name      string
 		path      string
 		basePath  string
+		tenants   []string
 		operation string
 		tenant    string
 		taskID    string
@@ -41,11 +42,24 @@ func TestParseHTTPJSONRoute(t *testing.T) {
 		{name: "create or list push", path: "/tasks/task-1/pushNotificationConfigs", operation: protocol.MethodTasksPushNotificationConfigList, taskID: "task-1"},
 		{name: "get or delete push", path: "/tenant-a/tasks/task-1/pushNotificationConfigs/config-1", operation: protocol.MethodTasksPushNotificationConfigGet, tenant: "tenant-a", taskID: "task-1", configID: "config-1"},
 		{name: "extended card", path: "/extendedAgentCard", operation: protocol.MethodAgentAuthenticatedExtendedCard},
+		// A registered tenant wins over the route keyword it collides with.
+		{name: "tenant named tasks", path: "/tasks/message:send", tenants: []string{"tasks"}, operation: protocol.MethodMessageSend, tenant: "tasks"},
+		{name: "tenant named tasks lists", path: "/tasks/tasks", tenants: []string{"tasks"}, operation: protocol.MethodTasksList, tenant: "tasks"},
+		// Without that registration the tenant-less reading still wins.
+		{name: "unregistered tasks segment", path: "/tasks/message:send", operation: protocol.MethodTasksGet, taskID: "message:send"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			route, ok := parseHTTPJSONRoute(tt.path, tt.basePath)
+			knownTenant := func(tenant string) bool {
+				for _, known := range tt.tenants {
+					if known == tenant {
+						return true
+					}
+				}
+				return false
+			}
+			route, ok := parseHTTPJSONRoute(tt.path, tt.basePath, knownTenant)
 			require.True(t, ok)
 			assert.Equal(t, tt.operation, route.operation)
 			assert.Equal(t, tt.tenant, route.tenant)
@@ -144,6 +158,99 @@ func TestHTTPJSONTaskNotFoundError(t *testing.T) {
 	assert.Equal(t, "TASK_NOT_FOUND", response.Error.Details[0]["reason"])
 }
 
+// error.message carries the human-readable cause (spec §11.6), so the detail
+// the A2A constructors keep in Data must reach the wire rather than the generic
+// heading the JSON-RPC binding puts in its "message" field.
+func TestHTTPJSONErrorBodyCarriesDetail(t *testing.T) {
+	srv, err := NewA2AServer(
+		newMockTaskManager(),
+		WithAgentCard(defaultAgentCard()),
+		WithHTTPJSONEndpoint("/"),
+	)
+	require.NoError(t, err)
+
+	params := protocol.SendMessageParams{Message: protocol.Message{
+		MessageID: "message-1",
+		Role:      protocol.MessageRoleAgent,
+		Parts:     []*protocol.Part{protocol.NewTextPart("hello")},
+	}}
+	body, err := json.Marshal(params)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/message:send", bytes.NewReader(body))
+	req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
+	recorder := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, req)
+
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	var response struct {
+		Error struct {
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.Equal(t, "INVALID_ARGUMENT", response.Error.Status)
+	assert.Equal(t, "message role must be ROLE_USER", response.Error.Message)
+
+	// A tenant conflict is likewise reported by cause, not as bare "Invalid params".
+	req = httptest.NewRequest(http.MethodPost, "/tenant-a/message:send", bytes.NewReader(
+		[]byte(`{"tenant":"tenant-b","message":{"messageId":"m","role":"ROLE_USER","parts":[{"text":"hi"}]}}`)))
+	req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
+	recorder = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, req)
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "tenant in request does not match tenant in URL path")
+}
+
+// A card that advertises only HTTP+JSON must not relocate the JSON-RPC endpoint
+// to the root and hand its advertised path to the REST binding.
+func TestJSONRPCEndpointKeepsCardBasePathWithoutJSONRPCInterface(t *testing.T) {
+	transport := protocol.ProtocolBindingHTTPJSON
+	card := defaultAgentCard()
+	card.SupportedInterfaces = nil
+	card.AdditionalInterfaces = nil
+	card.URL = "https://host.example/agent"
+	card.PreferredTransport = &transport
+
+	srv, err := NewA2AServer(newMockTaskManager(), WithAgentCard(card))
+	require.NoError(t, err)
+	assert.Equal(t, "/agent/", srv.jsonRPCEndpoint)
+	assert.Equal(t, "/agent", srv.httpJSONBasePath)
+	assert.True(t, srv.httpJSONEnabled)
+
+	// JSON-RPC still answers on the advertised path, and REST answers below it.
+	rpcBody := []byte(`{"jsonrpc":"2.0","id":"1","method":"` + protocol.MethodTasksGet + `","params":{"id":"missing-task"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/agent/", bytes.NewReader(rpcBody))
+	req.Header.Set("Content-Type", protocol.MediaTypeJSON)
+	recorder := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, req)
+	assert.Contains(t, recorder.Body.String(), "jsonrpc")
+
+	req = httptest.NewRequest(http.MethodGet, "/agent/tasks/missing-task", nil)
+	recorder = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, req)
+	assert.Equal(t, http.StatusNotFound, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "TASK_NOT_FOUND")
+}
+
+// A statically registered tenant must win over the route keyword it collides with.
+func TestHTTPJSONTenantShadowingRouteKeyword(t *testing.T) {
+	srv, err := NewA2AServer(
+		newMockTaskManager(),
+		WithAgentCard(defaultAgentCard()),
+		WithTenantCard("tasks", defaultAgentCard()),
+		WithHTTPJSONEndpoint("/"),
+	)
+	require.NoError(t, err)
+
+	body := []byte(`{"message":{"messageId":"m","role":"ROLE_USER","parts":[{"text":"hi"}]}}`)
+	req := httptest.NewRequest(http.MethodPost, "/tasks/message:send", bytes.NewReader(body))
+	req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
+	recorder := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, req)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+}
+
 func TestHTTPJSONStreamUsesRawSSEData(t *testing.T) {
 	manager := newMockTaskManager()
 	message := protocol.NewMessage(protocol.MessageRoleAgent, []*protocol.Part{protocol.NewTextPart("hello")})
@@ -239,13 +346,15 @@ func TestHTTPJSONTaskPushAndExtendedCardRoutes(t *testing.T) {
 		URL:    "https://example.com/webhook",
 	}
 	recorder = request(http.MethodPost, "/tasks/task-1/pushNotificationConfigs", config)
-	assert.Equal(t, http.StatusCreated, recorder.Code)
+	// The proto transcoding rule returns the created config with 200.
+	assert.Equal(t, http.StatusOK, recorder.Code)
 	recorder = request(http.MethodGet, "/tasks/task-1/pushNotificationConfigs/config-1", nil)
 	assert.Equal(t, http.StatusOK, recorder.Code)
 	recorder = request(http.MethodGet, "/tasks/task-1/pushNotificationConfigs?pageSize=5&pageToken=next", nil)
 	assert.Equal(t, http.StatusOK, recorder.Code)
 	recorder = request(http.MethodDelete, "/tasks/task-1/pushNotificationConfigs/config-1", nil)
-	assert.Equal(t, http.StatusNoContent, recorder.Code)
+	// Delete returns google.protobuf.Empty, i.e. 200 with an empty object.
+	assert.Equal(t, http.StatusOK, recorder.Code)
 
 	recorder = request(http.MethodGet, "/extendedAgentCard", nil)
 	assert.Equal(t, http.StatusOK, recorder.Code)

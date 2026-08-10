@@ -87,16 +87,19 @@ func (httpJSONBinding) stream(
 	if err != nil {
 		return nil, err
 	}
-	req, err := client.newHTTPJSONRequest(ctx, spec, true, opts...)
+	resp, err := client.sendHTTPJSONStream(ctx, spec, opts...)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := client.httpReqHandler.Handle(ctx, client.httpClient, req)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP+JSON stream request failed: %w", err)
-	}
-	if resp == nil || resp.Body == nil {
-		return nil, fmt.Errorf("HTTP+JSON stream request returned an unexpected nil response")
+	// The v1.0 sources disagree on SubscribeToTask's verb: the specification
+	// text and the reference clients use POST, while the normative proto binds
+	// it to GET. Retry the other verb once so either kind of server answers.
+	if resp.StatusCode == http.StatusMethodNotAllowed && operation == protocol.MethodTasksResubscribe {
+		resp.Body.Close()
+		spec.method = http.MethodGet
+		if resp, err = client.sendHTTPJSONStream(ctx, spec, opts...); err != nil {
+			return nil, err
+		}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
@@ -111,6 +114,27 @@ func (httpJSONBinding) stream(
 			protocol.MediaTypeEventStream,
 			resp.Header.Get("Content-Type"),
 		)
+	}
+	return resp, nil
+}
+
+// sendHTTPJSONStream issues one streaming attempt and returns the raw response
+// with its body still open.
+func (c *A2AClient) sendHTTPJSONStream(
+	ctx context.Context,
+	spec httpJSONRequest,
+	opts ...RequestOption,
+) (*http.Response, error) {
+	req, err := c.newHTTPJSONRequest(ctx, spec, true, opts...)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpReqHandler.Handle(ctx, c.httpClient, req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP+JSON stream request failed: %w", err)
+	}
+	if resp == nil || resp.Body == nil {
+		return nil, fmt.Errorf("HTTP+JSON stream request returned an unexpected nil response")
 	}
 	return resp, nil
 }
@@ -130,15 +154,11 @@ func buildHTTPJSONRequest(operation string, params any) (httpJSONRequest, error)
 		if !ok {
 			return httpJSONRequest{}, fmt.Errorf("invalid %s parameters %T", operation, params)
 		}
-		suffix := "/message:send"
+		path := "/message:send"
 		if operation == protocol.MethodMessageStream {
-			suffix = "/message:stream"
+			path = "/message:stream"
 		}
-		return httpJSONRequest{
-			method: http.MethodPost,
-			path:   httpJSONPath(p.Tenant, suffix),
-			body:   p,
-		}, nil
+		return httpJSONRequest{method: http.MethodPost, path: httpJSONPath(p.Tenant, path), body: p}, nil
 	case protocol.MethodTasksGet:
 		p, ok := params.(protocol.TaskQueryParams)
 		if !ok {
@@ -146,6 +166,9 @@ func buildHTTPJSONRequest(operation string, params any) (httpJSONRequest, error)
 		}
 		if len(p.Metadata) != 0 {
 			return httpJSONRequest{}, taskmanager.ErrInvalidParams("GetTask metadata cannot be represented by the HTTP+JSON binding")
+		}
+		if err := requireID("GetTask", "task ID", p.ID); err != nil {
+			return httpJSONRequest{}, err
 		}
 		query := make(url.Values)
 		setOptionalIntQuery(query, "historyLength", p.HistoryLength)
@@ -180,6 +203,9 @@ func buildHTTPJSONRequest(operation string, params any) (httpJSONRequest, error)
 		if !ok {
 			return httpJSONRequest{}, fmt.Errorf("invalid CancelTask parameters %T", params)
 		}
+		if err := requireID("CancelTask", "task ID", p.ID); err != nil {
+			return httpJSONRequest{}, err
+		}
 		return httpJSONRequest{
 			method: http.MethodPost,
 			path:   httpJSONPath(p.Tenant, "/tasks/"+url.PathEscape(p.ID)+":cancel"),
@@ -193,6 +219,9 @@ func buildHTTPJSONRequest(operation string, params any) (httpJSONRequest, error)
 		if len(p.Metadata) != 0 {
 			return httpJSONRequest{}, taskmanager.ErrInvalidParams("SubscribeToTask metadata cannot be represented by the HTTP+JSON binding")
 		}
+		if err := requireID("SubscribeToTask", "task ID", p.ID); err != nil {
+			return httpJSONRequest{}, err
+		}
 		return httpJSONRequest{
 			method: http.MethodPost,
 			path:   httpJSONPath(p.Tenant, "/tasks/"+url.PathEscape(p.ID)+":subscribe"),
@@ -202,18 +231,24 @@ func buildHTTPJSONRequest(operation string, params any) (httpJSONRequest, error)
 		if !ok {
 			return httpJSONRequest{}, fmt.Errorf("invalid CreateTaskPushNotificationConfig parameters %T", params)
 		}
+		if err := requireID("CreateTaskPushNotificationConfig", "task ID", p.TaskID); err != nil {
+			return httpJSONRequest{}, err
+		}
 		return httpJSONRequest{
 			method: http.MethodPost,
-			path: httpJSONPath(
-				p.Tenant,
-				"/tasks/"+url.PathEscape(p.TaskID)+"/pushNotificationConfigs",
-			),
-			body: p,
+			path:   httpJSONPath(p.Tenant, "/tasks/"+url.PathEscape(p.TaskID)+"/pushNotificationConfigs"),
+			body:   p,
 		}, nil
 	case protocol.MethodTasksPushNotificationConfigGet:
 		p, ok := params.(protocol.GetTaskPushNotificationConfigParams)
 		if !ok {
 			return httpJSONRequest{}, fmt.Errorf("invalid GetTaskPushNotificationConfig parameters %T", params)
+		}
+		if err := requireID("GetTaskPushNotificationConfig", "task ID", p.TaskID); err != nil {
+			return httpJSONRequest{}, err
+		}
+		if err := requireID("GetTaskPushNotificationConfig", "config ID", p.ID); err != nil {
+			return httpJSONRequest{}, err
 		}
 		return httpJSONRequest{
 			method: http.MethodGet,
@@ -227,21 +262,27 @@ func buildHTTPJSONRequest(operation string, params any) (httpJSONRequest, error)
 		if !ok {
 			return httpJSONRequest{}, fmt.Errorf("invalid ListTaskPushNotificationConfigs parameters %T", params)
 		}
+		if err := requireID("ListTaskPushNotificationConfigs", "task ID", p.TaskID); err != nil {
+			return httpJSONRequest{}, err
+		}
 		query := make(url.Values)
 		setOptionalIntQuery(query, "pageSize", p.PageSize)
 		setQuery(query, "pageToken", p.PageToken)
 		return httpJSONRequest{
 			method: http.MethodGet,
-			path: httpJSONPath(
-				p.Tenant,
-				"/tasks/"+url.PathEscape(p.TaskID)+"/pushNotificationConfigs",
-			),
-			query: query,
+			path:   httpJSONPath(p.Tenant, "/tasks/"+url.PathEscape(p.TaskID)+"/pushNotificationConfigs"),
+			query:  query,
 		}, nil
 	case protocol.MethodTasksPushNotificationConfigDelete:
 		p, ok := params.(protocol.DeleteTaskPushNotificationConfigParams)
 		if !ok {
 			return httpJSONRequest{}, fmt.Errorf("invalid DeleteTaskPushNotificationConfig parameters %T", params)
+		}
+		if err := requireID("DeleteTaskPushNotificationConfig", "task ID", p.TaskID); err != nil {
+			return httpJSONRequest{}, err
+		}
+		if err := requireID("DeleteTaskPushNotificationConfig", "config ID", p.ID); err != nil {
+			return httpJSONRequest{}, err
 		}
 		return httpJSONRequest{
 			method: http.MethodDelete,
@@ -258,11 +299,27 @@ func buildHTTPJSONRequest(operation string, params any) (httpJSONRequest, error)
 	}
 }
 
+// httpJSONPath prefixes the tenant path segment the normative proto defines as
+// an additional binding for every operation
+// (additional_bindings { get: "/{tenant}/tasks/{id=*}" } and friends). It is
+// also the form the reference clients put on the wire; the server additionally
+// accepts the tenant in the body or as a query parameter.
 func httpJSONPath(tenant, suffix string) string {
 	if tenant == "" {
 		return suffix
 	}
 	return "/" + url.PathEscape(tenant) + suffix
+}
+
+// requireID rejects an empty path parameter. Interpolating one would silently
+// address the collection resource instead — GET /tasks/ is ListTasks, not a
+// GetTask that misses — and the caller would decode that answer as an empty
+// object with no error.
+func requireID(operation, name, value string) error {
+	if value == "" {
+		return taskmanager.ErrInvalidParams(fmt.Sprintf("%s requires a non-empty %s", operation, name))
+	}
+	return nil
 }
 
 func setQuery(query url.Values, name, value string) {
@@ -364,28 +421,21 @@ func decodeHTTPJSONError(statusCode int, body []byte) error {
 		}
 		break
 	}
-	switch taskmanager.ErrorCode(reason) {
-	case taskmanager.ErrCodeTaskNotFound:
-		return taskmanager.ErrTaskNotFound(taskID)
-	case taskmanager.ErrCodeTaskNotCancelable:
-		return taskmanager.ErrTaskNotCancelable(taskID, protocol.TaskStateUnspecified)
-	case taskmanager.ErrCodePushNotificationNotSupported:
-		return taskmanager.ErrPushNotificationNotSupported()
-	case taskmanager.ErrCodeUnsupportedOperation:
-		return taskmanager.ErrUnsupportedOperation(response.Error.Message)
-	case taskmanager.ErrCodeContentTypeNotSupported:
-		return taskmanager.ErrContentTypeNotSupported(response.Error.Message)
-	case taskmanager.ErrCodeInvalidAgentResponse:
-		return taskmanager.ErrInvalidAgentResponse(response.Error.Message)
-	case taskmanager.ErrCodeAuthenticatedExtendedCardNotConfigured:
-		return taskmanager.ErrAuthenticatedExtendedCardNotConfigured()
-	case taskmanager.ErrCodeExtensionSupportRequired:
-		return taskmanager.ErrExtensionSupportRequired(response.Error.Message)
-	case taskmanager.ErrCodeVersionNotSupported:
-		return taskmanager.ErrVersionNotSupported(response.Error.Message)
+	// Rebuild the error from the wire values rather than re-running the
+	// server-side constructors: those take a specific value (a task ID, the
+	// rejected version) and would fabricate a detail out of the human-readable
+	// message. The message the server sent is already the human-readable form.
+	code := taskmanager.ErrorCode(reason)
+	if taskmanager.SentinelForCode(code) == nil {
+		if statusCode >= 500 {
+			code = taskmanager.ErrCodeInternalError
+		} else {
+			code = taskmanager.ErrCodeInvalidParams
+		}
 	}
-	if statusCode >= 500 {
-		return taskmanager.ErrInternalError(response.Error.Message)
+	var data any
+	if taskID != "" {
+		data = fmt.Sprintf("taskId=%s", taskID)
 	}
-	return taskmanager.ErrInvalidParams(response.Error.Message)
+	return taskmanager.NewError(code, response.Error.Message, data)
 }
