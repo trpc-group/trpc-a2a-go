@@ -27,7 +27,7 @@ the runtime contract see [Server](server.md) and [Client](client.md).
 | Multi-tenant hosting with per-tenant agent cards | ✅ | One process, many agents, routed by tenant. |
 | Legacy v0.2.x wire compatibility | ✅ | `compat/v0` on the same endpoint and auth chain. |
 | Telemetry: OpenTelemetry metrics, TTFT tracking | ✅ | Pluggable meter provider and first-token policy. |
-| Cross-node `SubscribeToTask` on Redis | ✅ Opt-in | Enable `WithCrossNodeResubscribe(true)` on every replica sharing Redis. |
+| Cross-node `SubscribeToTask` on Redis | ✅ | Redis TaskManager journals Task events by default; Redis 5.0+ is required. |
 
 ## Architecture
 
@@ -120,9 +120,7 @@ retention semantics — lives with the agent-author guide in
 ## Roadmap
 
 - **gRPC transport binding** — the spec defines it alongside JSON-RPC and HTTP+JSON; this framework does not serve gRPC yet.
-- **Redis execution coordination** — cross-node `SubscribeToTask` is available,
-  but continuation, live cancel, and single-writer execution routing remain
-  node-local concerns rather than a distributed work queue.
+- **Redis execution coordination** — cross-node `SubscribeToTask` is available by default, but continuation, live cancel, and single-writer execution routing remain node-local concerns rather than a distributed work queue.
 
 ## Where to go next
 

@@ -362,7 +362,7 @@ func (p *myProcessor) ProcessMessage(
 | `TaskHandler.GetTask(taskID)` | `TaskHandle.GetTask()` —— 仅本轮的续跑快照，全新一轮时为 `nil`；任意 task 读取与 `CancellableTask.Cancel` 均已移除 |
 | `TaskHandler.GetMetadata` | 已移除（它在 v0.x 中总是返回 error）；message 的 metadata 为 `ExecContext.Message.Metadata` |
 | `taskmanager.TaskSubscriber` / `CancellableTask` | 随回调式设计一并移除 |
-| redis `NewTaskSubscriber` / `WithSubscriberSendHook` / `WithSubscriberBlockingSend` | 已移除——fan-out 由 manager 管理；Redis 跨节点 `SubscribeToTask` 可通过 `redis.WithCrossNodeResubscribe(true)` 显式开启 |
+| redis `NewTaskSubscriber` / `WithSubscriberSendHook` / `WithSubscriberBlockingSend` | 已移除——streaming 由 manager 管理；Redis `SubscribeToTask` 默认使用跨节点 Redis Stream |
 
 ### 需要注意的行为变化
 

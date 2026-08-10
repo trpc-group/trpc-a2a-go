@@ -1402,29 +1402,6 @@ func TestStorageTTL(t *testing.T) {
 	}
 }
 
-// taskChanged deep-compares Artifacts, so an append=true chunk that merges into
-// an existing artifact (growing its Parts without growing the slice) is still
-// detected — the OnResubscribe registration-race compensation depends on this.
-func TestTaskChanged_DetectsMergedArtifactChunk(t *testing.T) {
-	before := &protocol.Task{
-		Status:    protocol.TaskStatus{State: protocol.TaskStateWorking, Timestamp: "t"},
-		Artifacts: []protocol.Artifact{{ArtifactID: "a", Parts: []*protocol.Part{protocol.NewTextPart("p1")}}},
-	}
-	// Same status, same artifact count — only the merged artifact's Parts grew.
-	after := &protocol.Task{
-		Status: protocol.TaskStatus{State: protocol.TaskStateWorking, Timestamp: "t"},
-		Artifacts: []protocol.Artifact{{ArtifactID: "a", Parts: []*protocol.Part{
-			protocol.NewTextPart("p1"), protocol.NewTextPart("p2"),
-		}}},
-	}
-	if !taskChanged(before, after) {
-		t.Fatal("taskChanged must detect a same-ID append chunk that grew an artifact's Parts")
-	}
-	if taskChanged(before, before) {
-		t.Error("taskChanged must be false for identical snapshots")
-	}
-}
-
 // storeMessage is atomically idempotent by MessageID: concurrent stores (e.g.
 // from reply and status paths) leave one conversation index entry.
 func TestStoreMessage_IdempotentByMessageID(t *testing.T) {

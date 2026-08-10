@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	redisc "github.com/redis/go-redis/v9"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
@@ -125,15 +126,31 @@ func TestTaskManagerTenantDataIsolationAndTaskIndex(t *testing.T) {
 		t.Fatalf("tenant stream hash tag = %q, want %q", got, want)
 	}
 
-	subscriberA := newTaskSubscriber(taskID, 1, false)
-	manager.subMu.Lock()
-	manager.subscribers[newScopedID("tenant-a", taskID)] = []*taskSubscriber{subscriberA}
-	manager.subMu.Unlock()
-	manager.notifySubscribers("tenant-b", taskID, protocol.NewStreamResponseTask(taskB))
+	subCtx, subCancel := context.WithCancel(ctx)
+	defer subCancel()
+	subscriberB, err := manager.OnResubscribe(subCtx, protocol.TaskIDParams{Tenant: "tenant-b", ID: taskID})
+	if err != nil {
+		t.Fatalf("resubscribe tenant-b: %v", err)
+	}
+	if initial, ok := recvTimeout(t, subscriberB); !ok || initial.GetTask() == nil {
+		t.Fatalf("tenant-b initial snapshot = %+v", initial)
+	}
+	foreign := protocol.NewStreamResponseMessage(agentReply("tenant-a-only"))
+	if err := manager.appendTaskEvent(ctx, "tenant-a", taskID, foreign); err != nil {
+		t.Fatalf("append tenant-a event: %v", err)
+	}
 	select {
-	case <-subscriberA.Channel():
-		t.Fatal("tenant-b event reached tenant-a subscriber")
-	default:
+	case event, ok := <-subscriberB:
+		t.Fatalf("tenant-a event reached tenant-b subscriber: event=%+v open=%v", event, ok)
+	case <-time.After(250 * time.Millisecond):
+	}
+	local := protocol.NewStreamResponseMessage(agentReply("tenant-b-only"))
+	if err := manager.appendTaskEvent(ctx, "tenant-b", taskID, local); err != nil {
+		t.Fatalf("append tenant-b event: %v", err)
+	}
+	if event, ok := recvTimeout(t, subscriberB); !ok || event.GetMessage() == nil ||
+		event.GetMessage().Parts[0].TextContent() != "tenant-b-only" {
+		t.Fatalf("tenant-b subscriber did not receive its event: %+v", event)
 	}
 
 	liveA := &liveExecution{cancel: func() {}}

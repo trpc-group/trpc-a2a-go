@@ -296,12 +296,7 @@ tm, _ := redistm.NewTaskManager(proc, redisClient,   // note: (processor, client
 )
 ```
 
-For a multi-replica service, add `redistm.WithCrossNodeResubscribe(true)` on
-**every** replica sharing Redis. It lets `SubscribeToTask` reconnect through a
-different node by atomically storing Task updates with a per-task Redis Stream.
-It does not route continuation, live-cancel, or execution requests between
-nodes. Each task stream retains approximately the latest 10,000 events; clients
-that lag beyond that bound may miss intermediate events.
+The Redis TaskManager requires Redis 5.0 or newer and atomically stores Task updates with a per-task Redis Stream by default. This lets `SubscribeToTask` reconnect through a different replica sharing Redis without extra configuration. It does not route continuation, live-cancel, or execution requests between nodes. Each Task Stream retains approximately the latest 10,000 events; clients that lag beyond that bound may miss intermediate events. Upgrade every replica together: older TaskManager versions do not write the journal consumed by Stream-only subscribers.
 
 → [examples/redis](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis).
 Implement the `taskmanager.TaskManager` interface for a custom backend.
@@ -312,11 +307,9 @@ Retention for the stateful managers:
 | --- | --- | --- |
 | Conversations | cleaned after `ConversationTTL` idle (default 1h); capped at `MaxHistoryLength` | key TTL (default 1h), refreshed on writes |
 | Terminal tasks | **kept forever by default** (`TaskTTL` = 0) — set `memory.WithTaskTTL` in production | key TTL (default 1h, `WithExpireTime`) |
-| Suspended tasks | never collected (cleaner is terminal-only) — have clients resume or cancel them | expire with the key TTL |
+| Suspended tasks | never collected (cleaner is terminal-only) — have clients resume or cancel them | expire with the key TTL; a live execution renews its lease until it finishes or yields |
 
-There is no per-task delete API; A2A defines none. Redis live event fan-out is
-per-process by default; `WithCrossNodeResubscribe(true)` moves resubscribe
-observation to Redis when enabled consistently across replicas.
+There is no per-task delete API; A2A defines none. Redis `SubscribeToTask` observation is backed by the per-task Redis Stream; active local response pipes close when the client disconnects, the Task becomes terminal, or its Redis key expires.
 
 ## Authentication
 

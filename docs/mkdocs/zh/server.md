@@ -236,11 +236,7 @@ tm, _ := redistm.NewTaskManager(proc, redisClient,   // 注意参数序:(process
 )
 ```
 
-多副本部署时，请在共享 Redis 的**每个**副本上增加
-`redistm.WithCrossNodeResubscribe(true)`。它把 Task 更新与每任务 Redis Stream
-事件原子写入，使 `SubscribeToTask` 可经其他节点接回；它不负责跨节点路由
-continuation、live cancel 或执行请求。每个 Task Stream 约保留最新 10,000 个事件；
-落后超过该窗口的客户端可能错过中间事件。
+Redis TaskManager 要求 Redis 5.0 或更高版本，并默认将 Task 更新与每任务 Redis Stream 事件原子写入，使 `SubscribeToTask` 无需额外配置即可经其他共享 Redis 的节点接回；它不负责跨节点路由 continuation、live cancel 或执行请求。每个 Task Stream 约保留最新 10,000 个事件，落后超过该窗口的客户端可能错过中间事件。升级时必须同步更新所有副本，因为旧版 TaskManager 不会写入 Stream-only subscriber 所依赖的事件日志。
 
 → [examples/redis](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis)。实现 `taskmanager.TaskManager` 接口即可自带后端。
 
@@ -250,10 +246,9 @@ continuation、live cancel 或执行请求。每个 Task Stream 约保留最新 
 | --- | --- | --- |
 | 会话 | 闲置超 `ConversationTTL`(默认 1h)即清理;单会话上限 `MaxHistoryLength` | key TTL(默认 1h),写时续期 |
 | 终态任务 | **默认永久保留**(`TaskTTL`=0)——生产环境请设置 `memory.WithTaskTTL` | key TTL(默认 1h,`WithExpireTime`) |
-| 挂起任务 | 永不回收(清理器只收终态)——请让 client 恢复或取消它们 | 随 key TTL 过期 |
+| 挂起任务 | 永不回收(清理器只收终态)——请让 client 恢复或取消它们 | 随 key TTL 过期；活跃执行在结束或让出前会持续续租 |
 
-没有按任务的删除 API；A2A 未定义此类接口。Redis 实时事件扇出默认仍在进程内；所有副本一致开启
-`WithCrossNodeResubscribe(true)` 后，`SubscribeToTask` 的观察面由 Redis 承担。
+没有按任务的删除 API；A2A 未定义此类接口。Redis `SubscribeToTask` 的观察面由每任务 Redis Stream 承担；客户端断开、Task 进入终态或 Redis Task key 过期时，本地响应 pipe 会关闭。
 
 ## 鉴权
 
@@ -400,7 +395,7 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 | 需求 | 推荐配置 | 注意事项 |
 | --- | --- | --- |
 | 本地开发、单进程 demo | `taskmanager/memory` | 默认终态任务永久保留；生产请设置 `memory.WithTaskTTL`。 |
-| 重启后保留任务、跨节点接回订阅 | `taskmanager/redis` + `WithCrossNodeResubscribe(true)` | 所有共享 Redis 的副本都要开启；只覆盖 `SubscribeToTask`，不路由 continuation/cancel/执行。 |
+| 重启后保留任务、跨节点接回订阅 | `taskmanager/redis` | 要求 Redis 5.0+；只覆盖 `SubscribeToTask`，不路由 continuation/cancel/执行。 |
 | 用户在线等结果 | `SendMessage` 或 `SendStreamingMessage` | v1.0 `SendMessage` 默认阻塞。 |
 | 用户离线等待回调 | push notification + JWKS | 需要 agent card 声明 push 能力，服务端负责发送 webhook。 |
 | 一个 agent 一个进程 | `WithAgentCard` | 最简单，card 直接代表该 agent。 |
