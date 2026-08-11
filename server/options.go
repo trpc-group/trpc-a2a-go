@@ -84,6 +84,16 @@ func WithHTTPJSONEndpoint(basePath string) Option {
 	}
 }
 
+// WithHTTPJSONMaxBodyBytes sets the maximum HTTP+JSON request body size. The
+// default is 4 MiB. A non-positive value disables the limit; deployments that
+// accept large inline data should set an explicit value appropriate for their
+// environment.
+func WithHTTPJSONMaxBodyBytes(maxBytes int64) Option {
+	return func(s *A2AServer) {
+		s.httpJSONMaxBody = maxBytes
+	}
+}
+
 // WithCompatHandler installs a fallback handler for JSON-RPC requests whose
 // method name is not a v1.0 method (e.g. the legacy slash-delimited names
 // served by compat/v0). The handler is mounted on the same JSON-RPC endpoint

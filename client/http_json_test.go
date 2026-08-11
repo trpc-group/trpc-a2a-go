@@ -274,6 +274,7 @@ func TestHTTPJSONBindingRequestValidation(t *testing.T) {
 		name        string
 		handle      func(context.Context, *http.Client, *http.Request) (*http.Response, error)
 		result      any
+		nilResult   bool
 		expectError string
 	}{
 		{
@@ -318,7 +319,7 @@ func TestHTTPJSONBindingRequestValidation(t *testing.T) {
 			handle: func(context.Context, *http.Client, *http.Request) (*http.Response, error) {
 				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
 			},
-			result: nil,
+			nilResult: true,
 		},
 		{
 			name: "invalid content type",
@@ -366,7 +367,7 @@ func TestHTTPJSONBindingRequestValidation(t *testing.T) {
 			)
 			require.NoError(t, err)
 			result := tt.result
-			if result == nil && tt.name != "nil result" {
+			if result == nil && !tt.nilResult {
 				result = &map[string]any{}
 			}
 			err = httpJSONBinding{}.request(

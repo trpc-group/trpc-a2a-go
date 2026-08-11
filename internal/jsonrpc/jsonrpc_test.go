@@ -50,6 +50,22 @@ func TestFromTaskManagerError(t *testing.T) {
 	}
 }
 
+func TestFromTaskManagerErrorRedactsServerDetails(t *testing.T) {
+	const sensitive = "password=hunter2 at 10.0.0.7"
+	tests := []error{
+		errors.New(sensitive),
+		taskmanager.ErrInternalError(sensitive),
+		taskmanager.ErrInvalidAgentResponse(sensitive),
+	}
+	for _, testErr := range tests {
+		rpcErr := FromTaskManagerError(testErr)
+		assert.Nil(t, rpcErr.Data)
+		encoded, err := json.Marshal(rpcErr)
+		require.NoError(t, err)
+		assert.NotContains(t, string(encoded), sensitive)
+	}
+}
+
 func TestJSONRPCRequest_MarshalUnmarshal(t *testing.T) {
 	tests := []struct {
 		name       string

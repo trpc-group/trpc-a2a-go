@@ -43,6 +43,7 @@ srv.Start(":8080")   // 在 "/" 服务 JSON-RPC，并提供 well-known card
 | `WithJSONRPCEndpoint(path)` | 自定义 JSON-RPC endpoint。通常优先用 `WithBasePath`。 |
 | `WithV1JSONRPCEnabled(false)` | 关闭 v1 JSON-RPC binding；通过 `WithCompatHandler` 配置的 legacy JSON-RPC 仍保留。 |
 | `WithHTTPJSONEndpoint(path)` | 启用 HTTP+JSON，并单独设置它的 base path。 |
+| `WithHTTPJSONMaxBodyBytes(bytes)` | 设置 HTTP+JSON 请求体上限（默认 4 MiB；非正数表示关闭限制）。 |
 | `WithCompatHandler(h)` | 同时服务 legacy v0.2.x wire。 |
 | `WithMiddleware(mw...)` | 包裹 HTTP handler 链。→ [middleware context 示例](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/middleware) |
 | `WithCORSEnabled(true)` | 输出 CORS 头。 |
@@ -408,4 +409,4 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 | 兼容老客户端 | `WithCompatHandler(v0.NewJSONRPCHandler(tm))` | 必须挂在 server 内部，才能共享鉴权链。 |
 | 指标与 TTFT | `WithTelemetryMeterProvider` 或 `WithTelemetryMeterProviderOptions` | `WithFirstTokenPolicy` 可调整首 token 判定。 |
 
-当前框架实现 **JSON-RPC** 与 **HTTP+JSON（REST）**。v1 JSON-RPC 默认启用，可通过 `WithV1JSONRPCEnabled(false)` 关闭；已配置的 compat/v0 JSON-RPC handler 仍保留。HTTP+JSON 仅由 `WithHTTPJSONEndpoint` 启用；它接受 `application/a2a+json` 与兼容性的 `application/json`，响应使用 `application/a2a+json`，SSE 的 `data:` 直接承载 `StreamResponse`。**gRPC** 尚未实现。Agent Card 的 `supportedInterfaces` 是给 client 的发现元数据，不会驱动 server 挂载；请保证 card 准确声明实际启用的 endpoint，server 不会向已签名 card 增加 binding，也不会以其他方式改写它。
+当前框架实现 **JSON-RPC** 与 **HTTP+JSON（REST）**。v1 JSON-RPC 默认启用，可通过 `WithV1JSONRPCEnabled(false)` 关闭；已配置的 compat/v0 JSON-RPC handler 仍保留。HTTP+JSON 仅由 `WithHTTPJSONEndpoint` 启用；它接受 `application/a2a+json` 与兼容性的 `application/json`，响应使用 `application/a2a+json`，SSE 的 `data:` 直接承载 `StreamResponse`。HTTP+JSON 请求体默认限制为 4 MiB；部署需要其他上限时使用 `WithHTTPJSONMaxBodyBytes`。**gRPC** 尚未实现。Agent Card 的 `supportedInterfaces` 是给 client 的发现元数据，不会驱动 server 挂载；请保证 card 准确声明实际启用的 endpoint，server 不会向已签名 card 增加 binding，也不会以其他方式改写它。

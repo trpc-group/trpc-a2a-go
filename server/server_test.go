@@ -1142,6 +1142,23 @@ func TestHTTPJSONTenantCanMatchJSONRPCEndpointPrefix(t *testing.T) {
 	req.Header.Set("Content-Type", protocol.MediaTypeJSON)
 	srv.Handler().ServeHTTP(recorder, req)
 	assert.Contains(t, recorder.Body.String(), `"jsonrpc":"2.0"`)
+
+	// Compare escaped path forms consistently when an explicitly configured
+	// JSON-RPC endpoint contains a character that must be percent-encoded.
+	escapedSrv, err := NewA2AServer(
+		newMockTaskManager(),
+		WithAgentCard(defaultAgentCard()),
+		WithJSONRPCEndpoint("/rpc endpoint/"),
+		WithHTTPJSONEndpoint("/"),
+	)
+	require.NoError(t, err)
+	recorder = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/rpc%20endpoint/", bytes.NewReader([]byte(
+		`{"jsonrpc":"2.0","id":"1","method":"GetTask","params":{"id":"missing-task"}}`,
+	)))
+	req.Header.Set("Content-Type", protocol.MediaTypeJSON)
+	escapedSrv.Handler().ServeHTTP(recorder, req)
+	assert.Contains(t, recorder.Body.String(), `"jsonrpc":"2.0"`)
 }
 
 func TestV1JSONRPCBindingCanBeDisabled(t *testing.T) {

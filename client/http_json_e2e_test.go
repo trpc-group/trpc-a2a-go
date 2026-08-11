@@ -10,6 +10,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -241,8 +242,11 @@ func TestConfiguredTenantPropagatesToExtendedCard(t *testing.T) {
 // specification text uses POST and the normative proto binds GET.
 func TestHTTPJSONSubscribeFallsBackToGET(t *testing.T) {
 	var methods []string
+	var methodsMu sync.Mutex
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methodsMu.Lock()
 		methods = append(methods, r.Method)
+		methodsMu.Unlock()
 		if r.Method == http.MethodPost {
 			w.Header().Set("Allow", http.MethodGet)
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -259,15 +263,21 @@ func TestHTTPJSONSubscribeFallsBackToGET(t *testing.T) {
 	require.NoError(t, err)
 	for range events {
 	}
-	assert.Equal(t, []string{http.MethodPost, http.MethodGet}, methods)
+	methodsMu.Lock()
+	gotMethods := append([]string(nil), methods...)
+	methodsMu.Unlock()
+	assert.Equal(t, []string{http.MethodPost, http.MethodGet}, gotMethods)
 }
 
 // A task ID containing a colon must stay addressable: the client escapes it so
 // the server does not read it as an operation verb.
 func TestHTTPJSONColonInTaskIDRoundTrips(t *testing.T) {
 	var seen []string
+	var seenMu sync.Mutex
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenMu.Lock()
 		seen = append(seen, r.Method+" "+r.URL.EscapedPath())
+		seenMu.Unlock()
 		w.Header().Set("Content-Type", protocol.MediaTypeA2AJSON)
 		_, _ = w.Write([]byte(`{"id":"job:cancel","contextId":"ctx","status":{"state":"TASK_STATE_COMPLETED"}}`))
 	}))
@@ -280,5 +290,8 @@ func TestHTTPJSONColonInTaskIDRoundTrips(t *testing.T) {
 	assert.Equal(t, "job:cancel", task.ID)
 	// The colon is percent-encoded, so the server reads it as part of the ID
 	// rather than as the ":cancel" verb (see TestParseHTTPJSONRoute).
-	assert.Equal(t, []string{"GET /tasks/job%3Acancel"}, seen)
+	seenMu.Lock()
+	got := append([]string(nil), seen...)
+	seenMu.Unlock()
+	assert.Equal(t, []string{"GET /tasks/job%3Acancel"}, got)
 }

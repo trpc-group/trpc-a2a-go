@@ -37,6 +37,7 @@ srv.Start(":8080")   // serves JSON-RPC plus the well-known card
 | `WithBasePath(prefix)` | Mount under a subpath. |
 | `WithV1JSONRPCEnabled(false)` | Disable the v1 JSON-RPC binding; a `WithCompatHandler` legacy JSON-RPC handler remains available. |
 | `WithHTTPJSONEndpoint(prefix)` | Enable HTTP+JSON and set its base path independently of JSON-RPC. |
+| `WithHTTPJSONMaxBodyBytes(bytes)` | Set the HTTP+JSON request-body limit (4 MiB by default; a non-positive value disables it). |
 | `WithCompatHandler(h)` | Also serve the legacy v0.2.x wire. |
 | `WithMiddleware(mw...)` | Wrap the HTTP handler chain. → [middleware context example](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/middleware) |
 | `WithCORSEnabled(true)` | Emit CORS headers. |
@@ -467,4 +468,4 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 
 ## Capability status
 
-The framework implements both **JSON-RPC** and **HTTP+JSON (REST)**. V1 JSON-RPC is enabled by default and can be disabled with `WithV1JSONRPCEnabled(false)`; a configured compat/v0 JSON-RPC handler remains available. HTTP+JSON is enabled only by `WithHTTPJSONEndpoint`; it accepts `application/a2a+json` and compatibility `application/json`, responds with `application/a2a+json`, and emits raw `StreamResponse` objects in SSE `data:` fields. **gRPC** remains planned. Agent Card `supportedInterfaces` are client discovery metadata and do not drive server mounting; keep the card accurate for every enabled endpoint. The server does not add bindings to or otherwise rewrite signed cards.
+The framework implements both **JSON-RPC** and **HTTP+JSON (REST)**. V1 JSON-RPC is enabled by default and can be disabled with `WithV1JSONRPCEnabled(false)`; a configured compat/v0 JSON-RPC handler remains available. HTTP+JSON is enabled only by `WithHTTPJSONEndpoint`; it accepts `application/a2a+json` and compatibility `application/json`, responds with `application/a2a+json`, and emits raw `StreamResponse` objects in SSE `data:` fields. HTTP+JSON request bodies are limited to 4 MiB by default; use `WithHTTPJSONMaxBodyBytes` when a deployment needs a different limit. **gRPC** remains planned. Agent Card `supportedInterfaces` are client discovery metadata and do not drive server mounting; keep the card accurate for every enabled endpoint. The server does not add bindings to or otherwise rewrite signed cards.

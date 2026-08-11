@@ -32,6 +32,8 @@ type httpJSONRoute struct {
 	configID  string
 }
 
+const defaultHTTPJSONMaxBodyBytes int64 = 4 << 20
+
 func normalizeHTTPJSONBasePath(basePath string) string {
 	basePath = strings.TrimSpace(basePath)
 	if basePath == "" || basePath == "/" {
@@ -299,22 +301,41 @@ func validateHTTPJSONContentType(r *http.Request) error {
 	return nil
 }
 
-func decodeHTTPJSONBody(r *http.Request, target any, required bool) error {
+func (s *A2AServer) decodeHTTPJSONBody(w http.ResponseWriter, r *http.Request, target any, required bool) error {
 	if r.Body == nil {
 		if required {
 			return taskmanager.ErrInvalidParams("request body is required")
 		}
 		return nil
 	}
-	decoder := json.NewDecoder(r.Body)
+	var body io.Reader = r.Body
+	if s.httpJSONMaxBody > 0 {
+		body = http.MaxBytesReader(w, r.Body, s.httpJSONMaxBody)
+	}
+	decoder := json.NewDecoder(body)
 	if err := decoder.Decode(target); err != nil {
 		if errors.Is(err, io.EOF) && !required {
 			return nil
 		}
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return taskmanager.ErrInvalidParams(
+				fmt.Sprintf("request body exceeds %d bytes", s.httpJSONMaxBody))
+		}
 		return taskmanager.ErrInvalidParams(fmt.Sprintf("failed to parse request body: %v", err))
 	}
 	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+	err := decoder.Decode(&trailing)
+	switch {
+	case errors.Is(err, io.EOF):
+	case err != nil:
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return taskmanager.ErrInvalidParams(
+				fmt.Sprintf("request body exceeds %d bytes", s.httpJSONMaxBody))
+		}
+		return taskmanager.ErrInvalidParams(fmt.Sprintf("failed to parse request body: %v", err))
+	default:
 		return taskmanager.ErrInvalidParams("request body must contain exactly one JSON value")
 	}
 	return nil
@@ -335,7 +356,7 @@ func (s *A2AServer) handleHTTPJSONMessageSend(w http.ResponseWriter, r *http.Req
 	defer tracker.record(r.Context())
 
 	var params protocol.SendMessageParams
-	if err := decodeHTTPJSONBody(r, &params, true); err != nil {
+	if err := s.decodeHTTPJSONBody(w, r, &params, true); err != nil {
 		tracker.setError(errTypeInvalidParams)
 		s.writeHTTPJSONError(w, err, "")
 		return
@@ -370,7 +391,7 @@ func (s *A2AServer) handleHTTPJSONMessageStream(w http.ResponseWriter, r *http.R
 	tracker := newMetricsTracker(protocol.MethodMessageStream, true, s.firstTokenPolicy, s.telemetryMetrics)
 
 	var params protocol.SendMessageParams
-	if err := decodeHTTPJSONBody(r, &params, true); err != nil {
+	if err := s.decodeHTTPJSONBody(w, r, &params, true); err != nil {
 		tracker.setError(errTypeInvalidParams)
 		tracker.record(r.Context())
 		s.writeHTTPJSONError(w, err, "")
@@ -467,7 +488,7 @@ func (s *A2AServer) handleHTTPJSONTasksList(w http.ResponseWriter, r *http.Reque
 
 func (s *A2AServer) handleHTTPJSONTaskCancel(w http.ResponseWriter, r *http.Request, route httpJSONRoute) {
 	params := protocol.TaskIDParams{}
-	if err := decodeHTTPJSONBody(r, &params, false); err != nil {
+	if err := s.decodeHTTPJSONBody(w, r, &params, false); err != nil {
 		s.writeHTTPJSONError(w, err, route.taskID)
 		return
 	}
@@ -511,7 +532,7 @@ func (s *A2AServer) handleHTTPJSONTaskSubscribe(w http.ResponseWriter, r *http.R
 
 func (s *A2AServer) handleHTTPJSONPushConfigCreate(w http.ResponseWriter, r *http.Request, route httpJSONRoute) {
 	var params protocol.TaskPushNotificationConfig
-	if err := decodeHTTPJSONBody(r, &params, true); err != nil {
+	if err := s.decodeHTTPJSONBody(w, r, &params, true); err != nil {
 		s.writeHTTPJSONError(w, err, route.taskID)
 		return
 	}
@@ -526,12 +547,12 @@ func (s *A2AServer) handleHTTPJSONPushConfigCreate(w http.ResponseWriter, r *htt
 	}
 	params.TaskID = route.taskID
 	params.Tenant = tenant
-	if err := push.ValidateConfig(params); err != nil {
-		s.writeHTTPJSONError(w, taskmanager.ErrInvalidParams(err.Error()), route.taskID)
-		return
-	}
 	if !s.pushAvailableForTenant(r.Context(), tenant) {
 		s.writeHTTPJSONError(w, taskmanager.ErrPushNotificationNotSupported(), route.taskID)
+		return
+	}
+	if err := push.ValidateConfig(params); err != nil {
+		s.writeHTTPJSONError(w, taskmanager.ErrInvalidParams(err.Error()), route.taskID)
 		return
 	}
 	result, err := s.taskManager.OnPushNotificationSet(r.Context(), params)

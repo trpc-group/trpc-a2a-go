@@ -176,7 +176,15 @@ func ErrInternalError(data interface{}) *Error {
 func FromTaskManagerError(err error) *Error {
 	var taskErr *taskmanager.Error
 	if !errors.As(err, &taskErr) {
-		return ErrInternalError(err.Error())
+		return ErrInternalError(nil)
+	}
+	if taskErr.Code == taskmanager.ErrCodeInternalError ||
+		taskErr.Code == taskmanager.ErrCodeInvalidAgentResponse {
+		code := CodeInternalError
+		if taskErr.Code == taskmanager.ErrCodeInvalidAgentResponse {
+			code = CodeInvalidAgentResponse
+		}
+		return (&Error{Code: code, Message: taskErr.Message}).WithWrappedError(err)
 	}
 	code := CodeInternalError
 	switch taskErr.Code {
@@ -192,8 +200,6 @@ func FromTaskManagerError(err error) *Error {
 		code = CodeUnsupportedOperation
 	case taskmanager.ErrCodeContentTypeNotSupported:
 		code = CodeContentTypeNotSupported
-	case taskmanager.ErrCodeInvalidAgentResponse:
-		code = CodeInvalidAgentResponse
 	case taskmanager.ErrCodeAuthenticatedExtendedCardNotConfigured:
 		code = CodeAuthenticatedExtendedCardNotConfigured
 	case taskmanager.ErrCodeExtensionSupportRequired:

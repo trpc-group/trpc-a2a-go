@@ -11,6 +11,7 @@
 - Push notification config create and delete answer `200`, matching the transcoding of their Protocol Buffer definitions, instead of `201` and `204` which the reference clients reject.
 - `SubscribeToTask` retries with `GET` when a server rejects `POST`: the v1.0 specification text and the reference clients use `POST`, while the normative Protocol Buffer definition binds `GET`.
 - HTTP+JSON validation errors report the specific client-correctable cause in `error.message` (spec §11.6), while internal and invalid-agent-response details are logged and replaced by a generic heading. The REST client rebuilds errors from the wire values instead of re-running the server-side constructors.
+- HTTP+JSON request bodies are limited to 4 MiB by default to bound decoder memory use; `server.WithHTTPJSONMaxBodyBytes` changes or explicitly disables the limit.
 
 ## 2.0.0-alpha.3 (2026-07-22)
 

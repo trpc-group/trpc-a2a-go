@@ -47,6 +47,7 @@ type A2AServer struct {
 	jsonRPCEndpoint  string                  // Path for the JSON-RPC endpoint.
 	httpJSONBasePath string                  // Base path for HTTP+JSON/REST endpoints.
 	httpJSONEnabled  bool                    // Whether the HTTP+JSON binding is mounted.
+	httpJSONMaxBody  int64                   // Maximum HTTP+JSON request body size; <= 0 disables the limit.
 	agentCardPath    string                  // Path for the agent card endpoint.
 	oldAgentCardPath string                  // Path for the old agent card endpoint.
 	// tenantCards is the static tenant -> AgentCard registry (WithTenantCards).
@@ -104,6 +105,7 @@ func NewA2AServer(taskManager taskmanager.TaskManager, opts ...Option) (*A2AServ
 		v1JSONRPCEnabled: true,
 		jsonRPCEndpoint:  protocol.DefaultJSONRPCPath,
 		httpJSONBasePath: "",
+		httpJSONMaxBody:  defaultHTTPJSONMaxBodyBytes,
 		agentCardPath:    protocol.AgentCardPath,
 		oldAgentCardPath: protocol.OldAgentCardPath,
 		readTimeout:      defaultReadTimeout,
@@ -345,8 +347,9 @@ func (s *A2AServer) Handler() http.Handler {
 		// dispatcher at the wider pattern so a tenant whose name matches the
 		// JSON-RPC path prefix is still routed as HTTP+JSON. Only the exact
 		// configured endpoint is JSON-RPC.
+		escapedJSONRPCEndpoint := (&url.URL{Path: s.jsonRPCEndpoint}).EscapedPath()
 		combined := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == s.jsonRPCEndpoint {
+			if r.URL.EscapedPath() == escapedJSONRPCEndpoint {
 				jsonRPCHandler.ServeHTTP(w, r)
 				return
 			}

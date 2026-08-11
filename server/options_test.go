@@ -49,6 +49,14 @@ func TestWithV1JSONRPCEnabled(t *testing.T) {
 	assert.False(t, s.v1JSONRPCEnabled)
 }
 
+func TestWithHTTPJSONMaxBodyBytes(t *testing.T) {
+	s := &A2AServer{httpJSONMaxBody: defaultHTTPJSONMaxBodyBytes}
+	WithHTTPJSONMaxBodyBytes(1024)(s)
+	assert.Equal(t, int64(1024), s.httpJSONMaxBody)
+	WithHTTPJSONMaxBodyBytes(0)(s)
+	assert.Zero(t, s.httpJSONMaxBody)
+}
+
 func TestWithReadTimeout(t *testing.T) {
 	// Test with custom read timeout
 	timeout := 30 * time.Second

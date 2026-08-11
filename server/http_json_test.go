@@ -13,6 +13,7 @@ import (
 	"mime"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -64,6 +65,27 @@ func TestParseHTTPJSONRoute(t *testing.T) {
 			assert.Equal(t, tt.tenant, route.tenant)
 			assert.Equal(t, tt.taskID, route.taskID)
 			assert.Equal(t, tt.configID, route.configID)
+		})
+	}
+}
+
+func TestParseHTTPJSONRouteRejects(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		basePath string
+	}{
+		{name: "empty segment", path: "/tasks//task-1"},
+		{name: "outside base path", path: "/other/tasks", basePath: "/api/a2a"},
+		{name: "adjacent to base path", path: "/api/a2atasks", basePath: "/api/a2a"},
+		{name: "unknown sub-collection", path: "/tasks/task-1/unknown"},
+		{name: "too many segments", path: "/tasks/task-1/pushNotificationConfigs/config-1/extra"},
+		{name: "unknown operation", path: "/unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, ok := parseHTTPJSONRoute(tt.path, tt.basePath)
+			assert.False(t, ok)
 		})
 	}
 }
@@ -343,6 +365,10 @@ func TestHTTPJSONTaskPushAndExtendedCardRoutes(t *testing.T) {
 	assert.Equal(t, http.StatusOK, recorder.Code)
 	assert.Equal(t, protocol.MediaTypeEventStream, recorder.Header().Get("Content-Type"))
 	assert.Contains(t, recorder.Body.String(), "data:")
+	recorder = request(http.MethodGet, "/tasks/task-1:subscribe", nil)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, protocol.MediaTypeEventStream, recorder.Header().Get("Content-Type"))
+	assert.Contains(t, recorder.Body.String(), "data:")
 
 	config := protocol.TaskPushNotificationConfig{
 		ID:     "config-1",
@@ -394,6 +420,12 @@ func TestHTTPJSONValidationAndCapabilityErrors(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
 	recorder = request(http.MethodPost, "/tasks/task-1:cancel", `{invalid`)
 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	recorder = request(http.MethodPost, "/tasks/task-1:cancel", `{} trailing`)
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "failed to parse request body")
+	recorder = request(http.MethodPost, "/tasks/task-1:cancel", `{} {}`)
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "request body must contain exactly one JSON value")
 	recorder = request(http.MethodPost, "/tenant-a/tasks/task-1:cancel", `{"tenant":"tenant-b"}`)
 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
 
@@ -403,6 +435,7 @@ func TestHTTPJSONValidationAndCapabilityErrors(t *testing.T) {
 		`{"taskId":"task-1","url":"not-a-url"}`,
 	)
 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "PUSH_NOTIFICATION_NOT_SUPPORTED")
 	recorder = request(http.MethodGet, "/tasks/task-1/pushNotificationConfigs/config-1", "")
 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
 	assert.Contains(t, recorder.Body.String(), "PUSH_NOTIFICATION_NOT_SUPPORTED")
@@ -410,6 +443,32 @@ func TestHTTPJSONValidationAndCapabilityErrors(t *testing.T) {
 	recorder = request(http.MethodGet, "/extendedAgentCard", "")
 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
 	assert.Contains(t, recorder.Body.String(), "EXTENDED_AGENT_CARD_NOT_CONFIGURED")
+
+	limited, err := NewA2AServer(
+		manager,
+		WithAgentCard(defaultAgentCard()),
+		WithHTTPJSONEndpoint("/"),
+		WithHTTPJSONMaxBodyBytes(32),
+	)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/message:send", strings.NewReader(strings.Repeat(" ", 33)))
+	req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
+	recorder = httptest.NewRecorder()
+	limited.Handler().ServeHTTP(recorder, req)
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "request body exceeds 32 bytes")
+}
+
+func TestDecodeHTTPJSONBodyLimitCanBeDisabled(t *testing.T) {
+	srv := &A2AServer{httpJSONMaxBody: defaultHTTPJSONMaxBodyBytes}
+	WithHTTPJSONMaxBodyBytes(0)(srv)
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"value":"accepted"}`))
+
+	var body map[string]string
+	err := srv.decodeHTTPJSONBody(httptest.NewRecorder(), req, &body, true)
+
+	require.NoError(t, err)
+	assert.Equal(t, "accepted", body["value"])
 }
 
 func TestHTTPJSONErrorMapping(t *testing.T) {
