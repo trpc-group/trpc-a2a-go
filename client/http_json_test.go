@@ -107,7 +107,7 @@ func TestWithProtocolBindingSelectsHTTPJSON(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, protocol.ProtocolBindingHTTPJSON, client.protocolBinding)
 	assert.Equal(t, "tenant-a", client.tenant)
-	assert.Equal(t, "https://rest.example/api/", client.baseURL.String())
+	assert.Equal(t, "https://rest.example/api", client.baseURL.String())
 
 	_, err = NewA2AClient("https://rest.example/api", WithProtocolBinding("CUSTOM"))
 	require.Error(t, err)
