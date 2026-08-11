@@ -21,12 +21,11 @@ type TaskManagerOptions struct {
 	// MaxHistoryLength is the maximum number of messages to keep in conversation history.
 	MaxHistoryLength int
 
-	// TaskSubscriberBufSize is the buffer size for task subscriber channels.
+	// TaskSubscriberBufSize is the buffer size for message/stream response pipes.
 	TaskSubscriberBufSize int
 
-	// TaskSubscriberBlockingSend enables blocking send for local task subscribers
-	// and request pipes. Cross-node resubscribe tailers always use blocking send:
-	// their Redis reader can wait without blocking a task producer.
+	// TaskSubscriberBlockingSend enables blocking send for message/stream
+	// response pipes. SubscribeToTask readers always use independent backpressure.
 	TaskSubscriberBlockingSend bool
 
 	// Push configures push-notification delivery (see push.Config). Push is
@@ -34,13 +33,9 @@ type TaskManagerOptions struct {
 	// application-owned delivery.
 	Push push.Config
 
-	// CrossNodeResubscribe, when true, mirrors each task's events onto a per-task
-	// Redis stream and serves OnResubscribe by tailing that stream. This makes
-	// SubscribeToTask work across instances (a reconnect landing on a different
-	// node than the one running the task), at the cost of one XADD per event.
-	// Each task stream retains approximately the latest 10,000 events.
-	// When false (default) resubscribe is served from the in-process subscriber
-	// map only — correct for single-instance deployments.
+	// CrossNodeResubscribe is retained for source compatibility. Redis
+	// SubscribeToTask always uses Redis Streams and this value is ignored.
+	// Deprecated: cross-node resubscribe is always enabled.
 	CrossNodeResubscribe bool
 }
 
@@ -51,6 +46,7 @@ func DefaultRedisTaskManagerOptions() *TaskManagerOptions {
 		MaxHistoryLength:           defaultMaxHistoryLength,
 		TaskSubscriberBufSize:      defaultTaskSubscriberBufferSize,
 		TaskSubscriberBlockingSend: false,
+		CrossNodeResubscribe:       true,
 	}
 }
 
@@ -75,7 +71,7 @@ func WithMaxHistoryLength(length int) TaskManagerOption {
 	}
 }
 
-// WithTaskSubscriberBufferSize sets the buffer size for task subscriber channels.
+// WithTaskSubscriberBufferSize sets the buffer size for message/stream response pipes.
 func WithTaskSubscriberBufferSize(size int) TaskManagerOption {
 	return func(opts *TaskManagerOptions) {
 		if size > 0 {
@@ -84,8 +80,8 @@ func WithTaskSubscriberBufferSize(size int) TaskManagerOption {
 	}
 }
 
-// WithTaskSubscriberBlockingSend sets blocking send for local task subscribers
-// and request pipes. Cross-node resubscribe tailers always block independently.
+// WithTaskSubscriberBlockingSend sets blocking send for message/stream response
+// pipes. SubscribeToTask readers always block independently.
 func WithTaskSubscriberBlockingSend(blockingSend bool) TaskManagerOption {
 	return func(opts *TaskManagerOptions) {
 		opts.TaskSubscriberBlockingSend = blockingSend
@@ -103,14 +99,11 @@ func WithPushNotifications(cfg push.Config) TaskManagerOption {
 	}
 }
 
-// WithCrossNodeResubscribe enables cross-instance SubscribeToTask by mirroring
-// each task's events onto a per-task Redis stream. Enable it on every replica
-// sharing Redis when a resubscribe may land on a different instance than the one
-// running the task. It does not distribute execution, continuation, or cancel
-// requests between replicas. Each task stream retains approximately the latest
-// 10,000 events.
+// WithCrossNodeResubscribe is retained for source compatibility. Redis
+// SubscribeToTask always uses Redis Streams regardless of enabled.
+// Deprecated: cross-node resubscribe is always enabled.
 func WithCrossNodeResubscribe(enabled bool) TaskManagerOption {
 	return func(opts *TaskManagerOptions) {
-		opts.CrossNodeResubscribe = enabled
+		opts.CrossNodeResubscribe = true
 	}
 }

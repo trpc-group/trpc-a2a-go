@@ -190,7 +190,7 @@ channel underneath is the actual contract, shown in
 | `taskmanager.CancellableTask` (and `CancellableTask.Cancel`) | removed — cancellation is `CancelTask` cancelling the processor's `ctx` |
 | `memory.NewTaskManager(processor, opts...)` | unchanged shape |
 | `redis.NewTaskManager(...)` | `redis.NewTaskManager(processor, rdb, opts...)` — **note the argument order** `(processor, rdb)` |
-| redis `NewTaskSubscriber` / `WithSubscriberSendHook` / `WithSubscriberBlockingSend` | removed — the manager owns fan-out; Redis cross-node `SubscribeToTask` is opt-in with `redis.WithCrossNodeResubscribe(true)` |
+| redis `NewTaskSubscriber` / `WithSubscriberSendHook` / `WithSubscriberBlockingSend` | removed — the manager owns streaming; Redis `SubscribeToTask` uses a cross-node Redis Stream by default |
 
 ### Wire method names
 

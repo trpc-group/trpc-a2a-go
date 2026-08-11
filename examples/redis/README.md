@@ -160,20 +160,7 @@ Test 2: Streaming conversion with task updates
 
 ### Multiple Server Replicas
 
-When several server replicas share Redis, enable cross-node resubscribe on
-every replica:
-
-```go
-taskManager, err := redisTaskManager.NewTaskManager(
-    processor,
-    rdb,
-    redisTaskManager.WithCrossNodeResubscribe(true),
-)
-```
-
-This lets a reconnecting `SubscribeToTask` request land on a different replica.
-It does not distribute continuation, cancel, or task execution requests; those
-still require a separate execution-coordination design.
+The Redis TaskManager journals Task events in a per-task Redis Stream by default, so a reconnecting `SubscribeToTask` request may land on any replica sharing Redis. Redis 5.0 or newer is required, and all replicas must be upgraded together because older versions of the TaskManager do not write the event journal. This does not distribute continuation, cancel, or task execution requests; those still require a separate execution-coordination design.
 
 ## Command Line Options
 

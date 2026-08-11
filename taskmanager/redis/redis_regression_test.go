@@ -353,9 +353,9 @@ func TestStream_ClosesAtTerminalWithoutChannelClose(t *testing.T) {
 	waitStreamClosed(t, pipe)
 }
 
-// A resubscribe stream is dropped (removed and closed) when its client goes
-// away, so a suspended task cannot accumulate dead subscribers forever.
-func TestResubscribe_ClientDisconnectDropsSubscriber(t *testing.T) {
+// A resubscribe stream closes when its client goes away, so a suspended task
+// cannot retain a Stream tailer forever.
+func TestResubscribe_ClientDisconnectClosesTailer(t *testing.T) {
 	processor := scriptedExecutor(statusEvent(protocol.TaskStateInputRequired, agentReply("need more")))
 	manager, _ := setupTest(t, processor)
 
@@ -374,17 +374,6 @@ func TestResubscribe_ClientDisconnectDropsSubscriber(t *testing.T) {
 
 	subCancel()
 	waitStreamClosed(t, ch)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		manager.subMu.RLock()
-		left := len(manager.subscribers[newScopedID("", taskID)])
-		manager.subMu.RUnlock()
-		if left == 0 {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatal("disconnected subscriber was not removed")
 }
 
 // The request's inline push-notification config reaches the MessageProcessor via

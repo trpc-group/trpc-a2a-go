@@ -161,52 +161,6 @@ func TestTaskSubscriber_BlockingSendWedgeReleasableByClose(t *testing.T) {
 }
 
 // =============================================================================
-// FIX-C: evicted slow subscribers must have their channel closed
-// =============================================================================
-
-// A non-blocking subscriber whose buffer overflows is evicted from the map and
-// its channel must be closed, or its consumer's range loop hangs forever.
-func TestNotifySubscribers_EvictedSlowSubscriberChannelIsClosed(t *testing.T) {
-	m, _ := setupTest(t, scriptedExecutor())
-	taskID := "task-slow"
-
-	// Register a non-blocking subscriber with a tiny buffer directly.
-	sub := newTaskSubscriber(taskID, 1, false)
-	m.subMu.Lock()
-	m.subscribers[newScopedID("", taskID)] = []*taskSubscriber{sub}
-	m.subMu.Unlock()
-
-	event := protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{TaskID: taskID})
-	// First fills the buffer, second overflows and evicts the subscriber.
-	m.notifySubscribers("", taskID, event)
-	m.notifySubscribers("", taskID, event)
-
-	// The evicted subscriber's channel must be closed: draining it must end.
-	done := make(chan struct{})
-	go func() {
-		for range sub.Channel() {
-		}
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("evicted subscriber channel was never closed; consumer range loop hangs")
-	}
-	if !sub.Closed() {
-		t.Error("evicted subscriber must be marked closed")
-	}
-
-	// It must also be gone from the map.
-	m.subMu.RLock()
-	_, exists := m.subscribers[newScopedID("", taskID)]
-	m.subMu.RUnlock()
-	if exists {
-		t.Error("evicted subscriber must be removed from the map")
-	}
-}
-
-// =============================================================================
 // FIX-D: register-or-reject — a concurrent continuation is rejected
 // =============================================================================
 

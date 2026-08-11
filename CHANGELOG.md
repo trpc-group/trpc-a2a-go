@@ -13,6 +13,12 @@
 - HTTP+JSON validation errors report the specific client-correctable cause in `error.message` (spec §11.6), while internal and invalid-agent-response details are logged and replaced by a generic heading. The REST client rebuilds errors from the wire values instead of re-running the server-side constructors.
 - HTTP+JSON request bodies are limited to 4 MiB by default to bound decoder memory use; `server.WithHTTPJSONMaxBodyBytes` changes or explicitly disables the limit.
 
+### Redis TaskManager
+
+- **`SubscribeToTask` now uses Redis Streams on every Redis TaskManager.** Task events are journaled by default so a reconnect may land on any replica sharing Redis without configuration. `WithCrossNodeResubscribe` remains as a deprecated no-op for source compatibility.
+- **Redis 5.0 or newer is required.** Deployments must allow the Stream commands (`XADD`, `XRANGE`, and `XREVRANGE`), sorted-set commands (`ZADD`, `ZSCORE`, `ZINCRBY`, `ZCARD`, and `ZREMRANGEBYRANK`), and Lua commands used by the TaskManager. Upgrade all replicas together because older nodes do not write the event journal required by Stream-only subscribers.
+- Stream subscriptions use a size-one local response pipe, stop when their Task expires, and retry transient Redis read failures with bounded backoff instead of retaining stale subscribers indefinitely. Live executions renew their Task lease while silent, and event writes are idempotent across ambiguous Redis command retries.
+
 ## 2.0.0-alpha.3 (2026-07-22)
 
 This prerelease adds request-scoped stateless execution and restores Redis

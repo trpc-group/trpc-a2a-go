@@ -15,11 +15,9 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
-// taskSubscriber is an in-process event channel attached to a task. It is
-// internal machinery: the MessageProcessor contract exposes only event channels, so
-// subscribers are created by the manager for resubscribe and for the
-// message/stream request pipe. Cross-node resubscribe tailers also feed one of
-// these local channels; the subscriber itself has no distributed semantics.
+// taskSubscriber is an in-process response pipe. It adapts both the current
+// message/stream execution and a Redis Stream tailer to the TaskManager channel
+// API; it is never registered as durable or manager-global subscription state.
 type taskSubscriber struct {
 	taskID     string
 	eventQueue chan protocol.StreamResponse

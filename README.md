@@ -392,7 +392,7 @@ the native channel style recommended for new code.
 | `TaskHandler.GetTask(taskID)` | `TaskHandle.GetTask()` — this round's continuation snapshot only, `nil` on a fresh round; arbitrary-task reads and `CancellableTask.Cancel` are gone |
 | `TaskHandler.GetMetadata` | removed (it always returned an error in v0.x); message metadata is `ExecContext.Message.Metadata` |
 | `taskmanager.TaskSubscriber` / `CancellableTask` | removed with the callback design |
-| redis `NewTaskSubscriber` / `WithSubscriberSendHook` / `WithSubscriberBlockingSend` | removed — the manager owns fan-out; Redis cross-node `SubscribeToTask` is opt-in with `redis.WithCrossNodeResubscribe(true)` |
+| redis `NewTaskSubscriber` / `WithSubscriberSendHook` / `WithSubscriberBlockingSend` | removed — the manager owns streaming; Redis `SubscribeToTask` uses a cross-node Redis Stream by default |
 
 ### Behavior changes to check
 
