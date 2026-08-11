@@ -48,3 +48,16 @@ const (
 	JWKSPath           = "/.well-known/jwks.json"
 	DefaultJSONRPCPath = "/"
 )
+
+// Standard A2A protocol binding names.
+const (
+	ProtocolBindingJSONRPC  = "JSONRPC"
+	ProtocolBindingHTTPJSON = "HTTP+JSON"
+)
+
+// Standard HTTP media types used by A2A bindings.
+const (
+	MediaTypeJSON        = "application/json"
+	MediaTypeA2AJSON     = "application/a2a+json"
+	MediaTypeEventStream = "text/event-stream"
+)

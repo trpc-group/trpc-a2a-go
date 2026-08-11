@@ -14,7 +14,7 @@ AI agent 正在变成服务：报告生成器、差旅预订助手、代码评�
 - **编排 agent** 把工作分发给多个专家 agent；
 - **跨组织调用**：需要鉴权与 webhook 回调。
 
-传输层刻意保持朴素：client 先取 agent 的 **agent card** 了解其身份、技能与能力，然后走 JSON-RPC——一元调用基于 HTTP POST，流式基于 SSE。trpc-a2a-go 实现 A2A **v1.0**（legacy v0.2.x wire 由 [compat/v0](https://github.com/trpc-group/trpc-a2a-go/tree/v2/compat/v0) 层继续支持）。
+传输层刻意保持朴素：client 应用先取 agent 的 **agent card** 了解其身份、技能、能力与有序的 `supportedInterfaces`，再选择 JSON-RPC 或 HTTP+JSON，并用所选 interface 的 URL、binding、tenant 构造 client；两种绑定的流式响应都使用 SSE。trpc-a2a-go 实现 A2A **v1.0**（legacy v0.2.x wire 由 [compat/v0](https://github.com/trpc-group/trpc-a2a-go/tree/v2/compat/v0) 层继续支持）。
 
 ## 心智模型
 
@@ -90,7 +90,7 @@ agentCard := server.AgentCard{
 两个相关概念：
 
 - **扩展 card**——agent 可以在 client **鉴权之后**提供一张更丰富的 card（不想公开的技能或细节）。wire 方法是 `GetExtendedAgentCard`，Go client 方法是 `GetAuthenticatedExtendedCard`；公开 card 用 `capabilities.extendedAgentCard` 声明这一点。
-- **多传输**——`supportedInterfaces` 可列出多个绑定（JSON-RPC、gRPC、REST），在本框架里还可按租户列不同 URL；client 选它支持的第一个。
+- **多传输**——`supportedInterfaces` 可列出多个绑定（JSON-RPC、gRPC、REST），在本框架里还可按租户列不同 URL；调用方按需自行选择并构造 client。
 - **扩展（Extensions）**——URI 标识的协议扩展，agent 在 `capabilities.extensions` 中声明；client 按请求选入，agent 可把某个标为 `required`（未选入则报 `-32008`）。
 - **签名**——card 可以经 JWS 签名（`signatures`），让 client 校验它未被篡改。
 
@@ -271,7 +271,7 @@ v1.0 JSON-RPC 绑定定义的方法名如下（v0.2.x wire 用的是斜杠分隔
 | `CreateTaskPushNotificationConfig` / `Get…` / `List…` / `Delete…` | 一元 | webhook 配置 CRUD，用于离线运行。 | `tasks/pushNotificationConfig/*` |
 | `GetExtendedAgentCard` | 一元 | 鉴权后的扩展 agent card。 | `agent/getAuthenticatedExtendedCard` |
 
-v1.0 spec 定义了三种功能等价的传输绑定——JSON-RPC、gRPC、HTTP+JSON/REST——各自有绑定特定的方法命名。本框架实现 JSON-RPC 绑定（上表方法名）；agent card 的 `supportedInterfaces` 声明一个 agent 提供哪些绑定。
+v1.0 spec 定义了三种功能等价的传输绑定——JSON-RPC、gRPC、HTTP+JSON/REST——各自有绑定特定的方法命名。本框架实现 JSON-RPC 与 HTTP+JSON；agent card 的有序 `supportedInterfaces` 声明一个 agent 提供哪些绑定及 endpoint URL，gRPC 仍在规划中。
 
 ### 请求配置
 
@@ -290,21 +290,21 @@ v1.0 spec 定义了三种功能等价的传输绑定——JSON-RPC、gRPC、HTTP
 
 > **v0.2.x 注**：老 wire 的默认值恰好*相反*——`blocking` 可选且缺席意味着"立即应答"。v1.0 把默认翻转了。compat 层为 legacy 客户端保留老默认；主动迁移的客户端必须显式选择（见[从 v0.x 迁移](migration.md)）。
 
-### 错误码
+### 错误映射
 
-标准 JSON-RPC 码适用（`-32700` 解析错误、`-32600` 无效请求、`-32601` 方法不存在、`-32602` 参数无效、`-32603` 内部错误），另加 A2A 专用区间：
+标准 JSON-RPC 码适用（`-32700` 解析错误、`-32600` 无效请求、`-32601` 方法不存在、`-32602` 参数无效、`-32603` 内部错误）。A2A 专用失败按 binding 映射；HTTP+JSON 返回 `google.rpc.Status` JSON body，并用 `google.rpc.ErrorInfo` 区分共享同一 HTTP status 的失败：
 
-| 码 | 含义 |
-| --- | --- |
-| `-32001` | 任务未找到 |
-| `-32002` | 任务不可取消（已终态） |
-| `-32003` | 不支持推送通知 |
-| `-32004` | 不支持该操作 |
-| `-32005` | 内容类型不兼容 |
-| `-32006` | agent 响应无效 |
-| `-32007` | 未配置扩展 agent card |
-| `-32008` | client 未选入某个必需的 extension |
-| `-32009` | 请求的 A2A 协议版本不受支持 |
+| 含义 | JSON-RPC 码 | HTTP status |
+| --- | --- | --- |
+| 任务未找到 | `-32001` | `404` |
+| 任务不可取消（已终态） | `-32002` | `400` |
+| 不支持推送通知 | `-32003` | `400` |
+| 不支持该操作 | `-32004` | `400` |
+| 内容类型不兼容 | `-32005` | `400` |
+| agent 响应无效 | `-32006` | `500` |
+| 未配置扩展 agent card | `-32007` | `400` |
+| client 未选入某个必需的 extension | `-32008` | `400` |
+| 请求的 A2A 协议版本不受支持 | `-32009` | `400` |
 
 ### 典型事件范式
 

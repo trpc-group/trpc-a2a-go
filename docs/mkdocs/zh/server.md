@@ -26,7 +26,7 @@ import (
 
 tm, _ := memory.NewTaskManager(&myProcessor{})
 srv, _ := server.NewA2AServer(tm, server.WithAgentCard(agentCard))
-srv.Start(":8080")   // 在 "/" 服务 JSON-RPC，在 /.well-known/agent-card.json 服务 card
+srv.Start(":8080")   // 在 "/" 服务 JSON-RPC，并提供 well-known card
 ```
 
 `NewA2AServer` 接收函数式 option:
@@ -36,11 +36,14 @@ srv.Start(":8080")   // 在 "/" 服务 JSON-RPC，在 /.well-known/agent-card.js
 | `WithAgentCard(card)` | 公开默认 agent card。单 agent server 必填；多租户 server 可作为默认目录 card。 |
 | `WithTenantCard(tenant, card)` / `WithTenantCardProvider(fn)` | 注册按租户解析的 card，多租户时使用。 |
 | `WithAuthenticatedExtendedCardHandler(fn)` | 开启鉴权后的 extended agent card。 |
-| `WithAuthProvider(p)` | 要求 JSON-RPC 请求鉴权。 |
+| `WithAuthProvider(p)` | 要求 JSON-RPC 与 HTTP+JSON 请求鉴权。 |
 | `WithPushNotificationJWKSHandler(handler)` | 发布 push sender 的验证公钥。`SignedSender` 传 `sender.JWKSHandler()`，也可传自定义 `http.Handler`。 |
 | `WithJWKSEndpoint(false, "")` | 公钥由别处发布时关闭内置 JWKS route；传非空 path 可修改该 route。 |
 | `WithBasePath(prefix)` | 挂载到子路径。 |
 | `WithJSONRPCEndpoint(path)` | 自定义 JSON-RPC endpoint。通常优先用 `WithBasePath`。 |
+| `WithV1JSONRPCEnabled(false)` | 关闭 v1 JSON-RPC binding；通过 `WithCompatHandler` 配置的 legacy JSON-RPC 仍保留。 |
+| `WithHTTPJSONEndpoint(path)` | 启用 HTTP+JSON，并单独设置它的 base path。 |
+| `WithHTTPJSONMaxBodyBytes(bytes)` | 设置 HTTP+JSON 请求体上限（默认 4 MiB；非正数表示关闭限制）。 |
 | `WithCompatHandler(h)` | 同时服务 legacy v0.2.x wire。 |
 | `WithMiddleware(mw...)` | 包裹 HTTP handler 链。→ [middleware context 示例](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/middleware) |
 | `WithCORSEnabled(true)` | 输出 CORS 头。 |
@@ -322,20 +325,22 @@ srv, _ := server.NewA2AServer(tm,
 // 在 ProcessMessage 里:switch ec.Tenant { … }
 ```
 
+JSON-RPC 下 `tenant` 放在 `params` 里；HTTP+JSON 下走 `/{tenant}/…` 路径前缀——规范的 Protocol Buffer 定义为每个 operation 都绑定了这个路径，POST 类操作的请求体同时也带 `tenant` 字段。服务端另外也接受 `tenant` query 参数。
+
 纯多租户 server 可以不提供默认 `WithAgentCard`；此时不带 `?tenant=` 获取 card 会返回 404。若需要一个目录型默认 card，再额外传 `WithAgentCard(card)`。
 
 → [examples/tenant](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/tenant)。
 
 ## 子路径部署
 
-把整个 server 挂到路径前缀下，比如放在网关后面。推荐显式使用 `WithBasePath`，它会同时调整 agent card、JSON-RPC 和 JWKS endpoint：
+把整个 server 挂到路径前缀下，比如放在网关后面。使用 `WithBasePath`，它会同时调整 agent card、JSON-RPC、已启用的 HTTP+JSON 和 JWKS endpoint：
 
 ```go
 srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
-    server.WithBasePath("/api/v1/agent"))   // card + JSON-RPC 位于 /api/v1/agent/…
+    server.WithBasePath("/api/v1/agent"))   // card + 已启用的 binding 位于 /api/v1/agent/…
 ```
 
-如果没有设置 `WithBasePath`，server 会尝试从 `agentCard.URL` 的 path 自动推导 base path；显式 `WithBasePath` 的优先级更高，适合外部 URL 和内部路由不一致的网关场景。
+未设置 `WithBasePath` 时保持根路径默认值。Agent Card 的 URL / `supportedInterfaces` 只用于 client 发现，不会推导 listen path。
 
 → [examples/subpath](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/subpath)。
 
@@ -348,6 +353,17 @@ import v0 "trpc.group/trpc-go/trpc-a2a-go/v2/compat/v0"
 
 srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
     server.WithCompatHandler(v0.NewJSONRPCHandler(tm)))
+```
+
+如果 v1 只暴露 HTTP+JSON，而 JSON-RPC 只用于 legacy client，可以显式关闭 v1 JSON-RPC：
+
+```go
+srv, _ := server.NewA2AServer(tm,
+    server.WithAgentCard(card),
+    server.WithHTTPJSONEndpoint("/"),
+    server.WithV1JSONRPCEnabled(false),
+    server.WithCompatHandler(v0.NewJSONRPCHandler(tm)),
+)
 ```
 
 → [examples/compat](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/compat)。
@@ -389,8 +405,8 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 | 用户离线等待回调 | push notification + JWKS | 需要 agent card 声明 push 能力，服务端负责发送 webhook。 |
 | 一个 agent 一个进程 | `WithAgentCard` | 最简单，card 直接代表该 agent。 |
 | 一个进程多个 agent | `WithTenantCard` / `WithTenantCardProvider` | 请求体带 `tenant`，card 用 `?tenant=` 获取。 |
-| 网关或统一前缀部署 | `WithBasePath` | 显式配置优先于从 `agentCard.URL` 推导。 |
+| 网关或统一前缀部署 | `WithBasePath` | 显式配置 listen 前缀；与 card 广告 URL 解耦。 |
 | 兼容老客户端 | `WithCompatHandler(v0.NewJSONRPCHandler(tm))` | 必须挂在 server 内部，才能共享鉴权链。 |
 | 指标与 TTFT | `WithTelemetryMeterProvider` 或 `WithTelemetryMeterProviderOptions` | `WithFirstTokenPolicy` 可调整首 token 判定。 |
 
-当前框架服务 **JSON-RPC** 传输绑定。A2A v1.0 spec 还定义了 **gRPC** 与 **HTTP+JSON（REST）** 绑定，当前尚未实现。见 [框架概览](overview.md)。
+当前框架实现 **JSON-RPC** 与 **HTTP+JSON（REST）**。v1 JSON-RPC 默认启用，可通过 `WithV1JSONRPCEnabled(false)` 关闭；已配置的 compat/v0 JSON-RPC handler 仍保留。HTTP+JSON 仅由 `WithHTTPJSONEndpoint` 启用；它接受 `application/a2a+json` 与兼容性的 `application/json`，响应使用 `application/a2a+json`，SSE 的 `data:` 直接承载 `StreamResponse`。HTTP+JSON 请求体默认限制为 4 MiB；部署需要其他上限时使用 `WithHTTPJSONMaxBodyBytes`。**gRPC** 尚未实现。Agent Card 的 `supportedInterfaces` 是给 client 的发现元数据，不会驱动 server 挂载；请保证 card 准确声明实际启用的 endpoint，server 不会向已签名 card 增加 binding，也不会以其他方式改写它。

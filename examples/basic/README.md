@@ -25,6 +25,9 @@ go run ./server
 
 # Or choose another address.
 go run ./server -host 0.0.0.0 -port 9000
+
+# JSON-RPC only (HTTP+JSON is on by default).
+go run ./server -http-json=false
 ```
 
 In another shell, run the interactive client:
@@ -34,6 +37,9 @@ go run ./client -host localhost:8080
 
 # Consume ordinary messages through message/stream.
 go run ./client -host localhost:8080 -stream
+
+# Use JSON-RPC instead of HTTP+JSON (default is HTTP+JSON).
+go run ./client -host localhost:8080 -http-json=false
 ```
 
 Useful REPL commands: `/help`, `/long-task`, `/async-long-task`, `/gettask`,

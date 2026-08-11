@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
@@ -250,7 +249,7 @@ func (m *TaskManager) prepareExecConfiguration(
 		pushConfig.ID = taskID
 	}
 	if err := push.ValidateConfig(pushConfig); err != nil {
-		return nil, nil, jsonrpc.ErrInvalidParams(err.Error())
+		return nil, nil, taskmanager.ErrInvalidParams(err.Error())
 	}
 	if continuation {
 		stored, err := m.pushStore.save(pushConfig)
@@ -306,14 +305,14 @@ func (m *TaskManager) resolveContinuation(tenant string, message *protocol.Messa
 	}
 	if isFinalState(stored.Status.State) {
 		// A terminal task is immutable: reject without invoking the MessageProcessor.
-		return nil, jsonrpc.ErrInvalidParams(
+		return nil, taskmanager.ErrInvalidParams(
 			fmt.Sprintf("task %s is in terminal state %s", taskID, stored.Status.State))
 	}
 	if message.ContextID != nil && *message.ContextID != "" && *message.ContextID != stored.ContextID {
 		// A continuation must stay in the task's own conversation: a foreign
 		// contextId would resolve the wrong ec.History and contradict the
 		// task snapshot's ContextID.
-		return nil, jsonrpc.ErrInvalidParams(fmt.Sprintf("message contextId does not match task %s context", taskID))
+		return nil, taskmanager.ErrInvalidParams(fmt.Sprintf("message contextId does not match task %s context", taskID))
 	}
 	return copyTask(stored), nil
 }
@@ -374,7 +373,7 @@ func (m *TaskManager) startExecution(
 	if events == nil {
 		m.releaseExecution(ec.Tenant, ec.TaskID, exec)
 		cancel()
-		return nil, jsonrpc.ErrInternalError("processor returned nil channel")
+		return nil, taskmanager.ErrInternalError("processor returned nil channel")
 	}
 
 	eng := &engine{
@@ -406,7 +405,7 @@ func (m *TaskManager) registerExecution(
 		m.execMu.Lock()
 		if m.closed {
 			m.execMu.Unlock()
-			return jsonrpc.ErrInternalError("task manager is closed")
+			return taskmanager.ErrInternalError("task manager is closed")
 		}
 		current, exists := m.executions[key]
 		if !exists {
@@ -420,7 +419,7 @@ func (m *TaskManager) registerExecution(
 		yieldDone := current.yieldDone
 		m.execMu.Unlock()
 		if yieldDone == nil {
-			return jsonrpc.ErrInvalidParams(
+			return taskmanager.ErrInvalidParams(
 				fmt.Sprintf("task %s already has an active execution", taskID))
 		}
 		select {
@@ -1031,7 +1030,7 @@ func (m *TaskManager) buildSendResponse(
 	if message != nil {
 		return protocol.NewSendMessageResponseMessage(message), nil
 	}
-	return nil, jsonrpc.ErrInternalError("processor produced no result")
+	return nil, taskmanager.ErrInternalError("processor produced no result")
 }
 
 // historyLengthFromConfig extracts the response historyLength, nil-safe.

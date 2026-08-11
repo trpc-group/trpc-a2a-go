@@ -23,6 +23,25 @@ type HTTPReqHandler interface {
 	Handle(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error)
 }
 
+// WithProtocolBinding selects the protocol binding used with the URL passed to
+// NewA2AClient. Supported values are protocol.ProtocolBindingJSONRPC and
+// protocol.ProtocolBindingHTTPJSON.
+func WithProtocolBinding(binding string) Option {
+	return func(c *A2AClient) {
+		c.protocolBinding = binding
+	}
+}
+
+// WithTenant configures the tenant advertised by the selected AgentInterface.
+// The client adds it to every A2A request and rejects a conflicting per-request
+// tenant. Callers that select an interface from an Agent Card should pass that
+// interface's Tenant value here.
+func WithTenant(tenant string) Option {
+	return func(c *A2AClient) {
+		c.tenant = tenant
+	}
+}
+
 // WithHTTPClient sets a custom http.Client for the A2AClient.
 func WithHTTPClient(client *http.Client) Option {
 	return func(c *A2AClient) {

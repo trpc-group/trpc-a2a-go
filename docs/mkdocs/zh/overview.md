@@ -6,7 +6,7 @@ tRPC-A2A-Go 是 A2A（Agent-to-Agent）协议 v1.0 的 Go 实现。它同时提�
 
 ## 适合什么场景
 
-- **把已有 Go agent 接入 A2A 生态**：定义 agent card，实现一个 `MessageProcessor`，框架负责 JSON-RPC 与 SSE。
+- **把已有 Go agent 接入 A2A 生态**：定义 agent card，实现一个 `MessageProcessor`，框架负责 JSON-RPC、HTTP+JSON 与 SSE。
 - **调用远端 agent**：发现 agent card 后，用同一个 client 支持阻塞调用、立即返回、实时流式和断线后订阅。
 - **长任务与多轮任务**：任务可查询、可取消、可恢复；`input-required` / `auth-required` 用于等待用户补充。
 - **生产化托管**：内置 memory / Redis 存储、JWT / API key / OAuth2、webhook 推送、多租户、子路径部署和 OpenTelemetry 指标。
@@ -17,8 +17,9 @@ tRPC-A2A-Go 是 A2A（Agent-to-Agent）协议 v1.0 的 Go 实现。它同时提�
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
 | A2A v1.0 协议对象与任务生命周期 | 支持 | `Message`、`Task`、状态事件、artifact 事件和 `Task \| Message` 结果 union。 |
-| JSON-RPC 传输绑定 | 支持 | HTTP POST 处理一元方法，SSE 处理流式方法。 |
-| gRPC / HTTP+JSON（REST）传输绑定 | 规划中 | A2A v1.0 spec 已定义；当前实现只服务 JSON-RPC。 |
+| JSON-RPC 传输绑定 | 支持 | 使用 `application/json` 与 JSON-RPC envelope；流式响应使用 SSE。 |
+| HTTP+JSON（REST）传输绑定 | 支持 | 使用 REST 路由、`application/a2a+json`、直接 JSON 响应与 raw SSE data。 |
+| gRPC 传输绑定 | 规划中 | A2A v1.0 spec 已定义，当前尚未实现。 |
 | 一份 processor 服务一元与流式 | 支持 | 同一个 `ProcessMessage` 同时服务 `SendMessage` 与 `SendStreamingMessage`。 |
 | 四种消费模式 | 支持 | 阻塞 send、`returnImmediately`、实时流式、`SubscribeToTask` / Go `ResubscribeTask`。 |
 | Stateless 请求内执行 | 支持 | 可返回直接 Message 或临时 Task，不保存任何状态或会话历史。 |
@@ -45,7 +46,7 @@ flowchart TB
         direction TB
         AUTH["鉴权链"]
         CARD["agent card / extended card"]
-        RPC["JSON-RPC + SSE 分发"]
+        RPC["JSON-RPC / HTTP+JSON + SSE 分发"]
         COMPAT["compat/v0 handler"]
     end
     TM["TaskManager<br/>stateless / memory / redis / 自定义"]
@@ -63,7 +64,7 @@ flowchart TB
 
 三层职责是固定的：
 
-- **`server`** 终结 wire 层：鉴权、提供 agent card、分发 JSON-RPC 方法和 SSE 流，也可以把 `compat/v0` 挂在同一端点里。
+- **`server`** 终结 wire 层：鉴权、提供 agent card、分发 JSON-RPC 与 HTTP+JSON 操作和 SSE 流，也可以把 `compat/v0` 挂在同一端点里。
 - **`TaskManager`** 决定执行策略，并按需持有状态：stateless 在请求内派生直接 Message 或临时 Task，不留存状态；memory 与 Redis 负责持久化事件、维护会话历史、取消、留存和订阅者扇出。
 - **`MessageProcessor`** 是你的 agent：它读取一份只读的 `ExecContext`，返回一个事件 channel。
 
@@ -85,7 +86,7 @@ sequenceDiagram
     P-->>TM: <-chan events（Message / status / artifact）
     Note over TM: memory/Redis 持久化任务事件；<br/>stateless 只在请求内应用事件
     TM-->>Server: Task、Message 或实时事件流
-    Server-->>Client: JSON-RPC 结果 / SSE 帧
+    Server-->>Client: binding 对应的结果 / SSE 帧
 ```
 
 核心思想只有一句：**agent 发事件，框架从事件流派生所有响应形状。**你的代码不需要判断这次是同步还是流式；`SendMessage` 默认等到终态或挂起态再返回，`SendStreamingMessage` 实时转发同一批事件。推荐先用 `TaskHandle` 写同步风格，确实需要控制底层事件字段时再返回裸 channel。
@@ -101,7 +102,7 @@ sequenceDiagram
 
 ## 当前边界
 
-- 当前只实现 JSON-RPC 传输绑定；gRPC 和 HTTP+JSON（REST）还没有落地。
+- 当前实现 JSON-RPC 与 HTTP+JSON（REST）传输绑定；gRPC 尚未落地。
 - Redis 后端可选择把 Task 事件写入 Redis Stream，使 `SubscribeToTask` 能跨节点接回；continuation、live cancel 和执行 single-writer 仍是节点本地能力，并非分布式工作队列。
 - A2A 没有定义“删除任务”API；生产环境需要通过 TTL 控制终态任务留存。
 

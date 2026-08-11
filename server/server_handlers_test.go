@@ -481,7 +481,7 @@ func TestA2AServer_Resubscribe(t *testing.T) {
 
 		assert.NotNil(t, resp.Error, "Should have an error")
 		assert.Nil(t, resp.Result, "Should not have a result")
-		assert.Equal(t, taskmanager.ErrCodeTaskNotFound, resp.Error.Code)
+		assert.Equal(t, jsonrpc.CodeTaskNotFound, resp.Error.Code)
 	})
 }
 

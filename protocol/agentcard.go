@@ -86,7 +86,7 @@ func (c *AgentCard) NormalizeInterfaces() {
 	if len(c.SupportedInterfaces) > 0 || c.URL == "" {
 		return
 	}
-	binding := "JSONRPC"
+	binding := ProtocolBindingJSONRPC
 	if c.PreferredTransport != nil && *c.PreferredTransport != "" {
 		binding = *c.PreferredTransport
 	}

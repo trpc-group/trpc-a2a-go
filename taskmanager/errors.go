@@ -11,170 +11,240 @@ import (
 	"errors"
 	"fmt"
 
-	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
-// JSON-RPC standard error codes
+// ErrorCode identifies a binding-neutral A2A operation error. Protocol
+// adapters map these codes to JSON-RPC codes, HTTP statuses, or gRPC statuses.
+type ErrorCode string
+
+// ErrCodeInvalidParams and the remaining values identify binding-neutral A2A operation errors.
 const (
-	ErrCodeJSONParse      int = -32700 // Invalid JSON was received by the server
-	ErrCodeInvalidRequest int = -32600 // The JSON sent is not a valid Request object
-	ErrCodeMethodNotFound int = -32601 // The method does not exist or is not available
-	ErrCodeInvalidParams  int = -32602 // Invalid method parameter(s)
-	ErrCodeInternalError  int = -32603 // Internal JSON-RPC error
+	ErrCodeInvalidParams                          ErrorCode = "INVALID_PARAMS"
+	ErrCodeInternalError                          ErrorCode = "INTERNAL_ERROR"
+	ErrCodeTaskNotFound                           ErrorCode = "TASK_NOT_FOUND"
+	ErrCodeTaskNotCancelable                      ErrorCode = "TASK_NOT_CANCELABLE"
+	ErrCodePushNotificationNotSupported           ErrorCode = "PUSH_NOTIFICATION_NOT_SUPPORTED"
+	ErrCodeUnsupportedOperation                   ErrorCode = "UNSUPPORTED_OPERATION"
+	ErrCodeContentTypeNotSupported                ErrorCode = "CONTENT_TYPE_NOT_SUPPORTED"
+	ErrCodeInvalidAgentResponse                   ErrorCode = "INVALID_AGENT_RESPONSE"
+	ErrCodeAuthenticatedExtendedCardNotConfigured ErrorCode = "EXTENDED_AGENT_CARD_NOT_CONFIGURED"
+	ErrCodeExtensionSupportRequired               ErrorCode = "EXTENSION_SUPPORT_REQUIRED"
+	ErrCodeVersionNotSupported                    ErrorCode = "VERSION_NOT_SUPPORTED"
 )
 
-// Custom JSON-RPC error codes specific to the A2A specification
+// Deprecated JSON-RPC error codes retained for source compatibility. Protocol
+// adapters own transport-specific error mapping; TaskManager implementations
+// should return ErrInvalidParams or ErrInternalError instead.
 const (
-	ErrCodeTaskNotFound                           int = -32001 // Task not found
-	ErrCodeTaskNotCancelable                      int = -32002 // Task cannot be canceled
-	ErrCodePushNotificationNotSupported           int = -32003 // Push Notification is not supported
-	ErrCodeUnsupportedOperation                   int = -32004 // This operation is not supported
-	ErrCodeContentTypeNotSupported                int = -32005 // Incompatible content types
-	ErrCodeInvalidAgentResponse                   int = -32006 // Invalid agent response
-	ErrCodeAuthenticatedExtendedCardNotConfigured int = -32007 // Authenticated extended card not configured
-	ErrCodeExtensionSupportRequired               int = -32008 // A required extension was not opted into by the client
-	ErrCodeVersionNotSupported                    int = -32009 // The requested A2A protocol version is not supported
+	ErrCodeJSONParse      int = -32700
+	ErrCodeInvalidRequest int = -32600
+	ErrCodeMethodNotFound int = -32601
 )
 
-// ErrCodePushNotificationNotConfigured is deprecated: Use ErrCodePushNotificationNotSupported instead
+// ErrCodePushNotificationNotConfigured is deprecated: Use
+// ErrCodePushNotificationNotSupported instead.
 const ErrCodePushNotificationNotConfigured int = -32003
 
-// Sentinel errors for type checking with errors.Is()
+// Error is the binding-neutral error returned by TaskManager implementations.
+// Data carries optional diagnostic context for protocol adapters and logs.
+type Error struct {
+	Code    ErrorCode
+	Message string
+	Data    any
+	cause   error
+}
+
+// Error implements the standard error interface. A string Data is appended so
+// the diagnostic detail survives logging and %v formatting: the constructors
+// put the generic A2A wording in Message and the specific cause in Data.
+func (e *Error) Error() string {
+	if e == nil {
+		return "<nil taskmanager error>"
+	}
+	if detail, ok := e.Data.(string); ok && detail != "" {
+		return fmt.Sprintf("a2a error %s: %s: %s", e.Code, e.Message, detail)
+	}
+	return fmt.Sprintf("a2a error %s: %s", e.Code, e.Message)
+}
+
+// Unwrap exposes the stable sentinel associated with this error.
+func (e *Error) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func newError(code ErrorCode, message string, data any, cause error) *Error {
+	return &Error{Code: code, Message: message, Data: data, cause: cause}
+}
+
+// NewError builds an error for an already-known code, attaching the sentinel
+// that errors.Is matches. Protocol adapters use it to rebuild the semantic
+// error carried by a wire response; the constructors below remain the way to
+// raise one. An unrecognized code yields an error with no sentinel.
+func NewError(code ErrorCode, message string, data any) *Error {
+	return newError(code, message, data, sentinelForCode(code))
+}
+
+// SentinelForCode reports the sentinel associated with code, or nil when the
+// code is not one of the standard A2A errors.
+func SentinelForCode(code ErrorCode) error { return sentinelForCode(code) }
+
+func sentinelForCode(code ErrorCode) error {
+	switch code {
+	case ErrCodeInvalidParams:
+		return ErrInvalidParamsSentinel
+	case ErrCodeInternalError:
+		return ErrInternalErrorSentinel
+	case ErrCodeTaskNotFound:
+		return ErrTaskNotFoundSentinel
+	case ErrCodeTaskNotCancelable:
+		return ErrTaskNotCancelableSentinel
+	case ErrCodePushNotificationNotSupported:
+		return ErrPushNotificationNotSupportedSentinel
+	case ErrCodeUnsupportedOperation:
+		return ErrUnsupportedOperationSentinel
+	case ErrCodeContentTypeNotSupported:
+		return ErrContentTypeNotSupportedSentinel
+	case ErrCodeInvalidAgentResponse:
+		return ErrInvalidAgentResponseSentinel
+	case ErrCodeAuthenticatedExtendedCardNotConfigured:
+		return ErrAuthenticatedExtendedCardNotConfiguredSentinel
+	case ErrCodeExtensionSupportRequired:
+		return ErrExtensionSupportRequiredSentinel
+	case ErrCodeVersionNotSupported:
+		return ErrVersionNotSupportedSentinel
+	default:
+		return nil
+	}
+}
+
+// Sentinel errors for type checking with errors.Is().
 var (
-	// ErrTaskNotFoundSentinel is a sentinel error for task not found
-	ErrTaskNotFoundSentinel = errors.New("task not found")
-	// ErrTaskNotCancelableSentinel is a sentinel error for task not cancelable
-	ErrTaskNotCancelableSentinel = errors.New("task not cancelable")
-	// ErrPushNotificationNotSupportedSentinel is a sentinel error for push notification not supported
-	ErrPushNotificationNotSupportedSentinel = errors.New("push notification not supported")
-	// ErrUnsupportedOperationSentinel is a sentinel error for unsupported operation
-	ErrUnsupportedOperationSentinel = errors.New("unsupported operation")
-	// ErrContentTypeNotSupportedSentinel is a sentinel error for content type not supported
-	ErrContentTypeNotSupportedSentinel = errors.New("content type not supported")
-	// ErrInvalidAgentResponseSentinel is a sentinel error for invalid agent response
-	ErrInvalidAgentResponseSentinel = errors.New("invalid agent response")
-	// ErrAuthenticatedExtendedCardNotConfiguredSentinel is a sentinel error for authenticated extended card not configured
+	ErrInvalidParamsSentinel                          = errors.New("invalid params")
+	ErrInternalErrorSentinel                          = errors.New("internal error")
+	ErrTaskNotFoundSentinel                           = errors.New("task not found")
+	ErrTaskNotCancelableSentinel                      = errors.New("task not cancelable")
+	ErrPushNotificationNotSupportedSentinel           = errors.New("push notification not supported")
+	ErrUnsupportedOperationSentinel                   = errors.New("unsupported operation")
+	ErrContentTypeNotSupportedSentinel                = errors.New("content type not supported")
+	ErrInvalidAgentResponseSentinel                   = errors.New("invalid agent response")
 	ErrAuthenticatedExtendedCardNotConfiguredSentinel = errors.New("authenticated extended card not configured")
-	// ErrExtensionSupportRequiredSentinel is a sentinel error for a required extension not opted into
-	ErrExtensionSupportRequiredSentinel = errors.New("extension support required")
-	// ErrVersionNotSupportedSentinel is a sentinel error for an unsupported A2A protocol version
-	ErrVersionNotSupportedSentinel = errors.New("version not supported")
-	// ErrPushConfigNotFoundSentinel is a sentinel error for a missing push notification config
-	ErrPushConfigNotFoundSentinel = errors.New("push notification config not found")
+	ErrExtensionSupportRequiredSentinel               = errors.New("extension support required")
+	ErrVersionNotSupportedSentinel                    = errors.New("version not supported")
+	ErrPushConfigNotFoundSentinel                     = errors.New("push notification config not found")
 )
 
-// A2A specific error functions
-
-// ErrTaskNotFound creates a JSON-RPC error for task not found.
-// The returned error wraps ErrTaskNotFoundSentinel for use with errors.Is().
-func ErrTaskNotFound(taskID string) *jsonrpc.Error {
-	return (&jsonrpc.Error{
-		Code:    ErrCodeTaskNotFound,
-		Message: "Task not found",
-		Data:    fmt.Sprintf("Task with ID '%s' was not found.", taskID),
-	}).WithWrappedError(ErrTaskNotFoundSentinel)
+// ErrTaskNotFound creates an A2A task-not-found error.
+func ErrTaskNotFound(taskID string) *Error {
+	return newError(
+		ErrCodeTaskNotFound,
+		"Task not found",
+		fmt.Sprintf("Task with ID '%s' was not found.", taskID),
+		ErrTaskNotFoundSentinel,
+	)
 }
 
-// ErrTaskNotCancelable creates a JSON-RPC error for task that cannot be canceled.
-// The returned error wraps ErrTaskNotCancelableSentinel for use with errors.Is().
-func ErrTaskNotCancelable(taskID string, state protocol.TaskState) *jsonrpc.Error {
-	return (&jsonrpc.Error{
-		Code:    ErrCodeTaskNotCancelable,
-		Message: "Task cannot be canceled",
-		Data:    fmt.Sprintf("Task '%s' is in state '%s' and cannot be canceled", taskID, state),
-	}).WithWrappedError(ErrTaskNotCancelableSentinel)
+// ErrTaskNotCancelable creates an A2A task-not-cancelable error.
+func ErrTaskNotCancelable(taskID string, state protocol.TaskState) *Error {
+	return newError(
+		ErrCodeTaskNotCancelable,
+		"Task cannot be canceled",
+		fmt.Sprintf("Task '%s' is in state '%s' and cannot be canceled", taskID, state),
+		ErrTaskNotCancelableSentinel,
+	)
 }
 
-// ErrPushNotificationNotSupported creates a JSON-RPC error for unsupported push notifications.
-// The returned error wraps ErrPushNotificationNotSupportedSentinel for use with errors.Is().
-func ErrPushNotificationNotSupported() *jsonrpc.Error {
-	return (&jsonrpc.Error{
-		Code:    ErrCodePushNotificationNotSupported,
-		Message: "Push Notification is not supported",
-		Data:    "This agent does not support push notifications",
-	}).WithWrappedError(ErrPushNotificationNotSupportedSentinel)
+// ErrPushNotificationNotSupported creates an unsupported-push error.
+func ErrPushNotificationNotSupported() *Error {
+	return newError(
+		ErrCodePushNotificationNotSupported,
+		"Push Notification is not supported",
+		"This agent does not support push notifications",
+		ErrPushNotificationNotSupportedSentinel,
+	)
 }
 
 // ErrPushConfigNotFound creates the TaskNotFoundError required by the A2A
 // push-config methods when the addressed configuration does not exist.
-// The returned error wraps ErrPushConfigNotFoundSentinel for use with errors.Is().
-func ErrPushConfigNotFound(taskID string) *jsonrpc.Error {
-	return (&jsonrpc.Error{
-		Code:    ErrCodeTaskNotFound,
-		Message: "Task not found",
-		Data:    fmt.Sprintf("Task '%s' has no push notification config.", taskID),
-	}).WithWrappedError(ErrPushConfigNotFoundSentinel)
+func ErrPushConfigNotFound(taskID string) *Error {
+	return newError(
+		ErrCodeTaskNotFound,
+		"Task not found",
+		fmt.Sprintf("Task '%s' has no push notification config.", taskID),
+		ErrPushConfigNotFoundSentinel,
+	)
 }
 
-// ErrUnsupportedOperation creates a JSON-RPC error for unsupported operations.
-// The returned error wraps ErrUnsupportedOperationSentinel for use with errors.Is().
-func ErrUnsupportedOperation(operation string) *jsonrpc.Error {
-	return (&jsonrpc.Error{
-		Code:    ErrCodeUnsupportedOperation,
-		Message: "This operation is not supported",
-		Data:    fmt.Sprintf("Operation '%s' is not supported by this agent", operation),
-	}).WithWrappedError(ErrUnsupportedOperationSentinel)
+// ErrUnsupportedOperation creates an unsupported-operation error.
+func ErrUnsupportedOperation(operation string) *Error {
+	return newError(
+		ErrCodeUnsupportedOperation,
+		"This operation is not supported",
+		fmt.Sprintf("Operation '%s' is not supported by this agent", operation),
+		ErrUnsupportedOperationSentinel,
+	)
 }
 
-// ErrContentTypeNotSupported creates a JSON-RPC error for incompatible content types.
-// The returned error wraps ErrContentTypeNotSupportedSentinel for use with errors.Is().
-func ErrContentTypeNotSupported(contentType string) *jsonrpc.Error {
-	return (&jsonrpc.Error{
-		Code:    ErrCodeContentTypeNotSupported,
-		Message: "Incompatible content types",
-		Data:    fmt.Sprintf("Content type '%s' is not supported", contentType),
-	}).WithWrappedError(ErrContentTypeNotSupportedSentinel)
+// ErrContentTypeNotSupported creates an incompatible-content-type error.
+func ErrContentTypeNotSupported(contentType string) *Error {
+	return newError(
+		ErrCodeContentTypeNotSupported,
+		"Incompatible content types",
+		fmt.Sprintf("Content type '%s' is not supported", contentType),
+		ErrContentTypeNotSupportedSentinel,
+	)
 }
 
-// ErrInvalidAgentResponse creates a JSON-RPC error for invalid agent response.
-// The returned error wraps ErrInvalidAgentResponseSentinel for use with errors.Is().
-func ErrInvalidAgentResponse(details string) *jsonrpc.Error {
-	return (&jsonrpc.Error{
-		Code:    ErrCodeInvalidAgentResponse,
-		Message: "Invalid agent response",
-		Data:    details,
-	}).WithWrappedError(ErrInvalidAgentResponseSentinel)
+// ErrInvalidAgentResponse creates an invalid-agent-response error.
+func ErrInvalidAgentResponse(details string) *Error {
+	return newError(
+		ErrCodeInvalidAgentResponse,
+		"Invalid agent response",
+		details,
+		ErrInvalidAgentResponseSentinel,
+	)
 }
 
-// ErrAuthenticatedExtendedCardNotConfigured creates a JSON-RPC error for authenticated extended card not configured.
-// The returned error wraps ErrAuthenticatedExtendedCardNotConfiguredSentinel for use with errors.Is().
-func ErrAuthenticatedExtendedCardNotConfigured() *jsonrpc.Error {
-	return (&jsonrpc.Error{
-		Code:    ErrCodeAuthenticatedExtendedCardNotConfigured,
-		Message: "Authenticated extended card not configured",
-		Data:    "This agent does not have an authenticated extended card configured",
-	}).WithWrappedError(ErrAuthenticatedExtendedCardNotConfiguredSentinel)
+// ErrAuthenticatedExtendedCardNotConfigured creates an extended-card error.
+func ErrAuthenticatedExtendedCardNotConfigured() *Error {
+	return newError(
+		ErrCodeAuthenticatedExtendedCardNotConfigured,
+		"Authenticated extended card not configured",
+		"This agent does not have an authenticated extended card configured",
+		ErrAuthenticatedExtendedCardNotConfiguredSentinel,
+	)
 }
 
-// ErrExtensionSupportRequired creates a JSON-RPC error for a required extension the client did not opt into.
-// The returned error wraps ErrExtensionSupportRequiredSentinel for use with errors.Is().
-func ErrExtensionSupportRequired(extensionURI string) *jsonrpc.Error {
-	return (&jsonrpc.Error{
-		Code:    ErrCodeExtensionSupportRequired,
-		Message: "Extension support required",
-		Data:    fmt.Sprintf("Required extension '%s' was not opted into by the client", extensionURI),
-	}).WithWrappedError(ErrExtensionSupportRequiredSentinel)
+// ErrExtensionSupportRequired creates an error for a required extension that
+// the client did not opt into.
+func ErrExtensionSupportRequired(extensionURI string) *Error {
+	return newError(
+		ErrCodeExtensionSupportRequired,
+		"Extension support required",
+		fmt.Sprintf("Required extension '%s' was not opted into by the client", extensionURI),
+		ErrExtensionSupportRequiredSentinel,
+	)
 }
 
-// ErrVersionNotSupported creates a JSON-RPC error for an unsupported A2A protocol version.
-// The returned error wraps ErrVersionNotSupportedSentinel for use with errors.Is().
-func ErrVersionNotSupported(requested string) *jsonrpc.Error {
-	return (&jsonrpc.Error{
-		Code:    ErrCodeVersionNotSupported,
-		Message: "Version not supported",
-		Data:    fmt.Sprintf("Requested A2A protocol version '%s' is not supported by this agent", requested),
-	}).WithWrappedError(ErrVersionNotSupportedSentinel)
+// ErrVersionNotSupported creates an unsupported-version error.
+func ErrVersionNotSupported(requested string) *Error {
+	return newError(
+		ErrCodeVersionNotSupported,
+		"Version not supported",
+		fmt.Sprintf("Requested A2A protocol version '%s' is not supported by this agent", requested),
+		ErrVersionNotSupportedSentinel,
+	)
 }
 
-// ErrInvalidParams creates a standard JSON-RPC invalid-params error.
-// It is exposed for TaskManager implementations that live in another module.
+// ErrInvalidParams creates a binding-neutral invalid-parameters error.
 func ErrInvalidParams(details string) error {
-	return jsonrpc.ErrInvalidParams(details)
+	return newError(ErrCodeInvalidParams, "Invalid params", details, ErrInvalidParamsSentinel)
 }
 
-// ErrInternalError creates a standard JSON-RPC internal error.
-// It is exposed for TaskManager implementations that live in another module.
+// ErrInternalError creates a binding-neutral internal error.
 func ErrInternalError(details string) error {
-	return jsonrpc.ErrInternalError(details)
+	return newError(ErrCodeInternalError, "Internal error", details, ErrInternalErrorSentinel)
 }

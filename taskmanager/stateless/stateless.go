@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
@@ -270,7 +269,7 @@ func (m *TaskManager) registerExecution(
 	m.executionMu.Lock()
 	if m.closed {
 		m.executionMu.Unlock()
-		return nil, jsonrpc.ErrInternalError("task manager is closed")
+		return nil, taskmanager.ErrInternalError("task manager is closed")
 	}
 	m.nextID++
 	id := m.nextID

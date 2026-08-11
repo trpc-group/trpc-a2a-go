@@ -33,14 +33,17 @@ const (
 	defaultUserAgent = "trpc-a2a-go-client/0.1"
 )
 
-// A2AClient provides methods to interact with an A2A agent server.
-// It handles making HTTP requests and encoding/decoding JSON-RPC messages.
+// A2AClient provides methods to interact with an A2A agent server over the
+// JSON-RPC or HTTP+JSON protocol binding.
 type A2AClient struct {
-	baseURL        *url.URL            // Parsed base URL of the agent server.
-	httpClient     *http.Client        // Underlying HTTP client.
-	userAgent      string              // User-Agent header string.
-	authProvider   auth.ClientProvider // Authentication provider.
-	httpReqHandler HTTPReqHandler      // Custom HTTP request handler.
+	baseURL         *url.URL            // Parsed base URL of the agent server.
+	httpClient      *http.Client        // Underlying HTTP client.
+	userAgent       string              // User-Agent header string.
+	authProvider    auth.ClientProvider // Authentication provider.
+	httpReqHandler  HTTPReqHandler      // Custom HTTP request handler.
+	protocolBinding string
+	binding         clientBinding
+	tenant          string
 
 	maxBufSize     int
 	initialBufSize int
@@ -52,10 +55,7 @@ type A2AClient struct {
 // Options can be provided to configure the client, such as setting a custom http.Client or timeout.
 // Returns an error if the agentURL is invalid.
 func NewA2AClient(agentURL string, opts ...Option) (*A2AClient, error) {
-	if !strings.HasSuffix(agentURL, "/") {
-		agentURL += "/" // Ensure base URL ends with a slash for correct path joining.
-	}
-	parsedURL, err := url.ParseRequestURI(agentURL)
+	parsedURL, err := parseAgentURL(agentURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid agent URL %q: %w", agentURL, err)
 	}
@@ -64,17 +64,42 @@ func NewA2AClient(agentURL string, opts ...Option) (*A2AClient, error) {
 		httpClient: &http.Client{
 			Timeout: defaultTimeout,
 		},
-		userAgent:      defaultUserAgent,
-		httpReqHandler: &httpRequestHandler{},
-		initialBufSize: 4096,
-		maxBufSize:     bufio.MaxScanTokenSize * 10,
-		channelSize:    1024,
+		userAgent:       defaultUserAgent,
+		httpReqHandler:  &httpRequestHandler{},
+		protocolBinding: protocol.ProtocolBindingJSONRPC,
+		binding:         jsonRPCBinding{},
+		initialBufSize:  4096,
+		maxBufSize:      bufio.MaxScanTokenSize * 10,
+		channelSize:     1024,
 	}
 	// Apply functional options.
 	for _, opt := range opts {
 		opt(client)
 	}
+	canonicalBinding, binding, err := clientBindingForName(client.protocolBinding)
+	if err != nil {
+		return nil, err
+	}
+	client.protocolBinding = canonicalBinding
+	client.binding = binding
 	return client, nil
+}
+
+func parseAgentURL(agentURL string) (*url.URL, error) {
+	parsedURL, err := url.ParseRequestURI(agentURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid agent URL %q: %w", agentURL, err)
+	}
+	// Normalize only the URL path. Appending to the original string corrupts a
+	// trailing query ("?token=x" would become "?token=x/"). Preserve RawPath
+	// when present so escaped endpoint paths continue to round-trip.
+	if !strings.HasSuffix(parsedURL.Path, "/") {
+		parsedURL.Path += "/"
+		if parsedURL.RawPath != "" {
+			parsedURL.RawPath += "/"
+		}
+	}
+	return parsedURL, nil
 }
 
 // SendMessage sends a message using the message/send method.
@@ -83,32 +108,26 @@ func (c *A2AClient) SendMessage(
 	params protocol.SendMessageParams,
 	opts ...RequestOption,
 ) (*protocol.SendMessageResponse, error) {
-	request := jsonrpc.NewRequest(protocol.MethodMessageSend, params.RPCID)
-	paramsBytes, err := json.Marshal(params)
-	if err != nil {
-		return nil, fmt.Errorf("a2aClient.SendMessage: failed to marshal params: %w", err)
-	}
-	request.Params = paramsBytes
-	message, err := c.doRequestAndDecodeMessage(ctx, request, opts...)
-	if err != nil {
+	if err := c.applySelectedTenant(&params.Tenant); err != nil {
 		return nil, fmt.Errorf("a2aClient.SendMessage: %w", err)
 	}
-	return message, nil
+	result := &protocol.SendMessageResponse{}
+	if err := c.binding.request(ctx, c, params.RPCID, protocol.MethodMessageSend, params, result, opts...); err != nil {
+		return nil, fmt.Errorf("a2aClient.SendMessage: %w", err)
+	}
+	return result, nil
 }
 
 // GetTasks retrieves the status of a task using the tasks_get method.
 func (c *A2AClient) GetTasks(ctx context.Context, params protocol.TaskQueryParams, opts ...RequestOption) (*protocol.Task, error) {
-	request := jsonrpc.NewRequest(protocol.MethodTasksGet, params.RPCID)
-	paramsBytes, err := json.Marshal(params)
-	if err != nil {
-		return nil, fmt.Errorf("a2aClient.GetTasks: failed to marshal params: %w", err)
-	}
-	request.Params = paramsBytes
-	task, err := c.doRequestAndDecodeTask(ctx, request, opts...)
-	if err != nil {
+	if err := c.applySelectedTenant(&params.Tenant); err != nil {
 		return nil, fmt.Errorf("a2aClient.GetTasks: %w", err)
 	}
-	return task, nil
+	result := &protocol.Task{}
+	if err := c.binding.request(ctx, c, params.RPCID, protocol.MethodTasksGet, params, result, opts...); err != nil {
+		return nil, fmt.Errorf("a2aClient.GetTasks: %w", err)
+	}
+	return result, nil
 }
 
 // ListTasks lists tasks using the v1.0 ListTasks method, with optional
@@ -118,25 +137,12 @@ func (c *A2AClient) ListTasks(
 	params protocol.ListTasksParams,
 	opts ...RequestOption,
 ) (*protocol.ListTasksResult, error) {
-	request := jsonrpc.NewRequest(protocol.MethodTasksList, params.RPCID)
-	paramsBytes, err := json.Marshal(params)
-	if err != nil {
-		return nil, fmt.Errorf("a2aClient.ListTasks: failed to marshal params: %w", err)
-	}
-	request.Params = paramsBytes
-	fullResponse, err := c.doRequest(ctx, request, opts...)
-	if err != nil {
+	if err := c.applySelectedTenant(&params.Tenant); err != nil {
 		return nil, fmt.Errorf("a2aClient.ListTasks: %w", err)
 	}
-	if fullResponse.Error != nil {
-		return nil, fullResponse.Error
-	}
-	if len(fullResponse.Result) == 0 {
-		return nil, fmt.Errorf("rpc response missing required 'result' field for id %v", request.ID)
-	}
 	result := &protocol.ListTasksResult{}
-	if err := json.Unmarshal(fullResponse.Result, result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal list tasks result: %w", err)
+	if err := c.binding.request(ctx, c, params.RPCID, protocol.MethodTasksList, params, result, opts...); err != nil {
+		return nil, fmt.Errorf("a2aClient.ListTasks: %w", err)
 	}
 	return result, nil
 }
@@ -148,17 +154,14 @@ func (c *A2AClient) CancelTasks(
 	params protocol.TaskIDParams,
 	opts ...RequestOption,
 ) (*protocol.Task, error) {
-	request := jsonrpc.NewRequest(protocol.MethodTasksCancel, params.RPCID)
-	paramsBytes, err := json.Marshal(params)
-	if err != nil {
-		return nil, fmt.Errorf("a2aClient.CancelTasks: failed to marshal params: %w", err)
-	}
-	request.Params = paramsBytes
-	task, err := c.doRequestAndDecodeTask(ctx, request, opts...)
-	if err != nil {
+	if err := c.applySelectedTenant(&params.Tenant); err != nil {
 		return nil, fmt.Errorf("a2aClient.CancelTasks: %w", err)
 	}
-	return task, nil
+	result := &protocol.Task{}
+	if err := c.binding.request(ctx, c, params.RPCID, protocol.MethodTasksCancel, params, result, opts...); err != nil {
+		return nil, fmt.Errorf("a2aClient.CancelTasks: %w", err)
+	}
+	return result, nil
 }
 
 // ResubscribeTask sends a message using tasks/resubscribe and returns a channel for receiving SSE events.
@@ -169,12 +172,10 @@ func (c *A2AClient) ResubscribeTask(
 	params protocol.TaskIDParams,
 	opts ...RequestOption,
 ) (<-chan protocol.StreamResponse, error) {
-	// Create the JSON-RPC request.
-	paramsBytes, err := json.Marshal(params)
-	if err != nil {
-		return nil, fmt.Errorf("a2aClient.ResubscribeTask: failed to marshal params: %w", err)
+	if err := c.applySelectedTenant(&params.Tenant); err != nil {
+		return nil, fmt.Errorf("a2aClient.ResubscribeTask: %w", err)
 	}
-	resp, err := c.sendA2AStreamRequest(ctx, params.RPCID, protocol.MethodTasksResubscribe, paramsBytes, opts...)
+	resp, err := c.binding.stream(ctx, c, params.RPCID, protocol.MethodTasksResubscribe, params, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.ResubscribeTask: failed to build stream request: %w", err)
 	}
@@ -193,12 +194,10 @@ func (c *A2AClient) StreamMessage(
 	params protocol.SendMessageParams,
 	opts ...RequestOption,
 ) (<-chan protocol.StreamResponse, error) {
-	// Create the JSON-RPC request.
-	paramsBytes, err := json.Marshal(params)
-	if err != nil {
-		return nil, fmt.Errorf("a2aClient.StreamMessage: failed to marshal params: %w", err)
+	if err := c.applySelectedTenant(&params.Tenant); err != nil {
+		return nil, fmt.Errorf("a2aClient.StreamMessage: %w", err)
 	}
-	resp, err := c.sendA2AStreamRequest(ctx, params.RPCID, protocol.MethodMessageStream, paramsBytes, opts...)
+	resp, err := c.binding.stream(ctx, c, params.RPCID, protocol.MethodMessageStream, params, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("a2aClient.StreamMessage: failed to build stream request: %w", err)
 	}
@@ -229,8 +228,8 @@ func (c *A2AClient) sendA2AStreamRequest(ctx context.Context, id, method string,
 		return nil, fmt.Errorf("a2aClient.sendA2AStreamRequest: failed to create http request: %w", err)
 	}
 	// Set headers, including Accept for event stream.
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	req.Header.Set("Accept", "text/event-stream") // Crucial for SSE.
+	req.Header.Set("Content-Type", protocol.MediaTypeJSON+"; charset=utf-8")
+	req.Header.Set("Accept", protocol.MediaTypeEventStream) // Crucial for SSE.
 	req.Header.Set("A2A-Version", protocol.ProtocolVersionV1)
 	if c.userAgent != "" {
 		req.Header.Set("User-Agent", c.userAgent)
@@ -260,7 +259,7 @@ func (c *A2AClient) sendA2AStreamRequest(ctx context.Context, id, method string,
 		)
 	}
 	// Check if the response is actually an event stream.
-	if !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+	if !strings.Contains(resp.Header.Get("Content-Type"), protocol.MediaTypeEventStream) {
 		resp.Body.Close()
 		return nil, fmt.Errorf(
 			"a2aClient.sendA2AStreamRequest: server did not respond with Content-Type 'text/event-stream', got %s",
@@ -321,20 +320,10 @@ func (c *A2AClient) processSSEStream(
 				return // Exit immediately, do not process any more events
 			}
 
-			// First, try to unmarshal as a JSON-RPC response
-			var jsonRPCResponse jsonrpc.RawResponse
-			jsonRPCErr := json.Unmarshal(eventBytes, &jsonRPCResponse)
-
-			// If this is a valid JSON-RPC response, extract the result for further processing
-			if jsonRPCErr == nil && jsonRPCResponse.JSONRPC == jsonrpc.Version {
-				log.Debugf("Received JSON-RPC wrapped event for request %s. Type: %s", reqID, eventType)
-				// Check for errors in the JSON-RPC response
-				if jsonRPCResponse.Error != nil {
-					log.Errorf("JSON-RPC error in SSE event for request %s: %v", reqID, jsonRPCResponse.Error)
-					continue // Skip events with JSON-RPC errors
-				}
-				// Use the result field directly for further processing
-				eventBytes = jsonRPCResponse.Result
+			eventBytes, err = c.binding.decodeSSEData(eventBytes)
+			if err != nil {
+				log.Errorf("Error decoding SSE event for request %s: %v", reqID, err)
+				continue
 			}
 
 			// Deserialize the event data based on the event type from SSE.
@@ -455,8 +444,8 @@ func (c *A2AClient) doRequest(ctx context.Context, request *jsonrpc.Request, opt
 		return nil, fmt.Errorf("a2aClient.doRequest: failed to create http request: %w", err)
 	}
 	// Set required headers.
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", protocol.MediaTypeJSON+"; charset=utf-8")
+	req.Header.Set("Accept", protocol.MediaTypeJSON)
 	req.Header.Set("A2A-Version", protocol.ProtocolVersionV1)
 	if c.userAgent != "" {
 		req.Header.Set("User-Agent", c.userAgent)
@@ -511,39 +500,16 @@ func (c *A2AClient) SetPushNotification(
 	params protocol.TaskPushNotificationConfig,
 	opts ...RequestOption,
 ) (*protocol.TaskPushNotificationConfig, error) {
-	request := jsonrpc.NewRequest(protocol.MethodTasksPushNotificationConfigSet, params.RPCID)
-	paramsBytes, err := json.Marshal(params)
-	if err != nil {
-		return nil, fmt.Errorf("a2aClient.SetPushNotification: failed to marshal params: %w", err)
-	}
-	request.Params = paramsBytes
-
-	// Perform the HTTP request and basic JSON unmarshaling
-	fullResponse, err := c.doRequest(ctx, request, opts...)
-	if err != nil {
+	if err := c.applySelectedTenant(&params.Tenant); err != nil {
 		return nil, fmt.Errorf("a2aClient.SetPushNotification: %w", err)
 	}
-
-	// Check for JSON-RPC level error included in the response
-	if fullResponse.Error != nil {
-		return nil, fullResponse.Error
+	result := &protocol.TaskPushNotificationConfig{}
+	if err := c.binding.request(
+		ctx, c, params.RPCID, protocol.MethodTasksPushNotificationConfigSet, params, result, opts...,
+	); err != nil {
+		return nil, fmt.Errorf("a2aClient.SetPushNotification: %w", err)
 	}
-
-	// Check if the result field is missing
-	if len(fullResponse.Result) == 0 {
-		return nil, fmt.Errorf("rpc response missing required 'result' field for id %v", request.ID)
-	}
-
-	// Unmarshal the result into a TaskPushNotificationConfig
-	config := &protocol.TaskPushNotificationConfig{}
-	if err := json.Unmarshal(fullResponse.Result, config); err != nil {
-		return nil, fmt.Errorf(
-			"failed to unmarshal push notification config: %w. Raw result: %s",
-			err, string(fullResponse.Result),
-		)
-	}
-
-	return config, nil
+	return result, nil
 }
 
 // GetPushNotification retrieves the push notification configuration for a task.
@@ -552,39 +518,16 @@ func (c *A2AClient) GetPushNotification(
 	params protocol.GetTaskPushNotificationConfigParams,
 	opts ...RequestOption,
 ) (*protocol.TaskPushNotificationConfig, error) {
-	request := jsonrpc.NewRequest(protocol.MethodTasksPushNotificationConfigGet, params.RPCID)
-	paramsBytes, err := json.Marshal(params)
-	if err != nil {
-		return nil, fmt.Errorf("a2aClient.GetPushNotification: failed to marshal params: %w", err)
-	}
-	request.Params = paramsBytes
-
-	// Perform the HTTP request and basic JSON unmarshaling
-	fullResponse, err := c.doRequest(ctx, request, opts...)
-	if err != nil {
+	if err := c.applySelectedTenant(&params.Tenant); err != nil {
 		return nil, fmt.Errorf("a2aClient.GetPushNotification: %w", err)
 	}
-
-	// Check for JSON-RPC level error included in the response
-	if fullResponse.Error != nil {
-		return nil, fullResponse.Error
+	result := &protocol.TaskPushNotificationConfig{}
+	if err := c.binding.request(
+		ctx, c, params.RPCID, protocol.MethodTasksPushNotificationConfigGet, params, result, opts...,
+	); err != nil {
+		return nil, fmt.Errorf("a2aClient.GetPushNotification: %w", err)
 	}
-
-	// Check if the result field is missing
-	if len(fullResponse.Result) == 0 {
-		return nil, fmt.Errorf("rpc response missing required 'result' field for id %v", request.ID)
-	}
-
-	// Unmarshal the result into a TaskPushNotificationConfig
-	config := &protocol.TaskPushNotificationConfig{}
-	if err := json.Unmarshal(fullResponse.Result, config); err != nil {
-		return nil, fmt.Errorf(
-			"failed to unmarshal push notification config: %w. Raw result: %s",
-			err, string(fullResponse.Result),
-		)
-	}
-
-	return config, nil
+	return result, nil
 }
 
 // ListPushNotifications lists the push notification configurations of a task
@@ -594,25 +537,14 @@ func (c *A2AClient) ListPushNotifications(
 	params protocol.ListTaskPushNotificationConfigsParams,
 	opts ...RequestOption,
 ) (*protocol.ListTaskPushNotificationConfigsResult, error) {
-	request := jsonrpc.NewRequest(protocol.MethodTasksPushNotificationConfigList, params.RPCID)
-	paramsBytes, err := json.Marshal(params)
-	if err != nil {
-		return nil, fmt.Errorf("a2aClient.ListPushNotifications: failed to marshal params: %w", err)
-	}
-	request.Params = paramsBytes
-	fullResponse, err := c.doRequest(ctx, request, opts...)
-	if err != nil {
+	if err := c.applySelectedTenant(&params.Tenant); err != nil {
 		return nil, fmt.Errorf("a2aClient.ListPushNotifications: %w", err)
 	}
-	if fullResponse.Error != nil {
-		return nil, fullResponse.Error
-	}
-	if len(fullResponse.Result) == 0 {
-		return nil, fmt.Errorf("rpc response missing required 'result' field for id %v", request.ID)
-	}
 	result := &protocol.ListTaskPushNotificationConfigsResult{}
-	if err := json.Unmarshal(fullResponse.Result, result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal push notification config list: %w", err)
+	if err := c.binding.request(
+		ctx, c, params.RPCID, protocol.MethodTasksPushNotificationConfigList, params, result, opts...,
+	); err != nil {
+		return nil, fmt.Errorf("a2aClient.ListPushNotifications: %w", err)
 	}
 	return result, nil
 }
@@ -624,18 +556,13 @@ func (c *A2AClient) DeletePushNotification(
 	params protocol.DeleteTaskPushNotificationConfigParams,
 	opts ...RequestOption,
 ) error {
-	request := jsonrpc.NewRequest(protocol.MethodTasksPushNotificationConfigDelete, params.RPCID)
-	paramsBytes, err := json.Marshal(params)
-	if err != nil {
-		return fmt.Errorf("a2aClient.DeletePushNotification: failed to marshal params: %w", err)
-	}
-	request.Params = paramsBytes
-	fullResponse, err := c.doRequest(ctx, request, opts...)
-	if err != nil {
+	if err := c.applySelectedTenant(&params.Tenant); err != nil {
 		return fmt.Errorf("a2aClient.DeletePushNotification: %w", err)
 	}
-	if fullResponse.Error != nil {
-		return fullResponse.Error
+	if err := c.binding.request(
+		ctx, c, params.RPCID, protocol.MethodTasksPushNotificationConfigDelete, params, nil, opts...,
+	); err != nil {
+		return fmt.Errorf("a2aClient.DeletePushNotification: %w", err)
 	}
 	return nil
 }
@@ -718,7 +645,7 @@ func (c *A2AClient) getAgentCardFromURL(
 	}
 
 	// Set standard headers
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", protocol.MediaTypeJSON)
 	req.Header.Set("User-Agent", c.userAgent)
 
 	// Apply custom headers from request options
@@ -763,22 +690,13 @@ func (c *A2AClient) getAgentCardFromURL(
 
 // GetAuthenticatedExtendedCard retrieves the extended agent card for authenticated users.
 func (c *A2AClient) GetAuthenticatedExtendedCard(ctx context.Context, opts ...RequestOption) (*server.AgentCard, error) {
-	request := jsonrpc.NewRequest(protocol.MethodAgentAuthenticatedExtendedCard, "")
-	fullResponse, err := c.doRequest(ctx, request, opts...)
-	if err != nil {
+	result := &server.AgentCard{}
+	if err := c.binding.request(
+		ctx, c, "", protocol.MethodAgentAuthenticatedExtendedCard, extendedCardParams{Tenant: c.tenant}, result, opts...,
+	); err != nil {
 		return nil, fmt.Errorf("a2aClient.GetExtendedCard: %w", err)
 	}
-	if fullResponse.Error != nil {
-		return nil, fullResponse.Error
-	}
-	if len(fullResponse.Result) == 0 {
-		return nil, fmt.Errorf("rpc response missing required 'result' field for id %v", request.ID)
-	}
-	extendedCard := &server.AgentCard{}
-	if err := json.Unmarshal(fullResponse.Result, extendedCard); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal extended card: %w. Raw result: %s", err, string(fullResponse.Result))
-	}
-	return extendedCard, nil
+	return result, nil
 }
 
 // httpRequestHandler is the HTTP request handler for a2a client.

@@ -15,8 +15,9 @@ the runtime contract see [Server](server.md) and [Client](client.md).
 | Capability | Status | Notes |
 | --- | --- | --- |
 | A2A v1.0 protocol objects, task lifecycle, `Task \| Message` result union | ✅ | The full object and state model of the spec. |
-| JSON-RPC transport binding (HTTP POST + SSE) | ✅ | The wire this framework serves. |
-| gRPC / HTTP+JSON (REST) transport bindings | 🗺️ Planned | Defined by the spec; not yet implemented — JSON-RPC only today. |
+| JSON-RPC transport binding (HTTP POST + SSE) | ✅ | Uses `application/json` and JSON-RPC envelopes. |
+| HTTP+JSON (REST) transport binding | ✅ | Uses REST routes, `application/a2a+json`, direct JSON responses, and raw SSE data. |
+| gRPC transport binding | 🗺️ Planned | Defined by the spec; not yet implemented. |
 | `SendMessage` / `SendStreamingMessage` from one processor | ✅ | One code path serves unary and streaming. |
 | Blocking send, `returnImmediately`, live streaming, `SubscribeToTask` | ✅ | Four client consumption modes over the same agent. |
 | Stateless request-scoped execution | ✅ | Direct Messages and ephemeral Tasks with no retained state or conversation history. |
@@ -39,7 +40,7 @@ flowchart TB
     subgraph server["server"]
         direction TB
         AUTH["auth chain"]
-        RPC["JSON-RPC + SSE dispatch"]
+        RPC["JSON-RPC / HTTP+JSON + SSE dispatch"]
         CARD["agent cards / discovery"]
         COMPAT["compat/v0 handler"]
     end
@@ -57,10 +58,7 @@ flowchart TB
 
 Three layers, three responsibilities:
 
-- **`server`** terminates the wire. It authenticates the request, serves agent
-  cards for discovery, dispatches JSON-RPC methods and SSE streams, and —
-  optionally — mounts the legacy v0.2.x endpoint on the same port inside the
-  same auth chain.
+- **`server`** terminates the wire. It authenticates requests, serves agent cards for discovery, dispatches JSON-RPC and HTTP+JSON operations and SSE streams, and — optionally — mounts the legacy v0.2.x endpoint on the same port inside the same auth chain.
 - **`TaskManager`** owns execution policy and, when enabled, task state: lazy
   task creation, round close rules, cancellation, conversation history,
   retention, and subscriber fan-out. `taskmanager/stateless` derives direct
@@ -89,7 +87,7 @@ sequenceDiagram
     P-->>TM: <-chan events (Message / status / artifact)
     Note over TM: memory/Redis persist task events;<br/>stateless applies them to a request-local Task only
     TM-->>Server: Task or Message (unary) OR live event stream
-    Server-->>Client: JSON-RPC result / SSE frames
+    Server-->>Client: binding-specific result / SSE frames
 ```
 
 The load-bearing idea: **your agent is one method that emits an event stream,
@@ -121,9 +119,7 @@ retention semantics — lives with the agent-author guide in
 
 ## Roadmap
 
-- **gRPC and HTTP+JSON (REST) transport bindings** — the spec defines all
-  three; this framework serves the JSON-RPC binding today, and the agent card
-  already models multi-transport declaration for when the others land.
+- **gRPC transport binding** — the spec defines it alongside JSON-RPC and HTTP+JSON; this framework does not serve gRPC yet.
 - **Redis execution coordination** — cross-node `SubscribeToTask` is available,
   but continuation, live cancel, and single-writer execution routing remain
   node-local concerns rather than a distributed work queue.

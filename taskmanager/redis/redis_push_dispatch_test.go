@@ -95,7 +95,7 @@ func waitPushCount(t *testing.T, s *recordingSender, n int) {
 
 func assertPushUnsupported(t *testing.T, err error) {
 	t.Helper()
-	assertRPCCode(t, err, taskmanager.ErrCodePushNotificationNotSupported)
+	assertTaskManagerCode(t, err, taskmanager.ErrCodePushNotificationNotSupported)
 }
 
 // TestRedisPushInlineConfigDelivered covers the full loop: a message carrying an

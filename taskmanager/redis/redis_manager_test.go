@@ -340,7 +340,7 @@ func TestOnSendMessageNoEvents(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty execution")
 	}
-	assertRPCCode(t, err, taskmanager.ErrCodeInternalError)
+	assertTaskManagerCode(t, err, taskmanager.ErrCodeInternalError)
 }
 
 func TestOnSendMessageExecuteError(t *testing.T) {
@@ -365,7 +365,7 @@ func TestOnSendMessageNilChannel(t *testing.T) {
 	}))
 
 	_, err := m.OnSendMessage(context.Background(), sendParams("hello", "ctx-nil"))
-	assertRPCCode(t, err, taskmanager.ErrCodeInternalError)
+	assertTaskManagerCode(t, err, taskmanager.ErrCodeInternalError)
 }
 
 // =============================================================================
@@ -564,12 +564,10 @@ func TestTerminalTaskSendRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for terminal task")
 	}
-	rpcErr := decodeRPCError(t, err)
-	if rpcErr.Code != taskmanager.ErrCodeInvalidParams {
-		t.Errorf("expected invalid params (-32602), got %v", err)
-	}
-	if data, _ := rpcErr.Data.(string); !strings.Contains(data, "task task-frozen is in terminal state") {
-		t.Errorf("expected terminal-state reason in error data, got %v", rpcErr.Data)
+	taskErr := decodeTaskManagerError(t, err)
+	assertTaskManagerCode(t, err, taskmanager.ErrCodeInvalidParams)
+	if data, _ := taskErr.Data.(string); !strings.Contains(data, "task task-frozen is in terminal state") {
+		t.Errorf("expected terminal-state reason in error data, got %v", taskErr.Data)
 	}
 	if invoked {
 		t.Error("processor must not be invoked for a terminal task")
@@ -653,7 +651,7 @@ func TestTaskSnapshotEventWithoutTaskLeavesNoTrace(t *testing.T) {
 	m, mr := setupTest(t, scriptedExecutor(&protocol.Task{ID: "task-x"}))
 
 	_, err := m.OnSendMessage(context.Background(), sendParams("go", "ctx-trace"))
-	assertRPCCode(t, err, taskmanager.ErrCodeInternalError)
+	assertTaskManagerCode(t, err, taskmanager.ErrCodeInternalError)
 	for _, key := range mr.Keys() {
 		if strings.HasPrefix(key, taskPrefix) {
 			t.Errorf("violation before task creation must not persist a task, found %s", key)
@@ -1326,7 +1324,7 @@ func TestPushNotificationCRUD(t *testing.T) { //nolint:gocyclo // One lifecycle 
 
 	err = m.OnPushNotificationDelete(context.Background(),
 		protocol.DeleteTaskPushNotificationConfigParams{TaskID: config.TaskID})
-	assertRPCCode(t, err, taskmanager.ErrCodeInvalidParams)
+	assertTaskManagerCode(t, err, taskmanager.ErrCodeInvalidParams)
 
 	// Public CRUD must not create or expose orphan configs for missing tasks.
 	_, err = m.OnPushNotificationSet(context.Background(), protocol.TaskPushNotificationConfig{

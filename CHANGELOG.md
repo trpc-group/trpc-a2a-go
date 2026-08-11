@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### HTTP+JSON protocol binding
+
+- **The v2 client and server now implement the A2A v1.0 HTTP+JSON/REST binding.** It uses the standard operation routes, `application/a2a+json` request and response bodies, direct protocol objects instead of JSON-RPC envelopes, raw `StreamResponse` SSE data, and `google.rpc.Status` JSON errors. JSON-RPC remains the default for direct client construction and continues to use `application/json`.
+- `client.WithProtocolBinding` selects JSON-RPC or HTTP+JSON for `NewA2AClient`, and `client.WithTenant` propagates the tenant from a caller-selected Agent Card interface to every request. `server.WithHTTPJSONEndpoint` explicitly enables and locates REST; `server.WithV1JSONRPCEnabled(false)` can disable only the v1 JSON-RPC binding while retaining compat/v0. Serving paths are not derived from Agent Card interface URLs; use `WithBasePath` / `WithJSONRPCEndpoint` / `WithHTTPJSONEndpoint` to mount under a subpath.
+- **TaskManager errors are now binding-neutral.** `taskmanager.Error` and semantic `ErrorCode` values replace the leaked internal JSON-RPC error representation so JSON-RPC and HTTP+JSON adapters can map the same failure independently. This is an intentional prerelease API change. `taskmanager.NewError` rebuilds one of these errors from wire values, and `taskmanager.Error.Error()` now includes the diagnostic detail the constructors keep in `Data`.
+- HTTP+JSON route matching runs on the escaped path, so percent-encoded operation-like task IDs remain identifiers and every legal task ID stays addressable. Literal tenant paths remain compatible with reference clients, including a tenant named `tasks`, and the server rejects dot segments before `http.ServeMux` can redirect them to another tenant or operation.
+- Push notification config create and delete answer `200`, matching the transcoding of their Protocol Buffer definitions, instead of `201` and `204` which the reference clients reject.
+- `SubscribeToTask` retries with `GET` when a server rejects `POST`: the v1.0 specification text and the reference clients use `POST`, while the normative Protocol Buffer definition binds `GET`.
+- HTTP+JSON validation errors report the specific client-correctable cause in `error.message` (spec §11.6), while internal and invalid-agent-response details are logged and replaced by a generic heading. The REST client rebuilds errors from the wire values instead of re-running the server-side constructors.
+- HTTP+JSON request bodies are limited to 4 MiB by default to bound decoder memory use; `server.WithHTTPJSONMaxBodyBytes` changes or explicitly disables the limit.
+
 ## 2.0.0-alpha.3 (2026-07-22)
 
 This prerelease adds request-scoped stateless execution and restores Redis

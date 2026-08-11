@@ -18,7 +18,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
@@ -470,7 +469,7 @@ func (m *TaskManager) OnPushNotificationSet(
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
 	if err := push.ValidateConfig(params); err != nil {
-		return nil, jsonrpc.ErrInvalidParams(err.Error())
+		return nil, taskmanager.ErrInvalidParams(err.Error())
 	}
 	if err := m.ensurePushTaskExists(params.Tenant, params.TaskID); err != nil {
 		return nil, err
@@ -492,7 +491,7 @@ func (m *TaskManager) OnPushNotificationGet(
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
 	if params.ID == "" {
-		return nil, jsonrpc.ErrInvalidParams("push notification config ID is required")
+		return nil, taskmanager.ErrInvalidParams("push notification config ID is required")
 	}
 	if err := m.ensurePushTaskExists(params.Tenant, params.TaskID); err != nil {
 		return nil, err
@@ -556,7 +555,7 @@ func (m *TaskManager) OnPushNotificationDelete(
 		return taskmanager.ErrPushNotificationNotSupported()
 	}
 	if params.ID == "" {
-		return jsonrpc.ErrInvalidParams("push notification config ID is required")
+		return taskmanager.ErrInvalidParams("push notification config ID is required")
 	}
 	if err := m.ensurePushTaskExists(params.Tenant, params.TaskID); err != nil {
 		return err

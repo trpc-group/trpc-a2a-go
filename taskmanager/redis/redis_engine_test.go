@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -58,29 +59,29 @@ func collectStream(t *testing.T, ch <-chan protocol.StreamResponse) []protocol.S
 	}
 }
 
-type rpcErrorPayload struct {
-	Code int `json:"code"`
+type taskManagerErrorPayload struct {
+	Code any `json:"code"`
 	Data any `json:"data"`
 }
 
-func decodeRPCError(t *testing.T, err error) rpcErrorPayload {
+func decodeTaskManagerError(t *testing.T, err error) taskManagerErrorPayload {
 	t.Helper()
 	payload, marshalErr := json.Marshal(err)
 	if marshalErr != nil {
-		t.Fatalf("marshal JSON-RPC error: %v", marshalErr)
+		t.Fatalf("marshal task-manager error: %v", marshalErr)
 	}
-	var rpcErr rpcErrorPayload
-	if unmarshalErr := json.Unmarshal(payload, &rpcErr); unmarshalErr != nil {
-		t.Fatalf("unmarshal JSON-RPC error: %v", unmarshalErr)
+	var taskErr taskManagerErrorPayload
+	if unmarshalErr := json.Unmarshal(payload, &taskErr); unmarshalErr != nil {
+		t.Fatalf("unmarshal task-manager error: %v", unmarshalErr)
 	}
-	return rpcErr
+	return taskErr
 }
 
-// assertRPCCode fails unless err carries the wanted JSON-RPC code.
-func assertRPCCode(t *testing.T, err error, code int) {
+// assertTaskManagerCode fails unless err carries the wanted semantic error code.
+func assertTaskManagerCode(t *testing.T, err error, code any) {
 	t.Helper()
-	if rpcErr := decodeRPCError(t, err); rpcErr.Code != code {
-		t.Fatalf("expected JSON-RPC error code %d, got %v", code, err)
+	if taskErr := decodeTaskManagerError(t, err); fmt.Sprint(taskErr.Code) != fmt.Sprint(code) {
+		t.Fatalf("expected task-manager error code %v, got %v", code, err)
 	}
 }
 
@@ -242,7 +243,7 @@ func TestOnSendMessage_ConcurrentContinuationRejected(t *testing.T) {
 	followUp := sendParams("again", "ctx-concurrent")
 	followUp.Message.TaskID = &taskID
 	_, err = m.OnSendMessage(context.Background(), followUp)
-	assertRPCCode(t, err, taskmanager.ErrCodeInvalidParams)
+	assertTaskManagerCode(t, err, taskmanager.ErrCodeInvalidParams)
 	if got := invocations.Load(); got != 1 {
 		t.Fatalf("processor must not run for the rejected round, invocations=%d", got)
 	}
@@ -293,7 +294,7 @@ func TestOnCancelTask_LiveButTerminalNotCancelable(t *testing.T) {
 	// The round is still live (channel not yet closed) but the stored state is
 	// terminal: cancel must be rejected.
 	_, err = m.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: taskID})
-	assertRPCCode(t, err, taskmanager.ErrCodeTaskNotCancelable)
+	assertTaskManagerCode(t, err, taskmanager.ErrCodeTaskNotCancelable)
 	close(release)
 	collectStream(t, pipe)
 }
@@ -329,7 +330,7 @@ func TestOnSendMessage_ContinuationContextMismatchRejected(t *testing.T) {
 	followUp.Message.TaskID = &taskID
 	followUp.Message.ContextID = &foreignContext
 	_, err = m.OnSendMessage(context.Background(), followUp)
-	assertRPCCode(t, err, taskmanager.ErrCodeInvalidParams)
+	assertTaskManagerCode(t, err, taskmanager.ErrCodeInvalidParams)
 	if got := invocations.Load(); got != 1 {
 		t.Fatalf("processor must not run for the rejected round, invocations=%d", got)
 	}
@@ -377,7 +378,7 @@ func TestOnSendMessage_RejectedContinuationLeavesPersistenceUntouched(t *testing
 		PushConfig: &protocol.TaskPushNotificationConfig{URL: "https://example.com/hook"},
 	}
 	_, err = m.OnSendMessage(context.Background(), followUp)
-	assertRPCCode(t, err, taskmanager.ErrPushNotificationNotSupported().Code)
+	assertTaskManagerCode(t, err, taskmanager.ErrPushNotificationNotSupported().Code)
 
 	afterTask, err := m.client.Get(context.Background(), taskKey).Bytes()
 	if err != nil {
@@ -438,7 +439,7 @@ func TestEngine_UnspecifiedStateIsViolation(t *testing.T) {
 	// task:* keys.
 	m2, mr2 := setupTest(t, scriptedExecutor(statusEvent(protocol.TaskStateUnspecified, nil)))
 	_, err = m2.OnSendMessage(context.Background(), sendParams("go", "ctx-unspec2"))
-	assertRPCCode(t, err, taskmanager.ErrCodeInternalError)
+	assertTaskManagerCode(t, err, taskmanager.ErrCodeInternalError)
 	for _, key := range mr2.Keys() {
 		if strings.HasPrefix(key, taskPrefix) {
 			t.Errorf("violation before any task must leave no task key, found %s", key)
@@ -582,7 +583,7 @@ func TestOnSendMessageStream_StartupFailureLeavesNoTrace(t *testing.T) {
 		return nil, nil
 	}))
 	_, err = m2.OnSendMessageStream(context.Background(), sendParams("x", "ctx-boot2"))
-	assertRPCCode(t, err, taskmanager.ErrCodeInternalError)
+	assertTaskManagerCode(t, err, taskmanager.ErrCodeInternalError)
 	if n := liveExecutionCount(m2); n != 0 {
 		t.Fatalf("nil channel must deregister the execution, %d live", n)
 	}
@@ -600,7 +601,7 @@ func TestOnSendMessage_ReturnImmediatelyEmptyRound(t *testing.T) {
 	params := sendParams("empty", "ctx-ri-empty")
 	params.Configuration = &protocol.SendMessageConfiguration{ReturnImmediately: &returnImmediately}
 	_, err := m.OnSendMessage(context.Background(), params)
-	assertRPCCode(t, err, taskmanager.ErrCodeInternalError)
+	assertTaskManagerCode(t, err, taskmanager.ErrCodeInternalError)
 }
 
 // §3.4 regression (parity with memory): a streaming client that fires its

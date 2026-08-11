@@ -22,7 +22,7 @@ import (
 
 tm, _ := memory.NewTaskManager(&myProcessor{})
 srv, _ := server.NewA2AServer(tm, server.WithAgentCard(agentCard))
-srv.Start(":8080")   // serves JSON-RPC at "/" and the card at /.well-known/agent-card.json
+srv.Start(":8080")   // serves JSON-RPC plus the well-known card
 ```
 
 `NewA2AServer` takes functional options:
@@ -35,6 +35,9 @@ srv.Start(":8080")   // serves JSON-RPC at "/" and the card at /.well-known/agen
 | `WithPushNotificationJWKSHandler(handler)` | Publish a push sender's verification keys. Pass `sender.JWKSHandler()` for `SignedSender`, or any custom `http.Handler`. |
 | `WithJWKSEndpoint(false, "")` | Disable the built-in JWKS route when verification keys are published elsewhere; a non-empty path changes the route. |
 | `WithBasePath(prefix)` | Mount under a subpath. |
+| `WithV1JSONRPCEnabled(false)` | Disable the v1 JSON-RPC binding; a `WithCompatHandler` legacy JSON-RPC handler remains available. |
+| `WithHTTPJSONEndpoint(prefix)` | Enable HTTP+JSON and set its base path independently of JSON-RPC. |
+| `WithHTTPJSONMaxBodyBytes(bytes)` | Set the HTTP+JSON request-body limit (4 MiB by default; a non-positive value disables it). |
 | `WithCompatHandler(h)` | Also serve the legacy v0.2.x wire. |
 | `WithMiddleware(mw...)` | Wrap the HTTP handler chain. → [middleware context example](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/middleware) |
 | `WithCORSEnabled(true)` | Emit CORS headers. |
@@ -398,23 +401,25 @@ srv, _ := server.NewA2AServer(tm,
 // in ProcessMessage: switch ec.Tenant { … }
 ```
 
+On JSON-RPC the tenant travels in `params`. On HTTP+JSON it is the leading
+`/{tenant}/…` path segment that the specification's Protocol Buffer definition
+binds for every operation, and POST bodies carry the `tenant` field as well.
+The server also accepts the tenant as a `tenant` query parameter.
+
 → [examples/tenant](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/tenant).
 
 ## Serving on a subpath
 
 Mount the whole server under a path prefix, for example behind a gateway.
-Prefer an explicit `WithBasePath`; it adjusts the agent card, JSON-RPC, and JWKS
-endpoints together:
+Use `WithBasePath`; it adjusts the Agent Card, JSON-RPC, enabled HTTP+JSON, and JWKS endpoints together:
 
 ```go
 srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
-    server.WithBasePath("/api/v1/agent"))   // card + JSON-RPC under /api/v1/agent/…
+    server.WithBasePath("/api/v1/agent"))   // card + enabled bindings under /api/v1/agent/…
 ```
 
-If `WithBasePath` is not set, the server attempts to derive the base path from
-the path in `agentCard.URL`. An explicit `WithBasePath` takes precedence, which
-is useful when a gateway exposes a different external URL from the server's
-internal route.
+Without `WithBasePath`, the server keeps the root path defaults. Agent Card URLs /
+`supportedInterfaces` are client discovery metadata and do not derive listen paths.
 
 → [examples/subpath](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/subpath).
 
@@ -435,6 +440,17 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
     server.WithCompatHandler(v0.NewJSONRPCHandler(tm)))
 ```
 
+To expose v1 only through HTTP+JSON while retaining JSON-RPC solely for legacy clients, disable the v1 JSON-RPC binding explicitly:
+
+```go
+srv, _ := server.NewA2AServer(tm,
+    server.WithAgentCard(card),
+    server.WithHTTPJSONEndpoint("/"),
+    server.WithV1JSONRPCEnabled(false),
+    server.WithCompatHandler(v0.NewJSONRPCHandler(tm)),
+)
+```
+
 → [examples/compat](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/compat).
 
 ## Telemetry
@@ -452,6 +468,4 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 
 ## Capability status
 
-The framework serves the **JSON-RPC** transport binding today. The spec also
-defines **gRPC** and **HTTP+JSON (REST)** bindings — planned, not yet
-implemented. See the [Overview](overview.md#what-you-get) capability matrix.
+The framework implements both **JSON-RPC** and **HTTP+JSON (REST)**. V1 JSON-RPC is enabled by default and can be disabled with `WithV1JSONRPCEnabled(false)`; a configured compat/v0 JSON-RPC handler remains available. HTTP+JSON is enabled only by `WithHTTPJSONEndpoint`; it accepts `application/a2a+json` and compatibility `application/json`, responds with `application/a2a+json`, and emits raw `StreamResponse` objects in SSE `data:` fields. HTTP+JSON request bodies are limited to 4 MiB by default; use `WithHTTPJSONMaxBodyBytes` when a deployment needs a different limit. **gRPC** remains planned. Agent Card `supportedInterfaces` are client discovery metadata and do not drive server mounting; keep the card accurate for every enabled endpoint. The server does not add bindings to or otherwise rewrite signed cards.

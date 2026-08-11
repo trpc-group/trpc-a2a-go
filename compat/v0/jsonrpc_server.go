@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -352,7 +353,15 @@ func writeError(w http.ResponseWriter, id interface{}, rpcErr *jsonrpc.Error) {
 }
 
 func writeTaskManagerError(w http.ResponseWriter, id interface{}, err error, operation string) {
-	if rpcErr, ok := err.(*jsonrpc.Error); ok {
+	var taskErr *taskmanager.Error
+	if errors.As(err, &taskErr) {
+		rpcErr := jsonrpc.FromTaskManagerError(taskErr)
+		log.Errorf("compat/v0: error calling %s: %v", operation, taskErr)
+		writeError(w, id, rpcErr)
+		return
+	}
+	var rpcErr *jsonrpc.Error
+	if errors.As(err, &rpcErr) {
 		log.Errorf("compat/v0: error calling %s: %v", operation, rpcErr)
 		writeError(w, id, rpcErr)
 		return
