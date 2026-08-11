@@ -3,7 +3,10 @@
 本页讲如何从 Go 程序调用一个 A2A agent：发现 agent、发送消息、消费流式事件、管理任务、注册推送通知，以及在一个 agent 内部编排调用其他 agent。构建服务端见 [服务端](server.md)，协议对象与状态机见 [协议](protocol.md)。
 
 ```go
-import "trpc.group/trpc-go/trpc-a2a-go/v2/client"
+import (
+    "trpc.group/trpc-go/trpc-a2a-go/v2/client"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+)
 
 c, err := client.NewA2AClient("http://localhost:8080/")
 if err != nil {
@@ -11,16 +14,24 @@ if err != nil {
 }
 ```
 
-`NewA2AClient` 接收 agent endpoint，默认继续使用 JSON-RPC。直接指定 HTTP+JSON 时传 `client.WithProtocolBinding(protocol.ProtocolBindingHTTPJSON)`；更推荐先获取 Agent Card，再让 client 按有序的 `supportedInterfaces` 选择第一个自己支持的 binding：
+`NewA2AClient` 接收 agent endpoint，默认继续使用 JSON-RPC。直接指定 HTTP+JSON 时传 `client.WithProtocolBinding(protocol.ProtocolBindingHTTPJSON)`：
 
 ```go
 restClient, _ := client.NewA2AClient(
     "https://agent.example.com/a2a",
     client.WithProtocolBinding(protocol.ProtocolBindingHTTPJSON),
 )
+```
 
-card, _ := c.GetAgentCard(ctx, "")
-discoveredClient, _ := client.NewA2AClientFromAgentCard(card)
+从 Agent Card 选择 interface 时，把它的三个属性一起传给直接构造函数。`WithTenant` 会把所选 interface 的 tenant 自动放进每个请求，并拒绝请求中冲突的 tenant：
+
+```go
+iface := card.SupportedInterfaces[0] // 调用方选出的第一个兼容 interface
+selectedClient, _ := client.NewA2AClient(
+    iface.URL,
+    client.WithProtocolBinding(iface.ProtocolBinding),
+    client.WithTenant(iface.Tenant),
+)
 ```
 
 JSON-RPC 请求继续使用 `application/json`。HTTP+JSON 使用 REST 路由并发送 `application/a2a+json`；一元响应同时接受 `application/a2a+json` 与兼容 1.0.0 实现的 `application/json`。默认没有超时；生产代码通常会传 `client.WithTimeout(...)` 或自定义 `http.Client`。

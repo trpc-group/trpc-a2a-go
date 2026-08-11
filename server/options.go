@@ -59,18 +59,27 @@ func WithCORSEnabled(enabled bool) Option {
 func WithJSONRPCEndpoint(path string) Option {
 	return func(s *A2AServer) {
 		s.jsonRPCEndpoint = path
-		s.pathsExplicitlySet = true
+	}
+}
+
+// WithV1JSONRPCEnabled controls the v1 JSON-RPC binding. It is enabled by
+// default for backward compatibility. Disabling it does not disable a handler
+// installed with WithCompatHandler, allowing an HTTP+JSON-only v1 server to
+// continue serving the legacy v0 JSON-RPC wire on the configured endpoint.
+func WithV1JSONRPCEnabled(enabled bool) Option {
+	return func(s *A2AServer) {
+		s.v1JSONRPCEnabled = enabled
 	}
 }
 
 // WithHTTPJSONEndpoint enables the HTTP+JSON/REST binding and sets its base path.
 // The standard operation paths, such as /message:send and /tasks/{id}, are
-// appended to this base path. The binding is also enabled automatically when a
-// static Agent Card advertises an HTTP+JSON interface.
+// appended to this base path. HTTP+JSON is off until this option is set; Agent
+// Card supportedInterfaces are discovery metadata for clients and do not enable
+// the binding.
 func WithHTTPJSONEndpoint(basePath string) Option {
 	return func(s *A2AServer) {
 		s.httpJSONBasePath = normalizeHTTPJSONBasePath(basePath)
-		s.httpJSONPathExplicitlySet = true
 		s.httpJSONEnabled = true
 	}
 }
@@ -90,10 +99,11 @@ func WithCompatHandler(h http.Handler) Option {
 }
 
 // WithAgentCard sets the server's default agent card. For a single-agent server
-// this is the card served at /.well-known/agent-card.json, and its URL also
-// supplies the base path when no path option is set. For a multi-tenant server
-// (WithTenantCard / WithTenantCardProvider) it is optional and, when given,
-// becomes the default "directory" card served when no "?tenant=" is present.
+// this is the card served at /.well-known/agent-card.json (or under WithBasePath).
+// Card interface URLs are client discovery metadata and do not change mount
+// paths. For a multi-tenant server (WithTenantCard / WithTenantCardProvider) it
+// is optional and, when given, becomes the default "directory" card served when
+// no "?tenant=" is present.
 //
 // At least one of WithAgentCard, WithTenantCard or WithTenantCardProvider must be
 // supplied to NewA2AServer.
@@ -179,7 +189,6 @@ func WithJWKSEndpoint(enabled bool, path string) Option {
 		s.jwksExplicitlySet = true
 		if path != "" {
 			s.jwksEndpoint = path
-			s.pathsExplicitlySet = true
 		}
 	}
 }
@@ -199,11 +208,11 @@ func WithPushNotificationJWKSHandler(handler http.Handler) Option {
 }
 
 // WithBasePath sets a base path for all A2A endpoints.
-// This option has higher priority than agentCard.URL path extraction.
-// When provided, it overrides any path extracted from agentCard.URL.
+// This option has higher priority than the root defaults when a subpath is
+// needed (for example behind a reverse proxy that strips or rewrites paths).
 //
 // This is useful when:
-// - The agentCard.URL is for external/frontend use
+// - The agentCard URL is for external/frontend discovery
 // - Internal routing/forwarding maps to different backend paths
 // - You need explicit control over the serving endpoints
 //
@@ -220,6 +229,8 @@ func WithPushNotificationJWKSHandler(handler http.Handler) Option {
 // - /api/v1/agent/.well-known/jwks.json
 //
 // The base path should start with "/" and not end with "/".
+// Note: WithBasePath sets the HTTP+JSON base path but does not enable that
+// binding; call WithHTTPJSONEndpoint when REST should be mounted.
 func WithBasePath(basePath string) Option {
 	return func(s *A2AServer) {
 		// Normalize the base path.
@@ -237,13 +248,11 @@ func WithBasePath(basePath string) Option {
 		basePath = strings.TrimSuffix(basePath, "/")
 
 		// Set all endpoint paths with the base path prefix.
-		s.pathsExplicitlySet = true
 		s.jsonRPCEndpoint = basePath + "/"
 		s.agentCardPath = basePath + protocol.AgentCardPath
 		s.oldAgentCardPath = basePath + protocol.OldAgentCardPath
 		s.jwksEndpoint = basePath + protocol.JWKSPath
 		s.httpJSONBasePath = basePath
-		s.httpJSONPathExplicitlySet = true
 	}
 }
 

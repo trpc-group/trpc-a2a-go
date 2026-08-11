@@ -43,6 +43,12 @@ func TestWithJSONRPCEndpoint(t *testing.T) {
 	assert.Equal(t, path, s.jsonRPCEndpoint)
 }
 
+func TestWithV1JSONRPCEnabled(t *testing.T) {
+	s := &A2AServer{v1JSONRPCEnabled: true}
+	WithV1JSONRPCEnabled(false)(s)
+	assert.False(t, s.v1JSONRPCEnabled)
+}
+
 func TestWithReadTimeout(t *testing.T) {
 	// Test with custom read timeout
 	timeout := 30 * time.Second
@@ -155,73 +161,9 @@ func TestWithTelemetryMeterProviderOverrideOptions(t *testing.T) {
 	assert.Nil(t, serverOptions.telemetryOptions)
 }
 
-func TestExtractBasePathFromURL(t *testing.T) {
-	tests := []struct {
-		name         string
-		agentURL     string
-		expectedPath string
-	}{
-		{
-			name:         "Basic sub-path",
-			agentURL:     "http://localhost:8080/agent",
-			expectedPath: "/agent",
-		},
-		{
-			name:         "Multi-level path",
-			agentURL:     "http://localhost:8080/api/v2/agents/myagent",
-			expectedPath: "/api/v2/agents/myagent",
-		},
-		{
-			name:         "Path with trailing slash - should be normalized",
-			agentURL:     "http://localhost:8080/agent/api/v2/",
-			expectedPath: "/agent/api/v2",
-		},
-		{
-			name:         "Root path - should return empty",
-			agentURL:     "http://localhost:8080/",
-			expectedPath: "",
-		},
-		{
-			name:         "Root path without slash - should return empty",
-			agentURL:     "http://localhost:8080",
-			expectedPath: "",
-		},
-		{
-			name:         "Empty URL - should return empty",
-			agentURL:     "",
-			expectedPath: "",
-		},
-		{
-			name:         "HTTPS URL with port",
-			agentURL:     "https://example.com:9090/my/agent/path",
-			expectedPath: "/my/agent/path",
-		},
-		{
-			name:         "URL with query parameters - query ignored",
-			agentURL:     "http://localhost:8080/agent?param=value",
-			expectedPath: "/agent",
-		},
-		{
-			name:         "URL with fragment - fragment ignored",
-			agentURL:     "http://localhost:8080/agent#section",
-			expectedPath: "/agent",
-		},
-		{
-			name:         "Invalid URL - should return empty",
-			agentURL:     "not-a-valid-url",
-			expectedPath: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := extractBasePathFromURL(tt.agentURL)
-			assert.Equal(t, tt.expectedPath, result, "Base path extraction mismatch")
-		})
-	}
-}
-
 func TestNewA2AServerWithAgentCardURL(t *testing.T) {
+	// Serving paths are not derived from the agent card URL; card metadata is
+	// for clients. Use WithBasePath when a subpath mount is required.
 	tests := []struct {
 		name              string
 		agentCardURL      string
@@ -230,18 +172,18 @@ func TestNewA2AServerWithAgentCardURL(t *testing.T) {
 		expectedJWKS      string
 	}{
 		{
-			name:              "Agent card with sub-path",
+			name:              "Agent card with sub-path still serves at root",
 			agentCardURL:      "http://localhost:8080/agent",
-			expectedJSONRPC:   "/agent/",
-			expectedAgentCard: "/agent/.well-known/agent-card.json",
-			expectedJWKS:      "/agent/.well-known/jwks.json",
+			expectedJSONRPC:   "/",
+			expectedAgentCard: "/.well-known/agent-card.json",
+			expectedJWKS:      "/.well-known/jwks.json",
 		},
 		{
-			name:              "Agent card with multi-level path",
+			name:              "Agent card with multi-level path still serves at root",
 			agentCardURL:      "http://localhost:8080/api/v2/agents/myagent",
-			expectedJSONRPC:   "/api/v2/agents/myagent/",
-			expectedAgentCard: "/api/v2/agents/myagent/.well-known/agent-card.json",
-			expectedJWKS:      "/api/v2/agents/myagent/.well-known/jwks.json",
+			expectedJSONRPC:   "/",
+			expectedAgentCard: "/.well-known/agent-card.json",
+			expectedJWKS:      "/.well-known/jwks.json",
 		},
 		{
 			name:              "Agent card with root URL",
@@ -461,20 +403,20 @@ func TestWithBasePathPriority(t *testing.T) {
 			expectedJWKS:      "/from/option/.well-known/jwks.json",
 		},
 		{
-			name:              "agentCard.URL used when WithBasePath is empty",
+			name:              "root defaults when WithBasePath is empty",
 			agentCardURL:      "http://localhost:8080/from/url",
 			basePath:          "",
-			expectedJSONRPC:   "/from/url/",
-			expectedAgentCard: "/from/url/.well-known/agent-card.json",
-			expectedJWKS:      "/from/url/.well-known/jwks.json",
+			expectedJSONRPC:   "/",
+			expectedAgentCard: "/.well-known/agent-card.json",
+			expectedJWKS:      "/.well-known/jwks.json",
 		},
 		{
-			name:              "agentCard.URL used when WithBasePath is root path",
+			name:              "root defaults when WithBasePath is root path",
 			agentCardURL:      "http://localhost:8080/from/url",
 			basePath:          "/",
-			expectedJSONRPC:   "/from/url/",
-			expectedAgentCard: "/from/url/.well-known/agent-card.json",
-			expectedJWKS:      "/from/url/.well-known/jwks.json",
+			expectedJSONRPC:   "/",
+			expectedAgentCard: "/.well-known/agent-card.json",
+			expectedJWKS:      "/.well-known/jwks.json",
 		},
 	}
 

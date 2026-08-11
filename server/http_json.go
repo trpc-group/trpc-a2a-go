@@ -51,38 +51,26 @@ func httpJSONServeMuxPattern(basePath string) string {
 	return basePath + "/"
 }
 
-func agentInterfaceURL(card AgentCard, binding string) string {
-	for _, iface := range card.SupportedInterfaces {
-		if strings.EqualFold(iface.ProtocolBinding, binding) {
-			return iface.URL
-		}
-	}
-	return ""
-}
-
-// httpJSONOperationSegments are the single-segment operation names. A tenant
-// carrying one of these names is unroutable, and a task whose ID is one of them
-// is indistinguishable from the operation, so they are reserved either way.
-var httpJSONOperationSegments = map[string]bool{
-	"message:send":      true,
-	"message:stream":    true,
-	"tasks":             true,
-	"extendedAgentCard": true,
-}
-
-// parseHTTPJSONRoute resolves an escaped request path to an operation.
+// parseHTTPJSONRoute maps an escaped request path to an HTTP+JSON operation.
 //
-// Matching runs on the still-escaped segments so that a percent-encoded colon
-// is not read as an operation verb: "/tasks/job%3Acancel" addresses the task
-// literally named "job:cancel", while "/tasks/job:cancel" cancels "job". IDs
-// are unescaped only once their position is known.
+// requestPath must be url.URL.EscapedPath() (still percent-encoded). Matching
+// runs on escaped segments so a literal "%3A" is not treated as the operation
+// verb colon: "/tasks/job%3Acancel" is GetTask("job:cancel"), while
+// "/tasks/job:cancel" is Cancel("job"). Identifiers are PathUnescape'd only
+// after their position in the route is known.
 //
-// The leading {tenant} segment is the additional binding a2a.proto defines for
-// every operation. The tenant-less reading is tried first, since that is the
-// common case, except where it would resolve to a GetTask whose ID is a
-// reserved operation name — that only happens for a tenant named "tasks", which
-// the prefixed reading handles correctly.
+// Layout after stripping basePath:
+//
+//	/{op}...                 — no tenant (common case)
+//	/{tenant}/{op}...        — tenant prefix from a2a.proto's additional binding
+//
+// Try the tenant-less parse first. The only ambiguous form is a GetTask whose
+// raw ID segment is also a top-level operation: it may instead be the official
+// tenant="tasks" additional binding. Literal operation segments select that
+// binding for interoperability with reference clients; percent-encoding one
+// character keeps the corresponding task ID addressable.
 func parseHTTPJSONRoute(requestPath, basePath string) (httpJSONRoute, bool) {
+	// Strip the configured mount prefix (also compared in escaped form).
 	basePath = normalizeHTTPJSONBasePath(basePath)
 	escapedBasePath := (&url.URL{Path: basePath}).EscapedPath()
 	if escapedBasePath != "" {
@@ -94,17 +82,19 @@ func parseHTTPJSONRoute(requestPath, basePath string) (httpJSONRoute, bool) {
 
 	segments := strings.Split(strings.Trim(requestPath, "/"), "/")
 	for _, segment := range segments {
+		// Reject "//" or a trailing empty segment after the split.
 		if segment == "" {
 			return httpJSONRoute{}, false
 		}
 	}
 
+	// 1) Tenant-less: /message:send, /tasks/{id}, /tasks/{id}:cancel, ...
 	route, ok := matchHTTPJSONRouteSegments(segments, "")
-	shadowsTenant := ok && route.operation == protocol.MethodTasksGet &&
-		httpJSONOperationSegments[route.taskID]
-	if ok && !shadowsTenant {
+	if ok && !shadowsTasksTenant(segments, route) {
 		return route, true
 	}
+
+	// 2) Tenant-prefixed: /{tenant}/message:send, /{tenant}/tasks/{id}, ...
 	if len(segments) > 1 {
 		tenant, err := url.PathUnescape(segments[0])
 		if err != nil || tenant == "" {
@@ -114,7 +104,23 @@ func parseHTTPJSONRoute(requestPath, basePath string) (httpJSONRoute, bool) {
 			return prefixed, true
 		}
 	}
+
 	return route, ok
+}
+
+// shadowsTasksTenant reports whether /tasks/{segment} is also a valid
+// tenant="tasks" operation. Compare the raw segment so an escaped task ID is
+// not mistaken for the additional tenant binding.
+func shadowsTasksTenant(segments []string, route httpJSONRoute) bool {
+	if route.operation != protocol.MethodTasksGet || len(segments) != 2 {
+		return false
+	}
+	switch segments[1] {
+	case "message:send", "message:stream", "tasks", "extendedAgentCard":
+		return true
+	default:
+		return false
+	}
 }
 
 // unescapeSegment decodes one path segment into an identifier.
@@ -124,18 +130,6 @@ func unescapeSegment(segment string) (string, bool) {
 		return "", false
 	}
 	return decoded, true
-}
-
-func agentCardsAdvertiseBinding(s *A2AServer, binding string) bool {
-	if s.agentCardSet && agentInterfaceURL(s.agentCard, binding) != "" {
-		return true
-	}
-	for _, card := range s.tenantCards {
-		if agentInterfaceURL(card, binding) != "" {
-			return true
-		}
-	}
-	return false
 }
 
 func matchHTTPJSONRouteSegments(segments []string, tenant string) (httpJSONRoute, bool) {

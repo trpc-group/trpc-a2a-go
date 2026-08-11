@@ -60,14 +60,11 @@ go run main.go -host localhost:9000
 go run main.go -stream
 ```
 
-v2 server 支持 A2A v1.0 的两种 HTTP binding。JSON-RPC 使用 `application/json`；HTTP+JSON 使用标准 REST 路由与 `application/a2a+json`。直接通过 endpoint 创建的 client 默认使用 JSON-RPC；从 Agent Card 创建时，client 会按有序的 `supportedInterfaces` 选择第一个兼容 binding：
+v2 server 支持 A2A v1.0 的两种 HTTP binding。JSON-RPC 使用 `application/json`；HTTP+JSON 使用标准 REST 路由与 `application/a2a+json`。直接通过 endpoint 创建的 client 默认使用 JSON-RPC；HTTP+JSON 需显式指定：
 
 ```go
 restClient, _ := client.NewA2AClient(endpoint,
 	client.WithProtocolBinding(protocol.ProtocolBindingHTTPJSON))
-
-card, _ := discoveryClient.GetAgentCard(ctx, "")
-selectedClient, _ := client.NewA2AClientFromAgentCard(card)
 ```
 
 ## 文档

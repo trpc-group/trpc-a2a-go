@@ -65,14 +65,11 @@ go run main.go -host localhost:9000
 go run main.go -stream
 ```
 
-The v2 server supports both A2A v1.0 HTTP bindings. JSON-RPC uses `application/json`; HTTP+JSON uses the standard REST routes and `application/a2a+json`. A direct client defaults to JSON-RPC, while Agent Card construction follows the ordered `supportedInterfaces` list:
+The v2 server supports both A2A v1.0 HTTP bindings. JSON-RPC uses `application/json`; HTTP+JSON uses the standard REST routes and `application/a2a+json`. A direct client defaults to JSON-RPC; select HTTP+JSON explicitly:
 
 ```go
 restClient, _ := client.NewA2AClient(endpoint,
 	client.WithProtocolBinding(protocol.ProtocolBindingHTTPJSON))
-
-card, _ := discoveryClient.GetAgentCard(ctx, "")
-selectedClient, _ := client.NewA2AClientFromAgentCard(card)
 ```
 
 ## Documentation

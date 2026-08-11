@@ -20,7 +20,7 @@ how it is built:
 - an **orchestrator agent** fanning work out to specialist agents,
 - **cross-organization** calls that need authentication and webhooks.
 
-The transport is deliberately boring: the client fetches the agent's **agent card** to learn its identity, skills, capabilities, and ordered `supportedInterfaces`, then selects JSON-RPC or HTTP+JSON; both use SSE for streaming. trpc-a2a-go implements A2A **v1.0** (the legacy v0.2.x wire is kept alive by [compat/v0](https://github.com/trpc-group/trpc-a2a-go/tree/v2/compat/v0)).
+The transport is deliberately boring: the client application fetches the agent's **agent card** to learn its identity, skills, capabilities, and ordered `supportedInterfaces`, then selects JSON-RPC or HTTP+JSON and constructs a client from the selected URL, binding, and tenant; both bindings use SSE for streaming. trpc-a2a-go implements A2A **v1.0** (the legacy v0.2.x wire is kept alive by [compat/v0](https://github.com/trpc-group/trpc-a2a-go/tree/v2/compat/v0)).
 
 ## The mental model
 
@@ -103,9 +103,7 @@ Two related notions:
   authenticates (skills or details it does not want public). The client fetches
   it with `GetExtendedAgentCard`; the public card advertises this via
   `capabilities.extendedAgentCard`.
-- **Multi-transport** — `supportedInterfaces` can list several bindings
-  (JSON-RPC, gRPC, REST) and, in this framework, per-tenant URLs; the client
-  picks the first it supports.
+- **Multi-transport** — `supportedInterfaces` can list several bindings (JSON-RPC, gRPC, REST) and per-tenant URLs; the caller selects the first compatible interface and passes its URL, binding, and tenant to `NewA2AClient`.
 - **Extensions** — URI-identified protocol extensions an agent declares in
   `capabilities.extensions`; a client opts into them per request, and an agent
   may mark one `required` (a missing opt-in is `-32008`).

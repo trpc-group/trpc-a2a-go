@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -63,14 +64,16 @@ func TestHTTPJSONClientServerSendAndStream(t *testing.T) {
 			ProtocolVersion: protocol.ProtocolVersionV1,
 		}},
 	}
-	a2aServer, err := server.NewA2AServer(manager, server.WithAgentCard(card))
+	a2aServer, err := server.NewA2AServer(
+		manager,
+		server.WithAgentCard(card),
+		server.WithHTTPJSONEndpoint("/"),
+	)
 	require.NoError(t, err)
 	testServer := httptest.NewServer(a2aServer.Handler())
 	t.Cleanup(testServer.Close)
 
-	clientCard := card
-	clientCard.SupportedInterfaces[0].URL = testServer.URL
-	client, err := NewA2AClientFromAgentCard(&clientCard)
+	client, err := NewA2AClient(testServer.URL, WithProtocolBinding(protocol.ProtocolBindingHTTPJSON))
 	require.NoError(t, err)
 	assert.Equal(t, protocol.ProtocolBindingHTTPJSON, client.protocolBinding)
 
@@ -95,35 +98,20 @@ func TestHTTPJSONClientServerSendAndStream(t *testing.T) {
 	assert.Equal(t, "echo: hello", streamed[0].GetMessage().Parts[0].TextContent())
 }
 
-func TestNewA2AClientFromAgentCardSelectionAndTenant(t *testing.T) {
-	card := &protocol.AgentCard{SupportedInterfaces: []protocol.AgentInterface{
-		{URL: "https://unsupported.example", ProtocolBinding: "CUSTOM", ProtocolVersion: protocol.ProtocolVersionV1},
-		{URL: "https://rest.example/api", ProtocolBinding: protocol.ProtocolBindingHTTPJSON, Tenant: "tenant-a", ProtocolVersion: protocol.ProtocolVersionV1},
-		{URL: "https://rpc.example/rpc", ProtocolBinding: protocol.ProtocolBindingJSONRPC, ProtocolVersion: protocol.ProtocolVersionV1},
-	}, Signatures: []protocol.AgentCardSignature{{Protected: "header", Signature: "signature"}}}
-	before, err := json.Marshal(card)
-	require.NoError(t, err)
-
-	client, err := NewA2AClientFromAgentCard(card)
+func TestWithProtocolBindingSelectsHTTPJSON(t *testing.T) {
+	client, err := NewA2AClient(
+		"https://rest.example/api",
+		WithProtocolBinding(protocol.ProtocolBindingHTTPJSON),
+		WithTenant("tenant-a"),
+	)
 	require.NoError(t, err)
 	assert.Equal(t, protocol.ProtocolBindingHTTPJSON, client.protocolBinding)
 	assert.Equal(t, "tenant-a", client.tenant)
 	assert.Equal(t, "https://rest.example/api/", client.baseURL.String())
-	after, err := json.Marshal(card)
-	require.NoError(t, err)
-	assert.JSONEq(t, string(before), string(after), "client construction must not mutate a signed Agent Card")
 
-	rpcClient, err := NewA2AClientFromAgentCard(card, WithProtocolBinding(protocol.ProtocolBindingJSONRPC))
-	require.NoError(t, err)
-	assert.Equal(t, protocol.ProtocolBindingJSONRPC, rpcClient.protocolBinding)
-	assert.Equal(t, "https://rpc.example/rpc/", rpcClient.baseURL.String())
-
-	_, err = client.SendMessage(context.Background(), protocol.SendMessageParams{
-		Tenant:  "tenant-b",
-		Message: protocol.Message{Role: protocol.MessageRoleUser, Parts: []*protocol.Part{protocol.NewTextPart("hello")}},
-	})
+	_, err = NewA2AClient("https://rest.example/api", WithProtocolBinding("CUSTOM"))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "does not match selected AgentInterface tenant")
+	assert.Contains(t, err.Error(), "unsupported A2A protocol binding")
 }
 
 func TestHTTPJSONRequestHeadersAndBody(t *testing.T) {
@@ -169,10 +157,13 @@ func TestHTTPJSONRequestHeadersAndBody(t *testing.T) {
 	}))
 	t.Cleanup(testServer.Close)
 
-	client, err := NewA2AClient(testServer.URL, WithProtocolBinding(protocol.ProtocolBindingHTTPJSON))
+	client, err := NewA2AClient(
+		testServer.URL,
+		WithProtocolBinding(protocol.ProtocolBindingHTTPJSON),
+		WithTenant("tenant/a"),
+	)
 	require.NoError(t, err)
 	_, err = client.SendMessage(context.Background(), protocol.SendMessageParams{
-		Tenant: "tenant/a",
 		Message: protocol.Message{
 			MessageID: "message-1",
 			Role:      protocol.MessageRoleUser,
@@ -183,6 +174,30 @@ func TestHTTPJSONRequestHeadersAndBody(t *testing.T) {
 	requestErrMu.Lock()
 	defer requestErrMu.Unlock()
 	require.NoError(t, requestErr)
+
+	_, err = client.SendMessage(context.Background(), protocol.SendMessageParams{Tenant: "another-tenant"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not match configured client tenant")
+}
+
+func TestHTTPJSONURLPreservesEndpointQuery(t *testing.T) {
+	client, err := NewA2AClient(
+		"https://rest.example/api?access_token=secret&region=base",
+		WithProtocolBinding(protocol.ProtocolBindingHTTPJSON),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "secret", client.baseURL.Query().Get("access_token"))
+	assert.Equal(t, "base", client.baseURL.Query().Get("region"))
+
+	target, err := url.Parse(client.httpJSONURL("/tasks", url.Values{
+		"pageSize": {"10"},
+		"region":   {"request"},
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, "/api/tasks", target.EscapedPath())
+	assert.Equal(t, "secret", target.Query().Get("access_token"))
+	assert.Equal(t, "10", target.Query().Get("pageSize"))
+	assert.Equal(t, "request", target.Query().Get("region"), "operation query overrides endpoint defaults")
 }
 
 func TestBuildHTTPJSONRequestRoutes(t *testing.T) {
@@ -208,6 +223,9 @@ func TestBuildHTTPJSONRequestRoutes(t *testing.T) {
 		{name: "delete push", operation: protocol.MethodTasksPushNotificationConfigDelete, params: protocol.DeleteTaskPushNotificationConfigParams{TaskID: "task", ID: "config"}, method: http.MethodDelete, path: "/tasks/task/pushNotificationConfigs/config"},
 		{name: "extended card", operation: protocol.MethodAgentAuthenticatedExtendedCard, params: extendedCardParams{Tenant: "tenant"}, method: http.MethodGet, path: "/tenant/extendedAgentCard"},
 		{name: "get task tenant", operation: protocol.MethodTasksGet, params: protocol.TaskQueryParams{ID: "task", Tenant: "tenant"}, method: http.MethodGet, path: "/tenant/tasks/task"},
+		{name: "reserved tenant", operation: protocol.MethodTasksList, params: protocol.ListTasksParams{Tenant: "tasks"}, method: http.MethodGet, path: "/tasks/tasks"},
+		{name: "reserved task id", operation: protocol.MethodTasksGet, params: protocol.TaskQueryParams{ID: "tasks"}, method: http.MethodGet, path: "/tasks/%74asks"},
+		{name: "extended card task id", operation: protocol.MethodTasksGet, params: protocol.TaskQueryParams{ID: "extendedAgentCard"}, method: http.MethodGet, path: "/tasks/%65xtendedAgentCard"},
 	}
 
 	for _, tt := range tests {

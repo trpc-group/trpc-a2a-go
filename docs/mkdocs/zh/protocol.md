@@ -14,7 +14,7 @@ AI agent 正在变成服务：报告生成器、差旅预订助手、代码评�
 - **编排 agent** 把工作分发给多个专家 agent；
 - **跨组织调用**：需要鉴权与 webhook 回调。
 
-传输层刻意保持朴素：client 先取 agent 的 **agent card** 了解其身份、技能、能力与有序的 `supportedInterfaces`，再选择 JSON-RPC 或 HTTP+JSON；两种绑定的流式响应都使用 SSE。trpc-a2a-go 实现 A2A **v1.0**（legacy v0.2.x wire 由 [compat/v0](https://github.com/trpc-group/trpc-a2a-go/tree/v2/compat/v0) 层继续支持）。
+传输层刻意保持朴素：client 应用先取 agent 的 **agent card** 了解其身份、技能、能力与有序的 `supportedInterfaces`，再选择 JSON-RPC 或 HTTP+JSON，并用所选 interface 的 URL、binding、tenant 构造 client；两种绑定的流式响应都使用 SSE。trpc-a2a-go 实现 A2A **v1.0**（legacy v0.2.x wire 由 [compat/v0](https://github.com/trpc-group/trpc-a2a-go/tree/v2/compat/v0) 层继续支持）。
 
 ## 心智模型
 
@@ -90,7 +90,7 @@ agentCard := server.AgentCard{
 两个相关概念：
 
 - **扩展 card**——agent 可以在 client **鉴权之后**提供一张更丰富的 card（不想公开的技能或细节）。wire 方法是 `GetExtendedAgentCard`，Go client 方法是 `GetAuthenticatedExtendedCard`；公开 card 用 `capabilities.extendedAgentCard` 声明这一点。
-- **多传输**——`supportedInterfaces` 可列出多个绑定（JSON-RPC、gRPC、REST），在本框架里还可按租户列不同 URL；client 选它支持的第一个。
+- **多传输**——`supportedInterfaces` 可列出多个绑定（JSON-RPC、gRPC、REST），在本框架里还可按租户列不同 URL；调用方按需自行选择并构造 client。
 - **扩展（Extensions）**——URI 标识的协议扩展，agent 在 `capabilities.extensions` 中声明；client 按请求选入，agent 可把某个标为 `required`（未选入则报 `-32008`）。
 - **签名**——card 可以经 JWS 签名（`signatures`），让 client 校验它未被篡改。
 

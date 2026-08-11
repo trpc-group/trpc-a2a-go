@@ -43,17 +43,12 @@ type A2AServer struct {
 	httpServer       *http.Server            // Underlying HTTP server.
 	httpServerMu     sync.Mutex              // Guards httpServer: Start writes it, Stop reads it.
 	corsEnabled      bool                    // Flag to enable/disable CORS headers.
+	v1JSONRPCEnabled bool                    // Whether the v1 JSON-RPC binding is mounted.
 	jsonRPCEndpoint  string                  // Path for the JSON-RPC endpoint.
 	httpJSONBasePath string                  // Base path for HTTP+JSON/REST endpoints.
 	httpJSONEnabled  bool                    // Whether the HTTP+JSON binding is mounted.
 	agentCardPath    string                  // Path for the agent card endpoint.
 	oldAgentCardPath string                  // Path for the old agent card endpoint.
-	// pathsExplicitlySet records whether serving paths were configured via an
-	// option (WithBasePath / WithJSONRPCEndpoint / WithJWKSEndpoint). When false,
-	// the base path is derived from the agent card URL. This replaces a fragile
-	// "did the paths change from their defaults?" heuristic.
-	pathsExplicitlySet        bool
-	httpJSONPathExplicitlySet bool
 	// tenantCards is the static tenant -> AgentCard registry (WithTenantCards).
 	// tenantCardProvider resolves a tenant's card dynamically (WithTenantCardProvider).
 	// When either is set the server is multi-tenant: it routes by params.Tenant
@@ -106,6 +101,7 @@ func NewA2AServer(taskManager taskmanager.TaskManager, opts ...Option) (*A2AServ
 	server := &A2AServer{
 		taskManager:      taskManager,
 		corsEnabled:      true, // Enable CORS by default for easier development.
+		v1JSONRPCEnabled: true,
 		jsonRPCEndpoint:  protocol.DefaultJSONRPCPath,
 		httpJSONBasePath: "",
 		agentCardPath:    protocol.AgentCardPath,
@@ -117,8 +113,7 @@ func NewA2AServer(taskManager taskmanager.TaskManager, opts ...Option) (*A2AServ
 		jwksEndpoint:     protocol.JWKSPath,
 	}
 
-	// Apply options. WithAgentCard sets the default card; path-setting options
-	// (WithBasePath / WithJSONRPCEndpoint / WithJWKSEndpoint) set pathsExplicitlySet.
+	// Apply options (WithAgentCard, path options, middleware, …).
 	for _, opt := range opts {
 		opt(server)
 	}
@@ -128,43 +123,9 @@ func NewA2AServer(taskManager taskmanager.TaskManager, opts ...Option) (*A2AServ
 		return nil, errors.New(
 			"NewA2AServer requires an agent card: use WithAgentCard, WithTenantCard, or WithTenantCardProvider")
 	}
-
-	// When the serving paths were not set explicitly, derive a base path from the
-	// default agent card URL (the common "direct serve under a subpath" case, where
-	// the advertised URL path == the serving path). Use WithBasePath to override
-	// this when they differ (e.g. behind a reverse proxy that rewrites the path).
-	// A pure multi-tenant server (no default card) defaults to the root paths;
-	// tenant cards share that single endpoint and use WithBasePath when needed.
-	if !server.pathsExplicitlySet && server.agentCardSet {
-		primaryBasePath := extractBasePathFromURL(server.agentCard.PrimaryURL())
-		if primaryBasePath != "" {
-			server.agentCardPath = primaryBasePath + protocol.AgentCardPath
-			server.jwksEndpoint = primaryBasePath + protocol.JWKSPath
-			server.oldAgentCardPath = primaryBasePath + protocol.OldAgentCardPath
-			if !server.httpJSONPathExplicitlySet {
-				server.httpJSONBasePath = primaryBasePath
-			}
-		}
-		// Prefer the path the card advertises for JSON-RPC specifically, so a
-		// card that offers the two bindings at different URLs mounts each where
-		// it says. Fall back to the primary URL — a card that advertises only
-		// HTTP+JSON (or only gRPC) must not silently relocate the JSON-RPC
-		// endpoint to the root and hand its old path to another binding.
-		jsonRPCBasePath := primaryBasePath
-		if endpoint := agentInterfaceURL(server.agentCard, protocol.ProtocolBindingJSONRPC); endpoint != "" {
-			jsonRPCBasePath = extractBasePathFromURL(endpoint)
-		}
-		if jsonRPCBasePath != "" {
-			server.jsonRPCEndpoint = jsonRPCBasePath + "/"
-		}
-	}
-	if !server.httpJSONPathExplicitlySet && server.agentCardSet {
-		if endpoint := agentInterfaceURL(server.agentCard, protocol.ProtocolBindingHTTPJSON); endpoint != "" {
-			server.httpJSONBasePath = extractBasePathFromURL(endpoint)
-		}
-	}
-	if agentCardsAdvertiseBinding(server, protocol.ProtocolBindingHTTPJSON) {
-		server.httpJSONEnabled = true
+	if !server.v1JSONRPCEnabled && server.compatHandler == nil && !server.httpJSONEnabled {
+		return nil, errors.New(
+			"NewA2AServer requires an enabled protocol binding: enable v1 JSON-RPC, HTTP+JSON, or compat/v0")
 	}
 
 	if err := server.resolvePushPosture(taskManager); err != nil {
@@ -359,56 +320,113 @@ func (s *A2AServer) shutdownTelemetry(ctx context.Context) error {
 func (s *A2AServer) Handler() http.Handler {
 	router := http.NewServeMux()
 
-	// Endpoint for agent metadata (.well-known convention).
-	router.Handle(s.agentCardPath, http.HandlerFunc(s.handleAgentCard))
-	router.Handle(s.oldAgentCardPath, http.HandlerFunc(s.handleAgentCard))
-
-	// JWKS endpoint for push-notification verification if enabled.
-	if s.jwksEnabled && s.pushJWKSHandler != nil {
-		router.Handle(s.jwksEndpoint, s.pushJWKSHandler)
+	cardHandler := s.agentCardHandler()
+	router.Handle(s.agentCardPath, cardHandler)
+	router.Handle(s.oldAgentCardPath, cardHandler)
+	if jwks := s.jwksHandler(); jwks != nil {
+		router.Handle(s.jwksEndpoint, jwks)
 	}
 
-	// Default JSON-RPC transport (configurable path). When a compat handler is
-	// configured, dispatch non-v1 (legacy) methods to it from within the same
-	// handler so the authentication middleware below covers both generations.
-	var jsonRPCHandler http.Handler = http.HandlerFunc(s.handleJSONRPC)
-	if s.compatHandler != nil {
-		jsonRPCHandler = s.dispatchByProtocol(jsonRPCHandler, s.compatHandler)
+	jsonRPCHandler := s.jsonRPCHandler()
+	httpJSONHandler := s.httpJSONHandler()
+	if httpJSONHandler == nil {
+		router.Handle(s.jsonRPCEndpoint, s.withMiddleware(jsonRPCHandler))
+		return rawPathGuard(router)
 	}
 
-	if !s.httpJSONEnabled {
-		if len(s.middleWare) > 0 {
-			jsonRPCHandler = MiddlewareChain(s.middleWare).Wrap(jsonRPCHandler)
-		}
-		router.Handle(s.jsonRPCEndpoint, jsonRPCHandler)
-		return router
-	}
-
-	httpJSONHandler := http.Handler(http.HandlerFunc(s.handleHTTPJSON))
 	httpJSONPattern := httpJSONServeMuxPattern(s.httpJSONBasePath)
-	if httpJSONPattern == s.jsonRPCEndpoint {
-		combined := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	if jsonRPCHandler == nil {
+		router.Handle(httpJSONPattern, s.withMiddleware(httpJSONHandler))
+		return rawPathGuard(router)
+	}
+
+	if strings.HasPrefix(s.jsonRPCEndpoint, httpJSONPattern) {
+		// The HTTP+JSON pattern covers the JSON-RPC endpoint. Register one
+		// dispatcher at the wider pattern so a tenant whose name matches the
+		// JSON-RPC path prefix is still routed as HTTP+JSON. Only the exact
+		// configured endpoint is JSON-RPC.
+		combined := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == s.jsonRPCEndpoint {
 				jsonRPCHandler.ServeHTTP(w, r)
 				return
 			}
 			httpJSONHandler.ServeHTTP(w, r)
-		}))
-		if len(s.middleWare) > 0 {
-			combined = MiddlewareChain(s.middleWare).Wrap(combined)
-		}
-		router.Handle(s.jsonRPCEndpoint, combined)
-		return router
+		})
+		router.Handle(httpJSONPattern, s.withMiddleware(combined))
+		return rawPathGuard(router)
 	}
 
-	if len(s.middleWare) > 0 {
-		chain := MiddlewareChain(s.middleWare)
-		jsonRPCHandler = chain.Wrap(jsonRPCHandler)
-		httpJSONHandler = chain.Wrap(httpJSONHandler)
+	router.Handle(s.jsonRPCEndpoint, s.withMiddleware(jsonRPCHandler))
+	router.Handle(httpJSONPattern, s.withMiddleware(httpJSONHandler))
+	return rawPathGuard(router)
+}
+
+// rawPathGuard rejects path forms that http.ServeMux would otherwise clean and
+// redirect before the A2A router sees them. A redirect can remove a tenant
+// segment or turn a task resource into a collection operation.
+func rawPathGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		segments := strings.Split(r.URL.EscapedPath(), "/")
+		for i, segment := range segments {
+			if segment == "" {
+				if i > 0 && i < len(segments)-1 {
+					http.Error(w, "invalid request path", http.StatusBadRequest)
+					return
+				}
+				continue
+			}
+			decoded, err := url.PathUnescape(segment)
+			if err != nil || decoded == "." || decoded == ".." {
+				http.Error(w, "invalid request path", http.StatusBadRequest)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// agentCardHandler serves the public agent card (not middleware-wrapped).
+func (s *A2AServer) agentCardHandler() http.Handler {
+	return http.HandlerFunc(s.handleAgentCard)
+}
+
+// jwksHandler returns the JWKS publication handler when enabled, else nil.
+func (s *A2AServer) jwksHandler() http.Handler {
+	if !s.jwksEnabled || s.pushJWKSHandler == nil {
+		return nil
 	}
-	router.Handle(s.jsonRPCEndpoint, jsonRPCHandler)
-	router.Handle(httpJSONPattern, httpJSONHandler)
-	return router
+	return s.pushJWKSHandler
+}
+
+// jsonRPCHandler returns the JSON-RPC binding handler with compat dispatch
+// included. Middleware is applied by Handler after transport routing is built.
+func (s *A2AServer) jsonRPCHandler() http.Handler {
+	if !s.v1JSONRPCEnabled {
+		return s.compatHandler
+	}
+	h := http.Handler(http.HandlerFunc(s.handleJSONRPC))
+	if s.compatHandler != nil {
+		// Compat runs inside the same handler so auth middleware covers both
+		// protocol generations when Handler() wraps the result.
+		h = s.dispatchByProtocol(h, s.compatHandler)
+	}
+	return h
+}
+
+// httpJSONHandler returns the HTTP+JSON binding handler when enabled, else nil.
+// Middleware is applied by Handler after transport routing is built.
+func (s *A2AServer) httpJSONHandler() http.Handler {
+	if !s.httpJSONEnabled {
+		return nil
+	}
+	return http.HandlerFunc(s.handleHTTPJSON)
+}
+
+func (s *A2AServer) withMiddleware(h http.Handler) http.Handler {
+	if len(s.middleWare) == 0 {
+		return h
+	}
+	return MiddlewareChain(s.middleWare).Wrap(h)
 }
 
 // dispatchByProtocol returns a handler that routes a JSON-RPC POST to the
@@ -1053,16 +1071,52 @@ func handleSSEStream(
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush() // Send headers immediately.
 
-	// Use request context to detect client disconnection.
-	clientClosed := ctx.Done()
-
 	if tracker != nil {
 		eventsChan = trackStreamEvents(ctx, eventsChan, tracker)
 	}
 
-	// Use optimized tunnel for batching events
-	tunnel := newSSETunnel(w, flusher, rpcID, formatBatch)
-	tunnel.start(ctx, eventsChan, clientClosed)
+	clientClosed := ctx.Done()
+	for {
+		select {
+		case event, ok := <-eventsChan:
+			if !ok {
+				return
+			}
+			eventType := event.EventType()
+			if eventType == "" {
+				log.Warnf("Unknown event type received for request ID: %v. Skipping.", rpcID)
+				continue
+			}
+			batch := []sse.EventBatch{{
+				EventType: eventType,
+				ID:        rpcID,
+				Data:      &event,
+			}}
+			if err := formatBatch(w, batch); err != nil {
+				log.Errorf("Error writing SSE event for request ID: %v (client likely disconnected): %v", rpcID, err)
+				drainToClose(eventsChan)
+				return
+			}
+			flusher.Flush()
+
+		case <-clientClosed:
+			log.Infof("SSE client disconnected for request ID: %v. Closing stream.", rpcID)
+			drainToClose(eventsChan)
+			return
+		}
+	}
+}
+
+// drainToClose keeps consuming the task-manager event channel until it closes,
+// discarding the events. The taskmanager pipe must always be drained to
+// closure: with a blocking-send manager the drain engine blocks on a full
+// pipe, so abandoning it on a client disconnect or write error would wedge the
+// execution forever.
+func drainToClose(eventsChan <-chan protocol.StreamResponse) {
+	go func() {
+		for range eventsChan {
+		}
+	}()
 }
 
 func trackStreamEvents(
@@ -1078,7 +1132,7 @@ func trackStreamEvents(
 			case <-ctx.Done():
 				tracker.setError(errTypeClientDisconnected)
 				// Abandoning the source pipe would wedge a blocking-send engine;
-				// keep draining it to closure (the downstream tunnel drains the
+				// keep draining it to closure (the downstream loop drains the
 				// wrapper channel, not this source).
 				drainToClose(eventsChan)
 				return
@@ -1098,42 +1152,6 @@ func trackStreamEvents(
 		}
 	}()
 	return tracked
-}
-
-// extractBasePathFromURL extracts the base path from an agent card URL.
-// For example, "http://localhost:8080/agent/api/v2/myagent" returns "/agent/api/v2/myagent".
-func extractBasePathFromURL(agentURL string) string {
-	if agentURL == "" {
-		return ""
-	}
-
-	// Parse the URL.
-	parsedURL, err := url.Parse(agentURL)
-	if err != nil {
-		log.Warnf("Failed to parse agent card URL '%s': %v", agentURL, err)
-		return ""
-	}
-
-	// Validate that it's a proper absolute URL (has scheme and host)
-	if parsedURL.Scheme == "" || parsedURL.Host == "" {
-		log.Warnf("Invalid agent card URL '%s': missing scheme or host", agentURL)
-		return ""
-	}
-
-	// Extract the path and clean it.
-	basePath := parsedURL.Path
-
-	// Remove trailing slash unless it's the root path.
-	if len(basePath) > 1 && strings.HasSuffix(basePath, "/") {
-		basePath = strings.TrimSuffix(basePath, "/")
-	}
-
-	// If the path is empty or just "/", return empty string (no base path).
-	if basePath == "" || basePath == "/" {
-		return ""
-	}
-
-	return basePath
 }
 
 // handleAgentGetAuthenticatedExtendedCard handles the agent/getAuthenticatedExtendedCard JSON-RPC method.

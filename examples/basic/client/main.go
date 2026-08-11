@@ -38,15 +38,22 @@ type session struct {
 func main() {
 	host := flag.String("host", "localhost:8080", "server address")
 	stream := flag.Bool("stream", false, "use message/stream instead of message/send")
+	httpJSON := flag.Bool("http-json", true, "use HTTP+JSON/REST binding (false = JSON-RPC)")
 	flag.Parse()
 
-	a2aClient, err := client.NewA2AClient(
-		fmt.Sprintf("http://%s/", *host),
+	opts := []client.Option{
 		// NOTE: http.Client.Timeout caps the WHOLE response body read, which
 		// for message/stream / SubscribeToTask is the entire SSE lifetime.
 		// 60s covers the 30s /long-task demo with some headroom.
-		client.WithTimeout(60*time.Second),
-	)
+		client.WithTimeout(60 * time.Second),
+	}
+	binding := "JSON-RPC"
+	if *httpJSON {
+		opts = append(opts, client.WithProtocolBinding(protocol.ProtocolBindingHTTPJSON))
+		binding = "HTTP+JSON"
+	}
+
+	a2aClient, err := client.NewA2AClient(fmt.Sprintf("http://%s/", *host), opts...)
 	if err != nil {
 		log.Fatalf("Failed to create A2A client: %v", err)
 	}
@@ -55,7 +62,7 @@ func main() {
 	if *stream {
 		mode = "message/stream"
 	}
-	fmt.Printf("Connected to http://%s/ (%s)\n", *host, mode)
+	fmt.Printf("Connected to http://%s/ (%s, %s)\n", *host, binding, mode)
 	printHelp()
 
 	s := &session{client: a2aClient, stream: *stream}

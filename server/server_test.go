@@ -1073,10 +1073,10 @@ func TestCompatHandler_CoveredByMiddleware(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, resp2.StatusCode)
 }
 
-// TestServer_BasePathFromSupportedInterfaces verifies the JSON-RPC base path is
-// derived from SupportedInterfaces[0].URL when the deprecated top-level URL is
-// empty (regression for the server reading only agentCard.URL).
-func TestServer_BasePathFromSupportedInterfaces(t *testing.T) {
+// TestServer_ServingPathsIndependentOfSupportedInterfaces verifies mount paths
+// stay at the root defaults even when SupportedInterfaces advertise a subpath.
+// Card URLs are client discovery metadata; use WithBasePath to listen elsewhere.
+func TestServer_ServingPathsIndependentOfSupportedInterfaces(t *testing.T) {
 	card := AgentCard{
 		Name:        "Test Agent",
 		Description: "x",
@@ -1089,6 +1089,177 @@ func TestServer_BasePathFromSupportedInterfaces(t *testing.T) {
 	}
 	srv, err := NewA2AServer(newMockTaskManager(), WithAgentCard(card))
 	require.NoError(t, err)
-	assert.Equal(t, "/agent/api/", srv.jsonRPCEndpoint,
-		"base path should come from SupportedInterfaces[0].URL")
+	assert.Equal(t, "/", srv.jsonRPCEndpoint)
+	assert.Equal(t, protocol.AgentCardPath, srv.agentCardPath)
+	assert.False(t, srv.httpJSONEnabled)
+}
+
+func TestServerRejectsPathsServeMuxWouldClean(t *testing.T) {
+	srv, err := NewA2AServer(
+		newMockTaskManager(),
+		WithAgentCard(defaultAgentCard()),
+		WithHTTPJSONEndpoint("/"),
+	)
+	require.NoError(t, err)
+
+	for _, requestPath := range []string{
+		"/./tasks/task-1",
+		"/%2e/tasks/task-1",
+		"/tenant/../tasks/task-1",
+		"//tasks/task-1",
+	} {
+		t.Run(requestPath, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, requestPath, nil)
+			srv.Handler().ServeHTTP(recorder, req)
+			assert.Equal(t, http.StatusBadRequest, recorder.Code)
+			assert.Empty(t, recorder.Header().Get("Location"), "must not redirect to a different A2A operation")
+		})
+	}
+}
+
+func TestHTTPJSONTenantCanMatchJSONRPCEndpointPrefix(t *testing.T) {
+	srv, err := NewA2AServer(
+		newMockTaskManager(),
+		WithAgentCard(defaultAgentCard()),
+		WithJSONRPCEndpoint("/rpc/"),
+		WithHTTPJSONEndpoint("/"),
+	)
+	require.NoError(t, err)
+
+	// The REST tenant "rpc" must not be swallowed by the /rpc/ JSON-RPC pattern.
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/rpc/tasks/missing-task", nil)
+	srv.Handler().ServeHTTP(recorder, req)
+	assert.Equal(t, protocol.MediaTypeA2AJSON, recorder.Header().Get("Content-Type"))
+	assert.Contains(t, recorder.Body.String(), "TASK_NOT_FOUND")
+
+	// The exact configured endpoint remains JSON-RPC.
+	recorder = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/rpc/", bytes.NewReader([]byte(
+		`{"jsonrpc":"2.0","id":"1","method":"GetTask","params":{"id":"missing-task"}}`,
+	)))
+	req.Header.Set("Content-Type", protocol.MediaTypeJSON)
+	srv.Handler().ServeHTTP(recorder, req)
+	assert.Contains(t, recorder.Body.String(), `"jsonrpc":"2.0"`)
+}
+
+func TestV1JSONRPCBindingCanBeDisabled(t *testing.T) {
+	_, err := NewA2AServer(
+		newMockTaskManager(),
+		WithAgentCard(defaultAgentCard()),
+		WithV1JSONRPCEnabled(false),
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "enabled protocol binding")
+
+	srv, err := NewA2AServer(
+		newMockTaskManager(),
+		WithAgentCard(defaultAgentCard()),
+		WithV1JSONRPCEnabled(false),
+		WithHTTPJSONEndpoint("/"),
+	)
+	require.NoError(t, err)
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(
+		`{"jsonrpc":"2.0","id":"1","method":"GetTask","params":{"id":"missing-task"}}`,
+	)))
+	req.Header.Set("Content-Type", protocol.MediaTypeJSON)
+	srv.Handler().ServeHTTP(recorder, req)
+	assert.Equal(t, http.StatusNotFound, recorder.Code)
+	assert.NotContains(t, recorder.Body.String(), `"jsonrpc"`)
+
+	compatHit := false
+	compat := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		compatHit = true
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv, err = NewA2AServer(
+		newMockTaskManager(),
+		WithAgentCard(defaultAgentCard()),
+		WithV1JSONRPCEnabled(false),
+		WithCompatHandler(compat),
+	)
+	require.NoError(t, err)
+	recorder = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(
+		`{"jsonrpc":"2.0","id":"1","method":"message/send","params":{}}`,
+	)))
+	srv.Handler().ServeHTTP(recorder, req)
+	assert.Equal(t, http.StatusNoContent, recorder.Code)
+	assert.True(t, compatHit)
+}
+
+func TestHandleSSEStreamSkipsUnknownEvents(t *testing.T) {
+	events := make(chan protocol.StreamResponse, 2)
+	events <- protocol.StreamResponse{}
+	events <- protocol.StreamResponse{Result: &protocol.Message{MessageID: "message-1"}}
+	close(events)
+
+	formatted := 0
+	recorder := httptest.NewRecorder()
+	handleSSEStream(
+		context.Background(),
+		false,
+		recorder,
+		recorder,
+		events,
+		"request-1",
+		nil,
+		func(_ io.Writer, batch []sse.EventBatch) error {
+			formatted += len(batch)
+			return nil
+		},
+	)
+	assert.Equal(t, 1, formatted)
+}
+
+func TestHandleSSEStreamDrainsAfterFormatError(t *testing.T) {
+	events := make(chan protocol.StreamResponse)
+	producerDone := make(chan struct{})
+	go func() {
+		defer close(producerDone)
+		defer close(events)
+		events <- protocol.StreamResponse{Result: &protocol.Message{MessageID: "message-1"}}
+		events <- protocol.StreamResponse{Result: &protocol.Message{MessageID: "message-2"}}
+	}()
+
+	recorder := httptest.NewRecorder()
+	handleSSEStream(
+		context.Background(),
+		false,
+		recorder,
+		recorder,
+		events,
+		"request-1",
+		nil,
+		func(io.Writer, []sse.EventBatch) error { return fmt.Errorf("write failed") },
+	)
+
+	select {
+	case <-producerDone:
+	case <-time.After(time.Second):
+		t.Fatal("event producer remained blocked after SSE format error")
+	}
+}
+
+func TestHandleSSEStreamDrainsAfterClientDisconnect(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	events := make(chan protocol.StreamResponse)
+	producerDone := make(chan struct{})
+	go func() {
+		defer close(producerDone)
+		defer close(events)
+		events <- protocol.StreamResponse{Result: &protocol.Message{MessageID: "message-1"}}
+	}()
+
+	recorder := httptest.NewRecorder()
+	handleSSEStream(ctx, false, recorder, recorder, events, "request-1", nil, sse.FormatEventBatch)
+
+	select {
+	case <-producerDone:
+	case <-time.After(time.Second):
+		t.Fatal("event producer remained blocked after SSE client disconnect")
+	}
 }

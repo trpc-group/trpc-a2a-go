@@ -41,12 +41,15 @@ func TestParseHTTPJSONRoute(t *testing.T) {
 		{name: "create or list push", path: "/tasks/task-1/pushNotificationConfigs", operation: protocol.MethodTasksPushNotificationConfigList, taskID: "task-1"},
 		{name: "get or delete push", path: "/tenant-a/tasks/task-1/pushNotificationConfigs/config-1", operation: protocol.MethodTasksPushNotificationConfigGet, tenant: "tenant-a", taskID: "task-1", configID: "config-1"},
 		{name: "extended card", path: "/extendedAgentCard", operation: protocol.MethodAgentAuthenticatedExtendedCard},
-		// A reserved operation name in the task-ID position means the path is
-		// really addressing a tenant named "tasks"; no registry lookup needed,
-		// so a dynamic WithTenantCardProvider tenant routes too.
-		{name: "tenant named tasks", path: "/tasks/message:send", operation: protocol.MethodMessageSend, tenant: "tasks"},
+		// Literal paths remain compatible with reference clients using the
+		// tenant="tasks" additional binding.
+		{name: "tenant named tasks sends", path: "/tasks/message:send", operation: protocol.MethodMessageSend, tenant: "tasks"},
 		{name: "tenant named tasks lists", path: "/tasks/tasks", operation: protocol.MethodTasksList, tenant: "tasks"},
 		{name: "tenant named tasks extended card", path: "/tasks/extendedAgentCard", operation: protocol.MethodAgentAuthenticatedExtendedCard, tenant: "tasks"},
+		// Escaped task IDs stay in the tenant-less namespace.
+		{name: "task id message send", path: "/tasks/message%3Asend", operation: protocol.MethodTasksGet, taskID: "message:send"},
+		{name: "task id tasks", path: "/tasks/%74asks", operation: protocol.MethodTasksGet, taskID: "tasks"},
+		{name: "task id extended card", path: "/tasks/%65xtendedAgentCard", operation: protocol.MethodTasksGet, taskID: "extendedAgentCard"},
 		// A percent-encoded colon is part of the ID, not an operation verb.
 		{name: "task id with escaped colon", path: "/tasks/job%3Acancel", operation: protocol.MethodTasksGet, taskID: "job:cancel"},
 		{name: "escaped colon subscribe", path: "/tasks/job%3Asubscribe", operation: protocol.MethodTasksGet, taskID: "job:subscribe"},
@@ -198,9 +201,9 @@ func TestHTTPJSONErrorBodyCarriesDetail(t *testing.T) {
 	assert.Contains(t, recorder.Body.String(), "tenant in request does not match tenant in URL path")
 }
 
-// A card that advertises only HTTP+JSON must not relocate the JSON-RPC endpoint
-// to the root and hand its advertised path to the REST binding.
-func TestJSONRPCEndpointKeepsCardBasePathWithoutJSONRPCInterface(t *testing.T) {
+// Advertising HTTP+JSON on the card does not enable or relocate the REST
+// binding; WithHTTPJSONEndpoint is required. JSON-RPC stays on the default path.
+func TestHTTPJSONRequiresExplicitEndpointOption(t *testing.T) {
 	transport := protocol.ProtocolBindingHTTPJSON
 	card := defaultAgentCard()
 	card.SupportedInterfaces = nil
@@ -210,17 +213,21 @@ func TestJSONRPCEndpointKeepsCardBasePathWithoutJSONRPCInterface(t *testing.T) {
 
 	srv, err := NewA2AServer(newMockTaskManager(), WithAgentCard(card))
 	require.NoError(t, err)
-	assert.Equal(t, "/agent/", srv.jsonRPCEndpoint)
-	assert.Equal(t, "/agent", srv.httpJSONBasePath)
-	assert.True(t, srv.httpJSONEnabled)
+	assert.Equal(t, "/", srv.jsonRPCEndpoint)
+	assert.Equal(t, "", srv.httpJSONBasePath)
+	assert.False(t, srv.httpJSONEnabled)
 
-	// JSON-RPC still answers on the advertised path, and REST answers below it.
 	rpcBody := []byte(`{"jsonrpc":"2.0","id":"1","method":"` + protocol.MethodTasksGet + `","params":{"id":"missing-task"}}`)
-	req := httptest.NewRequest(http.MethodPost, "/agent/", bytes.NewReader(rpcBody))
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(rpcBody))
 	req.Header.Set("Content-Type", protocol.MediaTypeJSON)
 	recorder := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recorder, req)
 	assert.Contains(t, recorder.Body.String(), "jsonrpc")
+
+	srv, err = NewA2AServer(newMockTaskManager(), WithAgentCard(card), WithHTTPJSONEndpoint("/agent"))
+	require.NoError(t, err)
+	assert.True(t, srv.httpJSONEnabled)
+	assert.Equal(t, "/agent", srv.httpJSONBasePath)
 
 	req = httptest.NewRequest(http.MethodGet, "/agent/tasks/missing-task", nil)
 	recorder = httptest.NewRecorder()
@@ -229,7 +236,8 @@ func TestJSONRPCEndpointKeepsCardBasePathWithoutJSONRPCInterface(t *testing.T) {
 	assert.Contains(t, recorder.Body.String(), "TASK_NOT_FOUND")
 }
 
-// A statically registered tenant must win over the route keyword it collides with.
+// A literal tenant named "tasks" follows the official additional binding.
+// Conflicting tenant-less task IDs use an escaped ID segment instead.
 func TestHTTPJSONTenantShadowingRouteKeyword(t *testing.T) {
 	srv, err := NewA2AServer(
 		newMockTaskManager(),

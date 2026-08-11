@@ -43,7 +43,6 @@ type A2AClient struct {
 	httpReqHandler  HTTPReqHandler      // Custom HTTP request handler.
 	protocolBinding string
 	binding         clientBinding
-	bindingExplicit bool
 	tenant          string
 
 	maxBufSize     int
@@ -86,72 +85,19 @@ func NewA2AClient(agentURL string, opts ...Option) (*A2AClient, error) {
 	return client, nil
 }
 
-// NewA2AClientFromAgentCard creates a client from the first compatible entry
-// in AgentCard.SupportedInterfaces. The card is inspected without mutation so
-// signed Agent Cards remain safe to verify after client construction.
-func NewA2AClientFromAgentCard(card *protocol.AgentCard, opts ...Option) (*A2AClient, error) {
-	if card == nil {
-		return nil, fmt.Errorf("agent card is nil")
-	}
-	client, err := NewA2AClient("http://a2a.invalid/", opts...)
-	if err != nil {
-		return nil, err
-	}
-
-	interfaces := card.SupportedInterfaces
-	if len(interfaces) == 0 && card.URL != "" {
-		// Deriving an interface from the deprecated top-level fields must not
-		// invent a version: a card that says it speaks 0.x really does, and
-		// driving it with v1.0 method names would only fail as MethodNotFound
-		// on the first call. Only an absent or v1.0 value can be adopted.
-		if v := card.ProtocolVersion; v != nil && *v != "" && *v != protocol.ProtocolVersionV1 {
-			return nil, fmt.Errorf(
-				"agent card declares protocol version %q, which this client does not speak; "+
-					"use the compat/v0 client for a 0.x agent", *v,
-			)
-		}
-		binding := protocol.ProtocolBindingJSONRPC
-		if card.PreferredTransport != nil && *card.PreferredTransport != "" {
-			binding = *card.PreferredTransport
-		}
-		interfaces = append([]protocol.AgentInterface{{
-			URL:             card.URL,
-			ProtocolBinding: binding,
-			ProtocolVersion: protocol.ProtocolVersionV1,
-		}}, card.AdditionalInterfaces...)
-	}
-
-	for _, iface := range interfaces {
-		if iface.URL == "" || (iface.ProtocolVersion != "" && iface.ProtocolVersion != protocol.ProtocolVersionV1) {
-			continue
-		}
-		canonicalBinding, binding, bindErr := clientBindingForName(iface.ProtocolBinding)
-		if bindErr != nil {
-			continue
-		}
-		if client.bindingExplicit && canonicalBinding != client.protocolBinding {
-			continue
-		}
-		parsedURL, parseErr := parseAgentURL(iface.URL)
-		if parseErr != nil {
-			return nil, fmt.Errorf("invalid URL for AgentInterface %s: %w", iface.ProtocolBinding, parseErr)
-		}
-		client.baseURL = parsedURL
-		client.protocolBinding = canonicalBinding
-		client.binding = binding
-		client.tenant = iface.Tenant
-		return client, nil
-	}
-	return nil, fmt.Errorf("agent card has no compatible A2A v1.0 JSONRPC or HTTP+JSON interface")
-}
-
 func parseAgentURL(agentURL string) (*url.URL, error) {
-	if !strings.HasSuffix(agentURL, "/") {
-		agentURL += "/"
-	}
 	parsedURL, err := url.ParseRequestURI(agentURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid agent URL %q: %w", agentURL, err)
+	}
+	// Normalize only the URL path. Appending to the original string corrupts a
+	// trailing query ("?token=x" would become "?token=x/"). Preserve RawPath
+	// when present so escaped endpoint paths continue to round-trip.
+	if !strings.HasSuffix(parsedURL.Path, "/") {
+		parsedURL.Path += "/"
+		if parsedURL.RawPath != "" {
+			parsedURL.RawPath += "/"
+		}
 	}
 	return parsedURL, nil
 }

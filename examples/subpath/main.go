@@ -37,11 +37,11 @@ func (p *simpleProcessor) ProcessMessage(
 }
 
 func main() {
-	// Create agent card with subpath URL
+	// Card URL is discovery metadata for clients; mounting uses WithBasePath.
 	agentCard := server.AgentCard{
 		Name:        "Subpath Agent",
 		Description: "Demo agent with subpath",
-		URL:         "http://localhost:8080/api/v1/agent", // Path will be extracted
+		URL:         "http://localhost:8080/api/v1/agent",
 		Version:     "1.0.0",
 	}
 
@@ -51,7 +51,11 @@ func main() {
 		log.Fatalf("Failed to create task manager: %v", err)
 	}
 
-	a2aServer, err := server.NewA2AServer(taskManager, server.WithAgentCard(agentCard))
+	a2aServer, err := server.NewA2AServer(
+		taskManager,
+		server.WithAgentCard(agentCard),
+		server.WithBasePath("/api/v1/agent"),
+	)
 	if err != nil {
 		log.Fatalf("Failed to create server: %v", err)
 	}

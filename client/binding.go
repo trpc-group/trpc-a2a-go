@@ -137,7 +137,7 @@ func (c *A2AClient) applySelectedTenant(tenant *string) error {
 		return nil
 	}
 	if *tenant != "" && *tenant != c.tenant {
-		return fmt.Errorf("request tenant %q does not match selected AgentInterface tenant %q", *tenant, c.tenant)
+		return fmt.Errorf("request tenant %q does not match configured client tenant %q", *tenant, c.tenant)
 	}
 	*tenant = c.tenant
 	return nil

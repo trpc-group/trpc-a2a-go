@@ -35,7 +35,8 @@ srv.Start(":8080")   // serves JSON-RPC plus the well-known card
 | `WithPushNotificationJWKSHandler(handler)` | Publish a push sender's verification keys. Pass `sender.JWKSHandler()` for `SignedSender`, or any custom `http.Handler`. |
 | `WithJWKSEndpoint(false, "")` | Disable the built-in JWKS route when verification keys are published elsewhere; a non-empty path changes the route. |
 | `WithBasePath(prefix)` | Mount under a subpath. |
-| `WithHTTPJSONEndpoint(prefix)` | Enable HTTP+JSON and set its base path independently of JSON-RPC. A static card advertising `HTTP+JSON` also enables it. |
+| `WithV1JSONRPCEnabled(false)` | Disable the v1 JSON-RPC binding; a `WithCompatHandler` legacy JSON-RPC handler remains available. |
+| `WithHTTPJSONEndpoint(prefix)` | Enable HTTP+JSON and set its base path independently of JSON-RPC. |
 | `WithCompatHandler(h)` | Also serve the legacy v0.2.x wire. |
 | `WithMiddleware(mw...)` | Wrap the HTTP handler chain. → [middleware context example](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/middleware) |
 | `WithCORSEnabled(true)` | Emit CORS headers. |
@@ -409,17 +410,15 @@ The server also accepts the tenant as a `tenant` query parameter.
 ## Serving on a subpath
 
 Mount the whole server under a path prefix, for example behind a gateway.
-Prefer an explicit `WithBasePath`; it adjusts the Agent Card, JSON-RPC, enabled HTTP+JSON, and JWKS endpoints together:
+Use `WithBasePath`; it adjusts the Agent Card, JSON-RPC, enabled HTTP+JSON, and JWKS endpoints together:
 
 ```go
 srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
     server.WithBasePath("/api/v1/agent"))   // card + enabled bindings under /api/v1/agent/…
 ```
 
-If `WithBasePath` is not set, the server attempts to derive the base path from
-the path in `agentCard.URL`. An explicit `WithBasePath` takes precedence, which
-is useful when a gateway exposes a different external URL from the server's
-internal route.
+Without `WithBasePath`, the server keeps the root path defaults. Agent Card URLs /
+`supportedInterfaces` are client discovery metadata and do not derive listen paths.
 
 → [examples/subpath](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/subpath).
 
@@ -440,6 +439,17 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
     server.WithCompatHandler(v0.NewJSONRPCHandler(tm)))
 ```
 
+To expose v1 only through HTTP+JSON while retaining JSON-RPC solely for legacy clients, disable the v1 JSON-RPC binding explicitly:
+
+```go
+srv, _ := server.NewA2AServer(tm,
+    server.WithAgentCard(card),
+    server.WithHTTPJSONEndpoint("/"),
+    server.WithV1JSONRPCEnabled(false),
+    server.WithCompatHandler(v0.NewJSONRPCHandler(tm)),
+)
+```
+
 → [examples/compat](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/compat).
 
 ## Telemetry
@@ -457,4 +467,4 @@ srv, _ := server.NewA2AServer(tm, server.WithAgentCard(card),
 
 ## Capability status
 
-The framework implements both **JSON-RPC** and **HTTP+JSON (REST)**. JSON-RPC remains enabled by default and uses `application/json`. HTTP+JSON is enabled by `WithHTTPJSONEndpoint` or a static Agent Card interface declaring `HTTP+JSON`; it accepts `application/a2a+json` and compatibility `application/json`, responds with `application/a2a+json`, and emits raw `StreamResponse` objects in SSE `data:` fields. **gRPC** remains planned. The Agent Card must accurately declare every enabled endpoint in `supportedInterfaces`; the server does not add bindings to or otherwise rewrite signed cards.
+The framework implements both **JSON-RPC** and **HTTP+JSON (REST)**. V1 JSON-RPC is enabled by default and can be disabled with `WithV1JSONRPCEnabled(false)`; a configured compat/v0 JSON-RPC handler remains available. HTTP+JSON is enabled only by `WithHTTPJSONEndpoint`; it accepts `application/a2a+json` and compatibility `application/json`, responds with `application/a2a+json`, and emits raw `StreamResponse` objects in SSE `data:` fields. **gRPC** remains planned. Agent Card `supportedInterfaces` are client discovery metadata and do not drive server mounting; keep the card accurate for every enabled endpoint. The server does not add bindings to or otherwise rewrite signed cards.

@@ -20,6 +20,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/stateless"
 )
 
 // httpJSONTaskProcessor runs a task to completion so the retaining manager has
@@ -180,21 +181,12 @@ func TestHTTPJSONErrorParityWithJSONRPC(t *testing.T) {
 // normative proto binds for every operation, which is also what the reference
 // clients put on the wire. POST bodies carry the tenant field as well.
 func TestHTTPJSONTenantIsAPathSegment(t *testing.T) {
-	card := &protocol.AgentCard{SupportedInterfaces: []protocol.AgentInterface{{
-		URL:             "https://rest.example/api",
-		ProtocolBinding: protocol.ProtocolBindingHTTPJSON,
-		Tenant:          "tenant-a",
-		ProtocolVersion: protocol.ProtocolVersionV1,
-	}}}
-	c, err := NewA2AClientFromAgentCard(card)
-	require.NoError(t, err)
-
-	spec, err := buildHTTPJSONRequest(protocol.MethodTasksGet, protocol.TaskQueryParams{ID: "task-1", Tenant: c.tenant})
+	spec, err := buildHTTPJSONRequest(protocol.MethodTasksGet, protocol.TaskQueryParams{ID: "task-1", Tenant: "tenant-a"})
 	require.NoError(t, err)
 	assert.Equal(t, "/tenant-a/tasks/task-1", spec.path)
 	assert.Empty(t, spec.query.Get("tenant"))
 
-	spec, err = buildHTTPJSONRequest(protocol.MethodMessageSend, protocol.SendMessageParams{Tenant: c.tenant})
+	spec, err = buildHTTPJSONRequest(protocol.MethodMessageSend, protocol.SendMessageParams{Tenant: "tenant-a"})
 	require.NoError(t, err)
 	assert.Equal(t, "/tenant-a/message:send", spec.path)
 	sent, ok := spec.body.(protocol.SendMessageParams)
@@ -202,27 +194,46 @@ func TestHTTPJSONTenantIsAPathSegment(t *testing.T) {
 	assert.Equal(t, "tenant-a", sent.Tenant)
 }
 
-// A card that declares a 0.x protocol version must be rejected rather than
-// driven with v1.0 method names, which would only fail as MethodNotFound.
-func TestNewA2AClientFromAgentCardRejectsLegacyProtocolVersion(t *testing.T) {
-	legacy := "0.2.5"
-	_, err := NewA2AClientFromAgentCard(&protocol.AgentCard{
-		URL:             "https://legacy.example/",
-		ProtocolVersion: &legacy,
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "0.2.5")
-	assert.Contains(t, err.Error(), "compat/v0")
+func TestConfiguredTenantPropagatesToExtendedCard(t *testing.T) {
+	manager, err := stateless.NewTaskManager(httpJSONEchoProcessor{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 
-	// An absent or v1.0 top-level version still derives an interface.
-	current := protocol.ProtocolVersionV1
-	for _, version := range []*string{nil, &current} {
-		c, err := NewA2AClientFromAgentCard(&protocol.AgentCard{
-			URL:             "https://current.example/",
-			ProtocolVersion: version,
+	extended := true
+	card := protocol.AgentCard{
+		Name:               "tenant card",
+		Description:        "test",
+		Version:            "1",
+		Capabilities:       protocol.AgentCapabilities{ExtendedAgentCard: &extended},
+		DefaultInputModes:  []string{"text/plain"},
+		DefaultOutputModes: []string{"text/plain"},
+		Skills:             []protocol.AgentSkill{},
+		SupportedInterfaces: []protocol.AgentInterface{
+			{URL: "http://placeholder.invalid", ProtocolBinding: protocol.ProtocolBindingJSONRPC, ProtocolVersion: protocol.ProtocolVersionV1},
+			{URL: "http://placeholder.invalid", ProtocolBinding: protocol.ProtocolBindingHTTPJSON, ProtocolVersion: protocol.ProtocolVersionV1},
+		},
+	}
+	srv, err := server.NewA2AServer(
+		manager,
+		server.WithTenantCard("tasks", card),
+		server.WithHTTPJSONEndpoint("/"),
+		server.WithAuthenticatedExtendedCardHandler(func(_ context.Context, base server.AgentCard) (server.AgentCard, error) {
+			base.Name = "extended tasks tenant"
+			return base, nil
+		}),
+	)
+	require.NoError(t, err)
+	testServer := httptest.NewServer(srv.Handler())
+	t.Cleanup(testServer.Close)
+
+	for _, binding := range []string{protocol.ProtocolBindingJSONRPC, protocol.ProtocolBindingHTTPJSON} {
+		t.Run(binding, func(t *testing.T) {
+			client, err := NewA2AClient(testServer.URL, WithProtocolBinding(binding), WithTenant("tasks"))
+			require.NoError(t, err)
+			extendedCard, err := client.GetAuthenticatedExtendedCard(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, "extended tasks tenant", extendedCard.Name)
 		})
-		require.NoError(t, err)
-		assert.Equal(t, protocol.ProtocolBindingJSONRPC, c.protocolBinding)
 	}
 }
 

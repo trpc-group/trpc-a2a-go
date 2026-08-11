@@ -299,19 +299,30 @@ func buildHTTPJSONRequest(operation string, params any) (httpJSONRequest, error)
 	}
 }
 
-// httpJSONPath prefixes the tenant path segment the normative proto defines as
-// an additional binding for every operation
-// (additional_bindings { get: "/{tenant}/tasks/{id=*}" } and friends). It is
-// also the form the reference clients put on the wire; the server additionally
-// accepts the tenant in the body or as a query parameter.
 // escapePathID escapes an identifier for a path segment. url.PathEscape leaves
 // ":" alone because it is a valid path character, but the REST routes use it to
 // introduce an operation verb, so a task literally named "job:cancel" would be
 // read as cancelling "job". Percent-encoding it keeps the ID addressable.
 func escapePathID(id string) string {
-	return strings.ReplaceAll(url.PathEscape(id), ":", "%3A")
+	escaped := strings.ReplaceAll(url.PathEscape(id), ":", "%3A")
+	// These literal task IDs collide with the additional tenant binding when
+	// tenant="tasks". Escape one unreserved character so EscapedPath-based
+	// routing can distinguish the task resource without changing its value.
+	switch escaped {
+	case "tasks":
+		return "%74asks"
+	case "extendedAgentCard":
+		return "%65xtendedAgentCard"
+	default:
+		return escaped
+	}
 }
 
+// httpJSONPath prefixes the tenant path segment the normative proto defines as
+// an additional binding for every operation
+// (additional_bindings { get: "/{tenant}/tasks/{id=*}" } and friends). It is
+// also the form the reference clients put on the wire; the server additionally
+// accepts the tenant in the body or as a query parameter.
 func httpJSONPath(tenant, suffix string) string {
 	if tenant == "" {
 		return suffix
@@ -387,7 +398,11 @@ func (c *A2AClient) httpJSONURL(rawPath string, query url.Values) string {
 	basePath := strings.TrimRight(target.EscapedPath(), "/")
 	target.RawPath = basePath + rawPath
 	target.Path, _ = url.PathUnescape(target.RawPath)
-	target.RawQuery = query.Encode()
+	mergedQuery := target.Query()
+	for key, values := range query {
+		mergedQuery[key] = append([]string(nil), values...)
+	}
+	target.RawQuery = mergedQuery.Encode()
 	target.Fragment = ""
 	return target.String()
 }

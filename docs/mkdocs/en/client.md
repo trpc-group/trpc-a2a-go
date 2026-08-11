@@ -5,21 +5,32 @@ management, authentication, and calling agents from inside an agent. For
 building an agent, see [Server](server.md).
 
 ```go
-import "trpc.group/trpc-go/trpc-a2a-go/v2/client"
+import (
+    "trpc.group/trpc-go/trpc-a2a-go/v2/client"
+    "trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+)
 
 c, _ := client.NewA2AClient("http://localhost:8080/")
 ```
 
-`NewA2AClient` keeps JSON-RPC as the default for direct endpoint construction. Select HTTP+JSON explicitly with `client.WithProtocolBinding(protocol.ProtocolBindingHTTPJSON)`, or construct from an Agent Card so the client follows the ordered `supportedInterfaces` list:
+`NewA2AClient` keeps JSON-RPC as the default for direct endpoint construction. Select HTTP+JSON explicitly with `client.WithProtocolBinding(protocol.ProtocolBindingHTTPJSON)`:
 
 ```go
 restClient, _ := client.NewA2AClient(
     "https://agent.example.com/a2a",
     client.WithProtocolBinding(protocol.ProtocolBindingHTTPJSON),
 )
+```
 
-card, _ := c.GetAgentCard(ctx, "")
-discoveredClient, _ := client.NewA2AClientFromAgentCard(card)
+When selecting an entry from an Agent Card, pass all three interface properties to the direct constructor. `WithTenant` propagates the selected interface tenant to every request and rejects conflicting per-request values:
+
+```go
+iface := card.SupportedInterfaces[0] // first interface supported by this client
+selectedClient, _ := client.NewA2AClient(
+    iface.URL,
+    client.WithProtocolBinding(iface.ProtocolBinding),
+    client.WithTenant(iface.Tenant),
+)
 ```
 
 JSON-RPC requests continue to use `application/json`. HTTP+JSON requests use REST paths and send `application/a2a+json`; unary responses accept both `application/a2a+json` and the 1.0.0-era `application/json` for compatibility.

@@ -25,12 +25,20 @@ type HTTPReqHandler interface {
 
 // WithProtocolBinding selects the protocol binding used with the URL passed to
 // NewA2AClient. Supported values are protocol.ProtocolBindingJSONRPC and
-// protocol.ProtocolBindingHTTPJSON. With NewA2AClientFromAgentCard it filters
-// SupportedInterfaces while preserving their preference order.
+// protocol.ProtocolBindingHTTPJSON.
 func WithProtocolBinding(binding string) Option {
 	return func(c *A2AClient) {
 		c.protocolBinding = binding
-		c.bindingExplicit = true
+	}
+}
+
+// WithTenant configures the tenant advertised by the selected AgentInterface.
+// The client adds it to every A2A request and rejects a conflicting per-request
+// tenant. Callers that select an interface from an Agent Card should pass that
+// interface's Tenant value here.
+func WithTenant(tenant string) Option {
+	return func(c *A2AClient) {
+		c.tenant = tenant
 	}
 }
 

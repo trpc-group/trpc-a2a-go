@@ -39,22 +39,28 @@ func main() {
 	// Parse command-line flags.
 	host := flag.String("host", "localhost", "Host to listen on")
 	port := flag.Int("port", 8080, "Port to listen on")
+	httpJSON := flag.Bool("http-json", true, "also mount the HTTP+JSON/REST binding on /")
 	flag.Parse()
+
+	baseURL := fmt.Sprintf("http://%s:%d/", *host, *port)
 
 	// Create the agent card.
 	agentCard := server.AgentCard{
 		Name:        "Basic A2A Chat Example Server",
 		Description: "An interactive chat example with task lifecycle operations",
-		URL:         fmt.Sprintf("http://%s:%d/", *host, *port),
+		URL:         baseURL,
 		Version:     "1.0.0",
 		Provider: &server.AgentProvider{
 			Organization: "tRPC-A2A-Go Examples",
-			URL:          stringPtr(fmt.Sprintf("http://%s:%d/", *host, *port)),
+			URL:          stringPtr(baseURL),
 		},
 		Capabilities: server.AgentCapabilities{
 			Streaming:              boolPtr(true),
 			PushNotifications:      boolPtr(false),
 			StateTransitionHistory: boolPtr(true),
+		},
+		SupportedInterfaces: []server.AgentInterface{
+			{URL: baseURL, ProtocolBinding: protocol.ProtocolBindingJSONRPC, ProtocolVersion: protocol.ProtocolVersionV1},
 		},
 		DefaultInputModes:  []string{"text"},
 		DefaultOutputModes: []string{"text"},
@@ -70,6 +76,11 @@ func main() {
 			},
 		},
 	}
+	if *httpJSON {
+		agentCard.SupportedInterfaces = append(agentCard.SupportedInterfaces, server.AgentInterface{
+			URL: baseURL, ProtocolBinding: protocol.ProtocolBindingHTTPJSON, ProtocolVersion: protocol.ProtocolVersionV1,
+		})
+	}
 
 	// Create the processor and inject it into a task manager.
 	// (redis.NewTaskManager accepts the same MessageProcessor for persistent storage.)
@@ -78,8 +89,13 @@ func main() {
 		log.Fatalf("Failed to create task manager: %v", err)
 	}
 
+	opts := []server.Option{server.WithAgentCard(agentCard)}
+	if *httpJSON {
+		opts = append(opts, server.WithHTTPJSONEndpoint("/"))
+	}
+
 	// Create the server.
-	srv, err := server.NewA2AServer(taskManager, server.WithAgentCard(agentCard))
+	srv, err := server.NewA2AServer(taskManager, opts...)
 	if err != nil {
 		log.Fatalf("Failed to create server: %v", err)
 	}
@@ -92,6 +108,11 @@ func main() {
 	go func() {
 		serverAddr := fmt.Sprintf("%s:%d", *host, *port)
 		log.Infof("Starting server on %s...", serverAddr)
+		log.Infof("  Agent Card: %s.well-known/agent-card.json", baseURL)
+		log.Infof("  JSON-RPC:   %s", baseURL)
+		if *httpJSON {
+			log.Infof("  HTTP+JSON:  %s (e.g. /message:send, /tasks/{id})", baseURL)
+		}
 		if err := srv.Start(serverAddr); err != nil {
 			log.Fatalf("Server failed: %v", err)
 		}
