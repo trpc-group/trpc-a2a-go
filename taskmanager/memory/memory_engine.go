@@ -160,18 +160,18 @@ func (m *TaskManager) prepareExecContext(
 	// write — the slot frees only after that write — so the snapshot below can
 	// never be a stale pre-terminal copy that would smuggle writes past a
 	// terminal state.
-	if err := m.registerExecution(ctx, taskID, exec); err != nil {
+	if err := m.registerExecution(ctx, request.Tenant, taskID, exec); err != nil {
 		return nil, err
 	}
 	releaseOnError := true
 	defer func() {
 		if releaseOnError {
-			m.releaseExecution(taskID, exec)
+			m.releaseExecution(request.Tenant, taskID, exec)
 		}
 	}()
 
 	// Continuation: a message carrying a taskId targets an existing task (§3.4).
-	taskCopy, err := m.resolveContinuation(message)
+	taskCopy, err := m.resolveContinuation(request.Tenant, message)
 	if err != nil {
 		return nil, err
 	}
@@ -193,6 +193,7 @@ func (m *TaskManager) prepareExecContext(
 	// the conversation history.
 	acceptedOutputModes, pushConfig, err := m.prepareExecConfiguration(
 		request.Configuration,
+		request.Tenant,
 		taskID,
 		taskCopy != nil,
 	)
@@ -200,10 +201,10 @@ func (m *TaskManager) prepareExecContext(
 		return nil, err
 	}
 
-	m.commitIncomingMessage(taskID, message, taskCopy)
+	m.commitIncomingMessage(request.Tenant, taskID, message, taskCopy)
 	// The manager's history limit shapes the processor snapshot; the request's
 	// historyLength only shapes the task returned to the client.
-	history := m.getConversationHistory(*message.ContextID, m.options.MaxHistoryLength)
+	history := m.getConversationHistory(request.Tenant, *message.ContextID, m.options.MaxHistoryLength)
 
 	releaseOnError = false
 	return &taskmanager.ExecContext{
@@ -224,6 +225,7 @@ func (m *TaskManager) prepareExecContext(
 // task event materializes the task.
 func (m *TaskManager) prepareExecConfiguration(
 	configuration *protocol.SendMessageConfiguration,
+	tenant string,
 	taskID string,
 	continuation bool,
 ) ([]string, *protocol.TaskPushNotificationConfig, error) {
@@ -240,6 +242,7 @@ func (m *TaskManager) prepareExecConfiguration(
 	}
 
 	pushConfig := clonePushConfig(*configuration.PushConfig)
+	pushConfig.Tenant = tenant
 	pushConfig.TaskID = taskID
 	if pushConfig.ID == "" {
 		// Inline registration retains the legacy stable default ID so a
@@ -263,6 +266,7 @@ func (m *TaskManager) prepareExecConfiguration(
 // validation has succeeded. On a continuation, the suspended status message
 // becomes history immediately before the new user turn.
 func (m *TaskManager) commitIncomingMessage(
+	tenant string,
 	taskID string,
 	message *protocol.Message,
 	taskCopy *protocol.Task,
@@ -275,20 +279,20 @@ func (m *TaskManager) commitIncomingMessage(
 		statusMessage := taskCopy.Status.Message
 		taskCopy.Status.Message = nil
 		m.taskMu.Lock()
-		if stored, exists := m.tasks[taskID]; exists {
+		if stored, exists := m.tasks[newScopedID(tenant, taskID)]; exists {
 			stored.Status.Message = nil
 		}
 		m.taskMu.Unlock()
-		m.storeStatusMessage(taskID, *message.ContextID, statusMessage)
+		m.storeStatusMessage(tenant, taskID, *message.ContextID, statusMessage)
 	}
-	m.storeMessage(*message)
+	m.storeMessage(tenant, *message)
 }
 
 // resolveContinuation loads and validates the task a continuation message
 // targets (§3.4), returning a copy for ec.Task. A message without a taskId is
 // a fresh round and resolves to nil. When taskId is set it is the same value
 // the caller registered the execution under (see startExecution).
-func (m *TaskManager) resolveContinuation(message *protocol.Message) (*protocol.Task, error) {
+func (m *TaskManager) resolveContinuation(tenant string, message *protocol.Message) (*protocol.Task, error) {
 	if message.TaskID == nil || *message.TaskID == "" {
 		return nil, nil
 	}
@@ -296,7 +300,7 @@ func (m *TaskManager) resolveContinuation(message *protocol.Message) (*protocol.
 
 	m.taskMu.RLock()
 	defer m.taskMu.RUnlock()
-	stored, exists := m.tasks[taskID]
+	stored, exists := m.tasks[newScopedID(tenant, taskID)]
 	if !exists {
 		return nil, taskmanager.ErrTaskNotFound(taskID)
 	}
@@ -355,15 +359,20 @@ func (m *TaskManager) startExecution(
 		return nil, err
 	}
 
-	events, err := m.processor.ProcessMessage(execCtx, ec)
+	processorEC := *ec
+	if ec.PushConfig != nil {
+		pushConfig := clonePushConfig(*ec.PushConfig)
+		processorEC.PushConfig = &pushConfig
+	}
+	events, err := m.processor.ProcessMessage(execCtx, &processorEC)
 	if err != nil {
 		// Failed start (§3.5): no events are consumed, nothing was persisted.
-		m.releaseExecution(ec.TaskID, exec)
+		m.releaseExecution(ec.Tenant, ec.TaskID, exec)
 		cancel()
 		return nil, err
 	}
 	if events == nil {
-		m.releaseExecution(ec.TaskID, exec)
+		m.releaseExecution(ec.Tenant, ec.TaskID, exec)
 		cancel()
 		return nil, jsonrpc.ErrInternalError("processor returned nil channel")
 	}
@@ -387,16 +396,21 @@ func (m *TaskManager) startExecution(
 // registerExecution publishes the cancellation handle of a starting run. A
 // task admits at most one live run; a continuation waits through the previous
 // round's short suspend handoff, while any other concurrent round is rejected.
-func (m *TaskManager) registerExecution(ctx context.Context, taskID string, exec *execution) error {
+func (m *TaskManager) registerExecution(
+	ctx context.Context,
+	tenant, taskID string,
+	exec *execution,
+) error {
+	key := newScopedID(tenant, taskID)
 	for {
 		m.execMu.Lock()
 		if m.closed {
 			m.execMu.Unlock()
 			return jsonrpc.ErrInternalError("task manager is closed")
 		}
-		current, exists := m.executions[taskID]
+		current, exists := m.executions[key]
 		if !exists {
-			m.executions[taskID] = exec
+			m.executions[key] = exec
 			// Counted under the registry lock so Close (which flips m.closed first)
 			// can never begin waiting before a just-admitted run is counted.
 			m.engineWg.Add(1)
@@ -421,8 +435,8 @@ func (m *TaskManager) registerExecution(ctx context.Context, taskID string, exec
 
 // releaseExecution aborts a registered run whose engine never started: it
 // undoes registerExecution's registration and engine count.
-func (m *TaskManager) releaseExecution(taskID string, exec *execution) {
-	m.deregisterExecution(taskID, exec)
+func (m *TaskManager) releaseExecution(tenant, taskID string, exec *execution) {
+	m.deregisterExecution(tenant, taskID, exec)
 	m.engineWg.Done()
 }
 
@@ -431,18 +445,20 @@ func (m *TaskManager) releaseExecution(taskID string, exec *execution) {
 // CANCELED write gets the same single-writer guarantee as a run: no
 // continuation can register (and then write) concurrently with it.
 func (m *TaskManager) claimCancelSlot(
+	tenant string,
 	taskID string,
 ) (live *execution, sentinel *execution, yieldDone <-chan struct{}) {
+	key := newScopedID(tenant, taskID)
 	m.execMu.Lock()
 	defer m.execMu.Unlock()
-	if exec, ok := m.executions[taskID]; ok {
+	if exec, ok := m.executions[key]; ok {
 		if exec.yieldDone != nil {
 			return nil, nil, exec.yieldDone
 		}
 		return exec, nil, nil
 	}
 	sentinel = &execution{cancel: func() {}}
-	m.executions[taskID] = sentinel
+	m.executions[key] = sentinel
 	return nil, sentinel, nil
 }
 
@@ -450,11 +466,13 @@ func (m *TaskManager) claimCancelSlot(
 // suspend handoff. It returns the handoff channel when yield won, or accepted
 // after publishing cancelRequested under the registry lock.
 func (m *TaskManager) requestExecutionCancel(
+	tenant string,
 	taskID string,
 	exec *execution,
 ) (yieldDone <-chan struct{}, accepted bool) {
+	key := newScopedID(tenant, taskID)
 	m.execMu.Lock()
-	if m.executions[taskID] != exec {
+	if m.executions[key] != exec {
 		m.execMu.Unlock()
 		return nil, false
 	}
@@ -470,11 +488,12 @@ func (m *TaskManager) requestExecutionCancel(
 }
 
 // deregisterExecution removes the handle if it still belongs to this run.
-func (m *TaskManager) deregisterExecution(taskID string, exec *execution) {
+func (m *TaskManager) deregisterExecution(tenant, taskID string, exec *execution) {
+	key := newScopedID(tenant, taskID)
 	m.execMu.Lock()
 	defer m.execMu.Unlock()
-	if m.executions[taskID] == exec {
-		delete(m.executions, taskID)
+	if m.executions[key] == exec {
+		delete(m.executions, key)
 		if exec.yieldDone != nil {
 			close(exec.yieldDone)
 			exec.yieldDone = nil
@@ -485,10 +504,11 @@ func (m *TaskManager) deregisterExecution(taskID string, exec *execution) {
 // beginExecutionYield turns an active slot into a short handoff barrier. The
 // slot remains owned by exec until its suspend frame has reached every local
 // observer, but continuations wait for the handoff instead of failing.
-func (m *TaskManager) beginExecutionYield(taskID string, exec *execution) bool {
+func (m *TaskManager) beginExecutionYield(tenant, taskID string, exec *execution) bool {
+	key := newScopedID(tenant, taskID)
 	m.execMu.Lock()
 	defer m.execMu.Unlock()
-	if m.executions[taskID] == exec && exec.yieldDone == nil && !exec.cancelRequested.Load() {
+	if m.executions[key] == exec && exec.yieldDone == nil && !exec.cancelRequested.Load() {
 		exec.yieldDone = make(chan struct{})
 		return true
 	}
@@ -497,20 +517,21 @@ func (m *TaskManager) beginExecutionYield(taskID string, exec *execution) bool {
 
 // abortExecutionYield restores an active slot when committing the suspended
 // state fails. Waiters wake and re-evaluate it as an ordinary active run.
-func (m *TaskManager) abortExecutionYield(taskID string, exec *execution) {
+func (m *TaskManager) abortExecutionYield(tenant, taskID string, exec *execution) {
+	key := newScopedID(tenant, taskID)
 	m.execMu.Lock()
 	defer m.execMu.Unlock()
-	if m.executions[taskID] == exec && exec.yieldDone != nil {
+	if m.executions[key] == exec && exec.yieldDone != nil {
 		close(exec.yieldDone)
 		exec.yieldDone = nil
 	}
 }
 
 // liveExecution returns the cancellation handle of the task's live run, if any.
-func (m *TaskManager) liveExecution(taskID string) *execution {
+func (m *TaskManager) liveExecution(tenant, taskID string) *execution {
 	m.execMu.Lock()
 	defer m.execMu.Unlock()
-	return m.executions[taskID]
+	return m.executions[newScopedID(tenant, taskID)]
 }
 
 // run consumes the MessageProcessor channel until it closes. After a terminal state or
@@ -599,7 +620,7 @@ func (eng *engine) handleMessage(message *protocol.Message) {
 	}
 	m := eng.manager
 	contextID := eng.ec.ContextID
-	m.processReplyMessage(&contextID, message)
+	m.processReplyMessage(eng.ec.Tenant, &contextID, message)
 	eng.finalOutcome = sendOutcome{message: message}
 	eng.offerImmediateResult(sendOutcome{message: message})
 
@@ -607,16 +628,19 @@ func (eng *engine) handleMessage(message *protocol.Message) {
 	eng.sendToPipe(response)
 
 	m.taskMu.RLock()
-	_, exists := m.tasks[eng.ec.TaskID]
+	_, exists := m.tasks[newScopedID(eng.ec.Tenant, eng.ec.TaskID)]
 	m.taskMu.RUnlock()
 	if exists {
-		m.notifySubscribers(eng.ec.TaskID, response)
+		m.notifySubscribers(eng.ec.Tenant, eng.ec.TaskID, response)
 	}
 }
 
 // storeStatusMessage stores a stamped copy without mutating the processor's
 // message, which may still be visible in an earlier task snapshot or wire event.
-func (m *TaskManager) storeStatusMessage(taskID, contextID string, message *protocol.Message) {
+func (m *TaskManager) storeStatusMessage(
+	tenant, taskID, contextID string,
+	message *protocol.Message,
+) {
 	if message == nil {
 		return
 	}
@@ -627,7 +651,7 @@ func (m *TaskManager) storeStatusMessage(taskID, contextID string, message *prot
 	if stored.MessageID == "" {
 		stored.MessageID = protocol.GenerateMessageID()
 	}
-	m.storeMessage(stored)
+	m.storeMessage(tenant, stored)
 }
 
 // rollStatusMessage moves a superseded status message into conversation
@@ -642,7 +666,7 @@ func (eng *engine) rollStatusMessage(message *protocol.Message) {
 		return
 	}
 	eng.lastRolledStatusMessage = message
-	eng.manager.storeStatusMessage(eng.ec.TaskID, eng.ec.ContextID, message)
+	eng.manager.storeStatusMessage(eng.ec.Tenant, eng.ec.TaskID, eng.ec.ContextID, message)
 }
 
 // handleStatus persists a status update and then broadcasts it. The first task
@@ -669,17 +693,18 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 		// still be rejected as a concurrent execution. If cancellation claimed
 		// the slot first, keep this round active so its close rule can persist
 		// CANCELED rather than swallowing the accepted cancellation.
-		yielding = m.beginExecutionYield(eng.ec.TaskID, eng.exec)
+		yielding = m.beginExecutionYield(eng.ec.Tenant, eng.ec.TaskID, eng.exec)
 	}
 
 	// Persist first (§3.6), under the task lock.
 	m.taskMu.Lock()
-	task, exists := m.tasks[eng.ec.TaskID]
+	taskKey := newScopedID(eng.ec.Tenant, eng.ec.TaskID)
+	task, exists := m.tasks[taskKey]
 	if exists && isFinalState(task.Status.State) {
 		// Terminal states are immutable: never write over one, whoever set it.
 		m.taskMu.Unlock()
 		if yielding {
-			m.abortExecutionYield(eng.ec.TaskID, eng.exec)
+			m.abortExecutionYield(eng.ec.Tenant, eng.ec.TaskID, eng.exec)
 		}
 		log.Warnf("memory TaskManager: discarding status %s for task %s already in terminal state %s",
 			event.Status.State, eng.ec.TaskID, task.Status.State)
@@ -689,7 +714,7 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 	var previousStatusMessage *protocol.Message
 	if !exists {
 		task = eng.newTask(event.Status)
-		m.tasks[eng.ec.TaskID] = task
+		m.tasks[taskKey] = task
 	} else {
 		previousStatusMessage = task.Status.Message
 		task.Status = event.Status
@@ -706,7 +731,7 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 	m.taskMu.Unlock()
 	if err := eng.persistInlinePushConfig(); err != nil {
 		if yielding {
-			m.abortExecutionYield(eng.ec.TaskID, eng.exec)
+			m.abortExecutionYield(eng.ec.Tenant, eng.ec.TaskID, eng.exec)
 		}
 		eng.violate(err.Error())
 		return
@@ -725,10 +750,10 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 		// cannot yet continue. The handoff starts before enqueue so a client that
 		// polls the persisted task also waits instead of being rejected. It also
 		// serializes task-subscriber fan-out with a continuation round.
-		m.dispatchPush(eng.ec.TaskID, response)
+		m.dispatchPush(eng.ec.Tenant, eng.ec.TaskID, response)
 		eng.broadcastWithoutPush(response, snapshot)
 		eng.closePipe()
-		m.deregisterExecution(eng.ec.TaskID, eng.exec)
+		m.deregisterExecution(eng.ec.Tenant, eng.ec.TaskID, eng.exec)
 		return
 	}
 
@@ -738,7 +763,7 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 
 	if final {
 		eng.stopReason = engineStopTerminal
-		m.cleanSubscribers(eng.ec.TaskID)
+		m.cleanSubscribers(eng.ec.Tenant, eng.ec.TaskID)
 		// Nothing can follow a terminal frame: end the response stream here
 		// instead of trusting the MessageProcessor to close its channel promptly.
 		eng.closePipe()
@@ -752,7 +777,8 @@ func (eng *engine) handleArtifact(event *protocol.TaskArtifactUpdateEvent) {
 	m := eng.manager
 
 	m.taskMu.Lock()
-	task, exists := m.tasks[eng.ec.TaskID]
+	taskKey := newScopedID(eng.ec.Tenant, eng.ec.TaskID)
+	task, exists := m.tasks[taskKey]
 	if exists && isFinalState(task.Status.State) {
 		// Terminal states are immutable: no artifact may land after one.
 		m.taskMu.Unlock()
@@ -766,7 +792,7 @@ func (eng *engine) handleArtifact(event *protocol.TaskArtifactUpdateEvent) {
 			State:     protocol.TaskStateSubmitted,
 			Timestamp: nowTimestamp(),
 		})
-		m.tasks[eng.ec.TaskID] = task
+		m.tasks[taskKey] = task
 	}
 	var appendedAsNew bool
 	task.Artifacts, appendedAsNew = protocol.AppendArtifact(task.Artifacts, event.Artifact, event.Append != nil && *event.Append)
@@ -826,7 +852,7 @@ func (eng *engine) broadcast(response protocol.StreamResponse, snapshot *protoco
 		eng.offerImmediateResult(sendOutcome{task: snapshot})
 	}
 	eng.sendToPipe(response)
-	eng.manager.notifySubscribers(eng.ec.TaskID, response)
+	eng.manager.notifySubscribers(eng.ec.Tenant, eng.ec.TaskID, response)
 }
 
 // broadcastWithoutPush publishes an event whose automatic push delivery was
@@ -836,7 +862,7 @@ func (eng *engine) broadcastWithoutPush(response protocol.StreamResponse, snapsh
 		eng.offerImmediateResult(sendOutcome{task: snapshot})
 	}
 	eng.sendToPipe(response)
-	eng.manager.notifyLiveSubscribers(eng.ec.TaskID, response)
+	eng.manager.notifyLiveSubscribers(eng.ec.Tenant, eng.ec.TaskID, response)
 }
 
 // offerImmediateResult publishes the immediate result exactly once.
@@ -876,7 +902,7 @@ func (eng *engine) violate(reason string) {
 	m := eng.manager
 	event := eng.statusEvent(protocol.TaskStateFailed, eng.failureStatusMessage(reason))
 	m.taskMu.Lock()
-	task, exists := m.tasks[eng.ec.TaskID]
+	task, exists := m.tasks[newScopedID(eng.ec.Tenant, eng.ec.TaskID)]
 	if !exists || isFinalState(task.Status.State) {
 		m.taskMu.Unlock()
 		return
@@ -890,7 +916,7 @@ func (eng *engine) violate(reason string) {
 	m.taskMu.Unlock()
 
 	eng.broadcast(protocol.NewStreamResponseStatusUpdate(event), snapshot)
-	m.cleanSubscribers(eng.ec.TaskID)
+	m.cleanSubscribers(eng.ec.Tenant, eng.ec.TaskID)
 	eng.closePipe()
 }
 
@@ -913,7 +939,7 @@ func (eng *engine) finish() {
 	var closing *protocol.TaskStatusUpdateEvent
 
 	m.taskMu.Lock()
-	task, exists := m.tasks[eng.ec.TaskID]
+	task, exists := m.tasks[newScopedID(eng.ec.Tenant, eng.ec.TaskID)]
 	if exists && !isFinalState(task.Status.State) {
 		switch {
 		case eng.exec.cancelRequested.Load():
@@ -952,15 +978,15 @@ func (eng *engine) finish() {
 	if closing != nil {
 		response := protocol.NewStreamResponseStatusUpdate(closing)
 		eng.sendToPipe(response)
-		m.notifySubscribers(eng.ec.TaskID, response)
-		m.cleanSubscribers(eng.ec.TaskID)
+		m.notifySubscribers(eng.ec.Tenant, eng.ec.TaskID, response)
+		m.cleanSubscribers(eng.ec.Tenant, eng.ec.TaskID)
 	}
 
 	if eng.pipe != nil {
 		eng.pipe.Close()
 	}
 	eng.exec.cancel() // release the detached ctx resources
-	m.deregisterExecution(eng.ec.TaskID, eng.exec)
+	m.deregisterExecution(eng.ec.Tenant, eng.ec.TaskID, eng.exec)
 	close(eng.done)
 }
 
@@ -993,12 +1019,13 @@ func (eng *engine) failureStatusMessage(text string) *protocol.Message {
 // task exists (history trimmed per the request's historyLength), otherwise the
 // last message; an execution that produced neither is a MessageProcessor bug.
 func (m *TaskManager) buildSendResponse(
+	tenant string,
 	task *protocol.Task,
 	message *protocol.Message,
 	historyLength *int,
 ) (*protocol.SendMessageResponse, error) {
 	if task != nil {
-		m.fillTaskHistory(task, historyLength)
+		m.fillTaskHistory(tenant, task, historyLength)
 		return protocol.NewSendMessageResponseTask(task), nil
 	}
 	if message != nil {

@@ -145,6 +145,7 @@ type execution struct {
 // the caller registered the execution under (see prepareExecution).
 func (m *TaskManager) resolveContinuation(
 	ctx context.Context,
+	tenant string,
 	message *protocol.Message,
 ) (*protocol.Task, error) {
 	if message.TaskID == nil || *message.TaskID == "" {
@@ -152,7 +153,7 @@ func (m *TaskManager) resolveContinuation(
 	}
 	taskID := *message.TaskID
 
-	loaded, err := m.getTaskInternal(ctx, taskID)
+	loaded, err := m.getTaskInternal(ctx, tenant, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +219,7 @@ func (m *TaskManager) prepareExecution(
 	// only after that write — so the working copy below can never be a stale
 	// pre-terminal snapshot that would smuggle writes past a terminal state.
 	// A rejected request never reaches the MessageProcessor and leaves no trace.
-	if err := m.registerExecution(ctx, taskID, ex.live); err != nil {
+	if err := m.registerExecution(ctx, request.Tenant, taskID, ex.live); err != nil {
 		cancel()
 		return nil, err
 	}
@@ -226,9 +227,9 @@ func (m *TaskManager) prepareExecution(
 	// Continuation: a request addressing an existing task loads it, rejects
 	// terminal tasks without invoking the MessageProcessor (the task is frozen), and
 	// hands the MessageProcessor the current snapshot via ec.Task.
-	task, err := m.resolveContinuation(ctx, message)
+	task, err := m.resolveContinuation(ctx, request.Tenant, message)
 	if err != nil {
-		m.releaseExecution(taskID, ex.live)
+		m.releaseExecution(request.Tenant, taskID, ex.live)
 		cancel()
 		return nil, err
 	}
@@ -241,9 +242,9 @@ func (m *TaskManager) prepareExecution(
 		}
 	}
 	acceptedOutputModes, inlinePushConfig := messageConfigurationValues(request.Configuration)
-	pushConfig, pending, err := m.prepareInlinePushConfig(taskID, task, inlinePushConfig)
+	pushConfig, pending, err := m.prepareInlinePushConfig(request.Tenant, taskID, task, inlinePushConfig)
 	if err != nil {
-		m.releaseExecution(taskID, ex.live)
+		m.releaseExecution(request.Tenant, taskID, ex.live)
 		cancel()
 		return nil, err
 	}
@@ -270,22 +271,22 @@ func (m *TaskManager) prepareExecution(
 				ContextID: task.ContextID,
 				Status:    task.Status,
 			}
-			if err := m.commitTaskEvent(ctx, task, protocol.NewStreamResponseStatusUpdate(event)); err != nil {
-				m.releaseExecution(taskID, ex.live)
+			if err := m.commitTaskEvent(ctx, request.Tenant, task, protocol.NewStreamResponseStatusUpdate(event)); err != nil {
+				m.releaseExecution(request.Tenant, taskID, ex.live)
 				cancel()
 				return nil, fmt.Errorf("failed to advance task status history: %w", err)
 			}
-			m.storeStatusMessage(taskID, contextID, statusMessage)
+			m.storeStatusMessage(request.Tenant, taskID, contextID, statusMessage)
 		}
 		// The engine's working copy must not alias ec.Task (the MessageProcessor's
 		// read-only snapshot).
 		ex.task = copyTask(task)
 	}
-	m.storeMessage(context.Background(), *message)
+	m.storeMessage(context.Background(), request.Tenant, *message)
 
 	// History is the conversation snapshot truncated per the manager
 	// configuration; the request's historyLength only shapes response tasks.
-	history, err := m.getConversationHistory(ctx, contextID, m.options.MaxHistoryLength)
+	history, err := m.getConversationHistory(ctx, request.Tenant, contextID, m.options.MaxHistoryLength)
 	if err != nil {
 		log.Warnf("RedisTaskManager: failed to load history for context %s: %v", contextID, err)
 	}
@@ -301,14 +302,23 @@ func (m *TaskManager) prepareExecution(
 	}
 	ex.inlinePushPending = pending
 
-	events, err := m.processor.ProcessMessage(execCtx, ex.ec)
+	processorEC := *ex.ec
+	if ex.ec.PushConfig != nil {
+		pushConfig := *ex.ec.PushConfig
+		if pushConfig.Authentication != nil {
+			auth := *pushConfig.Authentication
+			pushConfig.Authentication = &auth
+		}
+		processorEC.PushConfig = &pushConfig
+	}
+	events, err := m.processor.ProcessMessage(execCtx, &processorEC)
 	if err != nil {
-		m.releaseExecution(taskID, ex.live)
+		m.releaseExecution(request.Tenant, taskID, ex.live)
 		cancel()
 		return nil, err
 	}
 	if events == nil {
-		m.releaseExecution(taskID, ex.live)
+		m.releaseExecution(request.Tenant, taskID, ex.live)
 		cancel()
 		return nil, taskmanager.ErrInternalError("processor returned nil channel")
 	}
@@ -333,6 +343,7 @@ func messageConfigurationValues(
 // Existing tasks persist it immediately; fresh lazy tasks wait for their first
 // task event so a failed start or pure-Message reply cannot leave an orphan.
 func (m *TaskManager) prepareInlinePushConfig(
+	tenant string,
 	taskID string,
 	task *protocol.Task,
 	config *protocol.TaskPushNotificationConfig,
@@ -344,6 +355,7 @@ func (m *TaskManager) prepareInlinePushConfig(
 		return nil, false, taskmanager.ErrPushNotificationNotSupported()
 	}
 	pushConfig := *config
+	pushConfig.Tenant = tenant
 	pushConfig.TaskID = taskID
 	if pushConfig.ID == "" {
 		pushConfig.ID = taskID
@@ -500,7 +512,7 @@ func (ex *execution) finish() {
 	if ex.pipe != nil {
 		ex.pipe.Close()
 	}
-	ex.manager.deregisterExecution(ex.ec.TaskID, ex.live)
+	ex.manager.deregisterExecution(ex.ec.Tenant, ex.ec.TaskID, ex.live)
 	ex.live.cancel()
 	close(ex.done)
 }
@@ -578,7 +590,7 @@ func (ex *execution) processMessageEvent(msg *protocol.Message) {
 	ex.manager.stampReplyMessage(&contextID, msg)
 	response := protocol.NewStreamResponseMessage(msg)
 	if ex.task != nil {
-		if err := ex.manager.appendTaskEvent(context.Background(), ex.ec.TaskID, response); err != nil {
+		if err := ex.manager.appendTaskEvent(context.Background(), ex.ec.Tenant, ex.ec.TaskID, response); err != nil {
 			ex.failRun(fmt.Errorf("failed to store message event for task %s: %w", ex.ec.TaskID, err))
 			return
 		}
@@ -586,7 +598,7 @@ func (ex *execution) processMessageEvent(msg *protocol.Message) {
 	// The event journal is the success boundary for a reply attached to a Task.
 	// Store conversation history only after the append succeeds, so a failed
 	// request cannot leave behind an agent reply that no stream observed.
-	ex.manager.storeMessage(context.Background(), *msg)
+	ex.manager.storeMessage(context.Background(), ex.ec.Tenant, *msg)
 	ex.lastMessage = msg
 	ex.offerImmediateResult(sendOutcome{message: msg})
 	ex.broadcast(response)
@@ -594,7 +606,7 @@ func (ex *execution) processMessageEvent(msg *protocol.Message) {
 
 // storeStatusMessage stores a stamped copy without mutating the processor's
 // message, which may still be visible in an earlier task snapshot or wire event.
-func (m *TaskManager) storeStatusMessage(taskID, contextID string, message *protocol.Message) {
+func (m *TaskManager) storeStatusMessage(tenant, taskID, contextID string, message *protocol.Message) {
 	if message == nil {
 		return
 	}
@@ -605,7 +617,7 @@ func (m *TaskManager) storeStatusMessage(taskID, contextID string, message *prot
 	if stored.MessageID == "" {
 		stored.MessageID = protocol.GenerateMessageID()
 	}
-	m.storeMessage(context.Background(), stored)
+	m.storeMessage(context.Background(), tenant, stored)
 }
 
 // rollStatusMessage moves a superseded status message into conversation
@@ -618,7 +630,7 @@ func (ex *execution) rollStatusMessage(message *protocol.Message) {
 		return
 	}
 	ex.lastStatusMsg = message
-	ex.manager.storeStatusMessage(ex.ec.TaskID, ex.ec.ContextID, message)
+	ex.manager.storeStatusMessage(ex.ec.Tenant, ex.ec.TaskID, ex.ec.ContextID, message)
 }
 
 // processStatusEvent applies a status update to the task (lazily creating it
@@ -668,15 +680,15 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		// be rejected as a concurrent execution. If cancellation claimed the slot
 		// first, keep this round active so its close rule can persist CANCELED
 		// rather than swallowing the accepted cancellation.
-		yielding = ex.manager.beginExecutionYield(ex.ec.TaskID, ex.live)
+		yielding = ex.manager.beginExecutionYield(ex.ec.Tenant, ex.ec.TaskID, ex.live)
 	}
 	// Persist before broadcast (consistency order). A failure terminates the
 	// execution result: the mutated working copy is never returned as if it had
 	// committed successfully.
 	response := protocol.NewStreamResponseStatusUpdate(ev)
-	if err := ex.manager.commitTaskEvent(context.Background(), ex.task, response); err != nil {
+	if err := ex.manager.commitTaskEvent(context.Background(), ex.ec.Tenant, ex.task, response); err != nil {
 		if yielding {
-			ex.manager.abortExecutionYield(ex.ec.TaskID, ex.live)
+			ex.manager.abortExecutionYield(ex.ec.Tenant, ex.ec.TaskID, ex.live)
 		}
 		ex.failRun(fmt.Errorf("failed to store task %s status %s: %w", ev.TaskID, status.State, err))
 		return
@@ -687,7 +699,7 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 	ex.rollStatusMessage(previousStatusMessage)
 	if err := ex.persistInlinePushConfig(); err != nil {
 		if yielding {
-			ex.manager.abortExecutionYield(ex.ec.TaskID, ex.live)
+			ex.manager.abortExecutionYield(ex.ec.Tenant, ex.ec.TaskID, ex.live)
 		}
 		log.Errorf("RedisTaskManager: failed to persist inline push config for task %s: %v", ex.ec.TaskID, err)
 		ex.failTask("failed to persist inline push config")
@@ -700,11 +712,11 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		// cannot yet continue. The handoff starts before enqueue so a client that
 		// polls the persisted task also waits instead of being rejected. It also
 		// serializes task-subscriber fan-out with a continuation round.
-		ex.manager.dispatchPush(ex.ec.TaskID, response)
+		ex.manager.dispatchPush(ex.ec.Tenant, ex.ec.TaskID, response)
 		ex.offerImmediateTask()
 		ex.broadcastWithoutPush(response)
 		ex.closePipe()
-		ex.manager.deregisterExecution(ex.ec.TaskID, ex.live)
+		ex.manager.deregisterExecution(ex.ec.Tenant, ex.ec.TaskID, ex.live)
 		return
 	}
 
@@ -713,7 +725,7 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 	ex.offerImmediateTask()
 	ex.broadcast(response)
 	if final {
-		ex.manager.cleanSubscribers(ev.TaskID)
+		ex.manager.cleanSubscribers(ex.ec.Tenant, ev.TaskID)
 		// Nothing can follow a terminal frame: end the response stream here
 		// instead of trusting the MessageProcessor to close its channel promptly.
 		ex.closePipe()
@@ -745,7 +757,7 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 	ex.taskTouched = true
 	// Persist before broadcast (consistency order).
 	response := protocol.NewStreamResponseArtifactUpdate(ev)
-	if err := ex.manager.commitTaskEvent(context.Background(), ex.task, response); err != nil {
+	if err := ex.manager.commitTaskEvent(context.Background(), ex.ec.Tenant, ex.task, response); err != nil {
 		ex.failRun(fmt.Errorf("failed to store task %s artifact: %w", ev.TaskID, err))
 		return
 	}
@@ -801,7 +813,7 @@ func (ex *execution) broadcast(event protocol.StreamResponse) {
 		}
 	}
 	if ex.task != nil {
-		ex.manager.notifySubscribers(ex.ec.TaskID, event)
+		ex.manager.notifySubscribers(ex.ec.Tenant, ex.ec.TaskID, event)
 	}
 }
 
@@ -814,7 +826,7 @@ func (ex *execution) broadcastWithoutPush(event protocol.StreamResponse) {
 		}
 	}
 	if ex.task != nil {
-		ex.manager.notifyLiveSubscribers(ex.ec.TaskID, event)
+		ex.manager.notifyLiveSubscribers(ex.ec.Tenant, ex.ec.TaskID, event)
 	}
 }
 

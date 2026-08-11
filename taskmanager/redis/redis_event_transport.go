@@ -31,12 +31,14 @@ type taskEventTransport interface {
 	// produced it.
 	CommitTaskEvent(
 		ctx context.Context,
+		tenant string,
 		task *protocol.Task,
 		event protocol.StreamResponse,
 	) error
 	// AppendEvent stores an event that does not modify the Task snapshot.
 	AppendEvent(
 		ctx context.Context,
+		tenant string,
 		taskID string,
 		event protocol.StreamResponse,
 	) error
@@ -44,6 +46,7 @@ type taskEventTransport interface {
 	// event cursor. A subscriber reads only events committed after that cursor.
 	LoadTaskAndCursor(
 		ctx context.Context,
+		tenant string,
 		taskID string,
 	) (*protocol.Task, string, error)
 	// ReadAfter returns an ordered batch strictly after cursor and the cursor for
@@ -51,6 +54,7 @@ type taskEventTransport interface {
 	// when the cursor also did not advance.
 	ReadAfter(
 		ctx context.Context,
+		tenant string,
 		taskID string,
 		cursor string,
 	) ([]protocol.StreamResponse, string, error)
@@ -142,12 +146,13 @@ func newRedisTaskEventTransport(
 // streamKey shares the task key's Redis Cluster slot without changing the
 // existing task key. Redis hashes the full task key and the {...} portion of
 // the stream key, which are the same bytes for manager-generated task IDs.
-func streamKey(taskID string) string {
-	return streamPrefix + "{" + taskPrefix + taskID + "}"
+func streamKey(tenant, taskID string) string {
+	return streamPrefix + "{" + taskKey(tenant, taskID) + "}"
 }
 
 func (t *redisTaskEventTransport) CommitTaskEvent(
 	ctx context.Context,
+	tenant string,
 	task *protocol.Task,
 	event protocol.StreamResponse,
 ) error {
@@ -162,7 +167,7 @@ func (t *redisTaskEventTransport) CommitTaskEvent(
 	if _, err := commitTaskEventScript.Run(
 		ctx,
 		t.client,
-		[]string{taskPrefix + task.ID, streamKey(task.ID)},
+		[]string{taskKey(tenant, task.ID), streamKey(tenant, task.ID)},
 		taskBytes,
 		eventBytes,
 		streamMaxLen,
@@ -176,6 +181,7 @@ func (t *redisTaskEventTransport) CommitTaskEvent(
 
 func (t *redisTaskEventTransport) AppendEvent(
 	ctx context.Context,
+	tenant string,
 	taskID string,
 	event protocol.StreamResponse,
 ) error {
@@ -186,7 +192,7 @@ func (t *redisTaskEventTransport) AppendEvent(
 	if _, err := appendEventScript.Run(
 		ctx,
 		t.client,
-		[]string{taskPrefix + taskID, streamKey(taskID)},
+		[]string{taskKey(tenant, taskID), streamKey(tenant, taskID)},
 		payload,
 		streamMaxLen,
 		streamField,
@@ -198,12 +204,13 @@ func (t *redisTaskEventTransport) AppendEvent(
 
 func (t *redisTaskEventTransport) LoadTaskAndCursor(
 	ctx context.Context,
+	tenant string,
 	taskID string,
 ) (*protocol.Task, string, error) {
 	values, err := loadTaskAndCursorScript.Run(
 		ctx,
 		t.client,
-		[]string{taskPrefix + taskID, streamKey(taskID)},
+		[]string{taskKey(tenant, taskID), streamKey(tenant, taskID)},
 	).Slice()
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to load task %s and stream cursor: %w", taskID, err)
@@ -235,11 +242,12 @@ func (t *redisTaskEventTransport) LoadTaskAndCursor(
 
 func (t *redisTaskEventTransport) ReadAfter(
 	ctx context.Context,
+	tenant string,
 	taskID string,
 	cursor string,
 ) ([]protocol.StreamResponse, string, error) {
 	res, err := t.client.XRead(ctx, &redisclient.XReadArgs{
-		Streams: []string{streamKey(taskID), cursor},
+		Streams: []string{streamKey(tenant, taskID), cursor},
 		// Do not pin the TaskManager's shared Redis connection pool while a
 		// subscription is idle. The manager applies a context-aware backoff when
 		// this non-blocking read has no event or cursor progress.
