@@ -250,3 +250,24 @@ func TestHTTPJSONSubscribeFallsBackToGET(t *testing.T) {
 	}
 	assert.Equal(t, []string{http.MethodPost, http.MethodGet}, methods)
 }
+
+// A task ID containing a colon must stay addressable: the client escapes it so
+// the server does not read it as an operation verb.
+func TestHTTPJSONColonInTaskIDRoundTrips(t *testing.T) {
+	var seen []string
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.EscapedPath())
+		w.Header().Set("Content-Type", protocol.MediaTypeA2AJSON)
+		_, _ = w.Write([]byte(`{"id":"job:cancel","contextId":"ctx","status":{"state":"TASK_STATE_COMPLETED"}}`))
+	}))
+	t.Cleanup(testServer.Close)
+
+	c, err := NewA2AClient(testServer.URL, WithProtocolBinding(protocol.ProtocolBindingHTTPJSON))
+	require.NoError(t, err)
+	task, err := c.GetTasks(context.Background(), protocol.TaskQueryParams{ID: "job:cancel"})
+	require.NoError(t, err)
+	assert.Equal(t, "job:cancel", task.ID)
+	// The colon is percent-encoded, so the server reads it as part of the ID
+	// rather than as the ":cancel" verb (see TestParseHTTPJSONRoute).
+	assert.Equal(t, []string{"GET /tasks/job%3Acancel"}, seen)
+}

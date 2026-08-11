@@ -27,7 +27,6 @@ func TestParseHTTPJSONRoute(t *testing.T) {
 		name      string
 		path      string
 		basePath  string
-		tenants   []string
 		operation string
 		tenant    string
 		taskID    string
@@ -42,24 +41,21 @@ func TestParseHTTPJSONRoute(t *testing.T) {
 		{name: "create or list push", path: "/tasks/task-1/pushNotificationConfigs", operation: protocol.MethodTasksPushNotificationConfigList, taskID: "task-1"},
 		{name: "get or delete push", path: "/tenant-a/tasks/task-1/pushNotificationConfigs/config-1", operation: protocol.MethodTasksPushNotificationConfigGet, tenant: "tenant-a", taskID: "task-1", configID: "config-1"},
 		{name: "extended card", path: "/extendedAgentCard", operation: protocol.MethodAgentAuthenticatedExtendedCard},
-		// A registered tenant wins over the route keyword it collides with.
-		{name: "tenant named tasks", path: "/tasks/message:send", tenants: []string{"tasks"}, operation: protocol.MethodMessageSend, tenant: "tasks"},
-		{name: "tenant named tasks lists", path: "/tasks/tasks", tenants: []string{"tasks"}, operation: protocol.MethodTasksList, tenant: "tasks"},
-		// Without that registration the tenant-less reading still wins.
-		{name: "unregistered tasks segment", path: "/tasks/message:send", operation: protocol.MethodTasksGet, taskID: "message:send"},
+		// A reserved operation name in the task-ID position means the path is
+		// really addressing a tenant named "tasks"; no registry lookup needed,
+		// so a dynamic WithTenantCardProvider tenant routes too.
+		{name: "tenant named tasks", path: "/tasks/message:send", operation: protocol.MethodMessageSend, tenant: "tasks"},
+		{name: "tenant named tasks lists", path: "/tasks/tasks", operation: protocol.MethodTasksList, tenant: "tasks"},
+		{name: "tenant named tasks extended card", path: "/tasks/extendedAgentCard", operation: protocol.MethodAgentAuthenticatedExtendedCard, tenant: "tasks"},
+		// A percent-encoded colon is part of the ID, not an operation verb.
+		{name: "task id with escaped colon", path: "/tasks/job%3Acancel", operation: protocol.MethodTasksGet, taskID: "job:cancel"},
+		{name: "escaped colon subscribe", path: "/tasks/job%3Asubscribe", operation: protocol.MethodTasksGet, taskID: "job:subscribe"},
+		{name: "literal colon is a verb", path: "/tasks/job:cancel", operation: protocol.MethodTasksCancel, taskID: "job"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			knownTenant := func(tenant string) bool {
-				for _, known := range tt.tenants {
-					if known == tenant {
-						return true
-					}
-				}
-				return false
-			}
-			route, ok := parseHTTPJSONRoute(tt.path, tt.basePath, knownTenant)
+			route, ok := parseHTTPJSONRoute(tt.path, tt.basePath)
 			require.True(t, ok)
 			assert.Equal(t, tt.operation, route.operation)
 			assert.Equal(t, tt.tenant, route.tenant)
@@ -439,4 +435,30 @@ func TestHTTPJSONErrorMapping(t *testing.T) {
 			assert.NotEmpty(t, message)
 		})
 	}
+}
+
+// A server-side failure must not put its cause on the wire: the detail is
+// logged and the client sees only the generic heading.
+func TestHTTPJSONInternalErrorDetailIsNotLeaked(t *testing.T) {
+	manager := newMockTaskManager()
+	manager.sendMessageError = taskmanager.ErrInternalError(
+		"dial tcp 10.0.0.7:5432: connect: connection refused (password=hunter2)")
+	srv, err := NewA2AServer(manager, WithAgentCard(defaultAgentCard()), WithHTTPJSONEndpoint("/"))
+	require.NoError(t, err)
+
+	body, err := json.Marshal(protocol.SendMessageParams{Message: protocol.Message{
+		MessageID: "message-1",
+		Role:      protocol.MessageRoleUser,
+		Parts:     []*protocol.Part{protocol.NewTextPart("hello")},
+	}})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/message:send", bytes.NewReader(body))
+	req.Header.Set("Content-Type", protocol.MediaTypeA2AJSON)
+	recorder := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, req)
+
+	assert.Equal(t, http.StatusInternalServerError, recorder.Code)
+	assert.NotContains(t, recorder.Body.String(), "hunter2")
+	assert.NotContains(t, recorder.Body.String(), "10.0.0.7")
+	assert.Contains(t, recorder.Body.String(), "Internal error")
 }

@@ -60,13 +60,29 @@ func agentInterfaceURL(card AgentCard, binding string) string {
 	return ""
 }
 
-// parseHTTPJSONRoute resolves an escaped request path to an operation. The
-// leading {tenant} segment is a trpc-a2a-go extension (the spec carries the
-// tenant in the request itself), so the tenant-less reading is tried first and
-// the prefixed form only as a fallback — except when the first segment names a
-// registered tenant, which knownTenant reports. Without that check a tenant
-// literally named "tasks" would be shadowed by the /tasks/{id} route.
-func parseHTTPJSONRoute(requestPath, basePath string, knownTenant func(string) bool) (httpJSONRoute, bool) {
+// httpJSONOperationSegments are the single-segment operation names. A tenant
+// carrying one of these names is unroutable, and a task whose ID is one of them
+// is indistinguishable from the operation, so they are reserved either way.
+var httpJSONOperationSegments = map[string]bool{
+	"message:send":      true,
+	"message:stream":    true,
+	"tasks":             true,
+	"extendedAgentCard": true,
+}
+
+// parseHTTPJSONRoute resolves an escaped request path to an operation.
+//
+// Matching runs on the still-escaped segments so that a percent-encoded colon
+// is not read as an operation verb: "/tasks/job%3Acancel" addresses the task
+// literally named "job:cancel", while "/tasks/job:cancel" cancels "job". IDs
+// are unescaped only once their position is known.
+//
+// The leading {tenant} segment is the additional binding a2a.proto defines for
+// every operation. The tenant-less reading is tried first, since that is the
+// common case, except where it would resolve to a GetTask whose ID is a
+// reserved operation name — that only happens for a tenant named "tasks", which
+// the prefixed reading handles correctly.
+func parseHTTPJSONRoute(requestPath, basePath string) (httpJSONRoute, bool) {
 	basePath = normalizeHTTPJSONBasePath(basePath)
 	escapedBasePath := (&url.URL{Path: basePath}).EscapedPath()
 	if escapedBasePath != "" {
@@ -76,39 +92,38 @@ func parseHTTPJSONRoute(requestPath, basePath string, knownTenant func(string) b
 		requestPath = strings.TrimPrefix(requestPath, escapedBasePath)
 	}
 
-	rawSegments := strings.Split(strings.Trim(requestPath, "/"), "/")
-	if len(rawSegments) == 1 && rawSegments[0] == "" {
-		return httpJSONRoute{}, false
-	}
-	segments := make([]string, len(rawSegments))
-	for i, segment := range rawSegments {
-		decoded, err := url.PathUnescape(segment)
-		if err != nil || decoded == "" {
+	segments := strings.Split(strings.Trim(requestPath, "/"), "/")
+	for _, segment := range segments {
+		if segment == "" {
 			return httpJSONRoute{}, false
 		}
-		segments[i] = decoded
 	}
 
-	if len(segments) > 1 && knownTenant != nil && knownTenant(segments[0]) {
-		if route, ok := matchHTTPJSONRouteSegments(segments[1:], segments[0]); ok {
-			return route, true
-		}
-	}
-	if route, ok := matchHTTPJSONRouteSegments(segments, ""); ok {
+	route, ok := matchHTTPJSONRouteSegments(segments, "")
+	shadowsTenant := ok && route.operation == protocol.MethodTasksGet &&
+		httpJSONOperationSegments[route.taskID]
+	if ok && !shadowsTenant {
 		return route, true
 	}
 	if len(segments) > 1 {
-		return matchHTTPJSONRouteSegments(segments[1:], segments[0])
+		tenant, err := url.PathUnescape(segments[0])
+		if err != nil || tenant == "" {
+			return httpJSONRoute{}, false
+		}
+		if prefixed, prefixedOK := matchHTTPJSONRouteSegments(segments[1:], tenant); prefixedOK {
+			return prefixed, true
+		}
 	}
-	return httpJSONRoute{}, false
+	return route, ok
 }
 
-// registeredTenant reports whether tenant has a statically registered card. A
-// dynamic WithTenantCardProvider cannot be enumerated, so tenants it serves
-// keep the fallback ordering.
-func (s *A2AServer) registeredTenant(tenant string) bool {
-	_, ok := s.tenantCards[tenant]
-	return ok
+// unescapeSegment decodes one path segment into an identifier.
+func unescapeSegment(segment string) (string, bool) {
+	decoded, err := url.PathUnescape(segment)
+	if err != nil || decoded == "" {
+		return "", false
+	}
+	return decoded, true
 }
 
 func agentCardsAdvertiseBinding(s *A2AServer, binding string) bool {
@@ -140,45 +155,51 @@ func matchHTTPJSONRouteSegments(segments []string, tenant string) (httpJSONRoute
 		return httpJSONRoute{}, false
 	}
 	if len(segments) == 2 {
-		taskSegment := segments[1]
-		switch {
-		case strings.HasSuffix(taskSegment, ":cancel"):
-			taskID := strings.TrimSuffix(taskSegment, ":cancel")
-			if taskID == "" {
+		// The verb is matched on the escaped segment, so only a literal colon
+		// separates it from the task ID.
+		for verb, operation := range map[string]string{
+			":cancel":    protocol.MethodTasksCancel,
+			":subscribe": protocol.MethodTasksResubscribe,
+		} {
+			if !strings.HasSuffix(segments[1], verb) {
+				continue
+			}
+			taskID, ok := unescapeSegment(strings.TrimSuffix(segments[1], verb))
+			if !ok {
 				return httpJSONRoute{}, false
 			}
-			return httpJSONRoute{
-				operation: protocol.MethodTasksCancel,
-				tenant:    tenant,
-				taskID:    taskID,
-			}, true
-		case strings.HasSuffix(taskSegment, ":subscribe"):
-			taskID := strings.TrimSuffix(taskSegment, ":subscribe")
-			if taskID == "" {
-				return httpJSONRoute{}, false
-			}
-			return httpJSONRoute{
-				operation: protocol.MethodTasksResubscribe,
-				tenant:    tenant,
-				taskID:    taskID,
-			}, true
-		default:
-			return httpJSONRoute{operation: protocol.MethodTasksGet, tenant: tenant, taskID: taskSegment}, true
+			return httpJSONRoute{operation: operation, tenant: tenant, taskID: taskID}, true
 		}
+		taskID, ok := unescapeSegment(segments[1])
+		if !ok {
+			return httpJSONRoute{}, false
+		}
+		return httpJSONRoute{operation: protocol.MethodTasksGet, tenant: tenant, taskID: taskID}, true
 	}
-	if len(segments) == 3 && segments[2] == "pushNotificationConfigs" {
+	if segments[2] != "pushNotificationConfigs" {
+		return httpJSONRoute{}, false
+	}
+	taskID, ok := unescapeSegment(segments[1])
+	if !ok {
+		return httpJSONRoute{}, false
+	}
+	if len(segments) == 3 {
 		return httpJSONRoute{
 			operation: protocol.MethodTasksPushNotificationConfigList,
 			tenant:    tenant,
-			taskID:    segments[1],
+			taskID:    taskID,
 		}, true
 	}
-	if len(segments) == 4 && segments[2] == "pushNotificationConfigs" {
+	if len(segments) == 4 {
+		configID, configOK := unescapeSegment(segments[3])
+		if !configOK {
+			return httpJSONRoute{}, false
+		}
 		return httpJSONRoute{
 			operation: protocol.MethodTasksPushNotificationConfigGet,
 			tenant:    tenant,
-			taskID:    segments[1],
-			configID:  segments[3],
+			taskID:    taskID,
+			configID:  configID,
 		}, true
 	}
 	return httpJSONRoute{}, false
@@ -193,7 +214,7 @@ func (s *A2AServer) handleHTTPJSON(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	route, ok := parseHTTPJSONRoute(r.URL.EscapedPath(), s.httpJSONBasePath, s.registeredTenant)
+	route, ok := parseHTTPJSONRoute(r.URL.EscapedPath(), s.httpJSONBasePath)
 	if !ok {
 		s.writeHTTPJSONStatus(w, http.StatusNotFound, "NOT_FOUND", "HTTP+JSON endpoint not found")
 		return
@@ -718,10 +739,20 @@ func httpJSONErrorMapping(err error) (int, string, string, string) {
 	}
 	// The A2A error constructors keep the generic wording in Message and the
 	// specific cause in Data. Spec §11.6 maps the human-readable string to
-	// error.message, so the cause is what belongs there.
+	// error.message, so for a client error the cause is what belongs there.
+	// A server-side failure keeps the generic wording: its Data can carry a
+	// database, upstream or credential detail that must not cross the wire.
 	message := taskErr.Message
-	if detail, ok := taskErr.Data.(string); ok && detail != "" {
-		message = detail
+	detail, hasDetail := taskErr.Data.(string)
+	switch taskErr.Code {
+	case taskmanager.ErrCodeInternalError, taskmanager.ErrCodeInvalidAgentResponse:
+		if hasDetail && detail != "" {
+			log.Errorf("HTTP+JSON operation failed (%s): %s", taskErr.Code, detail)
+		}
+	default:
+		if hasDetail && detail != "" {
+			message = detail
+		}
 	}
 	switch taskErr.Code {
 	case taskmanager.ErrCodeInvalidParams:

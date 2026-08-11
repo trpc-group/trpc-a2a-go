@@ -174,7 +174,7 @@ func buildHTTPJSONRequest(operation string, params any) (httpJSONRequest, error)
 		setOptionalIntQuery(query, "historyLength", p.HistoryLength)
 		return httpJSONRequest{
 			method: http.MethodGet,
-			path:   httpJSONPath(p.Tenant, "/tasks/"+url.PathEscape(p.ID)),
+			path:   httpJSONPath(p.Tenant, "/tasks/"+escapePathID(p.ID)),
 			query:  query,
 		}, nil
 	case protocol.MethodTasksList:
@@ -208,7 +208,7 @@ func buildHTTPJSONRequest(operation string, params any) (httpJSONRequest, error)
 		}
 		return httpJSONRequest{
 			method: http.MethodPost,
-			path:   httpJSONPath(p.Tenant, "/tasks/"+url.PathEscape(p.ID)+":cancel"),
+			path:   httpJSONPath(p.Tenant, "/tasks/"+escapePathID(p.ID)+":cancel"),
 			body:   p,
 		}, nil
 	case protocol.MethodTasksResubscribe:
@@ -224,7 +224,7 @@ func buildHTTPJSONRequest(operation string, params any) (httpJSONRequest, error)
 		}
 		return httpJSONRequest{
 			method: http.MethodPost,
-			path:   httpJSONPath(p.Tenant, "/tasks/"+url.PathEscape(p.ID)+":subscribe"),
+			path:   httpJSONPath(p.Tenant, "/tasks/"+escapePathID(p.ID)+":subscribe"),
 		}, nil
 	case protocol.MethodTasksPushNotificationConfigSet:
 		p, ok := params.(protocol.TaskPushNotificationConfig)
@@ -236,7 +236,7 @@ func buildHTTPJSONRequest(operation string, params any) (httpJSONRequest, error)
 		}
 		return httpJSONRequest{
 			method: http.MethodPost,
-			path:   httpJSONPath(p.Tenant, "/tasks/"+url.PathEscape(p.TaskID)+"/pushNotificationConfigs"),
+			path:   httpJSONPath(p.Tenant, "/tasks/"+escapePathID(p.TaskID)+"/pushNotificationConfigs"),
 			body:   p,
 		}, nil
 	case protocol.MethodTasksPushNotificationConfigGet:
@@ -254,7 +254,7 @@ func buildHTTPJSONRequest(operation string, params any) (httpJSONRequest, error)
 			method: http.MethodGet,
 			path: httpJSONPath(
 				p.Tenant,
-				"/tasks/"+url.PathEscape(p.TaskID)+"/pushNotificationConfigs/"+url.PathEscape(p.ID),
+				"/tasks/"+escapePathID(p.TaskID)+"/pushNotificationConfigs/"+escapePathID(p.ID),
 			),
 		}, nil
 	case protocol.MethodTasksPushNotificationConfigList:
@@ -270,7 +270,7 @@ func buildHTTPJSONRequest(operation string, params any) (httpJSONRequest, error)
 		setQuery(query, "pageToken", p.PageToken)
 		return httpJSONRequest{
 			method: http.MethodGet,
-			path:   httpJSONPath(p.Tenant, "/tasks/"+url.PathEscape(p.TaskID)+"/pushNotificationConfigs"),
+			path:   httpJSONPath(p.Tenant, "/tasks/"+escapePathID(p.TaskID)+"/pushNotificationConfigs"),
 			query:  query,
 		}, nil
 	case protocol.MethodTasksPushNotificationConfigDelete:
@@ -288,7 +288,7 @@ func buildHTTPJSONRequest(operation string, params any) (httpJSONRequest, error)
 			method: http.MethodDelete,
 			path: httpJSONPath(
 				p.Tenant,
-				"/tasks/"+url.PathEscape(p.TaskID)+"/pushNotificationConfigs/"+url.PathEscape(p.ID),
+				"/tasks/"+escapePathID(p.TaskID)+"/pushNotificationConfigs/"+escapePathID(p.ID),
 			),
 		}, nil
 	case protocol.MethodAgentAuthenticatedExtendedCard:
@@ -304,6 +304,14 @@ func buildHTTPJSONRequest(operation string, params any) (httpJSONRequest, error)
 // (additional_bindings { get: "/{tenant}/tasks/{id=*}" } and friends). It is
 // also the form the reference clients put on the wire; the server additionally
 // accepts the tenant in the body or as a query parameter.
+// escapePathID escapes an identifier for a path segment. url.PathEscape leaves
+// ":" alone because it is a valid path character, but the REST routes use it to
+// introduce an operation verb, so a task literally named "job:cancel" would be
+// read as cancelling "job". Percent-encoding it keeps the ID addressable.
+func escapePathID(id string) string {
+	return strings.ReplaceAll(url.PathEscape(id), ":", "%3A")
+}
+
 func httpJSONPath(tenant, suffix string) string {
 	if tenant == "" {
 		return suffix
