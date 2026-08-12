@@ -194,9 +194,7 @@ func seedTask(m *TaskManager, task protocol.Task) {
 
 // liveExecutionCount reports how many executions are still registered.
 func liveExecutionCount(m *TaskManager) int {
-	m.execMu.Lock()
-	defer m.execMu.Unlock()
-	return len(m.executions)
+	return m.runs.len()
 }
 
 // =============================================================================

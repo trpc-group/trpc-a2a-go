@@ -177,17 +177,9 @@ type TaskManager struct {
 	// nil when push is disabled or the agent selected manual delivery.
 	pushDispatcher *push.Dispatcher
 
-	// executions tracks the cancellation handle of every live MessageProcessor run,
-	// keyed by task ID. Registered before ProcessMessage, removed when the engine
-	// finishes; OnCancelTask cancels through it.
-	executions map[scopedID]*execution
-	// execMu protects the executions and closed fields
-	execMu sync.Mutex
-	// closed rejects new runs once Close has begun tearing the manager down.
-	closed bool
-	// engineWg counts live drain engines so Close can wait for their final
-	// persists instead of clearing state under them.
-	engineWg sync.WaitGroup
+	// runs is the sole owner of live MessageProcessor slots (admission,
+	// suspend handoff, cancellation, Close). See executionRegistry.
+	runs *executionRegistry
 
 	// options
 	options *TaskManagerOptions
@@ -226,7 +218,7 @@ func NewTaskManager(processor taskmanager.MessageProcessor, opts ...TaskManagerO
 		subscribers:   make(map[scopedID][]*taskSubscriber),
 		pushStore:     newPushConfigStore(),
 		pushEnabled:   options.Push.Sender != nil || options.Push.ManualDelivery,
-		executions:    make(map[scopedID]*execution),
+		runs:          newExecutionRegistry(),
 		options:       options,
 		stopCleanup:   make(chan struct{}),
 	}
@@ -363,7 +355,7 @@ func (m *TaskManager) OnGetTask(ctx context.Context, params protocol.TaskQueryPa
 // sentinel so no continuation can start (and write) concurrently.
 func (m *TaskManager) OnCancelTask(ctx context.Context, params protocol.TaskIDParams) (*protocol.Task, error) {
 	for {
-		live, sentinel, yieldDone := m.claimCancelSlot(params.Tenant, params.ID)
+		live, sentinel, yieldDone := m.runs.claimCancelSlot(params.Tenant, params.ID)
 		if yieldDone != nil {
 			select {
 			case <-yieldDone:
@@ -373,7 +365,7 @@ func (m *TaskManager) OnCancelTask(ctx context.Context, params protocol.TaskIDPa
 			}
 		}
 		if live == nil {
-			defer m.deregisterExecution(params.Tenant, params.ID, sentinel)
+			defer m.runs.deregister(params.Tenant, params.ID, sentinel)
 			return m.cancelWithoutLiveRun(params)
 		}
 
@@ -397,7 +389,7 @@ func (m *TaskManager) OnCancelTask(ctx context.Context, params protocol.TaskIDPa
 		// Linearize cancellation against a concurrent suspend handoff. If the
 		// handoff won, wait for it and retry as a no-live cancel; otherwise the
 		// close rule is guaranteed to observe cancelRequested.
-		yieldDone, accepted := m.requestExecutionCancel(params.Tenant, params.ID, live)
+		yieldDone, accepted := m.runs.requestCancel(params.Tenant, params.ID, live)
 		if yieldDone != nil {
 			select {
 			case <-yieldDone:
@@ -410,7 +402,7 @@ func (m *TaskManager) OnCancelTask(ctx context.Context, params protocol.TaskIDPa
 			continue
 		}
 
-		if m.liveExecution(params.Tenant, params.ID) != live {
+		if m.runs.live(params.Tenant, params.ID) != live {
 			// The run yielded (suspend) or finished while we were canceling, so
 			// its close rule will not persist CANCELED on our behalf. Reassess:
 			// the next pass either claims the free slot and persists CANCELED
@@ -796,10 +788,7 @@ func (m *TaskManager) dispatchPush(tenant, taskID string, event protocol.StreamR
 	if len(registrations) == 0 {
 		return
 	}
-	m.execMu.Lock()
-	closed := m.closed
-	m.execMu.Unlock()
-	if closed {
+	if m.runs.isClosed() {
 		return
 	}
 	if err := m.pushDispatcher.Enqueue(registrations, event); err != nil && !errors.Is(err, push.ErrDispatcherClosed) {
@@ -1011,7 +1000,7 @@ func (m *TaskManager) cleanExpiredTasks(maxAge time.Duration) int {
 		// A terminal task normally has no live execution, but its engine may
 		// still be draining; cancel the MessageProcessor ctx so a stuck run can exit.
 		for _, taskKey := range expiredTaskIDs {
-			if exec := m.liveExecution(taskKey.tenant, taskKey.id); exec != nil {
+			if exec := m.runs.live(taskKey.tenant, taskKey.id); exec != nil {
 				exec.cancel()
 			}
 		}
@@ -1040,17 +1029,7 @@ func (m *TaskManager) Close() error {
 		// Refuse new runs, request cancellation of every live one, and collect
 		// their stream pipes: closing a pipe unblocks an engine parked on a
 		// blocking pipe send.
-		m.execMu.Lock()
-		m.closed = true
-		pipes := make([]*taskSubscriber, 0, len(m.executions))
-		for _, exec := range m.executions {
-			exec.cancelRequested.Store(true)
-			exec.cancel()
-			if exec.pipe != nil {
-				pipes = append(pipes, exec.pipe)
-			}
-		}
-		m.execMu.Unlock()
+		pipes := m.runs.shutdown()
 		// Unblock an enqueue waiting on a full queue and cancel slow webhook
 		// calls before waiting for engines that may be inside dispatch.
 		m.pushDispatcher.Close()
@@ -1075,7 +1054,7 @@ func (m *TaskManager) Close() error {
 		// Wait for the detached engines: their final persists (close-rule
 		// CANCELED) land before teardown, and nothing re-populates the maps
 		// afterwards.
-		m.engineWg.Wait()
+		m.runs.wait()
 
 		m.taskMu.Lock()
 		m.tasks = make(map[scopedID]*protocol.Task)

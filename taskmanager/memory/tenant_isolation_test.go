@@ -102,14 +102,14 @@ func TestTaskManagerTenantDataIsolation(t *testing.T) {
 
 	liveA := &execution{cancel: func() {}}
 	liveB := &execution{cancel: func() {}}
-	if err := manager.registerExecution(ctx, "tenant-a", taskID, liveA); err != nil {
+	if err := manager.runs.register(ctx, "tenant-a", taskID, liveA); err != nil {
 		t.Fatalf("register tenant-a execution: %v", err)
 	}
-	if err := manager.registerExecution(ctx, "tenant-b", taskID, liveB); err != nil {
+	if err := manager.runs.register(ctx, "tenant-b", taskID, liveB); err != nil {
 		t.Fatalf("register tenant-b execution with the same task ID: %v", err)
 	}
-	manager.releaseExecution("tenant-a", taskID, liveA)
-	manager.releaseExecution("tenant-b", taskID, liveB)
+	manager.runs.release("tenant-a", taskID, liveA)
+	manager.runs.release("tenant-b", taskID, liveB)
 }
 
 func TestTaskManagerProcessorCannotMutateTenantScope(t *testing.T) {

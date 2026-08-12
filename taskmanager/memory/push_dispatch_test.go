@@ -306,7 +306,7 @@ func TestInlinePushConfigRegistration(t *testing.T) {
 		if stored {
 			t.Fatalf("rejected continuation stored incoming message %s", followUp.Message.MessageID)
 		}
-		if live := manager.liveExecution("", suspended.ID); live != nil {
+		if live := manager.runs.live("", suspended.ID); live != nil {
 			t.Fatal("rejected continuation did not release its execution slot")
 		}
 	})
@@ -641,10 +641,8 @@ func TestSuspendWaitsForPushCapacityBeforeHandoff(t *testing.T) { //nolint:gocyc
 		state, ok := storedTaskState(manager, taskID)
 		return ok && state == protocol.TaskStateInputRequired
 	}, "task must persist input-required before publication")
-	manager.execMu.Lock()
-	exec := manager.executions[newScopedID("", taskID)]
+	exec := manager.runs.live("", taskID)
 	yielding := exec != nil && exec.yieldDone != nil
-	manager.execMu.Unlock()
 	if !yielding {
 		t.Fatal("input-required became visible before the suspend handoff barrier")
 	}
