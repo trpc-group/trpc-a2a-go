@@ -1,0 +1,11 @@
+[project]
+name = "trpc-a2a-go-python-interop-example"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "a2a-sdk[http-server]==1.1.2",
+    "uvicorn>=0.35.0,<1.0.0",
+]
+
+[tool.uv]
+package = false

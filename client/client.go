@@ -627,6 +627,43 @@ func (c *A2AClient) GetAgentCard(
 		newPathURL.String(), oldPathURL.String(), err)
 }
 
+// GetTenantAgentCard retrieves the public agent card for a tenant.
+// It first uses the tenant query parameter and then falls back to a
+// tenant-prefixed path.
+func (c *A2AClient) GetTenantAgentCard(
+	ctx context.Context,
+	tenant string,
+	opts ...RequestOption,
+) (*server.AgentCard, error) {
+	if tenant == "" {
+		return nil, fmt.Errorf("a2aClient.GetTenantAgentCard: tenant is required")
+	}
+
+	queryURL := *c.baseURL
+	queryURL.Path = path.Join(queryURL.Path, protocol.AgentCardPath)
+	query := queryURL.Query()
+	query.Set("tenant", tenant)
+	queryURL.RawQuery = query.Encode()
+	card, queryErr := c.getAgentCardFromURL(ctx, queryURL.String(), opts...)
+	if queryErr == nil {
+		return card, nil
+	}
+
+	pathURL := *c.baseURL
+	baseEscapedPath := pathURL.EscapedPath()
+	pathURL.Path = path.Join(pathURL.Path, tenant, protocol.AgentCardPath)
+	pathURL.RawPath = path.Join(baseEscapedPath, url.PathEscape(tenant), protocol.AgentCardPath)
+	card, pathErr := c.getAgentCardFromURL(ctx, pathURL.String(), opts...)
+	if pathErr == nil {
+		return card, nil
+	}
+	return nil, fmt.Errorf(
+		"a2aClient.GetTenantAgentCard: query endpoint failed: %v; tenant path failed: %w",
+		queryErr,
+		pathErr,
+	)
+}
+
 // getAgentCardFromURL is a helper function that fetches the agent card from a specific URL.
 func (c *A2AClient) getAgentCardFromURL(
 	ctx context.Context,
