@@ -124,7 +124,7 @@ sequenceDiagram
 
 ### 2. A tracked job with live progress
 
-Same request shape, the streaming endpoint: every event reaches you the moment it happens. The processor selects task mode by emitting a status or artifact update; the framework materializes the Task and sends its pre-update snapshot first.
+Same request shape, the streaming endpoint: every event reaches you the moment it happens. The first valid processor event selects the response shape: a Message completes a direct response, while a status or artifact selects task mode and makes the framework send the pre-update Task snapshot first.
 
 ```mermaid
 sequenceDiagram
@@ -353,7 +353,7 @@ last frame, after which the SSE stream closes. Everything else — an explicit
 `submitted`, how many `working` frames, whether progress text rides on status
 messages — is the agent's choice.
 
-This ownership split is intentional: a pure `Message` round remains taskless, while the first status/artifact event selects task mode and causes the framework to materialize the initial Task snapshot.
+This ownership split is intentional: a first `Message` completes a taskless response and later events are discarded, while a first status/artifact event selects task mode and causes the framework to materialize the initial Task snapshot.
 
 Next: [Server](server.md) explains how this framework turns that event
 stream into persisted tasks and derived responses; [Server](server.md) shows how

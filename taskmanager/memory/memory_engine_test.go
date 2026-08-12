@@ -613,17 +613,18 @@ func TestEngine_ForeignMessageEventFailsTask(t *testing.T) {
 	}
 }
 
-// §3.1: a continuation round that only emits Messages answers with the last
-// Message; the suspended task stays untouched.
-func TestEngine_ContinuationMessageOnlyReturnsMessage(t *testing.T) {
+// A continuation whose first event is a direct Message answers with that
+// Message and discards later task events; the suspended task stays untouched.
+func TestEngine_ContinuationDirectMessageDiscardsLaterTaskEvent(t *testing.T) {
 	var round atomic.Int32
 	processor := funcExecutor(
 		func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
-			out := make(chan protocol.StreamEvent, 1)
+			out := make(chan protocol.StreamEvent, 2)
 			if round.Add(1) == 1 {
 				out <- statusUpdate(protocol.TaskStateInputRequired, agentReply("need more input"))
 			} else {
 				out <- agentReply("just a clarification")
+				out <- statusUpdate(protocol.TaskStateCompleted, nil)
 			}
 			close(out)
 			return out, nil
@@ -678,7 +679,10 @@ func TestOnSendMessageStream_OrderAndPersistBeforeBroadcast(t *testing.T) {
 		})
 	manager := newTestManager(t, processor)
 
-	ch, err := manager.OnSendMessageStream(context.Background(), userParams("stream"))
+	one := 1
+	params := userParams("stream")
+	params.Configuration = &protocol.SendMessageConfiguration{HistoryLength: &one}
+	ch, err := manager.OnSendMessageStream(context.Background(), params)
 	if err != nil {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
@@ -690,6 +694,15 @@ func TestOnSendMessageStream_OrderAndPersistBeforeBroadcast(t *testing.T) {
 	}
 	if initial.ID == "" || initial.ContextID == "" {
 		t.Errorf("Expected stamped IDs, got taskID=%q contextID=%q", initial.ID, initial.ContextID)
+	}
+	manager.taskMu.RLock()
+	storedHistory := len(manager.tasks[newScopedID("", initial.ID)].History)
+	manager.taskMu.RUnlock()
+	if storedHistory != 0 {
+		t.Fatalf("Initial Task history must not be written into storage, got %d entries", storedHistory)
+	}
+	if len(initial.History) != 1 || textOfMessage(initial.History[0]) != "stream" {
+		t.Fatalf("Expected historyLength=1 on the initial Task, got %+v", initial.History)
 	}
 	// The initial snapshot is operation-local, but the triggering update is
 	// persisted before either response frame is published.
@@ -976,6 +989,31 @@ func TestOnSendMessageStream_PureMessage(t *testing.T) {
 	manager.taskMu.RUnlock()
 	if taskCount != 0 {
 		t.Errorf("Expected no task after a pure-message stream, got %d", taskCount)
+	}
+}
+
+// The first valid event fixes the response shape. Once a direct Message has
+// been sent, later task events are drained rather than switching wire modes.
+func TestOnSendMessageStream_DirectMessageDoesNotSwitchToTask(t *testing.T) {
+	manager := newTestManager(t, eventsExecutor(
+		agentReply("direct"),
+		agentReply("ignored"),
+		statusUpdate(protocol.TaskStateCompleted, nil),
+	))
+
+	ch, err := manager.OnSendMessageStream(context.Background(), userParams("hello"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream failed: %v", err)
+	}
+	events := collectStream(t, ch)
+	if len(events) != 1 || events[0].GetMessage() == nil || textOfMessage(*events[0].GetMessage()) != "direct" {
+		t.Fatalf("Expected exactly the first direct Message, got %+v", events)
+	}
+	manager.taskMu.RLock()
+	taskCount := len(manager.tasks)
+	manager.taskMu.RUnlock()
+	if taskCount != 0 {
+		t.Fatalf("A task event after a direct Message must be discarded, got %d tasks", taskCount)
 	}
 }
 
@@ -1342,6 +1380,8 @@ func TestEngine_StatusMessageDedupByID(t *testing.T) {
 			h := taskmanager.NewTaskHandle(ctx, ec)
 			go func() {
 				defer h.Close()
+				// Select task mode before emitting the task-attached reply.
+				h.UpdateTaskState(protocol.TaskStateWorking, nil)
 				h.Reply(&reply)
 				h.UpdateTaskState(protocol.TaskStateWorking, &status)
 				// Supersedes status, causing the same-MessageID copy above to roll.

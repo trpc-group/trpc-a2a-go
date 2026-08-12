@@ -487,13 +487,17 @@ func TestClose_CancelsYieldedDrainingEngine(t *testing.T) {
 	}
 	waitClosed(t, pipe)
 
-	closeDone := make(chan error, 1)
-	go func() { closeDone <- manager.Close() }()
+	// The suspend path itself must cancel the yielded round. Waiting before
+	// Close removes the race where Close could find the not-yet-deregistered
+	// execution and make an implementation without yield-time cancellation pass.
 	select {
 	case <-sawCancel:
 	case <-time.After(2 * time.Second):
-		t.Fatal("yielded processor did not observe context cancellation")
+		t.Fatal("suspend did not cancel the yielded processor context")
 	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- manager.Close() }()
 	select {
 	case err := <-closeDone:
 		if err != nil {

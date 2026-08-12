@@ -458,19 +458,20 @@ func TestInputRequiredContinuation(t *testing.T) {
 	}
 }
 
-// §3.1: a continuation round that only emits Messages answers with the last
-// Message; the suspended task stays untouched.
-func TestContinuationMessageOnlyReturnsMessage(t *testing.T) {
+// A continuation whose first event is a direct Message answers with that
+// Message and discards later task events; the suspended task stays untouched.
+func TestContinuationDirectMessageDiscardsLaterTaskEvent(t *testing.T) {
 	var round int
 	processor := executorFunc(func(
 		ctx context.Context, ec *taskmanager.ExecContext,
 	) (<-chan protocol.StreamEvent, error) {
 		round++
-		out := make(chan protocol.StreamEvent, 1)
+		out := make(chan protocol.StreamEvent, 2)
 		if round == 1 {
 			out <- statusEvent(protocol.TaskStateInputRequired, agentReply("need more"))
 		} else {
 			out <- agentReply("just a clarification")
+			out <- statusEvent(protocol.TaskStateCompleted, nil)
 		}
 		close(out)
 		return out, nil
@@ -681,7 +682,10 @@ func TestOnSendMessageStreamOrderAndPersistence(t *testing.T) {
 	})
 	m, _ := setupTest(t, processor)
 
-	ch, err := m.OnSendMessageStream(context.Background(), sendParams("stream it", "ctx-stream"))
+	one := 1
+	params := sendParams("stream it", "ctx-stream")
+	params.Configuration = &protocol.SendMessageConfiguration{HistoryLength: &one}
+	ch, err := m.OnSendMessageStream(context.Background(), params)
 	if err != nil {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
@@ -692,6 +696,16 @@ func TestOnSendMessageStreamOrderAndPersistence(t *testing.T) {
 	initial := frame1.GetTask()
 	if initial == nil || initial.Status.State != protocol.TaskStateSubmitted {
 		t.Fatalf("frame 1: expected submitted Task, got %+v", frame1.Result)
+	}
+	storedInitial, err := m.getTaskInternal(context.Background(), "", initial.ID)
+	if err != nil {
+		t.Fatalf("getTaskInternal failed: %v", err)
+	}
+	if len(storedInitial.History) != 0 {
+		t.Fatalf("initial Task history must not be written into Redis, got %d entries", len(storedInitial.History))
+	}
+	if len(initial.History) != 1 || textOfMessage(initial.History[0]) != "stream it" {
+		t.Fatalf("frame 1: historyLength=1 was not applied: %+v", initial.History)
 	}
 
 	// Frame 2: working. Persist-before-broadcast means the store must already
@@ -831,6 +845,31 @@ func TestOnSendMessageStreamPureMessage(t *testing.T) {
 	for _, key := range mr.Keys() {
 		if strings.HasPrefix(key, taskPrefix) {
 			t.Errorf("pure-message stream must not create a task, found %s", key)
+		}
+	}
+}
+
+// The first valid event fixes the response shape. Once a direct Message has
+// been sent, later task events are drained rather than switching wire modes.
+func TestOnSendMessageStreamDirectMessageDoesNotSwitchToTask(t *testing.T) {
+	m, mr := setupTest(t, scriptedExecutor(
+		agentReply("direct"),
+		agentReply("ignored"),
+		statusEvent(protocol.TaskStateCompleted, nil),
+	))
+
+	ch, err := m.OnSendMessageStream(context.Background(), sendParams("hello", "ctx-direct-mode"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream failed: %v", err)
+	}
+	frames := collectStream(t, ch)
+	if len(frames) != 1 || frames[0].GetMessage() == nil ||
+		textOfMessage(*frames[0].GetMessage()) != "direct" {
+		t.Fatalf("expected exactly the first direct Message, got %+v", frames)
+	}
+	for _, key := range mr.Keys() {
+		if strings.HasPrefix(key, taskPrefix) {
+			t.Fatalf("task event after direct Message must be discarded, found %s", key)
 		}
 	}
 }

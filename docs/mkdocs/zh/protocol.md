@@ -121,7 +121,7 @@ sequenceDiagram
 
 ### 2. 带实时进度的跟踪任务
 
-同样的请求换到流式端点：每个事件发生的瞬间就到达你这里。processor 通过发出 status 或 artifact 更新选择 Task 模式；框架负责创建 Task，并先发送更新前快照。
+同样的请求换到流式端点：每个事件发生的瞬间就到达你这里。processor 的首个有效事件决定响应形态：Message 会完成直接响应，status 或 artifact 则选择 Task 模式，并让框架先发送更新前 Task 快照。
 
 ```mermaid
 sequenceDiagram
@@ -323,7 +323,7 @@ artifact -> chunk 1..N     同一 artifact 的分块用 append/lastChunk
 status   -> completed      必须：以合法状态收尾；终态即关闭流
 ```
 
-强制项：产生任务后，要以合法状态结束（终态，或多轮场景的挂起态）并标注 artifact 分块；终态（或中断态）的那一帧即流的最后一帧，之后 SSE 流关闭。其余——要不要显式 `submitted`、发几帧 `working`、进度文字挂不挂在 status message 上——都由 agent 自定。这个所有权边界是刻意设计的：纯 `Message` 轮次不产生 Task，首个 status/artifact 则选择 Task 模式，并触发框架生成初始 Task 快照。
+强制项：产生任务后，要以合法状态结束（终态，或多轮场景的挂起态）并标注 artifact 分块；终态（或中断态）的那一帧即流的最后一帧，之后 SSE 流关闭。其余——要不要显式 `submitted`、发几帧 `working`、进度文字挂不挂在 status message 上——都由 agent 自定。这个所有权边界是刻意设计的：首个 `Message` 会完成不产生 Task 的直接响应，本轮后续事件被丢弃；首个 status/artifact 则选择 Task 模式，并触发框架生成初始 Task 快照。
 
 实现层面还有一个重要边界：`TaskStatus.message` 更适合放进度解释，它会被下一个 status 覆盖；需要跨轮进入会话历史的最终回答，应作为独立 `Message` 事件发出。详见 [服务端](server.md)。
 

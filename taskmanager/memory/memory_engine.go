@@ -74,6 +74,7 @@ const (
 	engineStopTerminal
 	engineStopViolation
 	engineStopYield
+	engineStopMessage
 )
 
 func (reason engineStopReason) description() string {
@@ -84,6 +85,8 @@ func (reason engineStopReason) description() string {
 		return "a contract violation"
 	case engineStopYield:
 		return "the round yielded (suspended task)"
+	case engineStopMessage:
+		return "a direct Message response"
 	default:
 		return "an unknown stop reason"
 	}
@@ -99,6 +102,9 @@ type engine struct {
 	exec    *execution
 	// pipe is the message/stream response channel; nil for unary requests.
 	pipe *taskSubscriber
+	// historyLength shapes only the operation-local Task framing sent on pipe.
+	// It is a private copy so callers may safely reuse or mutate their request.
+	historyLength *int
 
 	// Drain lifecycle. Only run() and its callees access these fields.
 	stopReason engineStopReason
@@ -388,6 +394,10 @@ func (m *TaskManager) startExecution(
 		immediateResult:   make(chan sendOutcome, 1),
 		done:              make(chan struct{}),
 	}
+	if requested := historyLengthFromConfig(request.Configuration); requested != nil {
+		value := *requested
+		eng.historyLength = &value
+	}
 	go func() {
 		defer m.runs.engineDone()
 		eng.run(events)
@@ -494,6 +504,13 @@ func (eng *engine) handleMessage(message *protocol.Message) {
 	if exists {
 		m.notifySubscribers(eng.ec.Tenant, eng.ec.TaskID, response)
 	}
+	// The first valid event selects the response shape. Once a round returns a
+	// direct Message, the wire response is complete; keep draining the processor
+	// channel, but never let later events switch the round into Task mode.
+	if !eng.taskWritten {
+		eng.stopReason = engineStopMessage
+		eng.closePipe()
+	}
 }
 
 // storeStatusMessage stores a stamped copy without mutating the processor's
@@ -573,9 +590,7 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 		eng.stopReason = engineStopTerminal
 		return
 	}
-	if persisted.initial != nil {
-		eng.sendToPipe(protocol.NewStreamResponseTask(persisted.initial))
-	}
+	eng.sendInitialTask(persisted.initial)
 	if err := eng.persistInlinePushConfig(); err != nil {
 		eng.abortYieldIf(yielding)
 		eng.violate(err.Error())
@@ -724,9 +739,7 @@ func (eng *engine) handleArtifact(event *protocol.TaskArtifactUpdateEvent) {
 	eng.taskWritten = true
 	snapshot := eng.immediateSnapshotLocked(task)
 	m.taskMu.Unlock()
-	if initial != nil {
-		eng.sendToPipe(protocol.NewStreamResponseTask(initial))
-	}
+	eng.sendInitialTask(initial)
 	if err := eng.persistInlinePushConfig(); err != nil {
 		eng.violate(err.Error())
 		return
@@ -808,6 +821,17 @@ func (eng *engine) sendToPipe(response protocol.StreamResponse) {
 	}
 }
 
+// sendInitialTask shapes and sends the operation-local pre-update Task frame.
+// The snapshot is private to this response, so filling History does not mutate
+// the stored Task or create another task event.
+func (eng *engine) sendInitialTask(task *protocol.Task) {
+	if task == nil || eng.pipe == nil {
+		return
+	}
+	eng.manager.fillTaskHistory(eng.ec.Tenant, task, eng.historyLength)
+	eng.sendToPipe(protocol.NewStreamResponseTask(task))
+}
+
 // closePipe ends the message/stream response stream, if any. Subscriber close
 // is CAS-guarded, so calling it from more than one place is safe.
 func (eng *engine) closePipe() {
@@ -843,9 +867,7 @@ func (eng *engine) violate(reason string) {
 	snapshot := eng.immediateSnapshotLocked(task)
 	m.taskMu.Unlock()
 
-	if initial != nil {
-		eng.sendToPipe(protocol.NewStreamResponseTask(initial))
-	}
+	eng.sendInitialTask(initial)
 	eng.broadcast(protocol.NewStreamResponseStatusUpdate(event), snapshot)
 	m.cleanSubscribers(eng.ec.Tenant, eng.ec.TaskID)
 	eng.closePipe()
@@ -910,9 +932,7 @@ func (eng *engine) finish() {
 	}
 	m.taskMu.Unlock()
 
-	if initial != nil {
-		eng.sendToPipe(protocol.NewStreamResponseTask(initial))
-	}
+	eng.sendInitialTask(initial)
 	if closing != nil {
 		response := protocol.NewStreamResponseStatusUpdate(closing)
 		eng.sendToPipe(response)

@@ -96,7 +96,7 @@ go func() {
 return out, nil
 ```
 
-首个 status 或 artifact 事件表示 processor 选择了 Task 生命周期。processor 不需要也不允许发送 `*protocol.Task`；对于 `SendStreamingMessage`，manager 会在转发首个更新前生成协议要求的初始 Task 快照：新任务从 `submitted` 开始，续跑任务从 `ec.Task` 开始。只调用 `Reply` 的轮次仍然不产生 Task。
+首个有效事件决定响应形态。`Reply` 会完成不产生 Task 的直接响应，本轮后续事件会被丢弃；status 或 artifact 则选择 Task 生命周期。processor 不需要也不允许发送 `*protocol.Task`；对于 `SendStreamingMessage`，manager 会在转发首个更新前生成协议要求的初始 Task 快照：新任务从 `submitted` 开始，续跑任务从 `ec.Task` 开始。
 
 （[examples/simple](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple)是一个完全用裸 channel 写的 processor。）
 
@@ -104,7 +104,7 @@ return out, nil
 
 - **纯回复**(不产生任务):`h.Reply(protocol.NewAgentText("..."))`。
 - **实时流式**——把函数体放进 goroutine,事件就会实时到达 `SendStreamingMessage` 的消费者;长循环里检查 `ctx.Err()`,被取消时直接关闭(框架落 `CANCELED`)。→ [examples/basic](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic)（`/long-task` 与 client `-stream`）
-- **多轮**——用 `h.UpdateTaskState(protocol.TaskStateInputRequired, protocol.NewAgentText("need more"))` 挂起并关闭;后续消息(回传 `taskId`)作为新一轮到来,此时 `ec.Task` 已就位。→ [examples/inputrequired](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/inputrequired)
+- **多轮**——用 `h.UpdateTaskState(protocol.TaskStateInputRequired, protocol.NewAgentText("need more"))` 挂起并及时关闭；后续消息（回传 `taskId`）作为新一轮到来，此时 `ec.Task` 已就位。Memory 会在发布挂起帧后取消已让出的旧轮次 `ctx`，这是轮次清理信号，不会取消 Task。→ [examples/inputrequired](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/inputrequired)
 
 ### 写 Processor 时记住这几条
 
@@ -113,7 +113,7 @@ return out, nil
 - **谁发事件，谁负责关闭。** 如果你在 goroutine 里发事件，就在那个 goroutine 里关闭 channel 或 `TaskHandle`。channel 不关闭，轮次就不会结束，任务也会一直占着执行槽。
 - **每轮都要给出结论。** 正常结束用 `completed` / `failed` / `canceled` / `rejected`；需要用户继续输入时用 `input-required` / `auth-required`。如果还停在 `submitted` 或 `working` 就关闭，框架会把任务标成 `FAILED`。
 - **一轮只属于一个任务。** 事件默认属于 `ec.TaskID`。不要发其他 `taskId` 的事件，也不要自己发 `*protocol.Task` 快照；任务快照只由框架生成。
-- **processor 间接选择响应形态。** `Reply` 选择不产生 Task 的直接回复；首个 status/artifact 事件选择 Task 生命周期，manager 随后补齐 wire 上的 Task 首帧。
+- **首个有效事件决定响应形态。** `Reply` 会完成不产生 Task 的直接回复，后续事件会被丢弃；status/artifact 则选择 Task 生命周期，manager 随后补齐 wire 上的 Task 首帧。
 - **要让后续对话记住终答，就发 `Message`。** 当前 `status.message` 只留在 `Task.Status`；后续状态或 follow-up 用户消息取代它时，上一条 status message 才会移入历史。终态 status message 不会再被取代，只留在 `status.Message`；artifact 也永不进历史。需要保留的回答，尤其是 LLM 最终回复，请作为 `Message` 事件发出。
 
 ## 轮次生命周期
@@ -132,7 +132,7 @@ Task 和会话历史；[TaskManager 实现](#taskmanager)中的 stateless manage
 
 关键语义如下：
 
-- **任务是懒创建的。** 只有发出 status 或 artifact 这类任务事件后，任务才真正落库。对于 `SendStreamingMessage`，response stream 会先发送 wire 协议要求的更新前 Task 快照，再发送触发创建的 status/artifact；持久化型 manager 在投递这两帧前已经落库更新后的 Task 和触发事件，但不会把额外 Task 帧再记成一条事件。只发 `Message` 的轮次不会留下任务；对该轮预分配 ID 调 `GetTask` 会得到 not-found。
+- **任务是懒创建的。** 只有发出 status 或 artifact 这类任务事件后，任务才真正落库。对于 `SendStreamingMessage`，response stream 会先发送 wire 协议要求的更新前 Task 快照，再发送触发创建的 status/artifact；持久化型 manager 在投递这两帧前已经落库更新后的 Task 和触发事件，但不会把额外 Task 帧再记成一条事件。如果首个有效事件是 `Message`，直接响应会立即完成，本轮后续事件被丢弃且不会创建 Task；对该轮预分配 ID 调 `GetTask` 会得到 not-found。
 - **同一任务同一时间只能跑一轮。** 上一轮还没结束时，针对同一个 `taskId` 的后续消息会被拒绝：`-32602`，`"already has an active execution"`。
 - **channel 关闭才算结束。** 关闭时框架应用下面的规则：
 
@@ -143,7 +143,7 @@ Task 和会话历史；[TaskManager 实现](#taskmanager)中的 stateless manage
   | 停在 `submitted` / `working` | 标记为 `FAILED`，错误信息是 `"processor finished without terminal state"` |
   | 收到取消且没有发出终态 | 标记为 `CANCELED` |
 
-- **挂起会立刻让出任务。** 发出 `input-required` / `auth-required` 后，框架允许续跑轮次开始。旧轮次之后再发出的事件会被丢弃；完成结果应该由续跑轮次交付。
+- **挂起会立刻让出任务。** 发出 `input-required` / `auth-required` 后，框架允许续跑轮次开始。旧轮次之后再发出的事件会被丢弃；Memory 还会在发布挂起帧后、释放执行槽前取消旧轮次 `ctx`。这是轮次清理信号，不等于 `CancelTask`，Task 仍保持挂起。旧轮次应尽快关闭 channel，完成结果由续跑轮次交付。
 - **违反事件契约会失败。** 例如给别的 `taskId` 发事件、发 `*protocol.Task` 快照、发没有状态的 status，都会让本轮任务失败，并丢弃后续事件。
 - **挂起必须有可留存的状态。** stateless 会拒绝 `input-required` / `auth-required`，因为它无法接受这些状态要求的后续 continuation。
 
@@ -153,7 +153,9 @@ memory 与 Redis manager 中，client 断开连接不会自动取消 agent 的�
 
 stateless manager 的轮次与请求绑定：client 断开或 manager 停机时会取消 processor，因为此时没有可供后续查询的 Task，也没有可重新订阅的流。
 
-对于 memory 与 Redis，真正会取消 processor `ctx` 的只有两类动作：client 调 `CancelTask`，或者 manager / server 停机。收到取消后，推荐做法是停止继续发送普通进度，尽快关闭 channel；如果你需要收尾，也可以发出自己的终态事件，框架会尊重它。
+对于 memory 与 Redis，client 调 `CancelTask` 或 manager / server 停机会取消正在执行的 processor `ctx`。收到任务取消后，推荐做法是停止继续发送普通进度，尽快关闭 channel；如果你需要收尾，也可以发出自己的终态事件，框架会尊重它。
+
+Memory 还会在发布 `input-required` / `auth-required` 后取消已让出的旧轮次 `ctx`。该信号只用于结束旧轮次，不会把保持挂起的 Task 标成 `CANCELED`。
 
 `CancelTask` 返回的是“发起取消那一刻”的任务快照，所以它可能仍然是 `working`。最终是否落成 `CANCELED`，要等 processor 停下并关闭 channel。已经终态的任务不能取消，会返回 `-32002`。
 
