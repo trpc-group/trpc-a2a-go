@@ -924,6 +924,55 @@ func TestA2AClient_GetAgentCard(t *testing.T) {
 	})
 }
 
+func TestA2AClient_GetTenantAgentCard(t *testing.T) {
+	t.Run("Query Parameter", func(t *testing.T) {
+		cardServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, protocol.AgentCardPath, r.URL.Path)
+			assert.Equal(t, "tenant-a", r.URL.Query().Get("tenant"))
+			assert.Equal(t, "test-value", r.Header.Get("X-Custom-Header"))
+			require.NoError(t, json.NewEncoder(w).Encode(server.AgentCard{Name: "Tenant A"}))
+		}))
+		defer cardServer.Close()
+
+		client, err := NewA2AClient(cardServer.URL)
+		require.NoError(t, err)
+		card, err := client.GetTenantAgentCard(
+			context.Background(),
+			"tenant-a",
+			WithRequestHeader("X-Custom-Header", "test-value"),
+		)
+		require.NoError(t, err)
+		assert.Equal(t, "Tenant A", card.Name)
+	})
+
+	t.Run("Tenant Path Fallback", func(t *testing.T) {
+		cardServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == protocol.AgentCardPath {
+				assert.Equal(t, "tenant/a", r.URL.Query().Get("tenant"))
+				http.NotFound(w, r)
+				return
+			}
+			assert.Equal(t, "/tenant%2Fa"+protocol.AgentCardPath, r.URL.EscapedPath())
+			require.NoError(t, json.NewEncoder(w).Encode(server.AgentCard{Name: "Tenant A/B"}))
+		}))
+		defer cardServer.Close()
+
+		client, err := NewA2AClient(cardServer.URL)
+		require.NoError(t, err)
+		card, err := client.GetTenantAgentCard(context.Background(), "tenant/a")
+		require.NoError(t, err)
+		assert.Equal(t, "Tenant A/B", card.Name)
+	})
+
+	t.Run("Empty Tenant", func(t *testing.T) {
+		client, err := NewA2AClient("http://localhost:8080/")
+		require.NoError(t, err)
+		card, err := client.GetTenantAgentCard(context.Background(), "")
+		require.Error(t, err)
+		assert.Nil(t, card)
+	})
+}
+
 // boolPtr returns a pointer to a bool value.
 func boolPtr(b bool) *bool {
 	return &b
