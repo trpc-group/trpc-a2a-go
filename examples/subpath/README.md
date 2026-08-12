@@ -1,8 +1,8 @@
 # Subpath Example
 
 This example demonstrates how to serve an A2A agent under a custom path with
-`server.WithBasePath`. Agent Card URLs are discovery metadata for clients and
-do not drive server mounting.
+`server.WithBasePath`. Agent Card `supportedInterfaces` URLs are discovery
+metadata for clients and do not drive server mounting.
 
 ## Quick Start
 
@@ -41,8 +41,12 @@ func (p *simpleProcessor) ProcessMessage(
 func main() {
     agentCard := server.AgentCard{
         Name: "My Agent",
-        // Discovery URL advertised to clients (may differ from listen path).
-        URL: "http://localhost:8080/api/v1/agent",
+        // The advertised URL is the complete JSON-RPC endpoint.
+        SupportedInterfaces: []server.AgentInterface{{
+            URL:             "http://localhost:8080/api/v1/agent/",
+            ProtocolBinding: protocol.ProtocolBindingJSONRPC,
+            ProtocolVersion: protocol.ProtocolVersionV1,
+        }},
     }
 
     taskManager, _ := memory.NewTaskManager(&simpleProcessor{})
@@ -60,12 +64,19 @@ func main() {
 - JSON-RPC: `http://localhost:8080/api/v1/agent/`
 - JWKS (when enabled): `http://localhost:8080/api/v1/agent/.well-known/jwks.json`
 
+The trailing slash in the advertised JSON-RPC interface is significant: `WithBasePath` mounts JSON-RPC at that exact path, and v2 clients use the interface URL as declared.
+
 ### External URL differs from internal route
 
 ```go
 agentCard := server.AgentCard{
     Name: "My Agent",
-    URL:  "https://example.com/external/path", // What clients discover
+    SupportedInterfaces: []server.AgentInterface{{
+        // The complete public endpoint clients use; it may differ from the listen path.
+        URL:             "https://example.com/external/path/",
+        ProtocolBinding: protocol.ProtocolBindingJSONRPC,
+        ProtocolVersion: protocol.ProtocolVersionV1,
+    }},
 }
 
 a2aServer, _ := server.NewA2AServer(

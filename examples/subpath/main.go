@@ -37,12 +37,16 @@ func (p *simpleProcessor) ProcessMessage(
 }
 
 func main() {
-	// Card URL is discovery metadata for clients; mounting uses WithBasePath.
+	// Interface URLs are discovery metadata for clients; mounting uses WithBasePath.
 	agentCard := server.AgentCard{
 		Name:        "Subpath Agent",
 		Description: "Demo agent with subpath",
-		URL:         "http://localhost:8080/api/v1/agent",
 		Version:     "1.0.0",
+		SupportedInterfaces: []server.AgentInterface{{
+			URL:             "http://localhost:8080/api/v1/agent/",
+			ProtocolBinding: protocol.ProtocolBindingJSONRPC,
+			ProtocolVersion: protocol.ProtocolVersionV1,
+		}},
 	}
 
 	// Create task manager with simple processor

@@ -23,6 +23,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/stateless"
 )
 
 // TestA2AClient_ResubscribeTask tests the ResubscribeTask client method for SSE.
@@ -639,6 +640,59 @@ func TestA2AClient_JSONRPCUsesExactEndpointURL(t *testing.T) {
 			assert.Equal(t, []string{tt.endpoint, tt.endpoint}, gotURLs)
 		})
 	}
+}
+
+func TestA2AClient_JSONRPCUsesAdvertisedSubpathEndpoint(t *testing.T) {
+	const basePath = "/api/v1/agent"
+	testServer := httptest.NewUnstartedServer(nil)
+	t.Cleanup(testServer.Close)
+	endpoint := "http://" + testServer.Listener.Addr().String() + basePath + "/"
+
+	manager, err := stateless.NewTaskManager(httpJSONEchoProcessor{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	card := protocol.AgentCard{
+		Name:               "Subpath Agent",
+		Description:        "test",
+		Version:            "1",
+		DefaultInputModes:  []string{"text/plain"},
+		DefaultOutputModes: []string{"text/plain"},
+		Skills:             []protocol.AgentSkill{},
+		SupportedInterfaces: []protocol.AgentInterface{{
+			URL:             endpoint,
+			ProtocolBinding: protocol.ProtocolBindingJSONRPC,
+			ProtocolVersion: protocol.ProtocolVersionV1,
+		}},
+	}
+	a2aServer, err := server.NewA2AServer(
+		manager,
+		server.WithAgentCard(card),
+		server.WithBasePath(basePath),
+	)
+	require.NoError(t, err)
+	testServer.Config.Handler = a2aServer.Handler()
+	testServer.Start()
+
+	discoveryClient, err := NewA2AClient(testServer.URL + basePath)
+	require.NoError(t, err)
+	discovered, err := discoveryClient.GetAgentCard(context.Background(), "")
+	require.NoError(t, err)
+	require.Len(t, discovered.SupportedInterfaces, 1)
+	iface := discovered.SupportedInterfaces[0]
+	assert.Equal(t, endpoint, iface.URL)
+
+	rpcClient, err := NewA2AClient(iface.URL, WithProtocolBinding(iface.ProtocolBinding))
+	require.NoError(t, err)
+	response, err := rpcClient.SendMessage(context.Background(), protocol.SendMessageParams{
+		Message: protocol.Message{
+			MessageID: "message-1",
+			Role:      protocol.MessageRoleUser,
+			Parts:     []*protocol.Part{protocol.NewTextPart("hello")},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, response.GetMessage())
+	assert.Equal(t, "echo: hello", response.GetMessage().Parts[0].TextContent())
 }
 
 // TestA2AClient_GetAgentCard tests the GetAgentCard client method.
