@@ -659,6 +659,11 @@ func (eng *engine) completeStatusYield(
 	m.dispatchPush(eng.ec.Tenant, eng.ec.TaskID, response)
 	eng.broadcastWithoutPush(response, snapshot)
 	eng.closePipe()
+	// This round no longer owns the task after publishing its suspend frame.
+	// Cancel its processor context before removing it from the registry: Close
+	// cannot discover a yielded execution once the slot is released, but still
+	// waits for its drain engine to finish.
+	eng.exec.cancel()
 	m.runs.deregister(eng.ec.Tenant, eng.ec.TaskID, eng.exec)
 }
 

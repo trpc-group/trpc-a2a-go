@@ -574,6 +574,13 @@ func (m *TaskManager) OnResubscribe(
 ) (<-chan protocol.StreamResponse, error) {
 	m.taskMu.Lock()
 	defer m.taskMu.Unlock()
+	// Close marks the execution registry closed before sweeping subscribers.
+	// Check that state while holding taskMu so a subscriber admitted just before
+	// shutdown is necessarily included in the sweep, while one arriving after
+	// shutdown is rejected instead of leaking past Close.
+	if m.runs.isClosed() {
+		return nil, taskmanager.ErrInternalError("task manager is closed")
+	}
 	key := newScopedID(params.Tenant, params.ID)
 
 	// Check if task exists

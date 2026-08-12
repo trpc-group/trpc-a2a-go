@@ -460,6 +460,117 @@ func TestClose_WaitsForDetachedEngines(t *testing.T) {
 	}
 }
 
+// A suspended round has released its registry slot, so Close cannot discover
+// and cancel it later. Publishing the suspend frame must therefore cancel the
+// processor context before deregistration, allowing its drain engine to exit.
+func TestClose_CancelsYieldedDrainingEngine(t *testing.T) {
+	sawCancel := make(chan struct{})
+	processor := funcExecutor(
+		func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
+			out := make(chan protocol.StreamEvent, 1)
+			go func() {
+				defer close(out)
+				out <- statusUpdate(protocol.TaskStateInputRequired, agentReply("need more"))
+				<-ctx.Done()
+				close(sawCancel)
+			}()
+			return out, nil
+		})
+	manager, err := NewTaskManager(processor)
+	if err != nil {
+		t.Fatalf("NewTaskManager failed: %v", err)
+	}
+
+	pipe, err := manager.OnSendMessageStream(context.Background(), userParams("go"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream failed: %v", err)
+	}
+	waitClosed(t, pipe)
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- manager.Close() }()
+	select {
+	case <-sawCancel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("yielded processor did not observe context cancellation")
+	}
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked waiting for a yielded drain engine")
+	}
+}
+
+// Close marks the manager closed before sweeping subscribers. A resubscribe
+// racing with the later engine wait must be rejected rather than appended
+// after the sweep and left behind when Close returns.
+func TestClose_RejectsResubscribeDuringEngineWait(t *testing.T) {
+	sawCancel := make(chan struct{})
+	releaseProcessor := make(chan struct{})
+	processor := funcExecutor(
+		func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
+			out := make(chan protocol.StreamEvent, 1)
+			out <- workingEvent()
+			go func() {
+				defer close(out)
+				<-ctx.Done()
+				close(sawCancel)
+				<-releaseProcessor
+			}()
+			return out, nil
+		})
+	manager, err := NewTaskManager(processor)
+	if err != nil {
+		t.Fatalf("NewTaskManager failed: %v", err)
+	}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseProcessor) }) }
+	defer release()
+
+	pipe, err := manager.OnSendMessageStream(context.Background(), userParams("go"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream failed: %v", err)
+	}
+	initialEvent := recvEvent(t, pipe)
+	initial := initialEvent.GetTask()
+	if initial == nil {
+		t.Fatal("stream did not begin with a Task")
+	}
+	recvEvent(t, pipe) // WORKING
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- manager.Close() }()
+	select {
+	case <-sawCancel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not reach the engine wait")
+	}
+
+	resubscribe, err := manager.OnResubscribe(context.Background(), protocol.TaskIDParams{ID: initial.ID})
+	if err == nil || resubscribe != nil {
+		t.Fatalf("resubscribe during Close = (%v, %v), want rejection", resubscribe, err)
+	}
+
+	release()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not finish after the processor exited")
+	}
+
+	manager.taskMu.RLock()
+	defer manager.taskMu.RUnlock()
+	if len(manager.subscribers) != 0 {
+		t.Fatalf("Close left %d subscriber entries", len(manager.subscribers))
+	}
+}
+
 // A resubscribe stream is dropped (removed and closed) when its client goes
 // away, so a suspended task cannot accumulate dead subscribers forever.
 func TestResubscribe_ClientDisconnectDropsSubscriber(t *testing.T) {
