@@ -23,6 +23,7 @@
 
 ### Redis TaskManager
 
+- Publishing `input-required` or `auth-required` now cancels the yielded old round's processor context before its execution slot is released. This is round teardown rather than task cancellation: the Task stays suspended while the manager drains the processor channel, and shutdown can wait for that drain even after the execution slot has been reused.
 - **`SubscribeToTask` now uses Redis Streams on every Redis TaskManager.** Task events are journaled by default so a reconnect may land on any replica sharing Redis without configuration. `WithCrossNodeResubscribe` remains as a deprecated no-op for source compatibility.
 - **Redis 5.0 or newer is required.** Deployments must allow the Stream commands (`XADD`, `XRANGE`, and `XREVRANGE`), sorted-set commands (`ZADD`, `ZSCORE`, `ZINCRBY`, `ZCARD`, and `ZREMRANGEBYRANK`), and Lua commands used by the TaskManager. Upgrade all replicas together because older nodes do not write the event journal required by Stream-only subscribers.
 - Stream subscriptions use a size-one local response pipe, stop when their Task expires, and retry transient Redis read failures with bounded backoff instead of retaining stale subscribers indefinitely. Live executions renew their Task lease while silent, and event writes are idempotent across ambiguous Redis command retries.

@@ -143,7 +143,7 @@ Task 和会话历史；[TaskManager 实现](#taskmanager)中的 stateless manage
   | 停在 `submitted` / `working` | 标记为 `FAILED`，错误信息是 `"processor finished without terminal state"` |
   | 收到取消且没有发出终态 | 标记为 `CANCELED` |
 
-- **挂起会立刻让出任务。** 发出 `input-required` / `auth-required` 后，框架允许续跑轮次开始。旧轮次之后再发出的事件会被丢弃；Memory 还会在发布挂起帧后、释放执行槽前取消旧轮次 `ctx`。这是轮次清理信号，不等于 `CancelTask`，Task 仍保持挂起。旧轮次应尽快关闭 channel，完成结果由续跑轮次交付。
+- **挂起会立刻让出任务。** 发出 `input-required` / `auth-required` 后，框架允许续跑轮次开始。旧轮次之后再发出的事件会被丢弃；Memory 与 Redis 还会在发布挂起帧后、释放执行槽前取消旧轮次 `ctx`。这是轮次清理信号，不等于 `CancelTask`，Task 仍保持挂起。旧轮次应尽快关闭 channel，完成结果由续跑轮次交付。
 - **违反事件契约会失败。** 例如给别的 `taskId` 发事件、发 `*protocol.Task` 快照、发没有状态的 status，都会让本轮任务失败，并丢弃后续事件。
 - **挂起必须有可留存的状态。** stateless 会拒绝 `input-required` / `auth-required`，因为它无法接受这些状态要求的后续 continuation。
 
@@ -155,7 +155,7 @@ stateless manager 的轮次与请求绑定：client 断开或 manager 停机时�
 
 对于 memory 与 Redis，client 调 `CancelTask` 或 manager / server 停机会取消正在执行的 processor `ctx`。收到任务取消后，推荐做法是停止继续发送普通进度，尽快关闭 channel；如果你需要收尾，也可以发出自己的终态事件，框架会尊重它。
 
-Memory 还会在发布 `input-required` / `auth-required` 后取消已让出的旧轮次 `ctx`。该信号只用于结束旧轮次，不会把保持挂起的 Task 标成 `CANCELED`。
+Memory 与 Redis 还会在发布 `input-required` / `auth-required` 后取消已让出的旧轮次 `ctx`。该信号只用于结束旧轮次，不会把保持挂起的 Task 标成 `CANCELED`。
 
 `CancelTask` 返回的是“发起取消那一刻”的任务快照，所以它可能仍然是 `working`。最终是否落成 `CANCELED`，要等 processor 停下并关闭 channel。已经终态的任务不能取消，会返回 `-32002`。
 

@@ -114,10 +114,11 @@ type ExecContext struct {
 // suspend frame; the channel itself is still drained until closed.
 //
 // For retaining managers, CancelTask and manager shutdown cancel active work.
-// The Memory manager also cancels a yielded round's ctx after publishing its
-// input-required/auth-required frame and before releasing the task slot. That is
-// round teardown, not task cancellation: the suspended Task stays unchanged and
-// the processor must close its channel promptly. A client disconnect does NOT
+// The Memory and Redis managers also cancel a yielded round's ctx after
+// publishing its input-required/auth-required frame and before releasing the
+// task slot. That is round teardown, not task cancellation: the suspended
+// Task stays unchanged and the processor must close its channel promptly. A
+// client disconnect does NOT
 // cancel retaining work, whose results remain retrievable (GetTask /
 // SubscribeToTask). A stateless manager cancels ctx on disconnect and discards
 // its request-local task. The framework always drains the channel until it is
