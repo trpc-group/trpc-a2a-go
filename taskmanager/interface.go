@@ -77,6 +77,15 @@ type ExecContext struct {
 //   - *protocol.Task is never accepted: task snapshots are materialized by
 //     managers from the event stream. Emitting one is a contract violation.
 //
+// The processor therefore selects the response shape without emitting a Task:
+// a pure Message round remains taskless, while emitting a status or artifact
+// selects a task lifecycle. For message/stream, the manager emits an
+// operation-local Task snapshot before that round's first task update. A fresh
+// round starts from SUBMITTED; a continuation starts from ExecContext.Task.
+// This framing snapshot is not a processor event and is not journaled or
+// broadcast as an update. Retaining managers persist the triggering task event
+// before delivering the response frames.
+//
 // Task events may leave TaskID/ContextID empty; the manager stamps them. A
 // direct Message may leave ContextID empty. Foreign IDs are a contract
 // violation: an already-materialized task is failed, otherwise the request is
@@ -147,10 +156,13 @@ type TaskManager interface {
 	) (*protocol.SendMessageResponse, error)
 
 	// OnSendMessageStream handles a request corresponding to the 'message/stream' RPC method.
-	// It invokes the MessageProcessor and returns a channel that carries emitted
-	// events. Retaining managers persist task events before delivery; stateless
-	// managers apply them only to the request-local task. The channel is closed
-	// when the round ends; setup errors are returned directly.
+	// It invokes the MessageProcessor and returns a channel carrying the derived
+	// response stream. A pure Message round has no Task framing. A task-producing
+	// round starts with a manager-materialized Task snapshot, followed by the
+	// processor's status/artifact events. Retaining managers persist task events
+	// before delivery; stateless managers apply them only to the request-local
+	// task. The channel is closed when the round ends; setup errors are returned
+	// directly.
 	OnSendMessageStream(
 		ctx context.Context,
 		request protocol.SendMessageParams,

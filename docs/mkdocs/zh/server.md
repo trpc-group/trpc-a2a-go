@@ -96,6 +96,8 @@ go func() {
 return out, nil
 ```
 
+首个 status 或 artifact 事件表示 processor 选择了 Task 生命周期。processor 不需要也不允许发送 `*protocol.Task`；对于 `SendStreamingMessage`，manager 会在转发首个更新前生成协议要求的初始 Task 快照：新任务从 `submitted` 开始，续跑任务从 `ec.Task` 开始。只调用 `Reply` 的轮次仍然不产生 Task。
+
 （[examples/simple](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple)是一个完全用裸 channel 写的 processor。）
 
 ### 常见形态
@@ -111,6 +113,7 @@ return out, nil
 - **谁发事件，谁负责关闭。** 如果你在 goroutine 里发事件，就在那个 goroutine 里关闭 channel 或 `TaskHandle`。channel 不关闭，轮次就不会结束，任务也会一直占着执行槽。
 - **每轮都要给出结论。** 正常结束用 `completed` / `failed` / `canceled` / `rejected`；需要用户继续输入时用 `input-required` / `auth-required`。如果还停在 `submitted` 或 `working` 就关闭，框架会把任务标成 `FAILED`。
 - **一轮只属于一个任务。** 事件默认属于 `ec.TaskID`。不要发其他 `taskId` 的事件，也不要自己发 `*protocol.Task` 快照；任务快照只由框架生成。
+- **processor 间接选择响应形态。** `Reply` 选择不产生 Task 的直接回复；首个 status/artifact 事件选择 Task 生命周期，manager 随后补齐 wire 上的 Task 首帧。
 - **要让后续对话记住终答，就发 `Message`。** 当前 `status.message` 只留在 `Task.Status`；后续状态或 follow-up 用户消息取代它时，上一条 status message 才会移入历史。终态 status message 不会再被取代，只留在 `status.Message`；artifact 也永不进历史。需要保留的回答，尤其是 LLM 最终回复，请作为 `Message` 事件发出。
 
 ## 轮次生命周期
@@ -124,12 +127,12 @@ Task 和会话历史；[TaskManager 实现](#taskmanager)中的 stateless manage
 
 1. 框架收到 `SendMessage` 或 `SendStreamingMessage`，准备好 `ExecContext`，然后调用你的 `ProcessMessage`。
 2. 你的 processor 返回事件 channel。
-3. 框架读取事件：每个事件都会先持久化，再返回给调用方或订阅者。
+3. 框架读取并应用事件：持久化型 manager 会先落库更新后的 Task 和触发事件；对于 `SendStreamingMessage`，response stream 先返回取自更新前状态的 Task 框架帧，再返回该事件。这个额外 Task 帧不会作为一条事件写入日志或广播。
 4. channel 关闭时，本轮结束；框架根据最后的任务状态收尾。
 
 关键语义如下：
 
-- **任务是懒创建的。** 只有发出 status 或 artifact 这类任务事件后，任务才真正落库。只发 `Message` 的轮次不会留下任务；对该轮预分配 ID 调 `GetTask` 会得到 not-found。
+- **任务是懒创建的。** 只有发出 status 或 artifact 这类任务事件后，任务才真正落库。对于 `SendStreamingMessage`，response stream 会先发送 wire 协议要求的更新前 Task 快照，再发送触发创建的 status/artifact；持久化型 manager 在投递这两帧前已经落库更新后的 Task 和触发事件，但不会把额外 Task 帧再记成一条事件。只发 `Message` 的轮次不会留下任务；对该轮预分配 ID 调 `GetTask` 会得到 not-found。
 - **同一任务同一时间只能跑一轮。** 上一轮还没结束时，针对同一个 `taskId` 的后续消息会被拒绝：`-32602`，`"already has an active execution"`。
 - **channel 关闭才算结束。** 关闭时框架应用下面的规则：
 
@@ -162,7 +165,7 @@ stateless manager 的轮次与请求绑定：client 断开或 manager 停机时�
 | --- | --- |
 | `SendMessage`（默认阻塞） | 本轮创建过任务时返回任务快照：memory / Redis 等轮次结束，stateless 等到终态。直接 `Message` 本身就是完整响应，stateless 收到第一条后立即返回。没有任何事件是 processor bug，返回 `-32006`。 |
 | `SendMessage` + `returnImmediately=true` | 返回最早可用的任务快照或第一条 `Message`。有状态 manager 可以让非终态任务继续后台运行；stateless 不可以。 |
-| `SendStreamingMessage` | 按事件顺序实时转发。memory / Redis 在投递前持久化任务事件；stateless 先发请求内 Task 快照，再发 status / artifact 更新。流在终态或挂起帧结束。 |
+| `SendStreamingMessage` | 纯 `Message` 轮次直接返回 Message，不添加 Task。Task 轮次由所有 manager 先发本次操作的 Task 快照，再按顺序转发 status / artifact；memory / Redis 在投递前持久化更新，stateless 只应用到请求内快照。流在终态或挂起帧结束。 |
 | `SubscribeToTask` | 先发送当前任务快照，再发送实时增量。终态任务不能订阅。 |
 
 ## 会话、历史，以及什么会被记住
