@@ -21,7 +21,8 @@ type TaskManagerOptions struct {
 	// MaxHistoryLength is the maximum number of messages to keep in conversation history.
 	MaxHistoryLength int
 
-	// TaskSubscriberBufSize is the buffer size for message/stream response pipes.
+	// TaskSubscriberBufSize is the buffer size for task update events. A
+	// SendStreamingMessage response pipe reserves one additional framing slot.
 	TaskSubscriberBufSize int
 
 	// TaskSubscriberBlockingSend enables blocking send for message/stream
@@ -71,7 +72,9 @@ func WithMaxHistoryLength(length int) TaskManagerOption {
 	}
 }
 
-// WithTaskSubscriberBufferSize sets the buffer size for message/stream response pipes.
+// WithTaskSubscriberBufferSize sets the buffer size for task update events. A
+// SendStreamingMessage response pipe reserves one additional framing slot for
+// its initial Task.
 func WithTaskSubscriberBufferSize(size int) TaskManagerOption {
 	return func(opts *TaskManagerOptions) {
 		if size > 0 {

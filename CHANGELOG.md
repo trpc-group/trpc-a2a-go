@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Task lifecycle streaming
+
+- Memory and Redis TaskManagers now start task-lifecycle `SendStreamingMessage` responses with the pre-update `Task` snapshot before status or artifact updates, as required by A2A 1.0. The compat/v0 JSON-RPC endpoint forwards that snapshot as a legacy `task` event for task-mode streams. Message-only responses, `SubscribeToTask`, push delivery, and the Redis event journal are unchanged.
+
 ### HTTP+JSON protocol binding
 
 - **The v2 client and server now implement the A2A v1.0 HTTP+JSON/REST binding.** It uses the standard operation routes, `application/a2a+json` request and response bodies, direct protocol objects instead of JSON-RPC envelopes, raw `StreamResponse` SSE data, and `google.rpc.Status` JSON errors. JSON-RPC remains the default for direct client construction and continues to use `application/json`.

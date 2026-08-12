@@ -648,6 +648,11 @@ func TestSuspendWaitsForPushCapacityBeforeHandoff(t *testing.T) { //nolint:gocyc
 	if !yielding {
 		t.Fatal("input-required became visible before the suspend handoff barrier")
 	}
+	initialEvent := recvEvent(t, stream)
+	initial := initialEvent.GetTask()
+	if initial == nil || initial.ID != taskID || initial.Status.State != protocol.TaskStateSubmitted {
+		t.Fatalf("request stream first event = %+v, want initial SUBMITTED Task", initialEvent)
+	}
 
 	type continuationResult struct {
 		response *protocol.SendMessageResponse
@@ -671,7 +676,7 @@ func TestSuspendWaitsForPushCapacityBeforeHandoff(t *testing.T) { //nolint:gocyc
 	}
 	select {
 	case event, ok := <-stream:
-		t.Fatalf("request stream published suspend before push enqueue completed: event=%+v open=%v",
+		t.Fatalf("request stream published update before push enqueue completed: event=%+v open=%v",
 			event, ok)
 	case <-time.After(50 * time.Millisecond):
 	}

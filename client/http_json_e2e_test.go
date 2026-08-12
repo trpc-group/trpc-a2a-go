@@ -91,6 +91,47 @@ func newHTTPJSONTask(t *testing.T, c *A2AClient, messageID string) string {
 	return response.GetTask().ID
 }
 
+func TestStreamingInitialTaskParityAcrossBindings(t *testing.T) {
+	rest, rpc := newHTTPJSONFixture(t)
+	tests := []struct {
+		name      string
+		client    *A2AClient
+		messageID string
+	}{
+		{name: "JSON-RPC", client: rpc, messageID: "stream-rpc"},
+		{name: "HTTP+JSON", client: rest, messageID: "stream-http-json"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stream, err := test.client.StreamMessage(context.Background(), protocol.SendMessageParams{
+				Message: protocol.Message{
+					MessageID: test.messageID,
+					Role:      protocol.MessageRoleUser,
+					Parts:     []*protocol.Part{protocol.NewTextPart("go")},
+				},
+			})
+			require.NoError(t, err)
+
+			var events []protocol.StreamResponse
+			for event := range stream {
+				events = append(events, event)
+			}
+			require.Len(t, events, 3)
+			initial := events[0].GetTask()
+			require.NotNil(t, initial)
+			assert.Equal(t, protocol.TaskStateSubmitted, initial.Status.State)
+			working := events[1].GetStatusUpdate()
+			require.NotNil(t, working)
+			assert.Equal(t, protocol.TaskStateWorking, working.Status.State)
+			completed := events[2].GetStatusUpdate()
+			require.NotNil(t, completed)
+			assert.Equal(t, protocol.TaskStateCompleted, completed.Status.State)
+			assert.Equal(t, initial.ID, working.TaskID)
+			assert.Equal(t, initial.ID, completed.TaskID)
+		})
+	}
+}
+
 // The task-scoped and push-config operations must round-trip over the REST
 // binding, not just message:send and message:stream.
 func TestHTTPJSONEndToEndOperations(t *testing.T) {

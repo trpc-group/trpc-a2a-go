@@ -210,7 +210,11 @@ func (m *TaskManager) prepareExecution(
 		done:            make(chan struct{}),
 	}
 	if streaming {
-		ex.pipe = newTaskSubscriber(taskID, m.options.TaskSubscriberBufSize, m.options.TaskSubscriberBlockingSend)
+		// Reserve one framing slot for the synthetic initial Task. The configured
+		// capacity remains available to processor updates, including when the
+		// request pipe uses non-blocking sends.
+		ex.pipe = newTaskSubscriber(taskID, m.options.TaskSubscriberBufSize+1,
+			m.options.TaskSubscriberBlockingSend)
 		ex.live.pipe = ex.pipe
 	}
 
@@ -702,6 +706,14 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		Message:   ev.Status.Message,
 		Timestamp: timestamp,
 	}
+	var initial *protocol.Task
+	if !ex.taskTouched {
+		if ex.task == nil {
+			initial = protocol.NewTask(ex.ec.TaskID, ex.ec.ContextID)
+		} else {
+			initial = copyTask(ex.task)
+		}
+	}
 	var previousStatusMessage *protocol.Message
 	allowCreate := ex.task == nil
 	if allowCreate {
@@ -734,6 +746,11 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		}
 		ex.failRun(fmt.Errorf("failed to store task %s status %s: %w", ev.TaskID, status.State, err))
 		return
+	}
+	if initial != nil && ex.pipe != nil {
+		if err := ex.pipe.Send(protocol.NewStreamResponseTask(initial)); err != nil {
+			log.Warnf("RedisTaskManager: failed to send initial Task for task %s: %v", ex.ec.TaskID, err)
+		}
 	}
 	// The old status message is durably superseded only after the Task/event
 	// commit succeeds. Moving it earlier would leave failed updates reflected in
@@ -783,6 +800,14 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 			ex.ec.TaskID, ex.task.Status.State)
 		return
 	}
+	var initial *protocol.Task
+	if !ex.taskTouched {
+		if ex.task == nil {
+			initial = protocol.NewTask(ex.ec.TaskID, ex.ec.ContextID)
+		} else {
+			initial = copyTask(ex.task)
+		}
+	}
 	allowCreate := ex.task == nil
 	if allowCreate {
 		ex.task = ex.newTask(ev.TaskID, ev.ContextID, protocol.TaskStatus{
@@ -802,6 +827,11 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 	if err := ex.manager.commitTaskEvent(context.Background(), ex.ec.Tenant, ex.task, response, allowCreate); err != nil {
 		ex.failRun(fmt.Errorf("failed to store task %s artifact: %w", ev.TaskID, err))
 		return
+	}
+	if initial != nil && ex.pipe != nil {
+		if err := ex.pipe.Send(protocol.NewStreamResponseTask(initial)); err != nil {
+			log.Warnf("RedisTaskManager: failed to send initial Task for task %s: %v", ex.ec.TaskID, err)
+		}
 	}
 	if err := ex.persistInlinePushConfig(); err != nil {
 		log.Errorf("RedisTaskManager: failed to persist inline push config for task %s: %v", ex.ec.TaskID, err)

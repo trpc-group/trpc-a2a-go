@@ -344,7 +344,10 @@ func (m *TaskManager) startExecution(
 	if withPipe {
 		exec.pipe = newTaskSubscriber(
 			taskID,
-			m.options.TaskSubscriberBufSize,
+			// The operation-local initial Task is framing, not a processor event.
+			// Reserve one extra slot so it cannot consume the configured capacity
+			// that was previously available to the first real update.
+			m.options.TaskSubscriberBufSize+1,
 			m.options.TaskSubscriberBlockingSend,
 		)
 	}
@@ -710,6 +713,14 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 		eng.stopReason = engineStopTerminal
 		return
 	}
+	var initial *protocol.Task
+	if !eng.taskWritten {
+		if exists {
+			initial = copyTask(task)
+		} else {
+			initial = protocol.NewTask(eng.ec.TaskID, eng.ec.ContextID)
+		}
+	}
 	var previousStatusMessage *protocol.Message
 	if !exists {
 		task = eng.newTask(event.Status)
@@ -728,6 +739,9 @@ func (eng *engine) handleStatus(event *protocol.TaskStatusUpdateEvent) {
 		yieldOutcome.task = copyTask(task)
 	}
 	m.taskMu.Unlock()
+	if initial != nil {
+		eng.sendToPipe(protocol.NewStreamResponseTask(initial))
+	}
 	if err := eng.persistInlinePushConfig(); err != nil {
 		if yielding {
 			m.abortExecutionYield(eng.ec.Tenant, eng.ec.TaskID, eng.exec)
@@ -786,6 +800,14 @@ func (eng *engine) handleArtifact(event *protocol.TaskArtifactUpdateEvent) {
 		eng.stopReason = engineStopTerminal
 		return
 	}
+	var initial *protocol.Task
+	if !eng.taskWritten {
+		if exists {
+			initial = copyTask(task)
+		} else {
+			initial = protocol.NewTask(eng.ec.TaskID, eng.ec.ContextID)
+		}
+	}
 	if !exists {
 		task = eng.newTask(protocol.TaskStatus{
 			State:     protocol.TaskStateSubmitted,
@@ -802,6 +824,9 @@ func (eng *engine) handleArtifact(event *protocol.TaskArtifactUpdateEvent) {
 	eng.taskWritten = true
 	snapshot := eng.immediateSnapshotLocked(task)
 	m.taskMu.Unlock()
+	if initial != nil {
+		eng.sendToPipe(protocol.NewStreamResponseTask(initial))
+	}
 	if err := eng.persistInlinePushConfig(); err != nil {
 		eng.violate(err.Error())
 		return
@@ -906,6 +931,10 @@ func (eng *engine) violate(reason string) {
 		m.taskMu.Unlock()
 		return
 	}
+	var initial *protocol.Task
+	if !eng.taskWritten {
+		initial = copyTask(task)
+	}
 	task.Status = event.Status
 	eng.taskWritten = true
 	// The framework-written FAILED is a task event (§3.1): offer it as the
@@ -914,6 +943,9 @@ func (eng *engine) violate(reason string) {
 	snapshot := eng.immediateSnapshotLocked(task)
 	m.taskMu.Unlock()
 
+	if initial != nil {
+		eng.sendToPipe(protocol.NewStreamResponseTask(initial))
+	}
 	eng.broadcast(protocol.NewStreamResponseStatusUpdate(event), snapshot)
 	m.cleanSubscribers(eng.ec.Tenant, eng.ec.TaskID)
 	eng.closePipe()
@@ -936,6 +968,7 @@ func (eng *engine) finish() {
 	}
 
 	var closing *protocol.TaskStatusUpdateEvent
+	var initial *protocol.Task
 
 	m.taskMu.Lock()
 	task, exists := m.tasks[newScopedID(eng.ec.Tenant, eng.ec.TaskID)]
@@ -947,6 +980,9 @@ func (eng *engine) finish() {
 			// emitted completed/failed after the cancel, that persist already
 			// happened in handleStatus and wins (§3.3) — this branch is then
 			// never reached because the task is terminal.
+			if !eng.taskWritten {
+				initial = copyTask(task)
+			}
 			closing = eng.statusEvent(protocol.TaskStateCanceled, nil)
 			task.Status = closing.Status
 		case !eng.taskWritten:
@@ -974,6 +1010,9 @@ func (eng *engine) finish() {
 	}
 	m.taskMu.Unlock()
 
+	if initial != nil {
+		eng.sendToPipe(protocol.NewStreamResponseTask(initial))
+	}
 	if closing != nil {
 		response := protocol.NewStreamResponseStatusUpdate(closing)
 		eng.sendToPipe(response)
