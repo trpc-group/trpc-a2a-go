@@ -9,6 +9,7 @@ package redis
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"strings"
@@ -368,6 +369,43 @@ func TestTaskEventsUseStreamByDefault(t *testing.T) {
 	}
 	if got, err := mgr.client.XLen(context.Background(), streamKey("", task.ID)).Result(); err != nil || got != 2 {
 		t.Fatalf("default event stream length = %d, want 2: %v", got, err)
+	}
+}
+
+func TestSendStreamingInitialTaskDoesNotEnterJournal(t *testing.T) {
+	mgr, _ := setupTest(t, scriptedExecutor(
+		statusEvent(protocol.TaskStateWorking, agentReply("working")),
+		statusEvent(protocol.TaskStateCompleted, agentReply("done")),
+	))
+	stream, err := mgr.OnSendMessageStream(context.Background(), sendParams("go", "ctx-stream-journal"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream: %v", err)
+	}
+	frames := collectStream(t, stream)
+	if len(frames) != 3 || frames[0].GetTask() == nil || frames[1].GetStatusUpdate() == nil ||
+		frames[2].GetStatusUpdate() == nil {
+		t.Fatalf("stream frames = %+v, want Task then two status updates", frames)
+	}
+	taskID := frames[0].GetTask().ID
+	if got, err := mgr.client.XLen(context.Background(), streamKey("", taskID)).Result(); err != nil || got != 2 {
+		t.Fatalf("journal length = %d, want only two processor updates: %v", got, err)
+	}
+	entries, err := mgr.client.XRange(context.Background(), streamKey("", taskID), "-", "+").Result()
+	if err != nil {
+		t.Fatalf("read journal: %v", err)
+	}
+	for _, entry := range entries {
+		payload, ok := entry.Values[streamField].(string)
+		if !ok {
+			t.Fatalf("journal payload = %#v, want string", entry.Values[streamField])
+		}
+		var event protocol.StreamResponse
+		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+			t.Fatalf("decode journal event: %v", err)
+		}
+		if event.GetTask() != nil {
+			t.Fatalf("synthetic initial Task was journaled: %+v", event.Result)
+		}
 	}
 }
 
@@ -1342,47 +1380,59 @@ func TestCrossNode_PersistenceFailureReturnsBeforeProcessorCloses(t *testing.T) 
 // The streaming response has no asynchronous error return, so a persistence
 // failure must at least close it immediately while the processor is drained.
 func TestCrossNode_PersistenceFailureClosesStreamBeforeProcessorCloses(t *testing.T) {
-	release := make(chan struct{})
-	processorDone := make(chan struct{})
-	var releaseOnce sync.Once
-	releaseProcessor := func() { releaseOnce.Do(func() { close(release) }) }
-	defer releaseProcessor()
-	processor := executorFunc(func(context.Context, *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
-		out := make(chan protocol.StreamEvent)
-		go func() {
-			defer close(processorDone)
-			defer close(out)
-			out <- statusEvent(protocol.TaskStateCompleted, agentReply("uncommitted"))
-			<-release
-		}()
-		return out, nil
-	})
-	manager, _ := setupTest(t, processor)
-	task := storedTask(t, manager, "task-stream-failure", "ctx-stream-failure", protocol.TaskStateWorking)
-	if err := manager.client.Set(context.Background(), streamKey("", task.ID), "not-a-stream", 0).Err(); err != nil {
-		t.Fatalf("seed wrong-type stream key: %v", err)
+	tests := []struct {
+		name  string
+		event protocol.StreamEvent
+	}{
+		{name: "status", event: statusEvent(protocol.TaskStateCompleted, agentReply("uncommitted"))},
+		{name: "artifact", event: artifactEvent("uncommitted", "content")},
 	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			release := make(chan struct{})
+			processorDone := make(chan struct{})
+			var releaseOnce sync.Once
+			releaseProcessor := func() { releaseOnce.Do(func() { close(release) }) }
+			defer releaseProcessor()
+			processor := executorFunc(func(context.Context, *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
+				out := make(chan protocol.StreamEvent)
+				go func() {
+					defer close(processorDone)
+					defer close(out)
+					out <- test.event
+					<-release
+				}()
+				return out, nil
+			})
+			manager, _ := setupTest(t, processor)
+			task := storedTask(t, manager, "task-stream-failure-"+test.name,
+				"ctx-stream-failure-"+test.name, protocol.TaskStateWorking)
+			if err := manager.client.Set(context.Background(), streamKey("", task.ID), "not-a-stream", 0).Err(); err != nil {
+				t.Fatalf("seed wrong-type stream key: %v", err)
+			}
 
-	params := sendParams("continue", task.ContextID)
-	params.Message.TaskID = &task.ID
-	stream, err := manager.OnSendMessageStream(context.Background(), params)
-	if err != nil {
-		t.Fatalf("OnSendMessageStream: %v", err)
+			params := sendParams("continue", task.ContextID)
+			params.Message.TaskID = &task.ID
+			stream, err := manager.OnSendMessageStream(context.Background(), params)
+			if err != nil {
+				t.Fatalf("OnSendMessageStream: %v", err)
+			}
+			select {
+			case frame, ok := <-stream:
+				if ok {
+					t.Fatalf("uncommitted event reached stream: %+v", frame)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("persistence failure left the response stream open")
+			}
+			select {
+			case <-processorDone:
+				t.Fatal("processor closed before the response stream")
+			default:
+			}
+			releaseProcessor()
+		})
 	}
-	select {
-	case frame, ok := <-stream:
-		if ok {
-			t.Fatalf("uncommitted event reached stream: %+v", frame)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("persistence failure left the response stream open")
-	}
-	select {
-	case <-processorDone:
-		t.Fatal("processor closed before the response stream")
-	default:
-	}
-	releaseProcessor()
 }
 
 // A superseded status message moves to history only after the new status and

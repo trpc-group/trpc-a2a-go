@@ -38,7 +38,7 @@ flowchart LR
     end
 ```
 
-不是每次交流都会产生任务：一个即答问题可以只返回一条 `Message`，没有任务生命周期，也没有任务清理负担。注意这不等于“没有会话历史”；具体实现可以把请求消息和 agent 发出的 `Message` 事件放入同一个 `contextId` 的历史里。只有值得跟踪的工作才需要开任务；从那之后，agent 汇报的一切都是**事件**：状态更新（进度）或 artifact 更新（交付物分块）。
+不是每次交流都会产生任务：一个即答问题可以只返回一条 `Message`，没有任务生命周期，也没有任务清理负担。注意这不等于“没有会话历史”；具体实现可以把请求消息和 agent 发出的 `Message` 事件放入同一个 `contextId` 的历史里。当 agent 发出 status 或 artifact 更新时，框架才创建 Task；对于流式调用，框架会在首个更新前先发送初始 Task 快照。
 
 ## 发现：Agent Card
 
@@ -103,7 +103,7 @@ agentCard := server.AgentCard{
 | 问一句、直接拿回答 | `SendMessage`，agent 返回 `Message` | 没有 `Task`，不能查询或取消。 |
 | 提交任务并等到结束 | `SendMessage` 默认模式 | 最终 `Task` 快照，包含状态和 artifacts。 |
 | 提交后马上返回 | `SendMessage` + `returnImmediately=true` | 最早可用的 `Task` 或 `Message`；任务可继续跑。 |
-| 实时看进度 | `SendStreamingMessage` | SSE 事件流：status / artifact / message。 |
+| 实时看进度 | `SendStreamingMessage` | Task 轮次先给初始快照，再给 status / artifact；直接 Message 轮次没有 Task。 |
 | 断线后接回任务 | `SubscribeToTask` | 先给当前 `Task` 快照，再给实时增量。 |
 | 不在线也要拿进展 | push notification | 服务端回调 client 的 webhook。 |
 
@@ -121,13 +121,14 @@ sequenceDiagram
 
 ### 2. 带实时进度的跟踪任务
 
-同样的请求换到流式端点：每个事件发生的瞬间就到达你这里。首个任务事件就是任务诞生的时刻。
+同样的请求换到流式端点：每个事件发生的瞬间就到达你这里。processor 的首个有效事件决定响应形态：Message 会完成直接响应，status 或 artifact 则选择 Task 模式，并让框架先发送更新前 Task 快照。
 
 ```mermaid
 sequenceDiagram
     participant C as Client
     participant A as Agent
     C->>A: SendStreamingMessage "生成 Q3 报告"
+    A-->>C: Task {id, submitted}
     A-->>C: status working
     A-->>C: artifact report.pdf（分块 1）
     A-->>C: artifact report.pdf（分块 2，lastChunk）
@@ -179,6 +180,7 @@ sequenceDiagram
     participant C as Client
     participant A as Agent
     C->>A: SendStreamingMessage "处理这个数据集"
+    A-->>C: Task {id, submitted}
     A-->>C: status working
     C->>A: CancelTask {id}
     A-->>C: Task {working} — 取消已受理
@@ -263,7 +265,7 @@ v1.0 JSON-RPC 绑定定义的方法名如下（v0.2.x wire 用的是斜杠分隔
 | 方法（v1.0） | 类型 | 用途 | v0.2.x 名称 |
 | --- | --- | --- | --- |
 | `SendMessage` | 一元 | 发送消息；响应是 **`Task` 或 `Message`**（union）。默认**等待**该轮结束。 | `message/send` |
-| `SendStreamingMessage` | SSE | 同样的请求；每个事件实时流出。 | `message/stream` |
+| `SendStreamingMessage` | SSE | 同样的请求；Task 轮次先给快照，再给 status/artifact 更新；纯直接回复没有 Task。 | `message/stream` |
 | `GetTask` | 一元 | 取任务快照；`historyLength` 决定随附多少历史。 | `tasks/get` |
 | `ListTasks` | 一元 | 枚举任务：可按 `contextId`/状态过滤、分页。 | —（v1.0 新增） |
 | `CancelTask` | 一元 | 请求取消。 | `tasks/cancel` |
@@ -308,7 +310,7 @@ v1.0 spec 定义了三种功能等价的传输绑定——JSON-RPC、gRPC、HTTP
 
 ### 典型事件范式
 
-常见输出分两类。
+常见输出分两类。下面 Task 模式中的 status/artifact 由 processor 发出；初始 `Task` 不由 processor 发送，而由框架根据首个更新前的任务状态生成。
 
 ```
 纯消息回复（不创建任务）：
@@ -321,7 +323,7 @@ artifact -> chunk 1..N     同一 artifact 的分块用 append/lastChunk
 status   -> completed      必须：以合法状态收尾；终态即关闭流
 ```
 
-强制项：产生任务后，要以合法状态结束（终态，或多轮场景的挂起态）并标注 artifact 分块；终态（或中断态）的那一帧即流的最后一帧，之后 SSE 流关闭。其余——要不要显式 `submitted`、发几帧 `working`、进度文字挂不挂在 status message 上——都由 agent 自定。
+强制项：产生任务后，要以合法状态结束（终态，或多轮场景的挂起态）并标注 artifact 分块；终态（或中断态）的那一帧即流的最后一帧，之后 SSE 流关闭。其余——要不要显式 `submitted`、发几帧 `working`、进度文字挂不挂在 status message 上——都由 agent 自定。这个所有权边界是刻意设计的：首个 `Message` 会完成不产生 Task 的直接响应，本轮后续事件被丢弃；首个 status/artifact 则选择 Task 模式，并触发框架生成初始 Task 快照。
 
 实现层面还有一个重要边界：`TaskStatus.message` 更适合放进度解释，它会被下一个 status 覆盖；需要跨轮进入会话历史的最终回答，应作为独立 `Message` 事件发出。详见 [服务端](server.md)。
 

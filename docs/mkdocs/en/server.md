@@ -111,6 +111,8 @@ go func() {
 return out, nil
 ```
 
+The first valid event selects the response shape. A `Reply` completes a taskless direct response, so later events from that round are discarded. A status or artifact selects a task-producing round. The processor does not emit `*protocol.Task`; for `SendStreamingMessage`, the manager materializes the required initial Task snapshot before forwarding that first update. A fresh round starts from `submitted`, while a continuation starts from `ec.Task`.
+
 ([examples/simple](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple)
 is a processor written entirely on the raw channel.)
 
@@ -122,10 +124,7 @@ is a processor written entirely on the raw channel.)
   loops and just close on cancellation (the framework persists `CANCELED`).
   → [examples/basic](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic)
   (`/long-task` and client `-stream`)
-- **Multi-turn** — suspend with
-  `h.UpdateTaskState(protocol.TaskStateInputRequired, protocol.NewAgentText("need more"))`,
-  close, and handle the follow-up (which echoes the `taskId`) as a new round
-  with `ec.Task` set.
+- **Multi-turn** — suspend with `h.UpdateTaskState(protocol.TaskStateInputRequired, protocol.NewAgentText("need more"))`, close promptly, and handle the follow-up (which echoes the `taskId`) as a new round with `ec.Task` set. Memory cancels the yielded old round's `ctx` as a teardown signal after publishing the suspend frame; this does not cancel the Task.
   → [examples/inputrequired](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/inputrequired)
 
 ### Usage constraints
@@ -135,6 +134,7 @@ is a processor written entirely on the raw channel.)
 - End every round in a terminal or suspend state; closing in `working` marks
   the task `FAILED`.
 - One round drives exactly one task; never emit `*protocol.Task`.
+- The first valid event chooses the response shape: `Reply` completes the taskless direct-response path and later events are discarded, while a status/artifact event starts a task lifecycle and lets the manager add the Task wire framing.
 - The current `status.message` stays only on `Task.Status`. When a later status
   or follow-up user message supersedes it, the previous message moves into
   history. A terminal status message stays current forever. Emit a final answer
@@ -152,9 +152,7 @@ the request.
 
 ### Round lifecycle
 
-- **Lazy task creation** — the task materializes when the first *task event* is
-  persisted. A round that only emits a `Message` leaves no task behind
-  (`GetTask` for that round's pre-allocated ID returns not-found).
+- **Lazy task creation** — the task materializes when the first *task event* is applied. For `SendStreamingMessage`, the response starts with the pre-update Task snapshot required by the wire protocol, then the triggering status/artifact update. Retaining managers persist the updated task and triggering event before delivering either response frame; the extra Task frame is not journaled as another event. If the first valid event is a `Message`, the direct response completes immediately and later processor events are discarded; no task is created (`GetTask` for that round's pre-allocated ID returns not-found).
 - **One active run per task** — a second message for a task whose round is
   still running is rejected (`-32602`, "already has an active execution").
 - **The round ends when you close the channel** — and only then. The close
@@ -167,10 +165,7 @@ the request.
   | `submitted` / `working` | **`FAILED`** — "processor finished without terminal state" (a bug signal) |
   | cancellation was requested | **`CANCELED`** |
 
-- **Suspend yields the round** — emitting `input-required`/`auth-required`
-  releases the task immediately so a continuation can start; anything the old
-  round emits afterwards is discarded. Deliver the completion from the
-  continuation round.
+- **Suspend yields the round** — emitting `input-required`/`auth-required` releases the task immediately so a continuation can start; anything the old round emits afterwards is discarded. Memory also cancels the yielded old round's `ctx` after publishing the suspend frame and before releasing the slot. This is a round-teardown signal, not `CancelTask`: the Task remains suspended. Close the old round's channel promptly and deliver completion from the continuation round.
 - **Contract violations fail fast** — emitting an event for a foreign `taskId`,
   a `*protocol.Task` snapshot (framework-only in v1.0), or an invalid status
   marks an already-materialized task `FAILED` and discards the rest.
@@ -186,10 +181,8 @@ the request.
 - Stateless rounds are request-bound: a disconnect or manager shutdown cancels
   the processor because there is no retained task to retrieve or resubscribe
   to.
-- In memory and Redis managers, only `CancelTask` (and manager shutdown)
-  cancels the processor's `ctx`. The polite reaction is to **stop emitting and
-  close** — the framework persists `CANCELED`. A terminal event emitted *after*
-  the cancel still wins.
+- In memory and Redis managers, `CancelTask` and manager shutdown cancel active processor work. The polite reaction is to **stop emitting and close** — the framework persists `CANCELED`. A terminal event emitted *after* the cancel still wins.
+- Memory additionally cancels a yielded round's `ctx` after publishing `input-required`/`auth-required`. This signal only tears down the old round; it does **not** mark the suspended Task `CANCELED`.
 - `CancelTask` **returns the snapshot at the moment cancellation was requested**
   (possibly still `working`); the terminal `CANCELED` lands when the round winds
   down. Canceling an already-terminal task returns `-32002`.
@@ -204,10 +197,7 @@ the request.
 - **`SendMessage` with `returnImmediately=true`** answers with the **earliest
   usable result**: the first task snapshot or the first Message. Retaining
   managers can keep a non-terminal task running; stateless cannot.
-- **`SendStreamingMessage`** forwards every event in order. Memory and Redis
-  persist task events before delivery; stateless first emits a request-local
-  Task snapshot and then its status/artifact updates. The stream ends at the
-  terminal or suspend frame.
+- **`SendStreamingMessage`** returns a direct Message without Task framing for a pure-message round. For a task-producing round, every manager first emits the operation-local Task snapshot and then forwards status/artifact updates in order; memory and Redis persist each update before delivery, while stateless applies it only to the request-local snapshot. The stream ends at the terminal or suspend frame.
 - **`SubscribeToTask`** sends the current task snapshot first, then live
   increments; terminal tasks are rejected.
 

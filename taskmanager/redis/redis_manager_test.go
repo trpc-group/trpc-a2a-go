@@ -458,19 +458,20 @@ func TestInputRequiredContinuation(t *testing.T) {
 	}
 }
 
-// §3.1: a continuation round that only emits Messages answers with the last
-// Message; the suspended task stays untouched.
-func TestContinuationMessageOnlyReturnsMessage(t *testing.T) {
+// A continuation whose first event is a direct Message answers with that
+// Message and discards later task events; the suspended task stays untouched.
+func TestContinuationDirectMessageDiscardsLaterTaskEvent(t *testing.T) {
 	var round int
 	processor := executorFunc(func(
 		ctx context.Context, ec *taskmanager.ExecContext,
 	) (<-chan protocol.StreamEvent, error) {
 		round++
-		out := make(chan protocol.StreamEvent, 1)
+		out := make(chan protocol.StreamEvent, 2)
 		if round == 1 {
 			out <- statusEvent(protocol.TaskStateInputRequired, agentReply("need more"))
 		} else {
 			out <- agentReply("just a clarification")
+			out <- statusEvent(protocol.TaskStateCompleted, nil)
 		}
 		close(out)
 		return out, nil
@@ -681,21 +682,46 @@ func TestOnSendMessageStreamOrderAndPersistence(t *testing.T) {
 	})
 	m, _ := setupTest(t, processor)
 
-	ch, err := m.OnSendMessageStream(context.Background(), sendParams("stream it", "ctx-stream"))
+	one := 1
+	params := sendParams("stream it", "ctx-stream")
+	params.Configuration = &protocol.SendMessageConfiguration{HistoryLength: &one}
+	ch, err := m.OnSendMessageStream(context.Background(), params)
 	if err != nil {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 
-	// Frame 1: working. Persist-before-broadcast means the store must already
-	// reflect the state when the frame is delivered.
+	// Frame 1: the protocol-level initial Task snapshot. The first processor
+	// update is already persisted before either task frame is delivered.
 	frame1 := <-ch
-	statusUpdate := frame1.GetStatusUpdate()
+	initial := frame1.GetTask()
+	if initial == nil || initial.Status.State != protocol.TaskStateSubmitted {
+		t.Fatalf("frame 1: expected submitted Task, got %+v", frame1.Result)
+	}
+	storedInitial, err := m.getTaskInternal(context.Background(), "", initial.ID)
+	if err != nil {
+		t.Fatalf("getTaskInternal failed: %v", err)
+	}
+	if len(storedInitial.History) != 0 {
+		t.Fatalf("initial Task history must not be written into Redis, got %d entries", len(storedInitial.History))
+	}
+	if len(initial.History) != 1 || textOfMessage(initial.History[0]) != "stream it" {
+		t.Fatalf("frame 1: historyLength=1 was not applied: %+v", initial.History)
+	}
+
+	// Frame 2: working. Persist-before-broadcast means the store must already
+	// reflect the state when the frame is delivered.
+	frame2 := <-ch
+	statusUpdate := frame2.GetStatusUpdate()
 	if statusUpdate == nil || statusUpdate.Status.State != protocol.TaskStateWorking {
-		t.Fatalf("frame 1: expected working status, got %+v", frame1.Result)
+		t.Fatalf("frame 2: expected working status, got %+v", frame2.Result)
 	}
 	taskID := statusUpdate.TaskID
 	if taskID == "" || statusUpdate.ContextID != "ctx-stream" {
-		t.Fatalf("frame 1: expected stamped IDs, got %+v", statusUpdate)
+		t.Fatalf("frame 2: expected stamped IDs, got %+v", statusUpdate)
+	}
+	if initial.ID != taskID || initial.ContextID != statusUpdate.ContextID {
+		t.Fatalf("initial Task IDs = %s/%s, want %s/%s",
+			initial.ID, initial.ContextID, taskID, statusUpdate.ContextID)
 	}
 	stored, err := m.getTaskInternal(context.Background(), "", taskID)
 	if err != nil {
@@ -706,11 +732,11 @@ func TestOnSendMessageStreamOrderAndPersistence(t *testing.T) {
 	}
 	step <- struct{}{}
 
-	// Frame 2: artifact, persisted before delivery.
-	frame2 := <-ch
-	artifactUpdate := frame2.GetArtifactUpdate()
+	// Frame 3: artifact, persisted before delivery.
+	frame3 := <-ch
+	artifactUpdate := frame3.GetArtifactUpdate()
 	if artifactUpdate == nil || artifactUpdate.Artifact.ArtifactID != "artifact-1" {
-		t.Fatalf("frame 2: expected artifact update, got %+v", frame2.Result)
+		t.Fatalf("frame 3: expected artifact update, got %+v", frame3.Result)
 	}
 	stored, err = m.getTaskInternal(context.Background(), "", taskID)
 	if err != nil {
@@ -721,11 +747,11 @@ func TestOnSendMessageStreamOrderAndPersistence(t *testing.T) {
 	}
 	step <- struct{}{}
 
-	// Frame 3: completed, then the pipe closes.
-	frame3 := <-ch
-	statusUpdate = frame3.GetStatusUpdate()
+	// Frame 4: completed, then the pipe closes.
+	frame4 := <-ch
+	statusUpdate = frame4.GetStatusUpdate()
 	if statusUpdate == nil || statusUpdate.Status.State != protocol.TaskStateCompleted {
-		t.Fatalf("frame 3: expected completed status, got %+v", frame3.Result)
+		t.Fatalf("frame 4: expected completed status, got %+v", frame4.Result)
 	}
 	stored, err = m.getTaskInternal(context.Background(), "", taskID)
 	if err != nil {
@@ -736,6 +762,68 @@ func TestOnSendMessageStreamOrderAndPersistence(t *testing.T) {
 	}
 	if _, ok := <-ch; ok {
 		t.Error("expected stream closed after engine end")
+	}
+}
+
+func TestOnSendMessageStreamArtifactFirstStartsWithTask(t *testing.T) {
+	m, _ := setupTest(t, scriptedExecutor(
+		artifactEvent("artifact-first", "chunk"),
+		statusEvent(protocol.TaskStateCompleted, nil),
+	))
+
+	stream, err := m.OnSendMessageStream(context.Background(), sendParams("stream it", "ctx-artifact-first"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream failed: %v", err)
+	}
+	frames := collectStream(t, stream)
+	if len(frames) != 3 {
+		t.Fatalf("frames = %d, want Task, artifact, completed status: %+v", len(frames), frames)
+	}
+	initial := frames[0].GetTask()
+	if initial == nil || initial.Status.State != protocol.TaskStateSubmitted ||
+		initial.ContextID != "ctx-artifact-first" {
+		t.Fatalf("first frame = %+v, want submitted Task", frames[0].Result)
+	}
+	artifact := frames[1].GetArtifactUpdate()
+	if artifact == nil || artifact.TaskID != initial.ID || artifact.Artifact.ArtifactID != "artifact-first" {
+		t.Fatalf("second frame = %+v, want artifact for %s", frames[1].Result, initial.ID)
+	}
+	completed := frames[2].GetStatusUpdate()
+	if completed == nil || completed.TaskID != initial.ID || completed.Status.State != protocol.TaskStateCompleted {
+		t.Fatalf("third frame = %+v, want completed status for %s", frames[2].Result, initial.ID)
+	}
+}
+
+func TestOnSendMessageStreamContinuationStartsWithCurrentTask(t *testing.T) {
+	m, _ := setupTest(t, scriptedExecutor(statusEvent(protocol.TaskStateCompleted, nil)))
+	task := storedTask(t, m, "task-continuation-stream", "ctx-continuation-stream", protocol.TaskStateInputRequired)
+	task.Artifacts = []protocol.Artifact{{
+		ArtifactID: "existing-artifact",
+		Parts:      []*protocol.Part{protocol.NewTextPart("existing")},
+	}}
+	if err := m.storeTask(context.Background(), "", task); err != nil {
+		t.Fatalf("storeTask with artifact failed: %v", err)
+	}
+
+	params := sendParams("continue", "")
+	params.Message.TaskID = &task.ID
+	stream, err := m.OnSendMessageStream(context.Background(), params)
+	if err != nil {
+		t.Fatalf("OnSendMessageStream continuation failed: %v", err)
+	}
+	frames := collectStream(t, stream)
+	if len(frames) != 2 {
+		t.Fatalf("frames = %d, want current Task then completed status: %+v", len(frames), frames)
+	}
+	initial := frames[0].GetTask()
+	if initial == nil || initial.ID != task.ID || initial.ContextID != task.ContextID ||
+		initial.Status.State != protocol.TaskStateInputRequired || len(initial.Artifacts) != 1 ||
+		initial.Artifacts[0].ArtifactID != "existing-artifact" {
+		t.Fatalf("first frame = %+v, want pre-update continuation Task", frames[0].Result)
+	}
+	completed := frames[1].GetStatusUpdate()
+	if completed == nil || completed.Status.State != protocol.TaskStateCompleted {
+		t.Fatalf("second frame = %+v, want completed status", frames[1].Result)
 	}
 }
 
@@ -757,6 +845,31 @@ func TestOnSendMessageStreamPureMessage(t *testing.T) {
 	for _, key := range mr.Keys() {
 		if strings.HasPrefix(key, taskPrefix) {
 			t.Errorf("pure-message stream must not create a task, found %s", key)
+		}
+	}
+}
+
+// The first valid event fixes the response shape. Once a direct Message has
+// been sent, later task events are drained rather than switching wire modes.
+func TestOnSendMessageStreamDirectMessageDoesNotSwitchToTask(t *testing.T) {
+	m, mr := setupTest(t, scriptedExecutor(
+		agentReply("direct"),
+		agentReply("ignored"),
+		statusEvent(protocol.TaskStateCompleted, nil),
+	))
+
+	ch, err := m.OnSendMessageStream(context.Background(), sendParams("hello", "ctx-direct-mode"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream failed: %v", err)
+	}
+	frames := collectStream(t, ch)
+	if len(frames) != 1 || frames[0].GetMessage() == nil ||
+		textOfMessage(*frames[0].GetMessage()) != "direct" {
+		t.Fatalf("expected exactly the first direct Message, got %+v", frames)
+	}
+	for _, key := range mr.Keys() {
+		if strings.HasPrefix(key, taskPrefix) {
+			t.Fatalf("task event after direct Message must be discarded, found %s", key)
 		}
 	}
 }
@@ -793,6 +906,44 @@ func TestOnSendMessageStreamBlockingSend(t *testing.T) {
 		if states[i] != want[i] {
 			t.Errorf("frame %d = %s, want %s (order must match emission)", i, states[i], want[i])
 		}
+	}
+}
+
+func TestOnSendMessageStreamNonBlockingBufferReservesInitialTaskSlot(t *testing.T) {
+	taskID := make(chan string, 1)
+	processor := executorFunc(func(
+		_ context.Context, ec *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		taskID <- ec.TaskID
+		out := make(chan protocol.StreamEvent, 1)
+		out <- statusEvent(protocol.TaskStateCompleted, nil)
+		close(out)
+		return out, nil
+	})
+	m, _ := setupTest(t, processor,
+		WithTaskSubscriberBufferSize(1),
+		WithTaskSubscriberBlockingSend(false),
+	)
+
+	stream, err := m.OnSendMessageStream(context.Background(), sendParams("go", "ctx-nonblocking-buffer"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream failed: %v", err)
+	}
+	id := <-taskID
+	// Do not consume the response until the terminal event has been committed
+	// and the pipe closed. This makes the capacity requirement deterministic.
+	waitTaskState(t, m, id, protocol.TaskStateCompleted)
+	frames := collectStream(t, stream)
+	if len(frames) != 2 {
+		t.Fatalf("frames = %d, want initial Task and completed status: %+v", len(frames), frames)
+	}
+	initial := frames[0].GetTask()
+	if initial == nil || initial.ID != id || initial.Status.State != protocol.TaskStateSubmitted {
+		t.Fatalf("first frame = %+v, want submitted Task for %s", frames[0].Result, id)
+	}
+	completed := frames[1].GetStatusUpdate()
+	if completed == nil || completed.TaskID != id || completed.Status.State != protocol.TaskStateCompleted {
+		t.Fatalf("second frame = %+v, want completed status for %s", frames[1].Result, id)
 	}
 }
 
@@ -889,7 +1040,15 @@ func TestOnCancelTaskLiveExecution(t *testing.T) {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 	frame := <-ch
-	taskID := frame.GetStatusUpdate().TaskID
+	task := frame.GetTask()
+	if task == nil {
+		t.Fatalf("first stream frame = %+v, want Task", frame.Result)
+	}
+	taskID := task.ID
+	frame = <-ch
+	if su := frame.GetStatusUpdate(); su == nil || su.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("expected WORKING after initial Task, got %+v", frame.Result)
+	}
 
 	snapshot, err := m.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: taskID})
 	if err != nil {
@@ -940,7 +1099,15 @@ func TestOnCancelTaskCompletedWins(t *testing.T) {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 	frame := <-ch
-	taskID := frame.GetStatusUpdate().TaskID
+	task := frame.GetTask()
+	if task == nil {
+		t.Fatalf("first stream frame = %+v, want Task", frame.Result)
+	}
+	taskID := task.ID
+	frame = <-ch
+	if su := frame.GetStatusUpdate(); su == nil || su.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("expected WORKING after initial Task, got %+v", frame.Result)
+	}
 
 	if _, err := m.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: taskID}); err != nil {
 		t.Fatalf("OnCancelTask failed: %v", err)
@@ -1119,7 +1286,15 @@ func TestOnResubscribeReceivesLiveEvents(t *testing.T) {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 	frame := <-ch
-	taskID := frame.GetStatusUpdate().TaskID
+	task := frame.GetTask()
+	if task == nil {
+		t.Fatalf("first stream frame = %+v, want Task", frame.Result)
+	}
+	taskID := task.ID
+	frame = <-ch
+	if su := frame.GetStatusUpdate(); su == nil || su.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("expected WORKING after initial Task, got %+v", frame.Result)
+	}
 
 	sub, err := m.OnResubscribe(context.Background(), protocol.TaskIDParams{ID: taskID})
 	if err != nil {

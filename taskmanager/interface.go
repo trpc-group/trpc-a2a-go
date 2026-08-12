@@ -77,6 +77,15 @@ type ExecContext struct {
 //   - *protocol.Task is never accepted: task snapshots are materialized by
 //     managers from the event stream. Emitting one is a contract violation.
 //
+// The first valid event selects the response shape without emitting a Task: a
+// Message completes a taskless direct response, and later events from that round
+// are discarded; a status or artifact selects a task lifecycle. For
+// message/stream, the manager emits an operation-local Task snapshot before that
+// round's first task update. A fresh round starts from SUBMITTED; a continuation
+// starts from ExecContext.Task. This framing snapshot is not a processor event
+// and is not journaled or broadcast as an update. Retaining managers persist the
+// triggering task event before delivering the response frames.
+//
 // Task events may leave TaskID/ContextID empty; the manager stamps them. A
 // direct Message may leave ContextID empty. Foreign IDs are a contract
 // violation: an already-materialized task is failed, otherwise the request is
@@ -104,11 +113,15 @@ type ExecContext struct {
 // suspending). The message/stream response stream ends at the terminal or
 // suspend frame; the channel itself is still drained until closed.
 //
-// For retaining managers, ctx is canceled when the task is canceled via
-// CancelTask. A client disconnect does NOT cancel ctx: the work keeps running
-// and its results remain retrievable (GetTask / SubscribeToTask). A stateless
-// manager cancels ctx on disconnect and discards its request-local task. The
-// framework always drains the channel until it is closed, so senders never leak.
+// For retaining managers, CancelTask and manager shutdown cancel active work.
+// The Memory manager also cancels a yielded round's ctx after publishing its
+// input-required/auth-required frame and before releasing the task slot. That is
+// round teardown, not task cancellation: the suspended Task stays unchanged and
+// the processor must close its channel promptly. A client disconnect does NOT
+// cancel retaining work, whose results remain retrievable (GetTask /
+// SubscribeToTask). A stateless manager cancels ctx on disconnect and discards
+// its request-local task. The framework always drains the channel until it is
+// closed, so senders never leak.
 //
 // The framework starts consuming the channel only after ProcessMessage
 // returns: sends beyond the channel buffer from inside ProcessMessage itself
@@ -147,10 +160,13 @@ type TaskManager interface {
 	) (*protocol.SendMessageResponse, error)
 
 	// OnSendMessageStream handles a request corresponding to the 'message/stream' RPC method.
-	// It invokes the MessageProcessor and returns a channel that carries emitted
-	// events. Retaining managers persist task events before delivery; stateless
-	// managers apply them only to the request-local task. The channel is closed
-	// when the round ends; setup errors are returned directly.
+	// It invokes the MessageProcessor and returns a channel carrying the derived
+	// response stream. A pure Message round has no Task framing. A task-producing
+	// round starts with a manager-materialized Task snapshot, followed by the
+	// processor's status/artifact events. Retaining managers persist task events
+	// before delivery; stateless managers apply them only to the request-local
+	// task. The channel is closed when the round ends; setup errors are returned
+	// directly.
 	OnSendMessageStream(
 		ctx context.Context,
 		request protocol.SendMessageParams,

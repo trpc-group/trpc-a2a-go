@@ -20,7 +20,22 @@ import (
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/sse"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/memory"
 )
+
+type legacyStreamingProcessor struct{}
+
+func (legacyStreamingProcessor) ProcessMessage(
+	_ context.Context,
+	_ *taskmanager.ExecContext,
+) (<-chan protocol.StreamEvent, error) {
+	events := make(chan protocol.StreamEvent, 2)
+	events <- &protocol.TaskStatusUpdateEvent{Status: protocol.TaskStatus{State: protocol.TaskStateWorking}}
+	events <- &protocol.TaskStatusUpdateEvent{Status: protocol.TaskStatus{State: protocol.TaskStateCompleted}}
+	close(events)
+	return events, nil
+}
 
 // fakeTaskManager is a minimal v1 TaskManager that records the converted
 // request and returns canned v1 responses, so the tests exercise exactly the
@@ -182,19 +197,10 @@ func TestHandler_TasksGet_LegacyWire(t *testing.T) {
 }
 
 func TestHandler_Streaming_LegacyWire(t *testing.T) {
-	fake := &fakeTaskManager{
-		streamEvents: []protocol.StreamResponse{
-			{Result: &protocol.TaskStatusUpdateEvent{
-				TaskID: "task-1", ContextID: "ctx-1",
-				Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
-			}},
-			{Result: &protocol.TaskStatusUpdateEvent{
-				TaskID: "task-1", ContextID: "ctx-1",
-				Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
-			}},
-		},
-	}
-	h := NewJSONRPCHandler(fake)
+	manager, err := memory.NewTaskManager(legacyStreamingProcessor{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	h := NewJSONRPCHandler(manager)
 
 	w := postJSON(t, h, `{
 		"jsonrpc": "2.0", "id": "req-3", "method": "message/stream",
@@ -223,18 +229,24 @@ func TestHandler_Streaming_LegacyWire(t *testing.T) {
 		payloads = append(payloads, rpcResp.Result)
 	}
 
-	require.Len(t, events, 2)
-	assert.Equal(t, EventStatusUpdate, events[0], "legacy SSE event name expected")
+	require.Len(t, events, 3)
+	assert.Equal(t, EventTask, events[0], "legacy SSE event name expected")
+	assert.Equal(t, "task", payloads[0]["kind"])
+	initialStatus := payloads[0]["status"].(map[string]interface{})
+	assert.Equal(t, "submitted", initialStatus["state"])
+
+	assert.Equal(t, EventStatusUpdate, events[1], "legacy SSE event name expected")
 	// Legacy kind discriminator and lowercase states on the wire.
-	assert.Equal(t, "status-update", payloads[0]["kind"])
-	status := payloads[0]["status"].(map[string]interface{})
+	assert.Equal(t, "status-update", payloads[1]["kind"])
+	status := payloads[1]["status"].(map[string]interface{})
 	assert.Equal(t, "working", status["state"])
-	assert.Equal(t, false, payloads[0]["final"])
+	assert.Equal(t, false, payloads[1]["final"])
+	assert.Equal(t, payloads[0]["id"], payloads[1]["taskId"])
 
 	// Terminal event must carry the derived final=true flag.
-	finalStatus := payloads[1]["status"].(map[string]interface{})
+	finalStatus := payloads[2]["status"].(map[string]interface{})
 	assert.Equal(t, "completed", finalStatus["state"])
-	assert.Equal(t, true, payloads[1]["final"])
+	assert.Equal(t, true, payloads[2]["final"])
 }
 
 func TestHandler_PushConfig_LegacyWire(t *testing.T) {

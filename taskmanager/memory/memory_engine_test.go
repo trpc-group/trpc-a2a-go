@@ -194,9 +194,7 @@ func seedTask(m *TaskManager, task protocol.Task) {
 
 // liveExecutionCount reports how many executions are still registered.
 func liveExecutionCount(m *TaskManager) int {
-	m.execMu.Lock()
-	defer m.execMu.Unlock()
-	return len(m.executions)
+	return m.runs.len()
 }
 
 // =============================================================================
@@ -615,17 +613,18 @@ func TestEngine_ForeignMessageEventFailsTask(t *testing.T) {
 	}
 }
 
-// §3.1: a continuation round that only emits Messages answers with the last
-// Message; the suspended task stays untouched.
-func TestEngine_ContinuationMessageOnlyReturnsMessage(t *testing.T) {
+// A continuation whose first event is a direct Message answers with that
+// Message and discards later task events; the suspended task stays untouched.
+func TestEngine_ContinuationDirectMessageDiscardsLaterTaskEvent(t *testing.T) {
 	var round atomic.Int32
 	processor := funcExecutor(
 		func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
-			out := make(chan protocol.StreamEvent, 1)
+			out := make(chan protocol.StreamEvent, 2)
 			if round.Add(1) == 1 {
 				out <- statusUpdate(protocol.TaskStateInputRequired, agentReply("need more input"))
 			} else {
 				out <- agentReply("just a clarification")
+				out <- statusUpdate(protocol.TaskStateCompleted, nil)
 			}
 			close(out)
 			return out, nil
@@ -680,49 +679,296 @@ func TestOnSendMessageStream_OrderAndPersistBeforeBroadcast(t *testing.T) {
 		})
 	manager := newTestManager(t, processor)
 
-	ch, err := manager.OnSendMessageStream(context.Background(), userParams("stream"))
+	one := 1
+	params := userParams("stream")
+	params.Configuration = &protocol.SendMessageConfiguration{HistoryLength: &one}
+	ch, err := manager.OnSendMessageStream(context.Background(), params)
 	if err != nil {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 
 	first := recvEvent(t, ch)
-	working := first.GetStatusUpdate()
+	initial := first.GetTask()
+	if initial == nil || initial.Status.State != protocol.TaskStateSubmitted {
+		t.Fatalf("Expected the initial SUBMITTED Task first, got %+v", first)
+	}
+	if initial.ID == "" || initial.ContextID == "" {
+		t.Errorf("Expected stamped IDs, got taskID=%q contextID=%q", initial.ID, initial.ContextID)
+	}
+	manager.taskMu.RLock()
+	storedHistory := len(manager.tasks[newScopedID("", initial.ID)].History)
+	manager.taskMu.RUnlock()
+	if storedHistory != 0 {
+		t.Fatalf("Initial Task history must not be written into storage, got %d entries", storedHistory)
+	}
+	if len(initial.History) != 1 || textOfMessage(initial.History[0]) != "stream" {
+		t.Fatalf("Expected historyLength=1 on the initial Task, got %+v", initial.History)
+	}
+	// The initial snapshot is operation-local, but the triggering update is
+	// persisted before either response frame is published.
+	if state, ok := storedTaskState(manager, initial.ID); !ok || state != protocol.TaskStateWorking {
+		t.Errorf("Expected the store at WORKING when the initial Task is received, got exists=%v state=%s", ok, state)
+	}
+
+	second := recvEvent(t, ch)
+	working := second.GetStatusUpdate()
 	if working == nil || working.Status.State != protocol.TaskStateWorking {
-		t.Fatalf("Expected the WORKING status first, got %+v", first)
-	}
-	if working.TaskID == "" || working.ContextID == "" {
-		t.Errorf("Expected stamped IDs, got taskID=%q contextID=%q", working.TaskID, working.ContextID)
-	}
-	// The producer is gated, so the store must reflect exactly this event:
-	// persisted before broadcast.
-	if state, ok := storedTaskState(manager, working.TaskID); !ok || state != protocol.TaskStateWorking {
-		t.Errorf("Expected the store at WORKING when the event is received, got exists=%v state=%s", ok, state)
+		t.Fatalf("Expected the WORKING status second, got %+v", second)
 	}
 	close(gate)
 
-	second := recvEvent(t, ch)
-	artifact := second.GetArtifactUpdate()
+	third := recvEvent(t, ch)
+	artifact := third.GetArtifactUpdate()
 	if artifact == nil || artifact.Artifact.ArtifactID != "art-1" {
-		t.Fatalf("Expected the artifact event second, got %+v", second)
+		t.Fatalf("Expected the artifact event third, got %+v", third)
 	}
 	manager.taskMu.RLock()
-	artifactCount := len(manager.tasks[newScopedID("", working.TaskID)].Artifacts)
+	artifactCount := len(manager.tasks[newScopedID("", initial.ID)].Artifacts)
 	manager.taskMu.RUnlock()
 	if artifactCount != 1 {
 		t.Errorf("Expected 1 persisted artifact when the event is received, got %d", artifactCount)
 	}
 
-	third := recvEvent(t, ch)
-	completed := third.GetStatusUpdate()
+	fourth := recvEvent(t, ch)
+	completed := fourth.GetStatusUpdate()
 	if completed == nil || completed.Status.State != protocol.TaskStateCompleted {
-		t.Fatalf("Expected the COMPLETED status third, got %+v", third)
+		t.Fatalf("Expected the COMPLETED status fourth, got %+v", fourth)
 	}
-	if state, _ := storedTaskState(manager, working.TaskID); state != protocol.TaskStateCompleted {
+	if state, _ := storedTaskState(manager, initial.ID); state != protocol.TaskStateCompleted {
 		t.Errorf("Expected the store at COMPLETED when the event is received, got %s", state)
 	}
 
 	if rest := collectStream(t, ch); len(rest) != 0 {
 		t.Errorf("Expected the stream to close after the terminal event, got %d more events", len(rest))
+	}
+}
+
+// An artifact can be the first task event, but the response stream still starts
+// with the operation-local SUBMITTED Task that existed before the artifact was
+// applied.
+func TestOnSendMessageStream_ArtifactFirstStartsWithTask(t *testing.T) {
+	manager := newTestManager(t, eventsExecutor(
+		artifactEvent("art-1", "chunk one"),
+		statusUpdate(protocol.TaskStateCompleted, nil),
+	))
+
+	ch, err := manager.OnSendMessageStream(context.Background(), userParams("stream artifact"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream failed: %v", err)
+	}
+
+	first := recvEvent(t, ch)
+	initial := first.GetTask()
+	if initial == nil || initial.Status.State != protocol.TaskStateSubmitted {
+		t.Fatalf("Expected the initial SUBMITTED Task first, got %+v", first)
+	}
+	if len(initial.Artifacts) != 0 {
+		t.Fatalf("Initial Task must be the pre-update snapshot, got artifacts %+v", initial.Artifacts)
+	}
+	if _, ok := storedTaskState(manager, initial.ID); !ok {
+		t.Fatal("Expected the artifact-created task persisted before delivery")
+	}
+	manager.taskMu.RLock()
+	artifactCount := len(manager.tasks[newScopedID("", initial.ID)].Artifacts)
+	manager.taskMu.RUnlock()
+	if artifactCount != 1 {
+		t.Fatalf("Expected the artifact persisted before the initial Task frame, got %d", artifactCount)
+	}
+
+	second := recvEvent(t, ch)
+	if artifact := second.GetArtifactUpdate(); artifact == nil || artifact.Artifact.ArtifactID != "art-1" {
+		t.Fatalf("Expected the artifact update second, got %+v", second)
+	}
+	third := recvEvent(t, ch)
+	if completed := third.GetStatusUpdate(); completed == nil || completed.Status.State != protocol.TaskStateCompleted {
+		t.Fatalf("Expected COMPLETED third, got %+v", third)
+	}
+	if rest := collectStream(t, ch); len(rest) != 0 {
+		t.Fatalf("Expected the stream to close after COMPLETED, got %d more events", len(rest))
+	}
+}
+
+// The configured subscriber capacity predates the operation-local initial
+// Task. Even with a one-slot, non-blocking configuration, that framing Task
+// must not displace the processor's first real status update.
+func TestOnSendMessageStream_BufferOneKeepsFirstStatusUpdate(t *testing.T) {
+	manager := newTestManager(t,
+		eventsExecutor(statusUpdate(protocol.TaskStateCompleted, nil)),
+		WithTaskSubscriberBufferSize(1),
+	)
+
+	ch, err := manager.OnSendMessageStream(context.Background(), userParams("complete"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream failed: %v", err)
+	}
+	// Do not consume until the engine has finished. This deterministically fills
+	// the request pipe before the real update is sent.
+	eventually(t, func() bool { return liveExecutionCount(manager) == 0 }, "execution did not finish")
+	events := collectStream(t, ch)
+	if len(events) != 2 {
+		t.Fatalf("Expected initial Task and terminal update, got %+v", events)
+	}
+	if task := events[0].GetTask(); task == nil || task.Status.State != protocol.TaskStateSubmitted {
+		t.Fatalf("Expected the initial SUBMITTED Task first, got %+v", events[0])
+	}
+	if update := events[1].GetStatusUpdate(); update == nil || update.Status.State != protocol.TaskStateCompleted {
+		t.Fatalf("Expected COMPLETED second, got %+v", events[1])
+	}
+}
+
+// The extra framing slot applies equally when an artifact is the first task
+// event. The later close-rule update may still be dropped under the caller's
+// original one-event capacity; the framing Task must only preserve that capacity.
+func TestOnSendMessageStream_BufferOneKeepsFirstArtifactUpdate(t *testing.T) {
+	manager := newTestManager(t,
+		eventsExecutor(artifactEvent("art-1", "chunk")),
+		WithTaskSubscriberBufferSize(1),
+	)
+
+	ch, err := manager.OnSendMessageStream(context.Background(), userParams("artifact"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream failed: %v", err)
+	}
+	eventually(t, func() bool { return liveExecutionCount(manager) == 0 }, "execution did not finish")
+	events := collectStream(t, ch)
+	if len(events) != 2 {
+		t.Fatalf("Expected initial Task and artifact update, got %+v", events)
+	}
+	if task := events[0].GetTask(); task == nil || task.Status.State != protocol.TaskStateSubmitted {
+		t.Fatalf("Expected the initial SUBMITTED Task first, got %+v", events[0])
+	}
+	if update := events[1].GetArtifactUpdate(); update == nil || update.Artifact.ArtifactID != "art-1" {
+		t.Fatalf("Expected artifact update second, got %+v", events[1])
+	}
+}
+
+// A continuation starts from the task state persisted by the previous round,
+// not from a snapshot that already contains this round's first update.
+func TestOnSendMessageStream_ContinuationStatusStartsWithPreviousTask(t *testing.T) {
+	var round atomic.Int32
+	manager := newTestManager(t, funcExecutor(
+		func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
+			if round.Add(1) == 1 {
+				return eventsExecutor(statusUpdate(protocol.TaskStateInputRequired, nil))(ctx, ec)
+			}
+			return eventsExecutor(statusUpdate(protocol.TaskStateCompleted, nil))(ctx, ec)
+		}))
+
+	first, err := manager.OnSendMessage(context.Background(), userParams("start"))
+	if err != nil {
+		t.Fatalf("First OnSendMessage failed: %v", err)
+	}
+	taskID := first.GetTask().ID
+	followUp := userParams("continue")
+	followUp.Message.TaskID = &taskID
+	ch, err := manager.OnSendMessageStream(context.Background(), followUp)
+	if err != nil {
+		t.Fatalf("Continuation failed: %v", err)
+	}
+
+	initialFrame := recvEvent(t, ch)
+	initial := initialFrame.GetTask()
+	if initial == nil || initial.ID != taskID || initial.Status.State != protocol.TaskStateInputRequired {
+		t.Fatalf("Expected the previous INPUT_REQUIRED Task first, got %+v", initial)
+	}
+	completedFrame := recvEvent(t, ch)
+	completed := completedFrame.GetStatusUpdate()
+	if completed == nil || completed.Status.State != protocol.TaskStateCompleted {
+		t.Fatalf("Expected COMPLETED after the initial Task, got %+v", completed)
+	}
+	if rest := collectStream(t, ch); len(rest) != 0 {
+		t.Fatalf("Expected the stream to close after COMPLETED, got %d more events", len(rest))
+	}
+}
+
+// A framework-generated failure can be the continuation's first task event.
+// The request stream must expose the pre-failure Task before FAILED.
+func TestOnSendMessageStream_ContinuationViolationStartsWithTask(t *testing.T) {
+	var round atomic.Int32
+	manager := newTestManager(t, funcExecutor(
+		func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
+			if round.Add(1) == 1 {
+				return eventsExecutor(statusUpdate(protocol.TaskStateInputRequired, nil))(ctx, ec)
+			}
+			return eventsExecutor(&protocol.Task{ID: "forbidden"})(ctx, ec)
+		}))
+
+	first, err := manager.OnSendMessage(context.Background(), userParams("start"))
+	if err != nil {
+		t.Fatalf("First OnSendMessage failed: %v", err)
+	}
+	taskID := first.GetTask().ID
+	followUp := userParams("continue")
+	followUp.Message.TaskID = &taskID
+	ch, err := manager.OnSendMessageStream(context.Background(), followUp)
+	if err != nil {
+		t.Fatalf("Continuation failed: %v", err)
+	}
+
+	initialFrame := recvEvent(t, ch)
+	initial := initialFrame.GetTask()
+	if initial == nil || initial.ID != taskID || initial.Status.State != protocol.TaskStateInputRequired {
+		t.Fatalf("Expected the pre-violation INPUT_REQUIRED Task, got %+v", initial)
+	}
+	failedFrame := recvEvent(t, ch)
+	failed := failedFrame.GetStatusUpdate()
+	if failed == nil || failed.Status.State != protocol.TaskStateFailed {
+		t.Fatalf("Expected FAILED after the initial Task, got %+v", failed)
+	}
+	if rest := collectStream(t, ch); len(rest) != 0 {
+		t.Fatalf("Expected the stream to close after FAILED, got %d more events", len(rest))
+	}
+}
+
+// Cancellation can close a continuation before its processor emits any event.
+// finish must publish the pre-cancel Task before its synthetic CANCELED update.
+func TestOnSendMessageStream_ContinuationCancelBeforeEventStartsWithTask(t *testing.T) {
+	var round atomic.Int32
+	started := make(chan string, 1)
+	manager := newTestManager(t, funcExecutor(
+		func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
+			if round.Add(1) == 1 {
+				return eventsExecutor(statusUpdate(protocol.TaskStateInputRequired, nil))(ctx, ec)
+			}
+			out := make(chan protocol.StreamEvent)
+			started <- ec.TaskID
+			go func() {
+				<-ctx.Done()
+				close(out)
+			}()
+			return out, nil
+		}))
+
+	first, err := manager.OnSendMessage(context.Background(), userParams("start"))
+	if err != nil {
+		t.Fatalf("First OnSendMessage failed: %v", err)
+	}
+	taskID := first.GetTask().ID
+	followUp := userParams("continue")
+	followUp.Message.TaskID = &taskID
+	ch, err := manager.OnSendMessageStream(context.Background(), followUp)
+	if err != nil {
+		t.Fatalf("Continuation failed: %v", err)
+	}
+	if got := <-started; got != taskID {
+		t.Fatalf("Continuation started for task %s, want %s", got, taskID)
+	}
+	if _, err := manager.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: taskID}); err != nil {
+		t.Fatalf("OnCancelTask failed: %v", err)
+	}
+
+	initialFrame := recvEvent(t, ch)
+	initial := initialFrame.GetTask()
+	if initial == nil || initial.ID != taskID || initial.Status.State != protocol.TaskStateInputRequired {
+		t.Fatalf("Expected the pre-cancel INPUT_REQUIRED Task, got %+v", initial)
+	}
+	canceledFrame := recvEvent(t, ch)
+	canceled := canceledFrame.GetStatusUpdate()
+	if canceled == nil || canceled.Status.State != protocol.TaskStateCanceled {
+		t.Fatalf("Expected CANCELED after the initial Task, got %+v", canceled)
+	}
+	if rest := collectStream(t, ch); len(rest) != 0 {
+		t.Fatalf("Expected the stream to close after CANCELED, got %d more events", len(rest))
 	}
 }
 
@@ -743,6 +989,31 @@ func TestOnSendMessageStream_PureMessage(t *testing.T) {
 	manager.taskMu.RUnlock()
 	if taskCount != 0 {
 		t.Errorf("Expected no task after a pure-message stream, got %d", taskCount)
+	}
+}
+
+// The first valid event fixes the response shape. Once a direct Message has
+// been sent, later task events are drained rather than switching wire modes.
+func TestOnSendMessageStream_DirectMessageDoesNotSwitchToTask(t *testing.T) {
+	manager := newTestManager(t, eventsExecutor(
+		agentReply("direct"),
+		agentReply("ignored"),
+		statusUpdate(protocol.TaskStateCompleted, nil),
+	))
+
+	ch, err := manager.OnSendMessageStream(context.Background(), userParams("hello"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream failed: %v", err)
+	}
+	events := collectStream(t, ch)
+	if len(events) != 1 || events[0].GetMessage() == nil || textOfMessage(*events[0].GetMessage()) != "direct" {
+		t.Fatalf("Expected exactly the first direct Message, got %+v", events)
+	}
+	manager.taskMu.RLock()
+	taskCount := len(manager.tasks)
+	manager.taskMu.RUnlock()
+	if taskCount != 0 {
+		t.Fatalf("A task event after a direct Message must be discarded, got %d tasks", taskCount)
 	}
 }
 
@@ -1109,6 +1380,8 @@ func TestEngine_StatusMessageDedupByID(t *testing.T) {
 			h := taskmanager.NewTaskHandle(ctx, ec)
 			go func() {
 				defer h.Close()
+				// Select task mode before emitting the task-attached reply.
+				h.UpdateTaskState(protocol.TaskStateWorking, nil)
 				h.Reply(&reply)
 				h.UpdateTaskState(protocol.TaskStateWorking, &status)
 				// Supersedes status, causing the same-MessageID copy above to roll.
@@ -1339,7 +1612,11 @@ func TestOnSendMessage_ConcurrentContinuationRejected(t *testing.T) {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 	first := recvEvent(t, pipe)
-	taskID := first.GetStatusUpdate().TaskID
+	initial := first.GetTask()
+	if initial == nil {
+		t.Fatalf("Expected the initial Task first, got %+v", first)
+	}
+	taskID := initial.ID
 
 	followUp := userParams("again")
 	followUp.Message.TaskID = &taskID
@@ -1385,7 +1662,11 @@ func TestOnCancelTask_LiveButTerminalNotCancelable(t *testing.T) {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 	first := recvEvent(t, pipe)
-	taskID := first.GetStatusUpdate().TaskID
+	initial := first.GetTask()
+	if initial == nil {
+		t.Fatalf("Expected the initial Task first, got %+v", first)
+	}
+	taskID := initial.ID
 	waitTaskState(t, manager, taskID, protocol.TaskStateCompleted)
 
 	_, err = manager.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: taskID})
@@ -1554,7 +1835,11 @@ func TestOnSendMessageStream_DisconnectKeepsRunning(t *testing.T) {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 	first := recvEvent(t, pipe)
-	taskID := first.GetStatusUpdate().TaskID
+	initial := first.GetTask()
+	if initial == nil {
+		t.Fatalf("Expected the initial Task first, got %+v", first)
+	}
+	taskID := initial.ID
 	cancel() // client disconnects; the pipe is abandoned from here on
 	close(disconnected)
 

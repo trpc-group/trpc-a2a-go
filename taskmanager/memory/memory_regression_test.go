@@ -181,26 +181,26 @@ func TestClaimCancelSlot_BlocksConcurrentRegistration(t *testing.T) {
 	manager := newTestManager(t, echoExecutor())
 	const taskID = "task-claim-slot"
 
-	live, sentinel, yieldDone := manager.claimCancelSlot("", taskID)
+	live, sentinel, yieldDone := manager.runs.claimCancelSlot("", taskID)
 	if live != nil || sentinel == nil {
 		t.Fatalf("expected to claim the free slot, got live=%v sentinel=%v", live, sentinel)
 	}
 	if yieldDone != nil {
 		t.Fatal("free slot unexpectedly reported a yield handoff")
 	}
-	if err := manager.registerExecution(context.Background(), "", taskID, &execution{cancel: func() {}}); err == nil {
+	if err := manager.runs.register(context.Background(), "", taskID, &execution{cancel: func() {}}); err == nil {
 		t.Fatal("registration must be rejected while a cancel sentinel holds the slot")
 	}
-	manager.deregisterExecution("", taskID, sentinel)
+	manager.runs.deregister("", taskID, sentinel)
 
 	exec := &execution{cancel: func() {}}
-	if err := manager.registerExecution(context.Background(), "", taskID, exec); err != nil {
+	if err := manager.runs.register(context.Background(), "", taskID, exec); err != nil {
 		t.Fatalf("registration after sentinel release failed: %v", err)
 	}
-	manager.releaseExecution("", taskID, exec)
+	manager.runs.release("", taskID, exec)
 }
 
-// Cancellation and suspend handoff use execMu as their linearization point.
+// Cancellation and suspend handoff use the execution registry as their linearization point.
 // Whichever operation acquires it first must keep ownership of the execution:
 // cancel prevents yielding, while yield makes cancel wait for the handoff.
 func TestCancelYieldLinearization(t *testing.T) {
@@ -209,21 +209,21 @@ func TestCancelYieldLinearization(t *testing.T) {
 		const taskID = "task-cancel-wins-yield"
 		var cancelCalls atomic.Int32
 		exec := &execution{cancel: func() { cancelCalls.Add(1) }}
-		if err := manager.registerExecution(context.Background(), "", taskID, exec); err != nil {
+		if err := manager.runs.register(context.Background(), "", taskID, exec); err != nil {
 			t.Fatalf("register execution: %v", err)
 		}
 		var releaseOnce sync.Once
-		release := func() { releaseOnce.Do(func() { manager.releaseExecution("", taskID, exec) }) }
+		release := func() { releaseOnce.Do(func() { manager.runs.release("", taskID, exec) }) }
 		defer release()
 
-		yieldDone, accepted := manager.requestExecutionCancel("", taskID, exec)
+		yieldDone, accepted := manager.runs.requestCancel("", taskID, exec)
 		if !accepted || yieldDone != nil {
 			t.Fatalf("cancel result: accepted=%v yieldDone=%v, want accepted with no handoff", accepted, yieldDone)
 		}
 		if got := cancelCalls.Load(); got != 1 {
 			t.Fatalf("execution cancel calls = %d, want 1", got)
 		}
-		if manager.beginExecutionYield("", taskID, exec) {
+		if manager.runs.beginYield("", taskID, exec) {
 			t.Fatal("suspend handoff started after cancellation had already won")
 		}
 
@@ -235,18 +235,18 @@ func TestCancelYieldLinearization(t *testing.T) {
 		const taskID = "task-yield-wins-cancel"
 		var cancelCalls atomic.Int32
 		exec := &execution{cancel: func() { cancelCalls.Add(1) }}
-		if err := manager.registerExecution(context.Background(), "", taskID, exec); err != nil {
+		if err := manager.runs.register(context.Background(), "", taskID, exec); err != nil {
 			t.Fatalf("register execution: %v", err)
 		}
 		var releaseOnce sync.Once
-		release := func() { releaseOnce.Do(func() { manager.releaseExecution("", taskID, exec) }) }
+		release := func() { releaseOnce.Do(func() { manager.runs.release("", taskID, exec) }) }
 		defer release()
-		if !manager.beginExecutionYield("", taskID, exec) {
+		if !manager.runs.beginYield("", taskID, exec) {
 			t.Fatal("suspend handoff did not start")
 		}
 		handoff := exec.yieldDone
 
-		yieldDone, accepted := manager.requestExecutionCancel("", taskID, exec)
+		yieldDone, accepted := manager.runs.requestCancel("", taskID, exec)
 		if accepted || yieldDone != handoff {
 			t.Fatalf("cancel result: accepted=%v yieldDone=%v, want existing handoff %v",
 				accepted, yieldDone, handoff)
@@ -294,12 +294,17 @@ func TestCancelBeforeSuspendClosePersistsCanceled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OnSendMessageStream: %v", err)
 	}
+	initialEvent := recvEvent(t, stream)
+	initial := initialEvent.GetTask()
+	if initial == nil || initial.Status.State != protocol.TaskStateSubmitted {
+		t.Fatalf("first stream event = %+v, want initial SUBMITTED Task", initialEvent)
+	}
 	workingEvent := recvEvent(t, stream)
 	working := workingEvent.GetStatusUpdate()
 	if working == nil || working.Status.State != protocol.TaskStateWorking {
-		t.Fatalf("first stream event = %+v, want WORKING", working)
+		t.Fatalf("second stream event = %+v, want WORKING", workingEvent)
 	}
-	taskID := working.TaskID
+	taskID := initial.ID
 
 	cancelSnapshot, err := manager.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: taskID})
 	if err != nil {
@@ -452,6 +457,121 @@ func TestClose_WaitsForDetachedEngines(t *testing.T) {
 	}
 	if _, err := manager.OnSendMessage(context.Background(), userParams("late")); err == nil {
 		t.Fatal("a closed manager must reject new requests")
+	}
+}
+
+// A suspended round has released its registry slot, so Close cannot discover
+// and cancel it later. Publishing the suspend frame must therefore cancel the
+// processor context before deregistration, allowing its drain engine to exit.
+func TestClose_CancelsYieldedDrainingEngine(t *testing.T) {
+	sawCancel := make(chan struct{})
+	processor := funcExecutor(
+		func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
+			out := make(chan protocol.StreamEvent, 1)
+			go func() {
+				defer close(out)
+				out <- statusUpdate(protocol.TaskStateInputRequired, agentReply("need more"))
+				<-ctx.Done()
+				close(sawCancel)
+			}()
+			return out, nil
+		})
+	manager, err := NewTaskManager(processor)
+	if err != nil {
+		t.Fatalf("NewTaskManager failed: %v", err)
+	}
+
+	pipe, err := manager.OnSendMessageStream(context.Background(), userParams("go"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream failed: %v", err)
+	}
+	waitClosed(t, pipe)
+
+	// The suspend path itself must cancel the yielded round. Waiting before
+	// Close removes the race where Close could find the not-yet-deregistered
+	// execution and make an implementation without yield-time cancellation pass.
+	select {
+	case <-sawCancel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("suspend did not cancel the yielded processor context")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- manager.Close() }()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked waiting for a yielded drain engine")
+	}
+}
+
+// Close marks the manager closed before sweeping subscribers. A resubscribe
+// racing with the later engine wait must be rejected rather than appended
+// after the sweep and left behind when Close returns.
+func TestClose_RejectsResubscribeDuringEngineWait(t *testing.T) {
+	sawCancel := make(chan struct{})
+	releaseProcessor := make(chan struct{})
+	processor := funcExecutor(
+		func(ctx context.Context, ec *taskmanager.ExecContext) (<-chan protocol.StreamEvent, error) {
+			out := make(chan protocol.StreamEvent, 1)
+			out <- workingEvent()
+			go func() {
+				defer close(out)
+				<-ctx.Done()
+				close(sawCancel)
+				<-releaseProcessor
+			}()
+			return out, nil
+		})
+	manager, err := NewTaskManager(processor)
+	if err != nil {
+		t.Fatalf("NewTaskManager failed: %v", err)
+	}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseProcessor) }) }
+	defer release()
+
+	pipe, err := manager.OnSendMessageStream(context.Background(), userParams("go"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream failed: %v", err)
+	}
+	initialEvent := recvEvent(t, pipe)
+	initial := initialEvent.GetTask()
+	if initial == nil {
+		t.Fatal("stream did not begin with a Task")
+	}
+	recvEvent(t, pipe) // WORKING
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- manager.Close() }()
+	select {
+	case <-sawCancel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not reach the engine wait")
+	}
+
+	resubscribe, err := manager.OnResubscribe(context.Background(), protocol.TaskIDParams{ID: initial.ID})
+	if err == nil || resubscribe != nil {
+		t.Fatalf("resubscribe during Close = (%v, %v), want rejection", resubscribe, err)
+	}
+
+	release()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not finish after the processor exited")
+	}
+
+	manager.taskMu.RLock()
+	defer manager.taskMu.RUnlock()
+	if len(manager.subscribers) != 0 {
+		t.Fatalf("Close left %d subscriber entries", len(manager.subscribers))
 	}
 }
 

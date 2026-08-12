@@ -426,14 +426,17 @@ func TestA2ASrv_HandleMessageStream_SSE(t *testing.T) {
 		Parts:     []*protocol.Part{protocol.NewTextPart("SSE test input")},
 	}
 
-	// Configure mock streaming events for message/stream
-	// Use TaskStatusUpdateEvent to simulate message streaming progress
+	// Configure mock streaming events for message/stream. A task lifecycle
+	// stream starts with the initial Task, followed by status/artifact updates.
+	initialTask := protocol.NewTask(messageID, "test-context")
 	event1 := protocol.TaskStatusUpdateEvent{
-		TaskID: messageID,
-		Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
+		TaskID:    messageID,
+		ContextID: initialTask.ContextID,
+		Status:    protocol.TaskStatus{State: protocol.TaskStateWorking},
 	}
 	event2 := protocol.TaskArtifactUpdateEvent{
-		TaskID: messageID,
+		TaskID:    messageID,
+		ContextID: initialTask.ContextID,
 		Artifact: protocol.Artifact{
 			ArtifactID: "stream-artifact-1",
 			Parts:      []*protocol.Part{protocol.NewTextPart("Streaming response")},
@@ -441,12 +444,14 @@ func TestA2ASrv_HandleMessageStream_SSE(t *testing.T) {
 	}
 	final := true
 	event3 := protocol.TaskStatusUpdateEvent{
-		TaskID: messageID,
-		Status: protocol.TaskStatus{State: protocol.TaskStateCompleted},
-		Final:  final,
+		TaskID:    messageID,
+		ContextID: initialTask.ContextID,
+		Status:    protocol.TaskStatus{State: protocol.TaskStateCompleted},
+		Final:     final,
 	}
 	// Configure mock events for message streaming
 	mockTM.sendMessageStreamEvents = []protocol.StreamResponse{
+		protocol.NewStreamResponseTask(initialTask),
 		{Result: &event1},
 		{Result: &event2},
 		{Result: &event3},
@@ -529,7 +534,11 @@ func TestA2ASrv_HandleMessageStream_SSE(t *testing.T) {
 			t.Fatalf("Test context canceled: %v", ctx.Err())
 		}
 	}
-	require.Greater(t, len(receivedEvents), 0, "Should have received at least one event")
+	require.Len(t, receivedEvents, 4, "Should have received the initial Task and three updates")
+	require.NotNil(t, receivedEvents[0].GetTask(), "First event should be a Task")
+	assert.Equal(t, protocol.TaskStateSubmitted, receivedEvents[0].GetTask().Status.State)
+	require.NotNil(t, receivedEvents[1].GetStatusUpdate(), "Initial Task should be followed by the first status update")
+	assert.Equal(t, protocol.TaskStateWorking, receivedEvents[1].GetStatusUpdate().Status.State)
 	var lastStatusEvent *protocol.TaskStatusUpdateEvent
 	for i := len(receivedEvents) - 1; i >= 0; i-- {
 		if receivedEvents[i].GetStatusUpdate() != nil {

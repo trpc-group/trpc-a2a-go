@@ -244,6 +244,66 @@ func TestRedisPushRegisteredConfigDelivered(t *testing.T) {
 	}
 }
 
+func TestRedisStreamingInitialTaskIsNotPushed(t *testing.T) {
+	sender := &recordingSender{}
+	m, _ := setupTest(t, scriptedExecutor(
+		statusEvent(protocol.TaskStateCompleted, agentReply("done")),
+	), WithPushNotifications(push.Config{Sender: sender}))
+	defer m.Close()
+
+	task := storedTask(t, m, "task-stream-push", "ctx-stream-push", protocol.TaskStateWorking)
+	if _, err := m.OnPushNotificationSet(context.Background(), protocol.TaskPushNotificationConfig{
+		TaskID: task.ID,
+		ID:     "stream-hook",
+		URL:    "https://example.com/stream-hook",
+	}); err != nil {
+		t.Fatalf("OnPushNotificationSet: %v", err)
+	}
+	params := sendParams("continue", task.ContextID)
+	params.Message.TaskID = &task.ID
+	stream, err := m.OnSendMessageStream(context.Background(), params)
+	if err != nil {
+		t.Fatalf("OnSendMessageStream: %v", err)
+	}
+	frames := collectStream(t, stream)
+	if len(frames) != 2 || frames[0].GetTask() == nil || frames[1].GetStatusUpdate() == nil {
+		t.Fatalf("stream frames = %+v, want Task then completed status", frames)
+	}
+
+	// Queue a recognizable sentinel for the same task/config. Dispatcher FIFO
+	// ordering for one registration guarantees every earlier delivery is
+	// recorded before the sentinel, without relying on timing.
+	sentinel := agentReply("push-sentinel")
+	m.dispatchPush("", task.ID, protocol.NewStreamResponseMessage(sentinel))
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		calls := sender.snapshot()
+		if len(calls) > 0 {
+			last := calls[len(calls)-1].event.GetMessage()
+			if last != nil && last.Parts[0].TextContent() == "push-sentinel" {
+				break
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	calls := sender.snapshot()
+	if len(calls) == 0 || calls[len(calls)-1].event.GetMessage() == nil ||
+		calls[len(calls)-1].event.GetMessage().Parts[0].TextContent() != "push-sentinel" {
+		t.Fatalf("sentinel push was not delivered: %+v", calls)
+	}
+	beforeSentinel := calls[:len(calls)-1]
+	if len(beforeSentinel) != 1 {
+		t.Fatalf("push deliveries before sentinel = %d, want only the real status update", len(beforeSentinel))
+	}
+	if beforeSentinel[0].event.GetTask() != nil {
+		t.Fatalf("synthetic initial Task was pushed: %+v", beforeSentinel[0].event.Result)
+	}
+	if update := beforeSentinel[0].event.GetStatusUpdate(); update == nil ||
+		update.Status.State != protocol.TaskStateCompleted {
+		t.Fatalf("push event = %+v, want completed status", beforeSentinel[0].event.Result)
+	}
+}
+
 func TestRedisPushQueuedGenerationInvalidatedAcrossManagers(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -412,6 +472,11 @@ func TestRedisPushBackpressureSerializesSuspendContinuation(t *testing.T) { //no
 	manager.cancelMu.RUnlock()
 	if !yielding {
 		t.Fatal("input-required became visible before the suspend handoff barrier")
+	}
+	initial := recvEvent(t, stream)
+	if task := initial.GetTask(); task == nil || task.ID != taskID ||
+		task.Status.State != protocol.TaskStateSubmitted {
+		t.Fatalf("initial stream event = %+v, want submitted Task", initial.Result)
 	}
 
 	type continuationResult struct {

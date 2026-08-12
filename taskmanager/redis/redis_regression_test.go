@@ -143,6 +143,10 @@ func TestCancelWinsConcurrentSuspendPersistsCanceled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OnSendMessageStream: %v", err)
 	}
+	initial := recvEvent(t, stream)
+	if task := initial.GetTask(); task == nil || task.Status.State != protocol.TaskStateSubmitted {
+		t.Fatalf("first stream frame = %+v, want submitted Task", initial.Result)
+	}
 	firstEvent := recvEvent(t, stream)
 	working := firstEvent.GetStatusUpdate()
 	if working == nil || working.Status.State != protocol.TaskStateWorking {
@@ -264,6 +268,10 @@ func TestCancel_TransientStorageErrorDoesNotCancelRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
+	initial := recvEvent(t, pipe)
+	if initial.GetTask() == nil {
+		t.Fatalf("first stream frame = %+v, want Task", initial.Result)
+	}
 	event := recvEvent(t, pipe)
 	su := event.GetStatusUpdate()
 	if su == nil {
@@ -304,6 +312,10 @@ func TestClose_PersistsCanceledBeforeClientClose(t *testing.T) {
 	pipe, err := manager.OnSendMessageStream(context.Background(), sendParams("start", ""))
 	if err != nil {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
+	}
+	initial := recvEvent(t, pipe)
+	if initial.GetTask() == nil {
+		t.Fatalf("first stream frame = %+v, want Task", initial.Result)
 	}
 	event := recvEvent(t, pipe)
 	su := event.GetStatusUpdate()

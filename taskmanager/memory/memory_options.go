@@ -33,7 +33,8 @@ type TaskManagerOptions struct {
 	// EnableCleanup enables automatic cleanup of expired conversations and tasks.
 	EnableCleanup bool
 
-	// TaskSubscriberBufSize is the buffer size for task subscribers.
+	// TaskSubscriberBufSize is the buffer size for task update events. A
+	// SendStreamingMessage response pipe reserves one additional framing slot.
 	TaskSubscriberBufSize int
 
 	// TaskSubscriberBlockingSend enables blocking send for task subscribers.
@@ -96,7 +97,9 @@ func WithTaskTTL(ttl time.Duration) TaskManagerOption {
 	}
 }
 
-// WithTaskSubscriberBufferSize sets the buffer size for task subscriber channels.
+// WithTaskSubscriberBufferSize sets the buffer size for task update events. A
+// SendStreamingMessage response pipe reserves one additional framing slot for
+// its initial Task.
 func WithTaskSubscriberBufferSize(size int) TaskManagerOption {
 	return func(opts *TaskManagerOptions) {
 		if size > 0 {

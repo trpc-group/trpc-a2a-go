@@ -48,10 +48,7 @@ flowchart LR
     end
 ```
 
-Not every exchange creates a task. A quick answer is just a `Message` back —
-no lifecycle, no cleanup. The agent opens a task only when there is work worth
-tracking; from then on, everything the agent reports is an **event**: a status
-update (progress) or an artifact update (deliverable chunk).
+Not every exchange creates a task. A quick answer is just a `Message` back — no lifecycle, no cleanup. When the agent emits a status or artifact update, the framework opens a task and, for streaming calls, sends the initial Task snapshot before that first update.
 
 ## Discovery: the Agent Card
 
@@ -127,14 +124,14 @@ sequenceDiagram
 
 ### 2. A tracked job with live progress
 
-Same request shape, the streaming endpoint: every event reaches you the moment
-it happens. The first task event is where the task comes into existence.
+Same request shape, the streaming endpoint: every event reaches you the moment it happens. The first valid processor event selects the response shape: a Message completes a direct response, while a status or artifact selects task mode and makes the framework send the pre-update Task snapshot first.
 
 ```mermaid
 sequenceDiagram
     participant C as Client
     participant A as Agent
     C->>A: SendStreamingMessage "Generate the Q3 report"
+    A-->>C: Task {id, submitted}
     A-->>C: status working
     A-->>C: artifact report.pdf (chunk 1)
     A-->>C: artifact report.pdf (chunk 2, lastChunk)
@@ -196,6 +193,7 @@ sequenceDiagram
     participant C as Client
     participant A as Agent
     C->>A: SendStreamingMessage "crunch this dataset"
+    A-->>C: Task {id, submitted}
     A-->>C: status working
     C->>A: CancelTask {id}
     A-->>C: Task {working} — cancellation requested
@@ -299,7 +297,7 @@ slash-delimited names, shown for reference):
 | Method (v1.0) | Kind | Purpose | v0.2.x name |
 | --- | --- | --- | --- |
 | `SendMessage` | unary | Send a message; the response is a **`Task` or a `Message`** (a union). By default it **waits** for the round to finish. | `message/send` |
-| `SendStreamingMessage` | SSE | Same request; every event streams live. | `message/stream` |
+| `SendStreamingMessage` | SSE | Same request; a task-producing stream starts with a Task snapshot, then carries status/artifact updates. A pure direct reply has no Task. | `message/stream` |
 | `GetTask` | unary | Fetch a task snapshot; `historyLength` shapes attached history. | `tasks/get` |
 | `ListTasks` | unary | Enumerate tasks: filter by `contextId`/state, paginate. | — (new in v1.0) |
 | `CancelTask` | unary | Request cancellation. | `tasks/cancel` |
@@ -340,7 +338,7 @@ Standard JSON-RPC codes apply (`-32700` parse error, `-32600` invalid request, `
 
 ### The canonical event paradigm
 
-The typical shape of a task-producing round, and what is actually mandatory:
+The processor emits the task updates below; it does not emit the initial `Task`. For `SendStreamingMessage`, the framework derives that wire frame from the task state before applying the first update.
 
 ```
 status  -> submitted     optional: creation implies submitted
@@ -354,6 +352,8 @@ and mark artifact chunks; the terminal (or interrupted) status is the stream's
 last frame, after which the SSE stream closes. Everything else — an explicit
 `submitted`, how many `working` frames, whether progress text rides on status
 messages — is the agent's choice.
+
+This ownership split is intentional: a first `Message` completes a taskless response and later events are discarded, while a first status/artifact event selects task mode and causes the framework to materialize the initial Task snapshot.
 
 Next: [Server](server.md) explains how this framework turns that event
 stream into persisted tasks and derived responses; [Server](server.md) shows how

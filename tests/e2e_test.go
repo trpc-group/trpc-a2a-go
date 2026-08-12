@@ -435,9 +435,11 @@ func TestE2E_MessageAPI_Resubscribe(t *testing.T) {
 
 	first, ok := <-firstChan
 	require.True(t, ok, "Should have received a first stream event")
-	firstStatus := first.GetStatusUpdate()
-	require.NotNil(t, firstStatus, "First event should be a status update")
-	taskID := firstStatus.TaskID
+	firstTask := first.GetTask()
+	require.NotNil(t, firstTask, "First event should be a Task")
+	require.Equal(t, protocol.TaskStateSubmitted, firstTask.Status.State,
+		"The initial Task should describe the pre-update state")
+	taskID := firstTask.ID
 	require.NotEmpty(t, taskID, "Server should have assigned a task ID")
 
 	// Resubscribe to streaming message events using the new API
@@ -458,7 +460,9 @@ func TestE2E_MessageAPI_Resubscribe(t *testing.T) {
 }
 
 func checkStreamingEvents(t *testing.T, events []protocol.StreamResponse) {
-	require.NotEmpty(t, events, "Should have received events")
+	require.GreaterOrEqual(t, len(events), 2, "Should have received an initial Task and updates")
+	require.NotNil(t, events[0].GetTask(), "First event should be a Task")
+	require.NotNil(t, events[1].GetStatusUpdate(), "Initial Task should be followed by the first status update")
 
 	hasWorkingStatus := false
 	hasArtifact := false
@@ -635,7 +639,9 @@ func TestE2E_StreamDisconnect_BlockingSendDoesNotWedge(t *testing.T) {
 
 	first, ok := <-eventChan
 	require.True(t, ok, "should receive a first event")
-	taskID := first.GetStatusUpdate().TaskID
+	firstTask := first.GetTask()
+	require.NotNil(t, firstTask, "first event should be a Task")
+	taskID := firstTask.ID
 	require.NotEmpty(t, taskID)
 	cancelStream() // client disconnects here; buffer(1) will fill server-side
 

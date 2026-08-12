@@ -191,7 +191,16 @@ func TestOnSendMessage_ConcurrentContinuationRejected(t *testing.T) {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 	first := recvEvent(t, pipe)
-	taskID := first.GetStatusUpdate().TaskID
+	task := first.GetTask()
+	if task == nil {
+		t.Fatalf("first stream frame = %+v, want Task", first.Result)
+	}
+	taskID := task.ID
+	second := recvEvent(t, pipe)
+	if update := second.GetStatusUpdate(); update == nil ||
+		update.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("second stream frame = %+v, want WORKING", update)
+	}
 
 	// Second live run on the same task must be rejected atomically.
 	followUp := sendParams("again", "ctx-concurrent")
@@ -242,7 +251,16 @@ func TestOnCancelTask_LiveButTerminalNotCancelable(t *testing.T) {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 	first := recvEvent(t, pipe)
-	taskID := first.GetStatusUpdate().TaskID
+	task := first.GetTask()
+	if task == nil {
+		t.Fatalf("first stream frame = %+v, want Task", first.Result)
+	}
+	taskID := task.ID
+	second := recvEvent(t, pipe)
+	if update := second.GetStatusUpdate(); update == nil ||
+		update.Status.State != protocol.TaskStateCompleted {
+		t.Fatalf("second stream frame = %+v, want COMPLETED", update)
+	}
 	waitTaskState(t, m, taskID, protocol.TaskStateCompleted)
 
 	// The round is still live (channel not yet closed) but the stored state is
@@ -494,7 +512,16 @@ func TestOnSendMessageStream_DisconnectKeepsRunning(t *testing.T) {
 		t.Fatalf("OnSendMessageStream failed: %v", err)
 	}
 	first := recvEvent(t, pipe)
-	taskID := first.GetStatusUpdate().TaskID
+	task := first.GetTask()
+	if task == nil {
+		t.Fatalf("first stream frame = %+v, want Task", first.Result)
+	}
+	taskID := task.ID
+	second := recvEvent(t, pipe)
+	if update := second.GetStatusUpdate(); update == nil ||
+		update.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("second stream frame = %+v, want WORKING", update)
+	}
 	cancel() // client disconnects; the pipe is abandoned from here on
 	close(disconnected)
 

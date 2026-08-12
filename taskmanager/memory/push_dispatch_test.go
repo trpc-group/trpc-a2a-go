@@ -306,7 +306,7 @@ func TestInlinePushConfigRegistration(t *testing.T) {
 		if stored {
 			t.Fatalf("rejected continuation stored incoming message %s", followUp.Message.MessageID)
 		}
-		if live := manager.liveExecution("", suspended.ID); live != nil {
+		if live := manager.runs.live("", suspended.ID); live != nil {
 			t.Fatal("rejected continuation did not release its execution slot")
 		}
 	})
@@ -641,12 +641,15 @@ func TestSuspendWaitsForPushCapacityBeforeHandoff(t *testing.T) { //nolint:gocyc
 		state, ok := storedTaskState(manager, taskID)
 		return ok && state == protocol.TaskStateInputRequired
 	}, "task must persist input-required before publication")
-	manager.execMu.Lock()
-	exec := manager.executions[newScopedID("", taskID)]
+	exec := manager.runs.live("", taskID)
 	yielding := exec != nil && exec.yieldDone != nil
-	manager.execMu.Unlock()
 	if !yielding {
 		t.Fatal("input-required became visible before the suspend handoff barrier")
+	}
+	initialEvent := recvEvent(t, stream)
+	initial := initialEvent.GetTask()
+	if initial == nil || initial.ID != taskID || initial.Status.State != protocol.TaskStateSubmitted {
+		t.Fatalf("request stream first event = %+v, want initial SUBMITTED Task", initialEvent)
 	}
 
 	type continuationResult struct {
@@ -671,7 +674,7 @@ func TestSuspendWaitsForPushCapacityBeforeHandoff(t *testing.T) { //nolint:gocyc
 	}
 	select {
 	case event, ok := <-stream:
-		t.Fatalf("request stream published suspend before push enqueue completed: event=%+v open=%v",
+		t.Fatalf("request stream published update before push enqueue completed: event=%+v open=%v",
 			event, ok)
 	case <-time.After(50 * time.Millisecond):
 	}

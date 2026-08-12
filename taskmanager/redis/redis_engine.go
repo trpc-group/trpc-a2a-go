@@ -75,6 +75,7 @@ const (
 	engineDrainTerminal
 	engineDrainViolation
 	engineDrainYielded
+	engineDrainMessage
 )
 
 // sendOutcome is a message-or-task result candidate for message/send: the
@@ -128,6 +129,9 @@ type execution struct {
 
 	// pipe is the message/stream request pipe; nil for message/send.
 	pipe *taskSubscriber
+	// historyLength shapes only the operation-local Task framing sent on pipe.
+	// It is a private copy so callers may safely reuse or mutate their request.
+	historyLength *int
 
 	// immediateResult carries the immediate result (first persisted task
 	// snapshot or first Message) for returnImmediately=true. Buffered so the
@@ -210,7 +214,11 @@ func (m *TaskManager) prepareExecution(
 		done:            make(chan struct{}),
 	}
 	if streaming {
-		ex.pipe = newTaskSubscriber(taskID, m.options.TaskSubscriberBufSize, m.options.TaskSubscriberBlockingSend)
+		// Reserve one framing slot for the synthetic initial Task. The configured
+		// capacity remains available to processor updates, including when the
+		// request pipe uses non-blocking sends.
+		ex.pipe = newTaskSubscriber(taskID, m.options.TaskSubscriberBufSize+1,
+			m.options.TaskSubscriberBlockingSend)
 		ex.live.pipe = ex.pipe
 	}
 
@@ -312,6 +320,10 @@ func (m *TaskManager) prepareExecution(
 		PushConfig:          pushConfig,
 	}
 	ex.inlinePushPending = pending
+	if requested := historyLengthFromConfig(request.Configuration); requested != nil {
+		value := *requested
+		ex.historyLength = &value
+	}
 
 	processorEC := *ex.ec
 	if ex.ec.PushConfig != nil {
@@ -420,6 +432,10 @@ func (ex *execution) run(events <-chan protocol.StreamEvent) {
 				log.Warnf("RedisTaskManager: discarding %T for task %s emitted after the round yielded (suspended task)",
 					event, ex.ec.TaskID)
 				continue
+			case engineDrainMessage:
+				log.Warnf("RedisTaskManager: discarding %T for task %s emitted after a direct Message response",
+					event, ex.ec.TaskID)
+				continue
 			}
 			mode = ex.handleEvent(event)
 		case <-leaseTicker.C:
@@ -476,7 +492,17 @@ func (ex *execution) handleEvent(event protocol.StreamEvent) int {
 			ex.violate("processor emitted event for foreign task")
 			return engineDrainViolation
 		}
+		direct := !ex.taskTouched
 		ex.processMessageEvent(ev)
+		if ex.runErr != nil {
+			return engineConsuming
+		}
+		// The first valid event selects the response shape. Once a round returns
+		// a direct Message, end its wire response and only drain later events.
+		if direct {
+			ex.closePipe()
+			return engineDrainMessage
+		}
 		return engineConsuming
 	case *protocol.TaskStatusUpdateEvent:
 		if ev == nil {
@@ -702,6 +728,14 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		Message:   ev.Status.Message,
 		Timestamp: timestamp,
 	}
+	var initial *protocol.Task
+	if !ex.taskTouched {
+		if ex.task == nil {
+			initial = protocol.NewTask(ex.ec.TaskID, ex.ec.ContextID)
+		} else {
+			initial = copyTask(ex.task)
+		}
+	}
 	var previousStatusMessage *protocol.Message
 	allowCreate := ex.task == nil
 	if allowCreate {
@@ -735,6 +769,7 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		ex.failRun(fmt.Errorf("failed to store task %s status %s: %w", ev.TaskID, status.State, err))
 		return
 	}
+	ex.sendInitialTask(initial)
 	// The old status message is durably superseded only after the Task/event
 	// commit succeeds. Moving it earlier would leave failed updates reflected in
 	// conversation history while the stored Task still carried the same message.
@@ -783,6 +818,14 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 			ex.ec.TaskID, ex.task.Status.State)
 		return
 	}
+	var initial *protocol.Task
+	if !ex.taskTouched {
+		if ex.task == nil {
+			initial = protocol.NewTask(ex.ec.TaskID, ex.ec.ContextID)
+		} else {
+			initial = copyTask(ex.task)
+		}
+	}
 	allowCreate := ex.task == nil
 	if allowCreate {
 		ex.task = ex.newTask(ev.TaskID, ev.ContextID, protocol.TaskStatus{
@@ -803,6 +846,7 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 		ex.failRun(fmt.Errorf("failed to store task %s artifact: %w", ev.TaskID, err))
 		return
 	}
+	ex.sendInitialTask(initial)
 	if err := ex.persistInlinePushConfig(); err != nil {
 		log.Errorf("RedisTaskManager: failed to persist inline push config for task %s: %v", ex.ec.TaskID, err)
 		ex.failTask("failed to persist inline push config")
@@ -843,6 +887,19 @@ func (ex *execution) newTask(taskID, contextID string, status protocol.TaskStatu
 func (ex *execution) closePipe() {
 	if ex.pipe != nil {
 		ex.pipe.Close()
+	}
+}
+
+// sendInitialTask shapes and sends the operation-local pre-update Task frame.
+// The snapshot is private to this response, so filling History does not mutate
+// the stored Task or create another Redis journal event.
+func (ex *execution) sendInitialTask(task *protocol.Task) {
+	if task == nil || ex.pipe == nil {
+		return
+	}
+	ex.manager.fillTaskHistory(context.Background(), ex.ec.Tenant, task, ex.historyLength)
+	if err := ex.pipe.Send(protocol.NewStreamResponseTask(task)); err != nil {
+		log.Warnf("RedisTaskManager: failed to send initial Task for task %s: %v", ex.ec.TaskID, err)
 	}
 }
 

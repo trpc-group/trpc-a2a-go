@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Task lifecycle streaming
+
+- Memory and Redis TaskManagers now let the first valid processor event select the `SendStreamingMessage` response shape: a `Message` completes a taskless response, while a status or artifact starts a task lifecycle with the pre-update `Task` snapshot first, as required by A2A 1.0. Initial Task history follows the request's `historyLength`. The compat/v0 JSON-RPC endpoint forwards the snapshot as a legacy `task` event for task-mode streams; normal `SubscribeToTask` framing, push delivery, and the Redis event journal are unchanged.
+
+### Memory TaskManager
+
+- Publishing `input-required` or `auth-required` now cancels the yielded old round's processor context before its execution slot is released. This is round teardown rather than task cancellation: the Task stays suspended while the manager drains the processor channel. Shutdown rejects new resubscriptions once it begins and still waits cooperatively for processors to close their channels.
+
 ### HTTP+JSON protocol binding
 
 - **The v2 client and server now implement the A2A v1.0 HTTP+JSON/REST binding.** It uses the standard operation routes, `application/a2a+json` request and response bodies, direct protocol objects instead of JSON-RPC envelopes, raw `StreamResponse` SSE data, and `google.rpc.Status` JSON errors. JSON-RPC remains the default for direct client construction and continues to use `application/json`.
