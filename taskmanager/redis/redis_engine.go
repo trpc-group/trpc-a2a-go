@@ -793,6 +793,11 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		ex.offerImmediateTask()
 		ex.broadcastWithoutPush(response)
 		ex.closePipe()
+		// The suspended round no longer owns the task after publishing its
+		// final frame. Cancel its processor context before removing it from the
+		// registry: Close cannot discover the execution once the slot is released,
+		// but still waits for its drain engine to finish.
+		ex.live.cancel()
 		ex.manager.deregisterExecution(ex.ec.Tenant, ex.ec.TaskID, ex.live)
 		return
 	}

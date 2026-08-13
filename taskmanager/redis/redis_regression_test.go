@@ -52,6 +52,70 @@ func pollTaskState(t *testing.T, m *TaskManager, taskID string, want protocol.Ta
 	t.Fatalf("task %s never reached %s (last seen %s)", taskID, want, last)
 }
 
+// A suspended round releases its execution slot before its processor channel
+// necessarily closes. Cancel the yielded round itself so Close can wait for a
+// cooperative drain engine even though that execution is no longer discoverable.
+func TestSuspend_CancelsYieldedRoundAndCloseWaitsForDrain(t *testing.T) {
+	sawCancel := make(chan struct{})
+	releaseDrain := make(chan struct{})
+	processor := executorFunc(func(
+		ctx context.Context, _ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent, 1)
+		go func() {
+			defer close(out)
+			out <- statusEvent(protocol.TaskStateInputRequired, agentReply("need more"))
+			<-ctx.Done()
+			close(sawCancel)
+			<-releaseDrain
+		}()
+		return out, nil
+	})
+	manager, _ := setupTest(t, processor)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseDrain) }) }
+	defer release()
+
+	stream, err := manager.OnSendMessageStream(context.Background(), sendParams("go", "ctx-yield-close"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream failed: %v", err)
+	}
+	waitStreamClosed(t, stream)
+
+	// This must happen before Close. Otherwise Close could win the small window
+	// before deregistration and hide the missing yield-time cancellation.
+	select {
+	case <-sawCancel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("suspend did not cancel the yielded processor context")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for liveExecutionCount(manager) != 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if got := liveExecutionCount(manager); got != 0 {
+		t.Fatalf("yielded execution was not released: %d live", got)
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- manager.Close() }()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned before the yielded drain engine finished: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked after the yielded drain engine finished")
+	}
+}
+
 // A terminal state persisted by a no-live cancel must survive a yielded
 // round's late events: once round 1 suspends (yielding ownership), whatever it
 // emits afterwards is discarded instead of overwriting the store.

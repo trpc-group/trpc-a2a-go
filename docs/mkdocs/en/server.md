@@ -165,7 +165,7 @@ the request.
   | `submitted` / `working` | **`FAILED`** — "processor finished without terminal state" (a bug signal) |
   | cancellation was requested | **`CANCELED`** |
 
-- **Suspend yields the round** — emitting `input-required`/`auth-required` releases the task immediately so a continuation can start; anything the old round emits afterwards is discarded. Memory also cancels the yielded old round's `ctx` after publishing the suspend frame and before releasing the slot. This is a round-teardown signal, not `CancelTask`: the Task remains suspended. Close the old round's channel promptly and deliver completion from the continuation round.
+- **Suspend yields the round** — emitting `input-required`/`auth-required` releases the task immediately so a continuation can start; anything the old round emits afterwards is discarded. Memory and Redis also cancel the yielded old round's `ctx` after publishing the suspend frame and before releasing the slot. This is a round-teardown signal, not `CancelTask`: the Task remains suspended. Close the old round's channel promptly and deliver completion from the continuation round.
 - **Contract violations fail fast** — emitting an event for a foreign `taskId`,
   a `*protocol.Task` snapshot (framework-only in v1.0), or an invalid status
   marks an already-materialized task `FAILED` and discards the rest.
@@ -182,7 +182,7 @@ the request.
   the processor because there is no retained task to retrieve or resubscribe
   to.
 - In memory and Redis managers, `CancelTask` and manager shutdown cancel active processor work. The polite reaction is to **stop emitting and close** — the framework persists `CANCELED`. A terminal event emitted *after* the cancel still wins.
-- Memory additionally cancels a yielded round's `ctx` after publishing `input-required`/`auth-required`. This signal only tears down the old round; it does **not** mark the suspended Task `CANCELED`.
+- Memory and Redis additionally cancel a yielded round's `ctx` after publishing `input-required`/`auth-required`. This signal only tears down the old round; it does **not** mark the suspended Task `CANCELED`.
 - `CancelTask` **returns the snapshot at the moment cancellation was requested**
   (possibly still `working`); the terminal `CANCELED` lands when the round winds
   down. Canceling an already-terminal task returns `-32002`.
