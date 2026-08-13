@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/internal/jsonrpc"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager/stateless"
 )
 
 // TestA2AClient_ResubscribeTask tests the ResubscribeTask client method for SSE.
@@ -587,6 +589,112 @@ func createMockServerHandler(
 	}
 }
 
+func TestA2AClient_JSONRPCUsesExactEndpointURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+	}{
+		{name: "without trailing slash", endpoint: "https://agent.example.com/a2a/v1?token=secret"},
+		{name: "with trailing slash", endpoint: "https://agent.example.com/a2a/v1/?token=secret"},
+		{name: "with escaped path", endpoint: "https://agent.example.com/a2a%2Fv1?token=secret"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotURLs []string
+			handler := &mockHTTPReqHandler{handleFunc: func(
+				_ context.Context,
+				_ *http.Client,
+				req *http.Request,
+			) (*http.Response, error) {
+				gotURLs = append(gotURLs, req.URL.String())
+				resp := &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       http.NoBody,
+				}
+				if req.Header.Get("Accept") == protocol.MediaTypeEventStream {
+					resp.Header.Set("Content-Type", protocol.MediaTypeEventStream)
+					return resp, nil
+				}
+				resp.Header.Set("Content-Type", protocol.MediaTypeJSON)
+				resp.Body = io.NopCloser(strings.NewReader(
+					`{"jsonrpc":"2.0","id":"request-1","result":{}}`,
+				))
+				return resp, nil
+			}}
+
+			client, err := NewA2AClient(tt.endpoint, WithHTTPReqHandler(handler))
+			require.NoError(t, err)
+
+			_, err = client.doRequest(
+				context.Background(), jsonrpc.NewRequest(protocol.MethodTasksGet, "request-1"),
+			)
+			require.NoError(t, err)
+
+			streamResp, err := client.sendA2AStreamRequest(
+				context.Background(), "request-2", protocol.MethodMessageStream, []byte(`{}`),
+			)
+			require.NoError(t, err)
+			require.NoError(t, streamResp.Body.Close())
+
+			assert.Equal(t, []string{tt.endpoint, tt.endpoint}, gotURLs)
+		})
+	}
+}
+
+func TestA2AClient_JSONRPCUsesAdvertisedSubpathEndpoint(t *testing.T) {
+	const basePath = "/api/v1/agent"
+	testServer := httptest.NewUnstartedServer(nil)
+	t.Cleanup(testServer.Close)
+	endpoint := "http://" + testServer.Listener.Addr().String() + basePath + "/"
+
+	manager, err := stateless.NewTaskManager(httpJSONEchoProcessor{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	card := protocol.AgentCard{
+		Name:               "Subpath Agent",
+		Description:        "test",
+		Version:            "1",
+		DefaultInputModes:  []string{"text/plain"},
+		DefaultOutputModes: []string{"text/plain"},
+		Skills:             []protocol.AgentSkill{},
+		SupportedInterfaces: []protocol.AgentInterface{{
+			URL:             endpoint,
+			ProtocolBinding: protocol.ProtocolBindingJSONRPC,
+			ProtocolVersion: protocol.ProtocolVersionV1,
+		}},
+	}
+	a2aServer, err := server.NewA2AServer(
+		manager,
+		server.WithAgentCard(card),
+		server.WithBasePath(basePath),
+	)
+	require.NoError(t, err)
+	testServer.Config.Handler = a2aServer.Handler()
+	testServer.Start()
+
+	discoveryClient, err := NewA2AClient(testServer.URL + basePath)
+	require.NoError(t, err)
+	discovered, err := discoveryClient.GetAgentCard(context.Background(), "")
+	require.NoError(t, err)
+	require.Len(t, discovered.SupportedInterfaces, 1)
+	iface := discovered.SupportedInterfaces[0]
+	assert.Equal(t, endpoint, iface.URL)
+
+	rpcClient, err := NewA2AClient(iface.URL, WithProtocolBinding(iface.ProtocolBinding))
+	require.NoError(t, err)
+	response, err := rpcClient.SendMessage(context.Background(), protocol.SendMessageParams{
+		Message: protocol.Message{
+			MessageID: "message-1",
+			Role:      protocol.MessageRoleUser,
+			Parts:     []*protocol.Part{protocol.NewTextPart("hello")},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, response.GetMessage())
+	assert.Equal(t, "echo: hello", response.GetMessage().Parts[0].TextContent())
+}
+
 // TestA2AClient_GetAgentCard tests the GetAgentCard client method.
 func TestA2AClient_GetAgentCard(t *testing.T) {
 	t.Run("GetAgentCard Success - Default URL (New Path)", func(t *testing.T) {
@@ -756,11 +864,10 @@ func TestA2AClient_GetAgentCard(t *testing.T) {
 			Skills:             []server.AgentSkill{},
 		}
 
-		// Create a mock server that serves the agent card at baseURL + /api/v1 + /.well-known/agent-card.json
+		// Create a mock server that serves the agent card below a JSON-RPC endpoint.
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			assert.Equal(t, http.MethodGet, r.Method)
-			// Expect: /api/v1/.well-known/agent-card.json
-			assert.Equal(t, "/api/v1/.well-known/agent-card.json", r.URL.Path)
+			assert.Equal(t, "/rpc/api/v1/.well-known/agent-card.json", r.URL.Path)
 
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
@@ -769,16 +876,62 @@ func TestA2AClient_GetAgentCard(t *testing.T) {
 		defer server.Close()
 
 		// Create client
-		client, err := NewA2AClient(server.URL)
+		client, err := NewA2AClient(server.URL + "/rpc")
 		require.NoError(t, err)
 
 		// Call GetAgentCard with custom relative path
-		card, err := client.GetAgentCard(context.Background(), "/api/v1")
+		card, err := client.GetAgentCard(context.Background(), "api/v1")
 
 		// Assertions
 		require.NoError(t, err)
 		require.NotNil(t, card)
 		assert.Equal(t, "Custom Path Agent", card.Name)
+	})
+
+	t.Run("GetAgentCard Success - Escaped Endpoint with Relative Path", func(t *testing.T) {
+		tests := []struct {
+			name             string
+			endpointPath     string
+			expectedCardPath string
+		}{
+			{
+				name:             "escaped slash",
+				endpointPath:     "/rpc%2Fv1",
+				expectedCardPath: "/rpc%2Fv1/child/.well-known/agent-card.json",
+			},
+			{
+				name:             "escaped dot segments",
+				endpointPath:     "/rpc/%2e%2e/v1",
+				expectedCardPath: "/rpc/%2e%2e/v1/child/.well-known/agent-card.json",
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				mockCard := server.AgentCard{
+					Name:               "Escaped Path Agent",
+					Description:        "Agent discovered below an escaped endpoint",
+					Version:            "1.0.0",
+					DefaultInputModes:  []string{"text"},
+					DefaultOutputModes: []string{"text"},
+					Skills:             []server.AgentSkill{},
+				}
+
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					assert.Equal(t, http.MethodGet, r.Method)
+					assert.Equal(t, tt.expectedCardPath, r.URL.EscapedPath())
+					w.Header().Set("Content-Type", "application/json; charset=utf-8")
+					require.NoError(t, json.NewEncoder(w).Encode(mockCard))
+				}))
+				defer server.Close()
+
+				client, err := NewA2AClient(server.URL + tt.endpointPath)
+				require.NoError(t, err)
+				card, err := client.GetAgentCard(context.Background(), "child")
+				require.NoError(t, err)
+				require.NotNil(t, card)
+				assert.Equal(t, "Escaped Path Agent", card.Name)
+			})
+		}
 	})
 
 	t.Run("GetAgentCard Success - Custom Relative Path with Fallback to Old Path", func(t *testing.T) {

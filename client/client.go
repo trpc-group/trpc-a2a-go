@@ -36,7 +36,7 @@ const (
 // A2AClient provides methods to interact with an A2A agent server over the
 // JSON-RPC or HTTP+JSON protocol binding.
 type A2AClient struct {
-	baseURL         *url.URL            // Parsed base URL of the agent server.
+	baseURL         *url.URL            // Exact JSON-RPC endpoint or HTTP+JSON route base.
 	httpClient      *http.Client        // Underlying HTTP client.
 	userAgent       string              // User-Agent header string.
 	authProvider    auth.ClientProvider // Authentication provider.
@@ -51,7 +51,8 @@ type A2AClient struct {
 }
 
 // NewA2AClient creates a new A2A client targeting the specified agentURL.
-// The agentURL should be the base endpoint for the agent (e.g., "http://localhost:8080/").
+// JSON-RPC requests use agentURL as the exact endpoint. HTTP+JSON requests use
+// it as the base URL for operation routes.
 // Options can be provided to configure the client, such as setting a custom http.Client or timeout.
 // Returns an error if the agentURL is invalid.
 func NewA2AClient(agentURL string, opts ...Option) (*A2AClient, error) {
@@ -89,15 +90,6 @@ func parseAgentURL(agentURL string) (*url.URL, error) {
 	parsedURL, err := url.ParseRequestURI(agentURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid agent URL %q: %w", agentURL, err)
-	}
-	// Normalize only the URL path. Appending to the original string corrupts a
-	// trailing query ("?token=x" would become "?token=x/"). Preserve RawPath
-	// when present so escaped endpoint paths continue to round-trip.
-	if !strings.HasSuffix(parsedURL.Path, "/") {
-		parsedURL.Path += "/"
-		if parsedURL.RawPath != "" {
-			parsedURL.RawPath += "/"
-		}
 	}
 	return parsedURL, nil
 }
@@ -431,8 +423,7 @@ func (c *A2AClient) doRequest(ctx context.Context, request *jsonrpc.Request, opt
 		// Use a more specific error message prefix.
 		return nil, fmt.Errorf("a2aClient.doRequest: failed to marshal request: %w", err)
 	}
-	// Construct the target URL using the base URL.
-	// Assume the RPC endpoint is at the root of the baseURL.
+	// Use the exact JSON-RPC endpoint supplied by the caller.
 	targetURL := c.baseURL.String()
 	req, err := http.NewRequestWithContext(
 		ctx,
@@ -575,7 +566,7 @@ func (c *A2AClient) DeletePushNotification(
 //     (tries baseURL + /.well-known/agent-card.json first,
 //     then falls back to baseURL + /.well-known/agent.json)
 //   - Relative path: Uses baseURL + agentCardURL + standard paths with fallback
-//     (e.g., "/api" -> baseURL/api/.well-known/agent-card.json, then baseURL/api/.well-known/agent.json)
+//     (e.g., "api" -> baseURL/api/.well-known/agent-card.json, then baseURL/api/.well-known/agent.json)
 //   - Absolute URL: Used as-is without fallback (e.g., "https://cdn.example.com/card.json")
 func (c *A2AClient) GetAgentCard(
 	ctx context.Context,
@@ -598,13 +589,23 @@ func (c *A2AClient) GetAgentCard(
 			return c.getAgentCardFromURL(ctx, agentCardURL, opts...)
 		}
 
-		// Relative path: resolve against baseURL to create new base
-		baseForCard = *c.baseURL.ResolveReference(parsedURL)
+		// Relative Agent Card locations are appended to the client endpoint.
+		// Treat the endpoint as a directory for this discovery-only operation;
+		// JSON-RPC requests still use the exact endpoint URL.
+		resolveBase := *c.baseURL
+		if !strings.HasSuffix(resolveBase.EscapedPath(), "/") {
+			resolveBase.Path += "/"
+			if resolveBase.RawPath != "" {
+				resolveBase.RawPath += "/"
+			}
+		}
+		baseForCard = *resolveBase.ResolveReference(parsedURL)
 	}
 
 	// Try the new path first (A2A spec v0.2.5+)
 	newPathURL := baseForCard
-	newPathURL.Path = path.Join(baseForCard.Path, protocol.AgentCardPath)
+	newPathURL.RawPath = path.Join(baseForCard.EscapedPath(), protocol.AgentCardPath)
+	newPathURL.Path, _ = url.PathUnescape(newPathURL.RawPath)
 	card, err := c.getAgentCardFromURL(ctx, newPathURL.String(), opts...)
 	if err == nil {
 		return card, nil
@@ -615,7 +616,8 @@ func (c *A2AClient) GetAgentCard(
 
 	// Fallback to the old path for backward compatibility
 	oldPathURL := baseForCard
-	oldPathURL.Path = path.Join(baseForCard.Path, protocol.OldAgentCardPath)
+	oldPathURL.RawPath = path.Join(baseForCard.EscapedPath(), protocol.OldAgentCardPath)
+	oldPathURL.Path, _ = url.PathUnescape(oldPathURL.RawPath)
 	card, fallbackErr := c.getAgentCardFromURL(ctx, oldPathURL.String(), opts...)
 	if fallbackErr == nil {
 		log.Debugf("A2A Client GetAgentCard: successfully fetched from fallback path %s", oldPathURL.String())

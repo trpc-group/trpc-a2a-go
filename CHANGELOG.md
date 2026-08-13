@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Client endpoint handling
+
+- **The v2 JSON-RPC client now uses the URL passed to `NewA2AClient` as the exact endpoint instead of automatically appending `/`.** Root URLs and explicitly slash-terminated endpoints are unchanged; callers that require a trailing slash must now include it. HTTP+JSON operation-path construction and relative Agent Card discovery retain their path-joining behavior.
+
 ### Task lifecycle streaming
 
 - Memory and Redis TaskManagers now let the first valid processor event select the `SendStreamingMessage` response shape: a `Message` completes a taskless response, while a status or artifact starts a task lifecycle with the pre-update `Task` snapshot first, as required by A2A 1.0. Initial Task history follows the request's `historyLength`. The compat/v0 JSON-RPC endpoint forwards the snapshot as a legacy `task` event for task-mode streams; normal `SubscribeToTask` framing, push delivery, and the Redis event journal are unchanged.

@@ -34,6 +34,8 @@ selectedClient, _ := client.NewA2AClient(
 )
 ```
 
+对于 JSON-RPC，所选 interface 的 URL 就是完整请求 endpoint，client 会严格按声明使用，包括是否以 `/` 结尾。对于 HTTP+JSON，该 URL 是路由基址，client 会继续拼接具体操作路径。
+
 JSON-RPC 请求继续使用 `application/json`。HTTP+JSON 使用 REST 路由并发送 `application/a2a+json`；一元响应同时接受 `application/a2a+json` 与兼容 1.0.0 实现的 `application/json`。默认没有超时；生产代码通常会传 `client.WithTimeout(...)` 或自定义 `http.Client`。
 
 ## 先发现 Agent

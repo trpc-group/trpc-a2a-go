@@ -33,6 +33,8 @@ selectedClient, _ := client.NewA2AClient(
 )
 ```
 
+For JSON-RPC, the selected interface URL is the complete request endpoint and is used exactly as declared, including whether its path ends in `/`. HTTP+JSON treats the URL as a route base and appends the operation path.
+
 JSON-RPC requests continue to use `application/json`. HTTP+JSON requests use REST paths and send `application/a2a+json`; unary responses accept both `application/a2a+json` and the 1.0.0-era `application/json` for compatibility.
 
 ## The four consumption modes
