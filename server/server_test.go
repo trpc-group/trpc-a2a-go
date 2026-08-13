@@ -78,6 +78,7 @@ func performJSONRPCRequest(
 	require.NoError(t, err)
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("A2A-Version", protocol.ProtocolVersionV1)
 
 	resp, err := server.Client().Do(httpReq)
 	require.NoError(t, err, "HTTP request failed")
@@ -499,6 +500,7 @@ func TestA2ASrv_HandleMessageStream_SSE(t *testing.T) {
 	require.NoError(t, err)
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream") // Critical for SSE
+	httpReq.Header.Set("A2A-Version", protocol.ProtocolVersionV1)
 
 	// Perform request
 	resp, err := testServer.Client().Do(httpReq)
@@ -976,22 +978,25 @@ func TestA2AServer_HandleAgentGetAuthenticatedExtendedCard(t *testing.T) {
 		expectedError            bool
 		expectedErrorCode        int
 	}{
+		// Spec §3.3.4 / §13.3: an undeclared capability is UnsupportedOperation,
+		// not ExtendedAgentCardNotConfigured.
 		{
-			name:                 "not_configured",
+			name:                 "capability_absent",
 			supportsExtendedCard: nil,
 			expectedError:        true,
-			expectedErrorCode:    jsonrpc.CodeAuthenticatedExtendedCardNotConfigured,
+			expectedErrorCode:    jsonrpc.CodeUnsupportedOperation,
 		},
 		{
-			name:                 "disabled",
+			name:                 "capability_false",
 			supportsExtendedCard: func() *bool { b := false; return &b }(),
 			expectedError:        true,
-			expectedErrorCode:    jsonrpc.CodeAuthenticatedExtendedCardNotConfigured,
+			expectedErrorCode:    jsonrpc.CodeUnsupportedOperation,
 		},
 		{
 			name:                 "enabled_no_handler",
 			supportsExtendedCard: func() *bool { b := true; return &b }(),
-			expectedError:        false,
+			expectedError:        true,
+			expectedErrorCode:    jsonrpc.CodeAuthenticatedExtendedCardNotConfigured,
 		},
 		{
 			name:                 "enabled_with_handler",
@@ -1061,6 +1066,37 @@ func TestA2AServer_HandleAgentGetAuthenticatedExtendedCard(t *testing.T) {
 	}
 }
 
+func TestA2AServer_HandleTenantExtendedAgentCard(t *testing.T) {
+	enabled := true
+	card := defaultAgentCard()
+	card.Name = "Tenant Agent"
+	card.Capabilities.ExtendedAgentCard = &enabled
+
+	srv, err := NewA2AServer(
+		newMockTaskManager(),
+		WithTenantCard("tenant-a", card),
+		WithAuthenticatedExtendedCardHandler(func(_ context.Context, base AgentCard) (AgentCard, error) {
+			base.Description = "extended tenant card"
+			return base, nil
+		}),
+	)
+	require.NoError(t, err)
+	testServer := httptest.NewServer(http.HandlerFunc(srv.handleJSONRPC))
+	defer testServer.Close()
+
+	resp := performJSONRPCRequest(t, testServer, protocol.MethodAgentAuthenticatedExtendedCard,
+		map[string]string{"tenant": "tenant-a"}, "tenant-extended-card")
+	require.Nil(t, resp.Error)
+	payload, err := json.Marshal(resp.Result)
+	require.NoError(t, err)
+	var got AgentCard
+	require.NoError(t, json.Unmarshal(payload, &got))
+	assert.Equal(t, "Tenant Agent", got.Name)
+	assert.Equal(t, "extended tenant card", got.Description)
+	require.NotEmpty(t, got.SupportedInterfaces)
+	assert.Equal(t, "tenant-a", got.SupportedInterfaces[0].Tenant)
+}
+
 // blockMiddleware rejects every request with 401, used to prove the compat
 // path is covered by the middleware chain.
 type blockMiddleware struct{}
@@ -1107,6 +1143,44 @@ func TestCompatHandler_CoveredByMiddleware(t *testing.T) {
 	require.NoError(t, err)
 	defer resp2.Body.Close()
 	assert.Equal(t, http.StatusUnauthorized, resp2.StatusCode)
+}
+
+func TestCompatDispatchRespectsA2AVersion(t *testing.T) {
+	compatHits := 0
+	compat := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		compatHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv, err := NewA2AServer(
+		newMockTaskManager(),
+		WithAgentCard(defaultAgentCard()),
+		WithCompatHandler(compat),
+	)
+	require.NoError(t, err)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(
+		`{"jsonrpc":"2.0","id":"1","method":"message/send","params":{}}`,
+	)))
+	request.Header.Set("Content-Type", protocol.MediaTypeJSON)
+	srv.Handler().ServeHTTP(recorder, request)
+	assert.Equal(t, http.StatusNoContent, recorder.Code)
+	assert.Equal(t, 1, compatHits)
+
+	for _, version := range []string{"1.0", "2.0"} {
+		recorder = httptest.NewRecorder()
+		request = httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(
+			`{"jsonrpc":"2.0","id":"2","method":"message/send","params":{}}`,
+		)))
+		request.Header.Set("Content-Type", protocol.MediaTypeJSON)
+		request.Header.Set("A2A-Version", version)
+		srv.Handler().ServeHTTP(recorder, request)
+		assert.Contains(t, recorder.Body.String(), map[string]string{
+			"1.0": "Method not found",
+			"2.0": "Version not supported",
+		}[version])
+		assert.Equal(t, 1, compatHits)
+	}
 }
 
 // TestServer_ServingPathsIndependentOfSupportedInterfaces verifies mount paths
@@ -1166,6 +1240,7 @@ func TestHTTPJSONTenantCanMatchJSONRPCEndpointPrefix(t *testing.T) {
 	// The REST tenant "rpc" must not be swallowed by the /rpc/ JSON-RPC pattern.
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/rpc/tasks/missing-task", nil)
+	req.Header.Set("A2A-Version", protocol.ProtocolVersionV1)
 	srv.Handler().ServeHTTP(recorder, req)
 	assert.Equal(t, protocol.MediaTypeA2AJSON, recorder.Header().Get("Content-Type"))
 	assert.Contains(t, recorder.Body.String(), "TASK_NOT_FOUND")
@@ -1176,6 +1251,7 @@ func TestHTTPJSONTenantCanMatchJSONRPCEndpointPrefix(t *testing.T) {
 		`{"jsonrpc":"2.0","id":"1","method":"GetTask","params":{"id":"missing-task"}}`,
 	)))
 	req.Header.Set("Content-Type", protocol.MediaTypeJSON)
+	req.Header.Set("A2A-Version", protocol.ProtocolVersionV1)
 	srv.Handler().ServeHTTP(recorder, req)
 	assert.Contains(t, recorder.Body.String(), `"jsonrpc":"2.0"`)
 
@@ -1193,6 +1269,7 @@ func TestHTTPJSONTenantCanMatchJSONRPCEndpointPrefix(t *testing.T) {
 		`{"jsonrpc":"2.0","id":"1","method":"GetTask","params":{"id":"missing-task"}}`,
 	)))
 	req.Header.Set("Content-Type", protocol.MediaTypeJSON)
+	req.Header.Set("A2A-Version", protocol.ProtocolVersionV1)
 	escapedSrv.Handler().ServeHTTP(recorder, req)
 	assert.Contains(t, recorder.Body.String(), `"jsonrpc":"2.0"`)
 }
@@ -1314,5 +1391,82 @@ func TestHandleSSEStreamDrainsAfterClientDisconnect(t *testing.T) {
 	case <-producerDone:
 	case <-time.After(time.Second):
 		t.Fatal("event producer remained blocked after SSE client disconnect")
+	}
+}
+
+// Version negotiation uses Major.Minor, ignores a numeric patch component and
+// treats an absent value as 0.3 as required by spec §3.6.
+func TestValidateA2AVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name, target, header string
+		wantErr              bool
+	}{
+		{name: "supported header", target: "/", header: "1.0"},
+		{name: "supported query", target: "/?A2A-Version=1.0"},
+		{name: "case-insensitive query", target: "/?a2a-version=1.0"},
+		{name: "patch zero", target: "/", header: "1.0.0"},
+		{name: "patch ignored", target: "/", header: "1.0.7"},
+		{name: "header wins", target: "/?A2A-Version=2.0", header: "1.0.1"},
+		{name: "absent means 0.3", target: "/", wantErr: true},
+		{name: "unsupported minor", target: "/", header: "1.1", wantErr: true},
+		{name: "unsupported major", target: "/", header: "2.0", wantErr: true},
+		{name: "unsupported old version", target: "/", header: "0.3", wantErr: true},
+		{name: "malformed short", target: "/", header: "1", wantErr: true},
+		{name: "malformed patch", target: "/", header: "1.0.x", wantErr: true},
+		{name: "too many components", target: "/", header: "1.0.0.0", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tc.target, nil)
+			if tc.header != "" {
+				req.Header.Set("A2A-Version", tc.header)
+			}
+			assert.Equal(t, tc.wantErr, validateA2AVersion(req) != nil)
+		})
+	}
+}
+
+func TestJSONRPCA2AVersionNegotiation(t *testing.T) {
+	srv, err := NewA2AServer(newMockTaskManager(), WithAgentCard(defaultAgentCard()))
+	require.NoError(t, err)
+	testServer := httptest.NewServer(http.HandlerFunc(srv.handleJSONRPC))
+	defer testServer.Close()
+
+	body := `{"jsonrpc":"2.0","id":"1","method":"` + protocol.MethodTasksGet + `","params":{"id":"t1"}}`
+	post := func(t *testing.T, target string, header string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, testServer.URL+target, strings.NewReader(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		if header != "" {
+			req.Header.Set("A2A-Version", header)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		return resp
+	}
+
+	for _, tc := range []struct{ name, target, header string }{
+		{"missing version", "/", ""},
+		{"header", "/", "0.3"},
+		{"query parameter", "/?A2A-Version=0.3", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := post(t, tc.target, tc.header)
+			defer resp.Body.Close()
+			payload, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			assert.Contains(t, string(payload), "Version not supported")
+		})
+	}
+
+	for _, version := range []string{protocol.ProtocolVersionV1, "1.0.0", "1.0.7"} {
+		t.Run("supported "+version, func(t *testing.T) {
+			resp := post(t, "/", version)
+			defer resp.Body.Close()
+			payload, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			assert.NotContains(t, string(payload), "Version not supported")
+		})
 	}
 }

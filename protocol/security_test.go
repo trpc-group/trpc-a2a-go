@@ -52,21 +52,95 @@ func TestSecurityScheme_UnmarshalBothShapes(t *testing.T) {
 }
 
 func TestSecurityRequirements_WrappedWire(t *testing.T) {
+	// SecurityRequirement.schemes is map<string, StringList> in the proto, so
+	// the ProtoJSON form wraps the scopes in {"list": [...]}.
 	r := SecurityRequirements{{"apiKey": {"read"}}}
 	b, err := json.Marshal(r)
 	require.NoError(t, err)
-	assert.JSONEq(t, `[{"schemes":{"apiKey":["read"]}}]`, string(b))
+	assert.JSONEq(t, `[{"schemes":{"apiKey":{"list":["read"]}}}]`, string(b))
 
-	// Unmarshal both shapes.
-	var fromV1 SecurityRequirements
-	require.NoError(t, json.Unmarshal([]byte(`[{"schemes":{"k":["s"]}}]`), &fromV1))
-	require.Len(t, fromV1, 1)
-	assert.Equal(t, []string{"s"}, fromV1[0]["k"])
+	// The spec's own sample Agent Card must round-trip.
+	var fromSpec SecurityRequirements
+	require.NoError(t, json.Unmarshal(
+		[]byte(`[{"schemes":{"google":{"list":["openid","profile","email"]}}}]`), &fromSpec))
+	require.Len(t, fromSpec, 1)
+	assert.Equal(t, []string{"openid", "profile", "email"}, fromSpec[0]["google"])
+
+	// Bare scopes inside "schemes" — what earlier v2 prereleases emitted.
+	var fromPrerelease SecurityRequirements
+	require.NoError(t, json.Unmarshal([]byte(`[{"schemes":{"k":["s"]}}]`), &fromPrerelease))
+	require.Len(t, fromPrerelease, 1)
+	assert.Equal(t, []string{"s"}, fromPrerelease[0]["k"])
 
 	var fromV0 SecurityRequirements
 	require.NoError(t, json.Unmarshal([]byte(`[{"k":["s"]}]`), &fromV0))
 	require.Len(t, fromV0, 1)
 	assert.Equal(t, []string{"s"}, fromV0[0]["k"])
+
+	// "schemes" is also a valid v0 scheme name. An array value distinguishes
+	// it from the v1.0 wrapper object.
+	var namedSchemes SecurityRequirements
+	require.NoError(t, json.Unmarshal(
+		[]byte(`[{"schemes":["read"]},{"schemes":[],"oauth":["openid"]}]`), &namedSchemes))
+	require.Len(t, namedSchemes, 2)
+	assert.Equal(t, []string{"read"}, namedSchemes[0]["schemes"])
+	assert.Empty(t, namedSchemes[1]["schemes"])
+	assert.Equal(t, []string{"openid"}, namedSchemes[1]["oauth"])
+}
+
+func TestSecurityRequirements_MixedCompatibilityWire(t *testing.T) {
+	var got SecurityRequirements
+	require.NoError(t, json.Unmarshal([]byte(`[
+		{"schemes":{"oauth":{"list":["openid"]}}},
+		{"schemes":{"apiKey":["read"]}},
+		{"mtls":[]}
+	]`), &got))
+	require.Len(t, got, 3)
+	assert.Equal(t, []string{"openid"}, got[0]["oauth"])
+	assert.Equal(t, []string{"read"}, got[1]["apiKey"])
+	assert.Empty(t, got[2]["mtls"])
+}
+
+func TestSecurityRequirements_IgnoresUnknownFields(t *testing.T) {
+	var got SecurityRequirements
+	require.NoError(t, json.Unmarshal([]byte(`[
+		{"schemes":{"oauth":{"list":["openid"],"future":true}},"future":"ignored"},
+		{"schemes":{"apiKey":["read"]},"future":"ignored"},
+		{"mtls":[]},
+		{"schemes":{"futureOnly":{"future":true}}},
+		{"future":true},
+		{"schemes":null,"future":true}
+	]`), &got))
+	require.Len(t, got, 6)
+	assert.Equal(t, []string{"openid"}, got[0]["oauth"])
+	assert.Equal(t, []string{"read"}, got[1]["apiKey"])
+	assert.Empty(t, got[2]["mtls"])
+	assert.Empty(t, got[3]["futureOnly"])
+	assert.Empty(t, got[4])
+	assert.Empty(t, got[5])
+}
+
+func TestSecurityRequirements_RejectsMalformedScopes(t *testing.T) {
+	for _, input := range []string{
+		`[{"schemes":{"oauth":{"list":"openid"}}}]`,
+		`[{"schemes":"oauth"}]`,
+	} {
+		var got SecurityRequirements
+		assert.Error(t, json.Unmarshal([]byte(input), &got), input)
+	}
+}
+
+func TestAgentSkill_SecurityRequirementsRoundTrip(t *testing.T) {
+	want := AgentSkill{
+		ID: "skill", Name: "Skill", Tags: []string{"test"},
+		SecurityRequirements: SecurityRequirements{{"oauth": {"openid"}}},
+	}
+	payload, err := json.Marshal(want)
+	require.NoError(t, err)
+	assert.Contains(t, string(payload), `"securityRequirements":[{"schemes":{"oauth":{"list":["openid"]}}}]`)
+	var got AgentSkill
+	require.NoError(t, json.Unmarshal(payload, &got))
+	assert.Equal(t, want.SecurityRequirements, got.SecurityRequirements)
 }
 
 func TestAgentInterface_DualKeyWire(t *testing.T) {

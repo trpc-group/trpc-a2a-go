@@ -1416,6 +1416,17 @@ func TestOnListTasks(t *testing.T) {
 		}
 		seen[task.ID] = true
 	}
+
+	intPointer := func(value int) *int { return &value }
+	for _, params := range []protocol.ListTasksParams{
+		{PageSize: intPointer(0)},
+		{PageSize: intPointer(taskmanager.ListTasksMaxPageSize + 1)},
+		{HistoryLength: intPointer(-1)},
+	} {
+		if _, err := m.OnListTasks(context.Background(), params); !errors.Is(err, taskmanager.ErrInvalidParamsSentinel) {
+			t.Errorf("OnListTasks(%+v) error = %v, want invalid params", params, err)
+		}
+	}
 }
 
 // =============================================================================

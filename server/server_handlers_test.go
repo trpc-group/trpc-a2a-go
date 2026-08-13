@@ -63,6 +63,7 @@ func createJSONRPCRequest(t *testing.T, method string, params interface{}, id st
 	req, err := http.NewRequest(http.MethodPost, "http://test", bytes.NewReader(reqBytes))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("A2A-Version", protocol.ProtocolVersionV1)
 
 	return req, reqBytes
 }
@@ -98,6 +99,7 @@ func testJSONRPCErrorResponse(t *testing.T, server *httptest.Server, method stri
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
+	req.Header.Set("A2A-Version", protocol.ProtocolVersionV1)
 
 	resp, err := server.Client().Do(req)
 	require.NoError(t, err)
@@ -438,6 +440,7 @@ func TestA2AServer_Resubscribe(t *testing.T) {
 		require.NoError(t, err)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "text/event-stream") // Request SSE
+		req.Header.Set("A2A-Version", protocol.ProtocolVersionV1)
 
 		resp, err := testServer.Client().Do(req)
 		require.NoError(t, err)

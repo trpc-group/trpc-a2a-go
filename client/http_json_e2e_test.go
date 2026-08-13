@@ -65,7 +65,12 @@ func newHTTPJSONFixture(t *testing.T) (rest, rpc *A2AClient) {
 		Skills:             []protocol.AgentSkill{},
 	}
 	a2aServer, err := server.NewA2AServer(manager,
-		server.WithAgentCard(card), server.WithHTTPJSONEndpoint("/"))
+		server.WithAgentCard(card),
+		server.WithHTTPJSONEndpoint("/"),
+		server.WithAuthenticatedExtendedCardHandler(func(_ context.Context, base server.AgentCard) (server.AgentCard, error) {
+			return base, nil
+		}),
+	)
 	require.NoError(t, err)
 	testServer := httptest.NewServer(a2aServer.Handler())
 	t.Cleanup(testServer.Close)

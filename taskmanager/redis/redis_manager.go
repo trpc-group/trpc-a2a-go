@@ -576,7 +576,7 @@ func (m *TaskManager) OnPushNotificationGet(
 const unlimitedHistoryLength = 1 << 30
 
 // OnListTasks handles the v1.0 ListTasks request from the tenant-and-owner-local task
-// index, filtering and applying offset-based pagination without a keyspace SCAN.
+// index, filtering and applying keyset pagination without a keyspace SCAN.
 func (m *TaskManager) OnListTasks(
 	ctx context.Context,
 	params protocol.ListTasksParams,

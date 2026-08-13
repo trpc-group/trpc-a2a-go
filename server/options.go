@@ -139,10 +139,17 @@ func WithTenantCard(tenant string, card AgentCard) Option {
 			s.tenantCards = make(map[string]AgentCard)
 		}
 		card.NormalizeInterfaces()
-		// Stamp the tenant onto the card's interfaces so clients see who to address.
-		for i := range card.SupportedInterfaces {
-			card.SupportedInterfaces[i].Tenant = tenant
+		// Stamp the tenant onto the card's interfaces so clients see who to
+		// address. Copy the slice first: card is passed by value but its
+		// backing array is still the caller's, so registering one card value
+		// for several tenants would otherwise leave them all advertising the
+		// tenant that was registered last.
+		interfaces := make([]protocol.AgentInterface, len(card.SupportedInterfaces))
+		copy(interfaces, card.SupportedInterfaces)
+		for i := range interfaces {
+			interfaces[i].Tenant = tenant
 		}
+		card.SupportedInterfaces = interfaces
 		s.tenantCards[tenant] = card
 	}
 }

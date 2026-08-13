@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### A2A v1.0 conformance fixes
+
+- **`securityRequirements` now uses the specified wire shape.** `SecurityRequirement.schemes` is `map<string, StringList>` in the proto, so scopes serialize as `{"schemes": {"google": {"list": ["openid"]}}}`. The previous form omitted the `StringList` level, which meant the specification's own sample Agent Card failed to parse and every card this SDK served declared its requirements in a shape no conformant peer could read. Cards written by earlier v2 prereleases (bare scope arrays) and v0 cards still parse.
+- `AgentSkill.securityRequirements` is now modelled, instead of being silently dropped when a card is read and re-served.
+- `ListTasks` returns tasks sorted by status timestamp descending as spec §3.1.4 requires, with the task ID breaking ties, and uses an opaque keyset cursor instead of an offset. Its required pagination fields are now always present, and out-of-range `pageSize` or negative `historyLength` values are rejected.
+- `GetExtendedAgentCard` distinguishes an unsupported capability from a declared-but-unconfigured extended card (spec §3.3.4, §13.3).
+- The JSON-RPC and HTTP+JSON bindings validate the `A2A-Version` service parameter, accepting it as a header or as a request parameter (spec §3.6.1), ignoring patch versions during negotiation, interpreting an absent value as 0.3, and answering `VersionNotSupportedError` for a version the interface does not speak.
+- `WithTenantCard` no longer stamps its tenant into the caller's Agent Card, so registering one card value for several tenants gives each its own tenant.
+
 ### Client endpoint handling
 
 - **The v2 JSON-RPC client now uses the URL passed to `NewA2AClient` as the exact endpoint instead of automatically appending `/`.** Root URLs and explicitly slash-terminated endpoints are unchanged; callers that require a trailing slash must now include it. HTTP+JSON operation-path construction and relative Agent Card discovery retain their path-joining behavior.

@@ -7,6 +7,8 @@
 package taskmanager
 
 import (
+	"encoding/base64"
+	"errors"
 	"testing"
 	"time"
 
@@ -76,8 +78,41 @@ func ltSampleTasks() []*protocol.Task {
 	return []*protocol.Task{mk("t3"), mk("t1"), mk("t5"), mk("t2"), mk("t4")}
 }
 
+// Spec §3.1.4: "Implementations MUST return tasks sorted by their status
+// timestamp time in descending order (most recently updated tasks first)."
+func TestPaginateTasksOrdersByStatusTimestampDescending(t *testing.T) {
+	mk := func(id, timestamp string) *protocol.Task {
+		return &protocol.Task{ID: id, Status: protocol.TaskStatus{Timestamp: timestamp}}
+	}
+	tasks := []*protocol.Task{
+		mk("t-whole", "2024-01-01T00:00:00Z"),
+		mk("t-b", "2024-01-01T00:00:00.100Z"),
+		mk("t-a", "2024-01-01T00:00:00.100Z"),
+		mk("t-empty", ""),
+	}
+	res, err := PaginateTasks(tasks, protocol.ListTasksParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"t-a", "t-b", "t-whole", "t-empty"}
+	for i, id := range want {
+		if res.Tasks[i].ID != id {
+			t.Fatalf("position %d: want %s, got %s (full order %v)", i, id, res.Tasks[i].ID, res.Tasks)
+		}
+	}
+
+	// Paging must walk the same descending order.
+	page, err := PaginateTasks(tasks, protocol.ListTasksParams{PageSize: ltIntPtr(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Tasks) != 1 || page.Tasks[0].ID != "t-a" {
+		t.Errorf("first page should hold the most recent task, got %v", page.Tasks)
+	}
+}
+
 func TestPaginateTasks(t *testing.T) {
-	t.Run("default page: sorted by ID, artifacts stripped, no next page", func(t *testing.T) {
+	t.Run("equal timestamps fall back to the ID tiebreak", func(t *testing.T) {
 		res, err := PaginateTasks(ltSampleTasks(), protocol.ListTasksParams{})
 		if err != nil {
 			t.Fatal(err)
@@ -97,48 +132,124 @@ func TestPaginateTasks(t *testing.T) {
 	})
 
 	t.Run("pageSize + pageToken walk pages", func(t *testing.T) {
-		p1, err := PaginateTasks(ltSampleTasks(), protocol.ListTasksParams{PageSize: ltIntPtr(2)})
-		if err != nil {
-			t.Fatal(err)
+		var got []string
+		token := ""
+		for {
+			page, err := PaginateTasks(ltSampleTasks(), protocol.ListTasksParams{
+				PageSize: ltIntPtr(2), PageToken: token,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, task := range page.Tasks {
+				got = append(got, task.ID)
+			}
+			if page.NextPageToken == "" {
+				break
+			}
+			if page.NextPageToken == "2" || page.NextPageToken == "4" {
+				t.Fatalf("page token must be opaque, got %q", page.NextPageToken)
+			}
+			token = page.NextPageToken
 		}
-		if len(p1.Tasks) != 2 || p1.Tasks[0].ID != "t1" || p1.Tasks[1].ID != "t2" || p1.NextPageToken != "2" {
-			t.Errorf("page1 wrong: ids=%s,%s next=%q", p1.Tasks[0].ID, p1.Tasks[1].ID, p1.NextPageToken)
+		want := []string{"t1", "t2", "t3", "t4", "t5"}
+		if len(got) != len(want) {
+			t.Fatalf("got %v, want %v", got, want)
 		}
-		p2, err := PaginateTasks(ltSampleTasks(), protocol.ListTasksParams{PageSize: ltIntPtr(2), PageToken: p1.NextPageToken})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if p2.Tasks[0].ID != "t3" || p2.NextPageToken != "4" {
-			t.Errorf("page2 wrong: id=%s next=%q", p2.Tasks[0].ID, p2.NextPageToken)
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("got %v, want %v", got, want)
+			}
 		}
 	})
 
 	t.Run("invalid pageToken errors", func(t *testing.T) {
-		if _, err := PaginateTasks(ltSampleTasks(), protocol.ListTasksParams{PageToken: "abc"}); err == nil {
-			t.Error("non-numeric pageToken should error")
+		tokens := []string{
+			"not-base64!",
+			base64.RawURLEncoding.EncodeToString([]byte(`not-json`)),
+			base64.RawURLEncoding.EncodeToString([]byte(`{"t":"2024-01-01T00:00:00Z"}`)),
+			base64.RawURLEncoding.EncodeToString([]byte(`{"t":"not-a-time","i":"task"}`)),
 		}
-		if _, err := PaginateTasks(ltSampleTasks(), protocol.ListTasksParams{PageToken: "-1"}); err == nil {
-			t.Error("negative pageToken should error")
-		}
-	})
-
-	t.Run("offset past end -> empty page", func(t *testing.T) {
-		res, err := PaginateTasks(ltSampleTasks(), protocol.ListTasksParams{PageToken: "100"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(res.Tasks) != 0 || res.NextPageToken != "" {
-			t.Errorf("expected empty final page, got %d tasks next=%q", len(res.Tasks), res.NextPageToken)
+		for _, token := range tokens {
+			_, err := PaginateTasks(ltSampleTasks(), protocol.ListTasksParams{PageToken: token})
+			if !errors.Is(err, ErrInvalidParamsSentinel) {
+				t.Errorf("pageToken %q: got %v, want invalid params", token, err)
+			}
 		}
 	})
 
-	t.Run("pageSize capped at max", func(t *testing.T) {
-		res, err := PaginateTasks(ltSampleTasks(), protocol.ListTasksParams{PageSize: ltIntPtr(99999)})
+	t.Run("cursor continues after its task is deleted", func(t *testing.T) {
+		input := ltSampleTasks()
+		first, err := PaginateTasks(input, protocol.ListTasksParams{PageSize: ltIntPtr(1)})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if res.PageSize != ListTasksMaxPageSize {
-			t.Errorf("pageSize=%d want %d", res.PageSize, ListTasksMaxPageSize)
+		var remaining []*protocol.Task
+		for _, task := range input {
+			if task.ID != first.Tasks[0].ID {
+				remaining = append(remaining, task)
+			}
+		}
+		next, err := PaginateTasks(remaining, protocol.ListTasksParams{
+			PageSize: ltIntPtr(1), PageToken: first.NextPageToken,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(next.Tasks) != 1 || next.Tasks[0].ID != "t2" {
+			t.Fatalf("next page = %v, want t2", next.Tasks)
+		}
+	})
+
+	t.Run("updates before the cursor do not repeat earlier results", func(t *testing.T) {
+		mk := func(id, timestamp string) *protocol.Task {
+			return &protocol.Task{ID: id, Status: protocol.TaskStatus{Timestamp: timestamp}}
+		}
+		input := []*protocol.Task{
+			mk("a", "2024-01-01T00:00:01Z"),
+			mk("b", "2024-01-01T00:00:02Z"),
+			mk("c", "2024-01-01T00:00:03Z"),
+			mk("d", "2024-01-01T00:00:00Z"),
+		}
+		first, err := PaginateTasks(input, protocol.ListTasksParams{PageSize: ltIntPtr(2)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, task := range input {
+			if task.ID == "a" {
+				task.Status.Timestamp = "2024-01-01T00:00:04Z"
+			}
+		}
+		next, err := PaginateTasks(input, protocol.ListTasksParams{
+			PageSize: ltIntPtr(2), PageToken: first.NextPageToken,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(next.Tasks) != 1 || next.Tasks[0].ID != "d" {
+			t.Fatalf("next page = %v, want only d", next.Tasks)
+		}
+	})
+
+	t.Run("pageSize validates range", func(t *testing.T) {
+		for _, pageSize := range []int{-1, 0, ListTasksMaxPageSize + 1} {
+			_, err := PaginateTasks(ltSampleTasks(), protocol.ListTasksParams{PageSize: ltIntPtr(pageSize)})
+			if !errors.Is(err, ErrInvalidParamsSentinel) {
+				t.Errorf("pageSize %d: got %v, want invalid params", pageSize, err)
+			}
+		}
+		for _, pageSize := range []int{1, ListTasksMaxPageSize} {
+			res, err := PaginateTasks(ltSampleTasks(), protocol.ListTasksParams{PageSize: ltIntPtr(pageSize)})
+			if err != nil || res.PageSize != pageSize {
+				t.Errorf("pageSize %d: result=%+v err=%v", pageSize, res, err)
+			}
+		}
+	})
+
+	t.Run("negative historyLength errors", func(t *testing.T) {
+		_, err := PaginateTasks(ltSampleTasks(), protocol.ListTasksParams{HistoryLength: ltIntPtr(-1)})
+		if !errors.Is(err, ErrInvalidParamsSentinel) {
+			t.Errorf("got %v, want invalid params", err)
 		}
 	})
 

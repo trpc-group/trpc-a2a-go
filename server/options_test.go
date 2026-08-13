@@ -454,3 +454,24 @@ func TestWithBasePathPriority(t *testing.T) {
 		})
 	}
 }
+
+// WithTenantCard must not stamp its tenant into the caller's card: the same
+// card value is a natural thing to register for several tenants.
+func TestWithTenantCardDoesNotAliasCallerInterfaces(t *testing.T) {
+	card := defaultAgentCard()
+	card.SupportedInterfaces = []protocol.AgentInterface{{
+		URL:             "https://host.example/a2a",
+		ProtocolBinding: "JSONRPC",
+		ProtocolVersion: protocol.ProtocolVersionV1,
+	}}
+
+	srv, err := NewA2AServer(newMockTaskManager(),
+		WithTenantCard("alpha", card),
+		WithTenantCard("beta", card),
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, "alpha", srv.tenantCards["alpha"].SupportedInterfaces[0].Tenant)
+	assert.Equal(t, "beta", srv.tenantCards["beta"].SupportedInterfaces[0].Tenant)
+	assert.Empty(t, card.SupportedInterfaces[0].Tenant, "caller's card must be left untouched")
+}

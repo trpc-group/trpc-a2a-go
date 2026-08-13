@@ -669,7 +669,8 @@ func TestTaskManager_OnListTasks(t *testing.T) {
 		seedTask(manager, seed[i])
 	}
 
-	// No filter: all tasks, sorted by ID.
+	// No filter: all tasks, most recently updated first (spec §3.1.4), with the
+	// task ID breaking timestamp ties.
 	result, err := manager.OnListTasks(ctx, protocol.ListTasksParams{})
 	if err != nil {
 		t.Fatalf("OnListTasks failed: %v", err)
@@ -677,11 +678,16 @@ func TestTaskManager_OnListTasks(t *testing.T) {
 	if result.TotalSize != 3 || len(result.Tasks) != 3 {
 		t.Fatalf("Expected 3 tasks, got total=%d len=%d", result.TotalSize, len(result.Tasks))
 	}
-	if result.Tasks[0].ID != "task-a" || result.Tasks[2].ID != "task-c" {
-		t.Errorf("Expected ID-sorted order, got %s..%s", result.Tasks[0].ID, result.Tasks[2].ID)
+	gotOrder := []string{result.Tasks[0].ID, result.Tasks[1].ID, result.Tasks[2].ID}
+	wantOrder := []string{"task-b", "task-c", "task-a"}
+	for i := range wantOrder {
+		if gotOrder[i] != wantOrder[i] {
+			t.Errorf("Expected status-timestamp-descending order %v, got %v", wantOrder, gotOrder)
+			break
+		}
 	}
-	// Artifacts stripped by default.
-	if result.Tasks[2].Artifacts != nil {
+	// Artifacts stripped by default (task-c carries the only artifact).
+	if result.Tasks[1].Artifacts != nil {
 		t.Errorf("Expected artifacts stripped by default")
 	}
 
@@ -707,13 +713,13 @@ func TestTaskManager_OnListTasks(t *testing.T) {
 		t.Fatalf("Expected task-c with artifact, got %+v", result.Tasks)
 	}
 
-	// Pagination: page size 2 -> next page token "2", second page has 1 task.
+	// Pagination: page size 2 yields an opaque cursor, then one final task.
 	result, err = manager.OnListTasks(ctx, protocol.ListTasksParams{PageSize: intPtr(2)})
 	if err != nil {
 		t.Fatalf("OnListTasks paged failed: %v", err)
 	}
-	if len(result.Tasks) != 2 || result.NextPageToken != "2" {
-		t.Fatalf("Expected 2 tasks + token \"2\", got len=%d token=%q", len(result.Tasks), result.NextPageToken)
+	if len(result.Tasks) != 2 || result.NextPageToken == "" {
+		t.Fatalf("Expected 2 tasks + cursor, got len=%d token=%q", len(result.Tasks), result.NextPageToken)
 	}
 	result, err = manager.OnListTasks(ctx, protocol.ListTasksParams{
 		PageSize: intPtr(2), PageToken: result.NextPageToken,
@@ -723,6 +729,16 @@ func TestTaskManager_OnListTasks(t *testing.T) {
 	}
 	if len(result.Tasks) != 1 || result.NextPageToken != "" {
 		t.Fatalf("Expected final page with 1 task, got len=%d token=%q", len(result.Tasks), result.NextPageToken)
+	}
+
+	for _, params := range []protocol.ListTasksParams{
+		{PageSize: intPtr(0)},
+		{PageSize: intPtr(taskmanager.ListTasksMaxPageSize + 1)},
+		{HistoryLength: intPtr(-1)},
+	} {
+		if _, err := manager.OnListTasks(ctx, params); !errors.Is(err, taskmanager.ErrInvalidParamsSentinel) {
+			t.Errorf("OnListTasks(%+v) error = %v, want invalid params", params, err)
+		}
 	}
 }
 
