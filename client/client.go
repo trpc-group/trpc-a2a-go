@@ -593,15 +593,19 @@ func (c *A2AClient) GetAgentCard(
 		// Treat the endpoint as a directory for this discovery-only operation;
 		// JSON-RPC requests still use the exact endpoint URL.
 		resolveBase := *c.baseURL
-		if !strings.HasSuffix(resolveBase.Path, "/") {
+		if !strings.HasSuffix(resolveBase.EscapedPath(), "/") {
 			resolveBase.Path += "/"
+			if resolveBase.RawPath != "" {
+				resolveBase.RawPath += "/"
+			}
 		}
 		baseForCard = *resolveBase.ResolveReference(parsedURL)
 	}
 
 	// Try the new path first (A2A spec v0.2.5+)
 	newPathURL := baseForCard
-	newPathURL.Path = path.Join(baseForCard.Path, protocol.AgentCardPath)
+	newPathURL.RawPath = path.Join(baseForCard.EscapedPath(), protocol.AgentCardPath)
+	newPathURL.Path, _ = url.PathUnescape(newPathURL.RawPath)
 	card, err := c.getAgentCardFromURL(ctx, newPathURL.String(), opts...)
 	if err == nil {
 		return card, nil
@@ -612,7 +616,8 @@ func (c *A2AClient) GetAgentCard(
 
 	// Fallback to the old path for backward compatibility
 	oldPathURL := baseForCard
-	oldPathURL.Path = path.Join(baseForCard.Path, protocol.OldAgentCardPath)
+	oldPathURL.RawPath = path.Join(baseForCard.EscapedPath(), protocol.OldAgentCardPath)
+	oldPathURL.Path, _ = url.PathUnescape(oldPathURL.RawPath)
 	card, fallbackErr := c.getAgentCardFromURL(ctx, oldPathURL.String(), opts...)
 	if fallbackErr == nil {
 		log.Debugf("A2A Client GetAgentCard: successfully fetched from fallback path %s", oldPathURL.String())

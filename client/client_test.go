@@ -888,6 +888,52 @@ func TestA2AClient_GetAgentCard(t *testing.T) {
 		assert.Equal(t, "Custom Path Agent", card.Name)
 	})
 
+	t.Run("GetAgentCard Success - Escaped Endpoint with Relative Path", func(t *testing.T) {
+		tests := []struct {
+			name             string
+			endpointPath     string
+			expectedCardPath string
+		}{
+			{
+				name:             "escaped slash",
+				endpointPath:     "/rpc%2Fv1",
+				expectedCardPath: "/rpc%2Fv1/child/.well-known/agent-card.json",
+			},
+			{
+				name:             "escaped dot segments",
+				endpointPath:     "/rpc/%2e%2e/v1",
+				expectedCardPath: "/rpc/%2e%2e/v1/child/.well-known/agent-card.json",
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				mockCard := server.AgentCard{
+					Name:               "Escaped Path Agent",
+					Description:        "Agent discovered below an escaped endpoint",
+					Version:            "1.0.0",
+					DefaultInputModes:  []string{"text"},
+					DefaultOutputModes: []string{"text"},
+					Skills:             []server.AgentSkill{},
+				}
+
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					assert.Equal(t, http.MethodGet, r.Method)
+					assert.Equal(t, tt.expectedCardPath, r.URL.EscapedPath())
+					w.Header().Set("Content-Type", "application/json; charset=utf-8")
+					require.NoError(t, json.NewEncoder(w).Encode(mockCard))
+				}))
+				defer server.Close()
+
+				client, err := NewA2AClient(server.URL + tt.endpointPath)
+				require.NoError(t, err)
+				card, err := client.GetAgentCard(context.Background(), "child")
+				require.NoError(t, err)
+				require.NotNil(t, card)
+				assert.Equal(t, "Escaped Path Agent", card.Name)
+			})
+		}
+	})
+
 	t.Run("GetAgentCard Success - Custom Relative Path with Fallback to Old Path", func(t *testing.T) {
 		mockCard := server.AgentCard{
 			Name:               "Legacy Custom Path Agent",
