@@ -55,7 +55,8 @@ const (
 // results are translated back to the legacy wire format. The task manager
 // never sees v0 types.
 type Handler struct {
-	tm taskmanager.TaskManager
+	tm              taskmanager.TaskManager
+	defaultBlocking bool
 	// extendedCardGetter optionally serves agent/getAuthenticatedExtendedCard.
 	extendedCardGetter func(ctx context.Context) (*protocol.AgentCard, error)
 }
@@ -68,6 +69,16 @@ type HandlerOption func(*Handler)
 // automatically so old clients can parse it).
 func WithExtendedAgentCard(getter func(ctx context.Context) (*protocol.AgentCard, error)) HandlerOption {
 	return func(h *Handler) { h.extendedCardGetter = getter }
+}
+
+// WithDefaultBlocking treats message/send requests with an omitted blocking
+// field as blocking. An explicit blocking=false remains non-blocking.
+//
+// This is useful for request-bound TaskManagers that cannot continue reliable
+// execution after the HTTP response ends. It intentionally overrides the
+// legacy v0.2.x default only when the client did not make an explicit choice.
+func WithDefaultBlocking() HandlerOption {
+	return func(h *Handler) { h.defaultBlocking = true }
 }
 
 // NewJSONRPCHandler creates a legacy-protocol handler backed by the given v1
@@ -137,6 +148,14 @@ func (h *Handler) handleMessageSend(ctx context.Context, w http.ResponseWriter, 
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		writeError(w, req.ID, jsonrpc.ErrInvalidParams(fmt.Sprintf("failed to parse params: %v", err)))
 		return
+	}
+	if h.defaultBlocking &&
+		(params.Configuration == nil || params.Configuration.Blocking == nil) {
+		blocking := true
+		if params.Configuration == nil {
+			params.Configuration = &SendMessageConfiguration{}
+		}
+		params.Configuration.Blocking = &blocking
 	}
 	resp, err := h.tm.OnSendMessage(ctx, ToV1SendMessageParams(params))
 	if err != nil {
