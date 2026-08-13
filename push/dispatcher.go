@@ -32,6 +32,7 @@ var ErrDispatcherClosed = errors.New("push dispatcher is closed")
 
 type job struct {
 	taskID     string
+	owner      string
 	generation string
 	cfg        []byte
 	event      []byte
@@ -43,10 +44,13 @@ type job struct {
 type Registration struct {
 	Config     protocol.TaskPushNotificationConfig `json:"config"`
 	Generation string                              `json:"generation"`
+	// Owner is the private authorization scope used to revalidate queued work.
+	// It is not part of the protocol push config and is never sent to callbacks.
+	Owner string `json:"-"`
 }
 
 // Dispatcher bounds automatic delivery while preserving FIFO order for each
-// (taskId, configId). Keys are assigned to stable worker shards; this avoids a
+// (owner, taskId, configId). Keys are assigned to stable worker shards; this avoids a
 // goroutine per webhook while allowing unrelated webhooks to make progress.
 type Dispatcher struct {
 	sender Sender
@@ -129,6 +133,7 @@ func (d *Dispatcher) Enqueue(
 		}
 		jobs[i] = job{
 			taskID:     cfg.TaskID,
+			owner:      registrations[i].Owner,
 			generation: registrations[i].Generation,
 			cfg:        cfgJSON,
 			event:      eventJSON,
@@ -136,7 +141,7 @@ func (d *Dispatcher) Enqueue(
 	}
 	for i := range jobs {
 		j := jobs[i]
-		queue := d.queues[shard(registrations[i].Config, len(d.queues))]
+		queue := d.queues[shard(registrations[i], len(d.queues))]
 		select {
 		case <-d.ctx.Done():
 			return ErrDispatcherClosed
@@ -171,7 +176,7 @@ func (d *Dispatcher) run(queue <-chan job) {
 				log.Warnf("push dispatch: restore event for task %s: %v", j.taskID, err)
 				continue
 			}
-			registration := Registration{Config: cfg, Generation: j.generation}
+			registration := Registration{Config: cfg, Generation: j.generation, Owner: j.owner}
 			if d.isCurrent != nil {
 				current, err := d.isCurrent(d.ctx, registration)
 				if err != nil {
@@ -215,8 +220,11 @@ func (d *Dispatcher) send(
 	returned = true
 }
 
-func shard(cfg protocol.TaskPushNotificationConfig, count int) int {
+func shard(registration Registration, count int) int {
 	h := fnv.New32a()
+	_, _ = h.Write([]byte(registration.Owner))
+	_, _ = h.Write([]byte{0})
+	cfg := registration.Config
 	_, _ = h.Write([]byte(cfg.TaskID))
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(cfg.ID))

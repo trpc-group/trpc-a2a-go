@@ -35,8 +35,8 @@ go run main.go
 | 示例 | 重点能力 |
 | --- | --- |
 | [`examples/simple`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/simple) | 裸 channel 最小示例；client 自动演示阻塞 send、`returnImmediately` 加轮询、streaming 和纯 Message。 |
-| [`examples/basic`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic) | `TaskHandle` 交互式 chat；长任务以及 GetTask、SubscribeToTask、CancelTask。 |
-| [`examples/auth`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth) | JWT、API key、OAuth2、鉴权后的 extended agent card。 |
+| [`examples/basic`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/basic) | `TaskHandle` 交互式 chat；长任务、Task 操作与跨用户 owner 隔离验证。 |
+| [`examples/auth`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth) | JWT、API key、鉴权用户与 `OwnerResolver` 接线。 |
 | [`examples/jwks`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/jwks) | push notification、JWT 签名、JWKS 校验。 |
 | [`examples/redis`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis) | Redis TaskManager、任务/会话持久化。 |
 | [`examples/tenant`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/tenant) | 一个进程托管多个 agent，按 `tenant` 路由。 |

@@ -411,6 +411,33 @@ func TestA2AServer_HandleJSONRPC_Methods(t *testing.T) {
 	})
 }
 
+func TestA2AServerOwnerResolverErrorIsNotLeaked(t *testing.T) {
+	const sensitive = "identity lookup failed: token=secret at 10.0.0.7"
+	tm, err := memory.NewTaskManager(
+		&mockExecutor{},
+		memory.WithOwnerResolver(func(context.Context) (string, error) {
+			return "", fmt.Errorf("%s", sensitive)
+		}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, tm.Close()) })
+
+	a2aServer, err := NewA2AServer(tm, WithAgentCard(defaultAgentCard()))
+	require.NoError(t, err)
+	testServer := httptest.NewServer(http.HandlerFunc(a2aServer.handleJSONRPC))
+	t.Cleanup(testServer.Close)
+
+	resp := performJSONRPCRequest(t, testServer, protocol.MethodMessageSend, protocol.SendMessageParams{
+		Message: protocol.NewMessage(protocol.MessageRoleUser, []*protocol.Part{protocol.NewTextPart("hello")}),
+	}, "owner-resolver-error")
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, jsonrpc.CodeInternalError, resp.Error.Code)
+	assert.Nil(t, resp.Error.Data)
+	encoded, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), sensitive)
+}
+
 func TestA2ASrv_HandleMessageStream_SSE(t *testing.T) {
 	mockTM := newMockTaskManager()
 	agentCard := defaultAgentCard()

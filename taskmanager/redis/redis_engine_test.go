@@ -307,7 +307,7 @@ func TestOnSendMessage_ContinuationContextMismatchRejected(t *testing.T) {
 		t.Fatalf("processor must not run for the rejected round, invocations=%d", got)
 	}
 	// The rejected continuation must not store the request message.
-	if mr.Exists(messagePrefix + "mismatch-msg") {
+	if mr.Exists(messageKey("", "", "mismatch-msg")) {
 		t.Fatal("rejected continuation must not store the request message")
 	}
 }
@@ -332,13 +332,13 @@ func TestOnSendMessage_RejectedContinuationLeavesPersistenceUntouched(t *testing
 		t.Fatalf("round 1 failed: %v", err)
 	}
 	taskID := first.GetTask().ID
-	taskKey := taskPrefix + taskID
-	conversationKey := conversationPrefix + "ctx-rejected-continuation"
-	beforeTask, err := m.client.Get(context.Background(), taskKey).Bytes()
+	storedTaskKey := taskKey("", "", taskID)
+	storedConversationKey := conversationKey("", "", "ctx-rejected-continuation")
+	beforeTask, err := m.client.Get(context.Background(), storedTaskKey).Bytes()
 	if err != nil {
 		t.Fatalf("read task before continuation: %v", err)
 	}
-	beforeHistory, err := m.client.LRange(context.Background(), conversationKey, 0, -1).Result()
+	beforeHistory, err := m.client.LRange(context.Background(), storedConversationKey, 0, -1).Result()
 	if err != nil {
 		t.Fatalf("read history before continuation: %v", err)
 	}
@@ -352,14 +352,14 @@ func TestOnSendMessage_RejectedContinuationLeavesPersistenceUntouched(t *testing
 	_, err = m.OnSendMessage(context.Background(), followUp)
 	assertTaskManagerCode(t, err, taskmanager.ErrPushNotificationNotSupported().Code)
 
-	afterTask, err := m.client.Get(context.Background(), taskKey).Bytes()
+	afterTask, err := m.client.Get(context.Background(), storedTaskKey).Bytes()
 	if err != nil {
 		t.Fatalf("read task after continuation: %v", err)
 	}
 	if !bytes.Equal(afterTask, beforeTask) {
 		t.Fatal("rejected continuation changed the stored task snapshot")
 	}
-	afterHistory, err := m.client.LRange(context.Background(), conversationKey, 0, -1).Result()
+	afterHistory, err := m.client.LRange(context.Background(), storedConversationKey, 0, -1).Result()
 	if err != nil {
 		t.Fatalf("read history after continuation: %v", err)
 	}
@@ -367,7 +367,7 @@ func TestOnSendMessage_RejectedContinuationLeavesPersistenceUntouched(t *testing
 		t.Fatalf("rejected continuation changed history: before=%v after=%v", beforeHistory, afterHistory)
 	}
 	if exists, err := m.client.Exists(
-		context.Background(), messagePrefix+followUp.Message.MessageID,
+		context.Background(), messageKey("", "", followUp.Message.MessageID),
 	).Result(); err != nil || exists != 0 {
 		t.Fatalf("rejected continuation stored its message: exists=%d err=%v", exists, err)
 	}
@@ -408,12 +408,12 @@ func TestEngine_UnspecifiedStateIsViolation(t *testing.T) {
 	}
 
 	// Zero-trace variant: the stateless event is the only one -> -32603 and no
-	// task:* keys.
+	// task keys.
 	m2, mr2 := setupTest(t, scriptedExecutor(statusEvent(protocol.TaskStateUnspecified, nil)))
 	_, err = m2.OnSendMessage(context.Background(), sendParams("go", "ctx-unspec2"))
 	assertTaskManagerCode(t, err, taskmanager.ErrCodeInternalError)
 	for _, key := range mr2.Keys() {
-		if strings.HasPrefix(key, taskPrefix) {
+		if strings.HasPrefix(key, tenantKeyPrefix("")+taskPrefix) {
 			t.Errorf("violation before any task must leave no task key, found %s", key)
 		}
 	}
@@ -549,7 +549,7 @@ func TestOnSendMessageStream_StartupFailureLeavesNoTrace(t *testing.T) {
 		t.Fatalf("expected the startup error, got %v", err)
 	}
 	for _, key := range mr.Keys() {
-		if strings.HasPrefix(key, taskPrefix) {
+		if strings.HasPrefix(key, tenantKeyPrefix("")+taskPrefix) {
 			t.Fatalf("startup failure must leave no task, found %s", key)
 		}
 	}

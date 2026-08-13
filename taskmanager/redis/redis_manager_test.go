@@ -100,7 +100,7 @@ func storedTask(t *testing.T, m *TaskManager, id, contextID string, state protoc
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		},
 	}
-	if err := m.storeTask(context.Background(), "", task); err != nil {
+	if err := m.storeTask(context.Background(), "", "", task); err != nil {
 		t.Fatalf("storeTask failed: %v", err)
 	}
 	return task
@@ -110,7 +110,7 @@ func waitTaskState(t *testing.T, m *TaskManager, taskID string, state protocol.T
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		task, err := m.getTaskInternal(context.Background(), "", taskID)
+		task, err := m.getTaskInternal(context.Background(), "", "", taskID)
 		if err == nil && task.Status.State == state {
 			return
 		}
@@ -167,13 +167,13 @@ func TestOnSendMessagePureMessage(t *testing.T) {
 
 	// A pure-message exchange must not leave a task behind in Redis.
 	for _, key := range mr.Keys() {
-		if strings.HasPrefix(key, taskPrefix) {
+		if strings.HasPrefix(key, tenantKeyPrefix("")+taskPrefix) {
 			t.Errorf("unexpected task key in redis: %s", key)
 		}
 	}
 
 	// Both the user message and the reply live in the conversation.
-	history, err := m.getConversationHistory(context.Background(), "", "ctx-pure", 10)
+	history, err := m.getConversationHistory(context.Background(), "", "", "ctx-pure", 10)
 	if err != nil {
 		t.Fatalf("getConversationHistory failed: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestOnSendMessageHistoryLength(t *testing.T) {
 	for _, text := range []string{"m1", "m2"} {
 		msg := protocol.NewMessage(protocol.MessageRoleUser, []*protocol.Part{protocol.NewTextPart(text)})
 		msg.ContextID = &contextID
-		m.storeMessage(context.Background(), "", msg)
+		m.storeMessage(context.Background(), "", "", msg)
 	}
 
 	send := func(text string, historyLength *int) *protocol.Task {
@@ -575,7 +575,8 @@ func TestTerminalTaskSendRejected(t *testing.T) {
 	}
 	// The rejection happens before the request message is stored.
 	for _, key := range mr.Keys() {
-		if strings.HasPrefix(key, messagePrefix) || strings.HasPrefix(key, conversationPrefix) {
+		if strings.HasPrefix(key, tenantKeyPrefix("")+messagePrefix) ||
+			strings.HasPrefix(key, tenantKeyPrefix("")+conversationPrefix) {
 			t.Errorf("rejected send must not store the request message, found %s", key)
 		}
 	}
@@ -654,7 +655,7 @@ func TestTaskSnapshotEventWithoutTaskLeavesNoTrace(t *testing.T) {
 	_, err := m.OnSendMessage(context.Background(), sendParams("go", "ctx-trace"))
 	assertTaskManagerCode(t, err, taskmanager.ErrCodeInternalError)
 	for _, key := range mr.Keys() {
-		if strings.HasPrefix(key, taskPrefix) {
+		if strings.HasPrefix(key, tenantKeyPrefix("")+taskPrefix) {
 			t.Errorf("violation before task creation must not persist a task, found %s", key)
 		}
 	}
@@ -697,7 +698,7 @@ func TestOnSendMessageStreamOrderAndPersistence(t *testing.T) {
 	if initial == nil || initial.Status.State != protocol.TaskStateSubmitted {
 		t.Fatalf("frame 1: expected submitted Task, got %+v", frame1.Result)
 	}
-	storedInitial, err := m.getTaskInternal(context.Background(), "", initial.ID)
+	storedInitial, err := m.getTaskInternal(context.Background(), "", "", initial.ID)
 	if err != nil {
 		t.Fatalf("getTaskInternal failed: %v", err)
 	}
@@ -723,7 +724,7 @@ func TestOnSendMessageStreamOrderAndPersistence(t *testing.T) {
 		t.Fatalf("initial Task IDs = %s/%s, want %s/%s",
 			initial.ID, initial.ContextID, taskID, statusUpdate.ContextID)
 	}
-	stored, err := m.getTaskInternal(context.Background(), "", taskID)
+	stored, err := m.getTaskInternal(context.Background(), "", "", taskID)
 	if err != nil {
 		t.Fatalf("task not persisted before broadcast: %v", err)
 	}
@@ -738,7 +739,7 @@ func TestOnSendMessageStreamOrderAndPersistence(t *testing.T) {
 	if artifactUpdate == nil || artifactUpdate.Artifact.ArtifactID != "artifact-1" {
 		t.Fatalf("frame 3: expected artifact update, got %+v", frame3.Result)
 	}
-	stored, err = m.getTaskInternal(context.Background(), "", taskID)
+	stored, err = m.getTaskInternal(context.Background(), "", "", taskID)
 	if err != nil {
 		t.Fatalf("getTaskInternal failed: %v", err)
 	}
@@ -753,7 +754,7 @@ func TestOnSendMessageStreamOrderAndPersistence(t *testing.T) {
 	if statusUpdate == nil || statusUpdate.Status.State != protocol.TaskStateCompleted {
 		t.Fatalf("frame 4: expected completed status, got %+v", frame4.Result)
 	}
-	stored, err = m.getTaskInternal(context.Background(), "", taskID)
+	stored, err = m.getTaskInternal(context.Background(), "", "", taskID)
 	if err != nil {
 		t.Fatalf("getTaskInternal failed: %v", err)
 	}
@@ -801,7 +802,7 @@ func TestOnSendMessageStreamContinuationStartsWithCurrentTask(t *testing.T) {
 		ArtifactID: "existing-artifact",
 		Parts:      []*protocol.Part{protocol.NewTextPart("existing")},
 	}}
-	if err := m.storeTask(context.Background(), "", task); err != nil {
+	if err := m.storeTask(context.Background(), "", "", task); err != nil {
 		t.Fatalf("storeTask with artifact failed: %v", err)
 	}
 
@@ -843,7 +844,7 @@ func TestOnSendMessageStreamPureMessage(t *testing.T) {
 		t.Error("expected stream closed")
 	}
 	for _, key := range mr.Keys() {
-		if strings.HasPrefix(key, taskPrefix) {
+		if strings.HasPrefix(key, tenantKeyPrefix("")+taskPrefix) {
 			t.Errorf("pure-message stream must not create a task, found %s", key)
 		}
 	}
@@ -868,7 +869,7 @@ func TestOnSendMessageStreamDirectMessageDoesNotSwitchToTask(t *testing.T) {
 		t.Fatalf("expected exactly the first direct Message, got %+v", frames)
 	}
 	for _, key := range mr.Keys() {
-		if strings.HasPrefix(key, taskPrefix) {
+		if strings.HasPrefix(key, tenantKeyPrefix("")+taskPrefix) {
 			t.Fatalf("task event after direct Message must be discarded, found %s", key)
 		}
 	}
@@ -1160,7 +1161,7 @@ func TestOnCancelTaskWithoutLiveExecution(t *testing.T) {
 		t.Error("expected subscriber closed after terminal broadcast")
 	}
 
-	stored, err := m.getTaskInternal(context.Background(), "", "task-idle")
+	stored, err := m.getTaskInternal(context.Background(), "", "", "task-idle")
 	if err != nil {
 		t.Fatalf("getTaskInternal failed: %v", err)
 	}
@@ -1330,7 +1331,7 @@ func TestOnGetTaskHistoryLength(t *testing.T) {
 	for _, text := range []string{"m1", "m2", "m3"} {
 		msg := protocol.NewMessage(protocol.MessageRoleUser, []*protocol.Part{protocol.NewTextPart(text)})
 		msg.ContextID = &contextID
-		m.storeMessage(context.Background(), "", msg)
+		m.storeMessage(context.Background(), "", "", msg)
 	}
 	storedTask(t, m, "task-hist", contextID, protocol.TaskStateWorking)
 
@@ -1443,10 +1444,10 @@ func TestPushNotificationCRUD(t *testing.T) { //nolint:gocyclo // One lifecycle 
 	if first.ID == "" || second.ID == "" || first.ID == second.ID {
 		t.Fatalf("generated IDs must be distinct: first=%q second=%q", first.ID, second.ID)
 	}
-	if !mr.Exists(pushNotificationPrefix + "task-push") {
+	if !mr.Exists(pushNotificationKey("", "", "task-push")) {
 		t.Error("push config key missing in redis")
 	}
-	if got := mr.TTL(pushNotificationPrefix + "task-push"); got != defaultExpiration {
+	if got := mr.TTL(pushNotificationKey("", "", "task-push")); got != defaultExpiration {
 		t.Errorf("push config TTL = %v, want %v", got, defaultExpiration)
 	}
 
@@ -1529,13 +1530,13 @@ func TestTaskWriteRefreshesPushConfigTTL(t *testing.T) {
 		t.Fatal(err)
 	}
 	mr.FastForward(10 * time.Minute)
-	if got := mr.TTL(pushNotificationPrefix + task.ID); got != 20*time.Minute {
+	if got := mr.TTL(pushNotificationKey("", "", task.ID)); got != 20*time.Minute {
 		t.Fatalf("push config TTL before refresh = %v, want 20m", got)
 	}
-	if err := m.storeTask(context.Background(), "", task); err != nil {
+	if err := m.storeTask(context.Background(), "", "", task); err != nil {
 		t.Fatal(err)
 	}
-	if got := mr.TTL(pushNotificationPrefix + task.ID); got != expire {
+	if got := mr.TTL(pushNotificationKey("", "", task.ID)); got != expire {
 		t.Fatalf("push config TTL after task write = %v, want %v", got, expire)
 	}
 }
@@ -1556,15 +1557,15 @@ func TestStorageTTL(t *testing.T) {
 	}
 	taskID := resp.GetTask().ID
 
-	if got := mr.TTL(taskPrefix + taskID); got != expire {
+	if got := mr.TTL(taskKey("", "", taskID)); got != expire {
 		t.Errorf("task TTL = %v, want %v", got, expire)
 	}
-	if got := mr.TTL(conversationPrefix + "ctx-ttl"); got != expire {
+	if got := mr.TTL(conversationKey("", "", "ctx-ttl")); got != expire {
 		t.Errorf("conversation TTL = %v, want %v", got, expire)
 	}
 	var messageKey string
 	for _, key := range mr.Keys() {
-		if strings.HasPrefix(key, messagePrefix) {
+		if strings.HasPrefix(key, tenantKeyPrefix("")+messagePrefix) {
 			messageKey = key
 			break
 		}
@@ -1592,12 +1593,12 @@ func TestStoreMessage_IdempotentByMessageID(t *testing.T) {
 	for i := 0; i < writers; i++ {
 		go func() {
 			defer wg.Done()
-			m.storeMessage(ctx, "", msg)
+			m.storeMessage(ctx, "", "", msg)
 		}()
 	}
 	wg.Wait()
 
-	hist, err := m.getConversationHistory(ctx, "", cid, 100)
+	hist, err := m.getConversationHistory(ctx, "", "", cid, 100)
 	if err != nil {
 		t.Fatalf("getConversationHistory: %v", err)
 	}

@@ -123,39 +123,28 @@ An interactive `TaskHandle`-based chat example showcasing:
 - Long-running tasks started with `returnImmediately`
 - GetTask, SubscribeToTask, and CancelTask
 - Conversation grouping and message history through `contextId`
+- HTTP Basic authentication and per-user retained-task isolation
 
 See [examples/basic/README.md](examples/basic/README.md) for the REPL commands.
 
 ### 3. Authentication Examples ([examples/auth](examples/auth))
 
-Complete examples demonstrating authentication:
-- Server implementation with various authentication methods
-- Client examples showing how to connect with different auth methods
-- JWT, API key, and OAuth2 implementations
-- Command-line options for all authentication parameters
+This example chains the built-in API-key and JWT providers, derives the retained-task owner from the authenticated `auth.User`, and verifies both same-owner access and cross-owner denial for a completed Task. Use `examples/basic` for an interactive check across GetTask, SubscribeToTask, and CancelTask.
 
 ```bash
-# Start the authentication server with OAuth2 support enabled
+# Start the authentication server.
 cd examples/auth/server
-go run main.go --enable-oauth true
+go run .
 
-# Run client with JWT authentication
+# In another terminal, run as alice with an API key.
 cd examples/auth/client
-go run main.go --auth jwt --jwt-secret "your-secret-key"
+go run . -auth apikey -api-key alice-key
 
-# Run client with API key authentication
-go run main.go --auth apikey --api-key "test-api-key"
+# Or run as bob with the other API key.
+go run . -auth apikey -api-key bob-key
 
-# Run client with OAuth2 authentication
-go run main.go --auth oauth2 \
-  --oauth2-client-id "my-client-id" \
-  --oauth2-client-secret "my-client-secret"
-
-# Run client with JWT from a file
-go run main.go --auth jwt --jwt-secret-file "path/to/jwt-secret.key"
-
-# Specify custom message and session ID
-go run main.go --auth jwt --message "Custom message" --session-id "session123"
+# Or use the shared demo JWT secret.
+go run . -auth jwt
 ```
 
 ### 4. v0 Compatibility Example ([examples/compat](examples/compat))
@@ -334,6 +323,8 @@ if err := srv.Start(":8080"); err != nil {
 
 The Redis TaskManager is a separate module. Install it with
 `go get trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2@v2.0.0-alpha.3`.
+
+The A2A `tenant` selects an agent; it does not authorize end users. Memory and Redis keep tenant-wide retained-task sharing unless `WithOwnerResolver` is configured. After `server.WithAuthProvider` installs `auth.User`, derive the owner with `auth.UserFromContext`; see [Server: owner-scoped retained state](docs/mkdocs/en/server.md#owner-scoped-retained-state) and the runnable [basic example](examples/basic/README.md).
 
 ## Migrating from v0.x
 
@@ -540,7 +531,7 @@ client, err := client.NewA2AClient(
 )
 ```
 
-See the [examples/auth/client](examples/auth/client) directory for complete examples of using different authentication methods.
+See [examples/auth](examples/auth) for runnable JWT and API-key client/server wiring. The OAuth2 options above use the same client API with an external token endpoint.
 
 ### Push Notification Authentication
 

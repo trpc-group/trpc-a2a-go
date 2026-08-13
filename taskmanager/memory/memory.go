@@ -42,15 +42,16 @@ type ConversationHistory struct {
 	LastAccessTime time.Time
 }
 
-// scopedID is the internal identity of tenant-owned data. Tenant remains
-// request scope and is deliberately not written into protocol.Task.
+// scopedID is the internal identity of tenant-and-owner-scoped data. Neither
+// scope component is written into protocol.Task.
 type scopedID struct {
 	tenant string
+	owner  string
 	id     string
 }
 
-func newScopedID(tenant, id string) scopedID {
-	return scopedID{tenant: tenant, id: id}
+func newScopedID(tenant, owner, id string) scopedID {
+	return scopedID{tenant: tenant, owner: owner, id: id}
 }
 
 // taskSubscriber is one fan-out endpoint of a task's event stream: the
@@ -142,7 +143,7 @@ type TaskManager struct {
 	// processor is the user-provided agent logic invoked for every incoming message.
 	processor taskmanager.MessageProcessor
 
-	// messages stores all Messages, indexed by tenant and message ID.
+	// messages stores all Messages, indexed by tenant, owner, and message ID.
 	messages map[scopedID]protocol.Message
 
 	// conversations stores the message history of each conversation, indexed by contextID
@@ -192,6 +193,20 @@ type TaskManager struct {
 }
 
 var _ taskmanager.TaskManager = (*TaskManager)(nil)
+
+func (m *TaskManager) resolveOwner(ctx context.Context) (string, error) {
+	if m.options.OwnerResolver == nil {
+		return "", nil
+	}
+	owner, err := m.options.OwnerResolver(ctx)
+	if err != nil {
+		return "", taskmanager.ErrInternalError(fmt.Sprintf("resolve task owner: %v", err))
+	}
+	if owner == "" {
+		return "", taskmanager.ErrInternalError("task owner resolver returned an empty owner")
+	}
+	return owner, nil
+}
 
 // NewTaskManager creates a new TaskManager instance driven by the given MessageProcessor.
 func NewTaskManager(processor taskmanager.MessageProcessor, opts ...TaskManagerOption) (*TaskManager, error) {
@@ -280,10 +295,10 @@ func (m *TaskManager) OnSendMessage(
 		// engine keep running; later state is retrievable via GetTask/subscribe.
 		select {
 		case out := <-eng.immediateResult:
-			return m.buildSendResponse(request.Tenant, out.task, out.message, historyLength)
+			return m.buildSendResponse(request.Tenant, eng.owner, out.task, out.message, historyLength)
 		case <-eng.done:
 			// The stream closed before any immediate result: same derivation as blocking.
-			return m.buildSendResponse(request.Tenant, eng.finalOutcome.task, eng.finalOutcome.message, historyLength)
+			return m.buildSendResponse(request.Tenant, eng.owner, eng.finalOutcome.task, eng.finalOutcome.message, historyLength)
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -291,7 +306,7 @@ func (m *TaskManager) OnSendMessage(
 
 	select {
 	case <-eng.done:
-		return m.buildSendResponse(request.Tenant, eng.finalOutcome.task, eng.finalOutcome.message, historyLength)
+		return m.buildSendResponse(request.Tenant, eng.owner, eng.finalOutcome.task, eng.finalOutcome.message, historyLength)
 	case <-ctx.Done():
 		// The request died first. The execution is detached (§3.3): it keeps
 		// running and its results stay retrievable via GetTask/resubscribe.
@@ -330,7 +345,11 @@ func (m *TaskManager) OnSendMessageStream(
 
 // OnGetTask handles the tasks/get request
 func (m *TaskManager) OnGetTask(ctx context.Context, params protocol.TaskQueryParams) (*protocol.Task, error) {
-	key := newScopedID(params.Tenant, params.ID)
+	owner, err := m.resolveOwner(ctx)
+	if err != nil {
+		return nil, err
+	}
+	key := newScopedID(params.Tenant, owner, params.ID)
 	m.taskMu.RLock()
 	task, exists := m.tasks[key]
 	if !exists {
@@ -342,7 +361,7 @@ func (m *TaskManager) OnGetTask(ctx context.Context, params protocol.TaskQueryPa
 	taskCopy := copyTask(task)
 	m.taskMu.RUnlock()
 
-	m.fillTaskHistory(params.Tenant, taskCopy, params.HistoryLength)
+	m.fillTaskHistory(params.Tenant, owner, taskCopy, params.HistoryLength)
 	return taskCopy, nil
 }
 
@@ -354,8 +373,12 @@ func (m *TaskManager) OnGetTask(ctx context.Context, params protocol.TaskQueryPa
 // manager persists CANCELED directly, holding the execution slot with a
 // sentinel so no continuation can start (and write) concurrently.
 func (m *TaskManager) OnCancelTask(ctx context.Context, params protocol.TaskIDParams) (*protocol.Task, error) {
+	owner, err := m.resolveOwner(ctx)
+	if err != nil {
+		return nil, err
+	}
 	for {
-		live, sentinel, yieldDone := m.runs.claimCancelSlot(params.Tenant, params.ID)
+		live, sentinel, yieldDone := m.runs.claimCancelSlot(params.Tenant, owner, params.ID)
 		if yieldDone != nil {
 			select {
 			case <-yieldDone:
@@ -365,14 +388,14 @@ func (m *TaskManager) OnCancelTask(ctx context.Context, params protocol.TaskIDPa
 			}
 		}
 		if live == nil {
-			defer m.runs.deregister(params.Tenant, params.ID, sentinel)
-			return m.cancelWithoutLiveRun(params)
+			defer m.runs.deregister(params.Tenant, owner, params.ID, sentinel)
+			return m.cancelWithoutLiveRun(owner, params)
 		}
 
 		// A stored terminal state is immutable even while the round is still
 		// draining: canceling it must fail like the no-live path does.
 		m.taskMu.RLock()
-		task, exists := m.tasks[newScopedID(params.Tenant, params.ID)]
+		task, exists := m.tasks[newScopedID(params.Tenant, owner, params.ID)]
 		var snapshot *protocol.Task
 		var terminal protocol.TaskState
 		if exists {
@@ -389,7 +412,7 @@ func (m *TaskManager) OnCancelTask(ctx context.Context, params protocol.TaskIDPa
 		// Linearize cancellation against a concurrent suspend handoff. If the
 		// handoff won, wait for it and retry as a no-live cancel; otherwise the
 		// close rule is guaranteed to observe cancelRequested.
-		yieldDone, accepted := m.runs.requestCancel(params.Tenant, params.ID, live)
+		yieldDone, accepted := m.runs.requestCancel(params.Tenant, owner, params.ID, live)
 		if yieldDone != nil {
 			select {
 			case <-yieldDone:
@@ -402,7 +425,7 @@ func (m *TaskManager) OnCancelTask(ctx context.Context, params protocol.TaskIDPa
 			continue
 		}
 
-		if m.runs.live(params.Tenant, params.ID) != live {
+		if m.runs.live(params.Tenant, owner, params.ID) != live {
 			// The run yielded (suspend) or finished while we were canceling, so
 			// its close rule will not persist CANCELED on our behalf. Reassess:
 			// the next pass either claims the free slot and persists CANCELED
@@ -421,8 +444,8 @@ func (m *TaskManager) OnCancelTask(ctx context.Context, params protocol.TaskIDPa
 // cancelWithoutLiveRun persists CANCELED for a task with no live execution:
 // persist first, then broadcast (§3.6). The caller holds the task's execution
 // slot (sentinel), making this the task's single writer.
-func (m *TaskManager) cancelWithoutLiveRun(params protocol.TaskIDParams) (*protocol.Task, error) {
-	key := newScopedID(params.Tenant, params.ID)
+func (m *TaskManager) cancelWithoutLiveRun(owner string, params protocol.TaskIDParams) (*protocol.Task, error) {
+	key := newScopedID(params.Tenant, owner, params.ID)
 	m.taskMu.Lock()
 	task, exists := m.tasks[key]
 	if !exists {
@@ -447,8 +470,8 @@ func (m *TaskManager) cancelWithoutLiveRun(params protocol.TaskIDParams) (*proto
 	result := copyTask(task)
 	m.taskMu.Unlock()
 
-	m.notifySubscribers(params.Tenant, params.ID, protocol.NewStreamResponseStatusUpdate(event))
-	m.cleanSubscribers(params.Tenant, params.ID)
+	m.notifySubscribers(params.Tenant, owner, params.ID, protocol.NewStreamResponseStatusUpdate(event))
+	m.cleanSubscribers(params.Tenant, owner, params.ID)
 	return result, nil
 }
 
@@ -457,16 +480,20 @@ func (m *TaskManager) OnPushNotificationSet(
 	ctx context.Context,
 	params protocol.TaskPushNotificationConfig,
 ) (*protocol.TaskPushNotificationConfig, error) {
+	owner, err := m.resolveOwner(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if !m.pushEnabled {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
 	if err := push.ValidateConfig(params); err != nil {
 		return nil, taskmanager.ErrInvalidParams(err.Error())
 	}
-	if err := m.ensurePushTaskExists(params.Tenant, params.TaskID); err != nil {
+	if err := m.ensurePushTaskExists(params.Tenant, owner, params.TaskID); err != nil {
 		return nil, err
 	}
-	stored, err := m.pushStore.save(params)
+	stored, err := m.pushStore.save(owner, params)
 	if err != nil {
 		return nil, err
 	}
@@ -479,16 +506,20 @@ func (m *TaskManager) OnPushNotificationGet(
 	ctx context.Context,
 	params protocol.GetTaskPushNotificationConfigParams,
 ) (*protocol.TaskPushNotificationConfig, error) {
+	owner, err := m.resolveOwner(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if !m.pushEnabled {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
 	if params.ID == "" {
 		return nil, taskmanager.ErrInvalidParams("push notification config ID is required")
 	}
-	if err := m.ensurePushTaskExists(params.Tenant, params.TaskID); err != nil {
+	if err := m.ensurePushTaskExists(params.Tenant, owner, params.TaskID); err != nil {
 		return nil, err
 	}
-	config, found := m.pushStore.get(params.Tenant, params.TaskID, params.ID)
+	config, found := m.pushStore.get(params.Tenant, owner, params.TaskID, params.ID)
 	if !found {
 		return nil, taskmanager.ErrPushConfigNotFound(params.TaskID)
 	}
@@ -500,6 +531,10 @@ func (m *TaskManager) OnListTasks(
 	ctx context.Context,
 	params protocol.ListTasksParams,
 ) (*protocol.ListTasksResult, error) {
+	owner, err := m.resolveOwner(ctx)
+	if err != nil {
+		return nil, err
+	}
 	afterTime, err := taskmanager.ParseListTasksStatusTimestampAfter(params.StatusTimestampAfter)
 	if err != nil {
 		return nil, err
@@ -511,7 +546,7 @@ func (m *TaskManager) OnListTasks(
 	defer m.taskMu.RUnlock()
 	var filtered []*protocol.Task
 	for key, task := range m.tasks {
-		if key.tenant != params.Tenant {
+		if key.tenant != params.Tenant || key.owner != owner {
 			continue
 		}
 		if taskmanager.TaskMatchesListFilter(task, params, afterTime) {
@@ -527,13 +562,17 @@ func (m *TaskManager) OnPushNotificationList(
 	ctx context.Context,
 	params protocol.ListTaskPushNotificationConfigsParams,
 ) (*protocol.ListTaskPushNotificationConfigsResult, error) {
+	owner, err := m.resolveOwner(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if !m.pushEnabled {
 		return nil, taskmanager.ErrPushNotificationNotSupported()
 	}
-	if err := m.ensurePushTaskExists(params.Tenant, params.TaskID); err != nil {
+	if err := m.ensurePushTaskExists(params.Tenant, owner, params.TaskID); err != nil {
 		return nil, err
 	}
-	configs := m.pushStore.list(params.Tenant, params.TaskID)
+	configs := m.pushStore.list(params.Tenant, owner, params.TaskID)
 	return &protocol.ListTaskPushNotificationConfigsResult{Configs: configs}, nil
 }
 
@@ -543,23 +582,27 @@ func (m *TaskManager) OnPushNotificationDelete(
 	ctx context.Context,
 	params protocol.DeleteTaskPushNotificationConfigParams,
 ) error {
+	owner, err := m.resolveOwner(ctx)
+	if err != nil {
+		return err
+	}
 	if !m.pushEnabled {
 		return taskmanager.ErrPushNotificationNotSupported()
 	}
 	if params.ID == "" {
 		return taskmanager.ErrInvalidParams("push notification config ID is required")
 	}
-	if err := m.ensurePushTaskExists(params.Tenant, params.TaskID); err != nil {
+	if err := m.ensurePushTaskExists(params.Tenant, owner, params.TaskID); err != nil {
 		return err
 	}
-	m.pushStore.remove(params.Tenant, params.TaskID, params.ID)
+	m.pushStore.remove(params.Tenant, owner, params.TaskID, params.ID)
 	log.Debugf("TaskManager: Push notification config %s deleted for task %s", params.ID, params.TaskID)
 	return nil
 }
 
-func (m *TaskManager) ensurePushTaskExists(tenant, taskID string) error {
+func (m *TaskManager) ensurePushTaskExists(tenant, owner, taskID string) error {
 	m.taskMu.RLock()
-	_, exists := m.tasks[newScopedID(tenant, taskID)]
+	_, exists := m.tasks[newScopedID(tenant, owner, taskID)]
 	m.taskMu.RUnlock()
 	if !exists {
 		return taskmanager.ErrTaskNotFound(taskID)
@@ -572,6 +615,10 @@ func (m *TaskManager) OnResubscribe(
 	ctx context.Context,
 	params protocol.TaskIDParams,
 ) (<-chan protocol.StreamResponse, error) {
+	owner, err := m.resolveOwner(ctx)
+	if err != nil {
+		return nil, err
+	}
 	m.taskMu.Lock()
 	defer m.taskMu.Unlock()
 	// Close marks the execution registry closed before sweeping subscribers.
@@ -581,7 +628,7 @@ func (m *TaskManager) OnResubscribe(
 	if m.runs.isClosed() {
 		return nil, taskmanager.ErrInternalError("task manager is closed")
 	}
-	key := newScopedID(params.Tenant, params.ID)
+	key := newScopedID(params.Tenant, owner, params.ID)
 
 	// Check if task exists
 	task, exists := m.tasks[key]
@@ -620,7 +667,7 @@ func (m *TaskManager) OnResubscribe(
 	go func() {
 		select {
 		case <-ctx.Done():
-			m.cleanupFailedSubscribers(params.Tenant, params.ID, []*taskSubscriber{subscriber})
+			m.cleanupFailedSubscribers(params.Tenant, owner, params.ID, []*taskSubscriber{subscriber})
 		case <-subscriber.done:
 		}
 	}()
@@ -633,17 +680,17 @@ func (m *TaskManager) OnResubscribe(
 // =============================================================================
 
 // storeMessage stores messages
-func (m *TaskManager) storeMessage(tenant string, message protocol.Message) {
+func (m *TaskManager) storeMessage(tenant, owner string, message protocol.Message) {
 	m.conversationMu.Lock()
 	defer m.conversationMu.Unlock()
 
 	// Store the message
-	m.messages[newScopedID(tenant, message.MessageID)] = message
+	m.messages[newScopedID(tenant, owner, message.MessageID)] = message
 
 	// If the message has a contextID, add it to conversation history
 	if message.ContextID != nil {
 		contextID := *message.ContextID
-		conversationKey := newScopedID(tenant, contextID)
+		conversationKey := newScopedID(tenant, owner, contextID)
 		conv, exists := m.conversations[conversationKey]
 		if !exists {
 			conv = &ConversationHistory{
@@ -674,13 +721,13 @@ func (m *TaskManager) storeMessage(tenant string, message protocol.Message) {
 			removedMsgID := conv.MessageIDs[0]
 			conv.MessageIDs = conv.MessageIDs[1:]
 			// Delete old message from message storage
-			delete(m.messages, newScopedID(tenant, removedMsgID))
+			delete(m.messages, newScopedID(tenant, owner, removedMsgID))
 		}
 	}
 }
 
 // getConversationHistory gets conversation history of specified length
-func (m *TaskManager) getConversationHistory(tenant, contextID string, length int) []protocol.Message {
+func (m *TaskManager) getConversationHistory(tenant, owner, contextID string, length int) []protocol.Message {
 	// LastAccessTime is mutated below: this must be the write lock (a read
 	// lock here races concurrent history reads and tears the time value).
 	m.conversationMu.Lock()
@@ -688,7 +735,7 @@ func (m *TaskManager) getConversationHistory(tenant, contextID string, length in
 
 	var history []protocol.Message
 
-	if conversation, exists := m.conversations[newScopedID(tenant, contextID)]; exists {
+	if conversation, exists := m.conversations[newScopedID(tenant, owner, contextID)]; exists {
 		// Update last access time
 		conversation.LastAccessTime = time.Now()
 
@@ -698,7 +745,7 @@ func (m *TaskManager) getConversationHistory(tenant, contextID string, length in
 		}
 
 		for i := start; i < len(conversation.MessageIDs); i++ {
-			if msg, exists := m.messages[newScopedID(tenant, conversation.MessageIDs[i])]; exists {
+			if msg, exists := m.messages[newScopedID(tenant, owner, conversation.MessageIDs[i])]; exists {
 				history = append(history, msg)
 			}
 		}
@@ -712,22 +759,22 @@ func (m *TaskManager) getConversationHistory(tenant, contextID string, length in
 //   - historyLength unset -> no limit (full history)
 //   - historyLength == 0  -> no messages
 //   - historyLength > 0   -> the most recent N messages
-func (m *TaskManager) fillTaskHistory(tenant string, task *protocol.Task, historyLength *int) {
+func (m *TaskManager) fillTaskHistory(tenant, owner string, task *protocol.Task, historyLength *int) {
 	if task.ContextID == "" {
 		return
 	}
 	switch {
 	case historyLength == nil:
-		task.History = m.getConversationHistory(tenant, task.ContextID, unlimitedHistoryLength)
+		task.History = m.getConversationHistory(tenant, owner, task.ContextID, unlimitedHistoryLength)
 	case *historyLength > 0:
-		task.History = m.getConversationHistory(tenant, task.ContextID, *historyLength)
+		task.History = m.getConversationHistory(tenant, owner, task.ContextID, *historyLength)
 	default: // == 0 (or negative): no messages
 		task.History = nil
 	}
 }
 
 // processReplyMessage processes the reply message, add messageID and contextID if not set
-func (m *TaskManager) processReplyMessage(tenant string, ctxID *string, message *protocol.Message) {
+func (m *TaskManager) processReplyMessage(tenant, owner string, ctxID *string, message *protocol.Message) {
 	message.ContextID = ctxID
 	message.Role = protocol.MessageRoleAgent
 
@@ -740,7 +787,7 @@ func (m *TaskManager) processReplyMessage(tenant string, ctxID *string, message 
 		message.ContextID = &contextID
 	}
 
-	m.storeMessage(tenant, *message)
+	m.storeMessage(tenant, owner, *message)
 }
 
 // isFinalState checks if it's a final state
@@ -787,11 +834,11 @@ func (m *TaskManager) SupportsPushNotifications() bool {
 // It is a no-op unless automatic delivery is configured. The bounded dispatcher
 // preserves order per config; when its queue is full this call applies
 // backpressure rather than dropping an event.
-func (m *TaskManager) dispatchPush(tenant, taskID string, event protocol.StreamResponse) {
+func (m *TaskManager) dispatchPush(tenant, owner, taskID string, event protocol.StreamResponse) {
 	if m.pushDispatcher == nil {
 		return
 	}
-	registrations := m.pushStore.registrations(tenant, taskID)
+	registrations := m.pushStore.registrations(tenant, owner, taskID)
 	if len(registrations) == 0 {
 		return
 	}
@@ -804,17 +851,17 @@ func (m *TaskManager) dispatchPush(tenant, taskID string, event protocol.StreamR
 }
 
 // notifySubscribers notifies all subscribers of the task
-func (m *TaskManager) notifySubscribers(tenant, taskID string, event protocol.StreamResponse) {
+func (m *TaskManager) notifySubscribers(tenant, owner, taskID string, event protocol.StreamResponse) {
 	// Deliver push notifications independently of live SSE subscribers: reaching
 	// clients that are not currently streaming is the whole point of push.
-	m.dispatchPush(tenant, taskID, event)
-	m.notifyLiveSubscribers(tenant, taskID, event)
+	m.dispatchPush(tenant, owner, taskID, event)
+	m.notifyLiveSubscribers(tenant, owner, taskID, event)
 }
 
 // notifyLiveSubscribers fans out to process-local task subscribers without
 // dispatching push a second time.
-func (m *TaskManager) notifyLiveSubscribers(tenant, taskID string, event protocol.StreamResponse) {
-	key := newScopedID(tenant, taskID)
+func (m *TaskManager) notifyLiveSubscribers(tenant, owner, taskID string, event protocol.StreamResponse) {
+	key := newScopedID(tenant, owner, taskID)
 	m.taskMu.RLock()
 	subs, exists := m.subscribers[key]
 	if !exists || len(subs) == 0 {
@@ -846,16 +893,16 @@ func (m *TaskManager) notifyLiveSubscribers(tenant, taskID string, event protoco
 
 	// Clean up failed or closed subscribers
 	if len(failedSubscribers) > 0 {
-		m.cleanupFailedSubscribers(tenant, taskID, failedSubscribers)
+		m.cleanupFailedSubscribers(tenant, owner, taskID, failedSubscribers)
 	}
 }
 
 // cleanupFailedSubscribers cleans up failed or closed subscribers
 func (m *TaskManager) cleanupFailedSubscribers(
-	tenant, taskID string,
+	tenant, owner, taskID string,
 	failedSubscribers []*taskSubscriber,
 ) {
-	key := newScopedID(tenant, taskID)
+	key := newScopedID(tenant, owner, taskID)
 	m.taskMu.Lock()
 
 	subs, exists := m.subscribers[key]
@@ -899,8 +946,8 @@ func (m *TaskManager) cleanupFailedSubscribers(
 }
 
 // cleanSubscribers closes and removes all subscribers for a task.
-func (m *TaskManager) cleanSubscribers(tenant, taskID string) {
-	key := newScopedID(tenant, taskID)
+func (m *TaskManager) cleanSubscribers(tenant, owner, taskID string) {
+	key := newScopedID(tenant, owner, taskID)
 	m.taskMu.Lock()
 
 	subs, exists := m.subscribers[key]
@@ -932,7 +979,7 @@ func (m *TaskManager) CleanExpiredConversations(maxAge time.Duration) int {
 		if now.Sub(conversation.LastAccessTime) > maxAge {
 			expiredContexts = append(expiredContexts, contextKey)
 			for _, messageID := range conversation.MessageIDs {
-				expiredMessages = append(expiredMessages, newScopedID(contextKey.tenant, messageID))
+				expiredMessages = append(expiredMessages, newScopedID(contextKey.tenant, contextKey.owner, messageID))
 			}
 		}
 	}
@@ -1007,13 +1054,13 @@ func (m *TaskManager) cleanExpiredTasks(maxAge time.Duration) int {
 		// A terminal task normally has no live execution, but its engine may
 		// still be draining; cancel the MessageProcessor ctx so a stuck run can exit.
 		for _, taskKey := range expiredTaskIDs {
-			if exec := m.runs.live(taskKey.tenant, taskKey.id); exec != nil {
+			if exec := m.runs.live(taskKey.tenant, taskKey.owner, taskKey.id); exec != nil {
 				exec.cancel()
 			}
 		}
 
 		for _, taskKey := range expiredTaskIDs {
-			m.pushStore.removeAll(taskKey.tenant, taskKey.id)
+			m.pushStore.removeAll(taskKey.tenant, taskKey.owner, taskKey.id)
 		}
 	}
 

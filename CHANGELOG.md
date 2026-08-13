@@ -14,6 +14,11 @@
 
 - Publishing `input-required` or `auth-required` now cancels the yielded old round's processor context before its execution slot is released. This is round teardown rather than task cancellation: the Task stays suspended while the manager drains the processor channel. Shutdown rejects new resubscriptions once it begins and still waits cooperatively for processors to close their channels.
 
+### Retained task ownership
+
+- Memory and Redis TaskManagers now accept `WithOwnerResolver` to scope retained state by `(tenant, owner)`. Authentication middleware can install `auth.User` and derive the application owner through `auth.UserFromContext`; a nil resolver preserves tenant-wide sharing for compatibility.
+- Owner isolation covers task and conversation history, continuations, list/get/cancel, live execution slots, subscriptions and Redis Streams, and push configuration and delivery. Foreign owners see task-not-found, while resolver failures and empty owners are rejected before state access and surfaced as redacted internal errors.
+
 ### HTTP+JSON protocol binding
 
 - **The v2 client and server now implement the A2A v1.0 HTTP+JSON/REST binding.** It uses the standard operation routes, `application/a2a+json` request and response bodies, direct protocol objects instead of JSON-RPC envelopes, raw `StreamResponse` SSE data, and `google.rpc.Status` JSON errors. JSON-RPC remains the default for direct client construction and continues to use `application/json`.
@@ -31,6 +36,7 @@
 - **`SubscribeToTask` now uses Redis Streams on every Redis TaskManager.** Task events are journaled by default so a reconnect may land on any replica sharing Redis without configuration. `WithCrossNodeResubscribe` remains as a deprecated no-op for source compatibility.
 - **Redis 5.0 or newer is required.** Deployments must allow the Stream commands (`XADD`, `XRANGE`, and `XREVRANGE`), sorted-set commands (`ZADD`, `ZSCORE`, `ZINCRBY`, `ZCARD`, and `ZREMRANGEBYRANK`), and Lua commands used by the TaskManager. Upgrade all replicas together because older nodes do not write the event journal required by Stream-only subscribers.
 - Stream subscriptions use a size-one local response pipe, stop when their Task expires, and retry transient Redis read failures with bounded backoff instead of retaining stale subscribers indefinitely. Live executions renew their Task lease while silent, and event writes are idempotent across ambiguous Redis command retries.
+- Empty-tenant Redis data now lives under the reserved `tenant:~default:` namespace. This prerelease does not read the former unprefixed keys; drain active tasks before upgrading or migrate `task:*`, `msg:*`, `conv:*`, `taskidx:*`, `push:*`, `stream:*`, and `stream-dedupe:*` keys while preserving their TTLs and Redis Cluster hash-slot relationships.
 
 ## 2.0.0-alpha.3 (2026-07-22)
 

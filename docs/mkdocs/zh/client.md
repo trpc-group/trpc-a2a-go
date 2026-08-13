@@ -234,6 +234,8 @@ c, err := client.NewA2AClient("https://agent.example.com/",
 )
 ```
 
+JWT 与 API key 的可运行 client/server 接线见 [`examples/auth`](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth)。
+
 常用 option：
 
 | Option | 用途 |

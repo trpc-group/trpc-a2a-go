@@ -34,6 +34,7 @@ type taskEventTransport interface {
 	CommitTaskEvent(
 		ctx context.Context,
 		tenant string,
+		owner string,
 		task *protocol.Task,
 		event protocol.StreamResponse,
 		allowCreate bool,
@@ -42,6 +43,7 @@ type taskEventTransport interface {
 	AppendEvent(
 		ctx context.Context,
 		tenant string,
+		owner string,
 		taskID string,
 		event protocol.StreamResponse,
 	) error
@@ -50,6 +52,7 @@ type taskEventTransport interface {
 	LoadTaskAndCursor(
 		ctx context.Context,
 		tenant string,
+		owner string,
 		taskID string,
 	) (*protocol.Task, string, error)
 	// ReadAfter returns an ordered batch strictly after cursor and the cursor for
@@ -58,12 +61,13 @@ type taskEventTransport interface {
 	ReadAfter(
 		ctx context.Context,
 		tenant string,
+		owner string,
 		taskID string,
 		cursor string,
 	) ([]protocol.StreamResponse, string, error)
 	// RefreshTaskLease extends an existing live Task and its event journal. It
 	// must not create a missing Task.
-	RefreshTaskLease(ctx context.Context, tenant string, taskID string) error
+	RefreshTaskLease(ctx context.Context, tenant string, owner string, taskID string) error
 }
 
 const (
@@ -228,29 +232,31 @@ func newRedisTaskEventTransport(
 // streamKey shares the task key's Redis Cluster slot without changing the
 // existing task key. Redis hashes the full task key and the {...} portion of
 // the stream key, which are the same bytes for manager-generated task IDs.
-func streamKey(tenant, taskID string) string {
-	return streamPrefix + "{" + taskKey(tenant, taskID) + "}"
+func streamKey(tenant, owner, taskID string) string {
+	return streamPrefix + "{" + taskKey(tenant, owner, taskID) + "}"
 }
 
-func streamDedupeKey(tenant, taskID string) string {
-	return streamDedupePrefix + "{" + taskKey(tenant, taskID) + "}"
+func streamDedupeKey(tenant, owner, taskID string) string {
+	return streamDedupePrefix + "{" + taskKey(tenant, owner, taskID) + "}"
 }
 
 func (t *redisTaskEventTransport) CommitTaskEvent(
 	ctx context.Context,
 	tenant string,
+	owner string,
 	task *protocol.Task,
 	event protocol.StreamResponse,
 	allowCreate bool,
 ) error {
 	return t.commitTaskEventWithOperationID(
-		ctx, tenant, task, event, allowCreate, "op-"+protocol.GenerateMessageID(),
+		ctx, tenant, owner, task, event, allowCreate, "op-"+protocol.GenerateMessageID(),
 	)
 }
 
 func (t *redisTaskEventTransport) commitTaskEventWithOperationID(
 	ctx context.Context,
 	tenant string,
+	owner string,
 	task *protocol.Task,
 	event protocol.StreamResponse,
 	allowCreate bool,
@@ -272,9 +278,9 @@ func (t *redisTaskEventTransport) commitTaskEventWithOperationID(
 		ctx,
 		t.client,
 		[]string{
-			taskKey(tenant, task.ID),
-			streamKey(tenant, task.ID),
-			streamDedupeKey(tenant, task.ID),
+			taskKey(tenant, owner, task.ID),
+			streamKey(tenant, owner, task.ID),
+			streamDedupeKey(tenant, owner, task.ID),
 		},
 		taskBytes,
 		eventBytes,
@@ -292,17 +298,19 @@ func (t *redisTaskEventTransport) commitTaskEventWithOperationID(
 func (t *redisTaskEventTransport) AppendEvent(
 	ctx context.Context,
 	tenant string,
+	owner string,
 	taskID string,
 	event protocol.StreamResponse,
 ) error {
 	return t.appendEventWithOperationID(
-		ctx, tenant, taskID, event, "op-"+protocol.GenerateMessageID(),
+		ctx, tenant, owner, taskID, event, "op-"+protocol.GenerateMessageID(),
 	)
 }
 
 func (t *redisTaskEventTransport) appendEventWithOperationID(
 	ctx context.Context,
 	tenant string,
+	owner string,
 	taskID string,
 	event protocol.StreamResponse,
 	operationID string,
@@ -315,9 +323,9 @@ func (t *redisTaskEventTransport) appendEventWithOperationID(
 		ctx,
 		t.client,
 		[]string{
-			taskKey(tenant, taskID),
-			streamKey(tenant, taskID),
-			streamDedupeKey(tenant, taskID),
+			taskKey(tenant, owner, taskID),
+			streamKey(tenant, owner, taskID),
+			streamDedupeKey(tenant, owner, taskID),
 		},
 		payload,
 		streamMaxLen,
@@ -332,12 +340,13 @@ func (t *redisTaskEventTransport) appendEventWithOperationID(
 func (t *redisTaskEventTransport) LoadTaskAndCursor(
 	ctx context.Context,
 	tenant string,
+	owner string,
 	taskID string,
 ) (*protocol.Task, string, error) {
 	values, err := loadTaskAndCursorScript.Run(
 		ctx,
 		t.client,
-		[]string{taskKey(tenant, taskID), streamKey(tenant, taskID)},
+		[]string{taskKey(tenant, owner, taskID), streamKey(tenant, owner, taskID)},
 	).Slice()
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to load task %s and stream cursor: %w", taskID, err)
@@ -370,13 +379,14 @@ func (t *redisTaskEventTransport) LoadTaskAndCursor(
 func (t *redisTaskEventTransport) ReadAfter(
 	ctx context.Context,
 	tenant string,
+	owner string,
 	taskID string,
 	cursor string,
 ) ([]protocol.StreamResponse, string, error) {
 	values, err := readAfterScript.Run(
 		ctx,
 		t.client,
-		[]string{taskKey(tenant, taskID), streamKey(tenant, taskID)},
+		[]string{taskKey(tenant, owner, taskID), streamKey(tenant, owner, taskID)},
 		cursor,
 		streamReadCount,
 		streamField,
@@ -418,15 +428,16 @@ func (t *redisTaskEventTransport) ReadAfter(
 func (t *redisTaskEventTransport) RefreshTaskLease(
 	ctx context.Context,
 	tenant string,
+	owner string,
 	taskID string,
 ) error {
 	refreshed, err := refreshTaskLeaseScript.Run(
 		ctx,
 		t.client,
 		[]string{
-			taskKey(tenant, taskID),
-			streamKey(tenant, taskID),
-			streamDedupeKey(tenant, taskID),
+			taskKey(tenant, owner, taskID),
+			streamKey(tenant, owner, taskID),
+			streamDedupeKey(tenant, owner, taskID),
 		},
 		t.expiration.Milliseconds(),
 	).Int()

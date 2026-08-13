@@ -12,10 +12,15 @@ import (
 	"time"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
 
 // TaskManagerOptions contains configuration options for TaskManager.
 type TaskManagerOptions struct {
+	// OwnerResolver derives the authorization owner scope from each request.
+	// A nil resolver preserves tenant-wide task sharing for compatibility.
+	OwnerResolver taskmanager.OwnerResolver
+
 	// MaxHistoryLength is the maximum number of messages to keep in conversation history.
 	MaxHistoryLength int
 
@@ -112,6 +117,15 @@ func WithTaskSubscriberBufferSize(size int) TaskManagerOption {
 func WithTaskSubscriberBlockingSend(blockingSend bool) TaskManagerOption {
 	return func(opts *TaskManagerOptions) {
 		opts.TaskSubscriberBlockingSend = blockingSend
+	}
+}
+
+// WithOwnerResolver scopes retained tasks and related state to the owner
+// returned for each request. The resolver must return a non-empty owner; an
+// error or empty result rejects the operation before any state is accessed.
+func WithOwnerResolver(resolver taskmanager.OwnerResolver) TaskManagerOption {
+	return func(opts *TaskManagerOptions) {
+		opts.OwnerResolver = resolver
 	}
 }
 

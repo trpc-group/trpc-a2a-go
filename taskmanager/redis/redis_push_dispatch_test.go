@@ -156,7 +156,7 @@ func TestRedisInlinePushConfigMessageOnlyLeavesNoOrphan(t *testing.T) {
 		t.Fatal(err)
 	}
 	taskID := <-taskIDs
-	if mr.Exists(taskPrefix+taskID) || mr.Exists(pushNotificationPrefix+taskID) {
+	if mr.Exists(taskKey("", "", taskID)) || mr.Exists(pushNotificationKey("", "", taskID)) {
 		t.Fatalf("message-only round created task or push-config keys for %s", taskID)
 	}
 	list, err := m.OnPushNotificationList(context.Background(),
@@ -274,7 +274,7 @@ func TestRedisStreamingInitialTaskIsNotPushed(t *testing.T) {
 	// ordering for one registration guarantees every earlier delivery is
 	// recorded before the sentinel, without relying on timing.
 	sentinel := agentReply("push-sentinel")
-	m.dispatchPush("", task.ID, protocol.NewStreamResponseMessage(sentinel))
+	m.dispatchPush("", "", task.ID, protocol.NewStreamResponseMessage(sentinel))
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		calls := sender.snapshot()
@@ -346,13 +346,13 @@ func TestRedisPushQueuedGenerationInvalidatedAcrossManagers(t *testing.T) {
 
 	// Keep the first delivery in flight and leave the old-generation event in
 	// A's process-local queue.
-	managerA.dispatchPush("", task.ID, response(protocol.TaskStateWorking))
+	managerA.dispatchPush("", "", task.ID, response(protocol.TaskStateWorking))
 	select {
 	case <-started:
 	case <-time.After(2 * time.Second):
 		t.Fatal("first push delivery did not start")
 	}
-	managerA.dispatchPush("", task.ID, response(protocol.TaskStateInputRequired))
+	managerA.dispatchPush("", "", task.ID, response(protocol.TaskStateInputRequired))
 
 	// B deletes and recreates the same config ID. Existence and ID checks alone
 	// would revive the queued event; only the shared Redis generation rejects it.
@@ -367,7 +367,7 @@ func TestRedisPushQueuedGenerationInvalidatedAcrossManagers(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("manager B recreate: %v", err)
 	}
-	managerA.dispatchPush("", task.ID, response(protocol.TaskStateCompleted))
+	managerA.dispatchPush("", "", task.ID, response(protocol.TaskStateCompleted))
 	releaseFirst()
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -439,13 +439,13 @@ func TestRedisPushBackpressureSerializesSuspendContinuation(t *testing.T) { //no
 			Status: protocol.TaskStatus{State: state},
 		})
 	}
-	manager.dispatchPush("", prefill.ID, prefillResponse(protocol.TaskStateWorking))
+	manager.dispatchPush("", "", prefill.ID, prefillResponse(protocol.TaskStateWorking))
 	select {
 	case <-started:
 	case <-time.After(2 * time.Second):
 		t.Fatal("prefill push delivery did not start")
 	}
-	manager.dispatchPush("", prefill.ID, prefillResponse(protocol.TaskStateSubmitted))
+	manager.dispatchPush("", "", prefill.ID, prefillResponse(protocol.TaskStateSubmitted))
 
 	params := sendParams("start", "ctx-push-suspend")
 	params.Configuration = &protocol.SendMessageConfiguration{PushConfig: &protocol.TaskPushNotificationConfig{
@@ -467,7 +467,7 @@ func TestRedisPushBackpressureSerializesSuspendContinuation(t *testing.T) { //no
 	// Once INPUT_REQUIRED is visible in Redis, the yield barrier must already
 	// exist. This ordering makes a GetTask-driven continuation safe.
 	manager.cancelMu.RLock()
-	live := manager.executions[newScopedID("", taskID)]
+	live := manager.executions[newScopedID("", "", taskID)]
 	yielding := live != nil && live.yieldDone != nil
 	manager.cancelMu.RUnlock()
 	if !yielding {

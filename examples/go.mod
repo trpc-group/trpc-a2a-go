@@ -8,7 +8,6 @@ replace trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2 => ../taskmanager/re
 
 require (
 	github.com/redis/go-redis/v9 v9.10.0
-	golang.org/x/oauth2 v0.26.0
 	trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2 v2.0.0
 	trpc.group/trpc-go/trpc-a2a-go/v2 v2.0.0
 )
@@ -44,6 +43,7 @@ require (
 	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/crypto v0.32.0 // indirect
 	golang.org/x/net v0.24.0 // indirect
+	golang.org/x/oauth2 v0.26.0 // indirect
 	golang.org/x/sys v0.30.0 // indirect
 	golang.org/x/text v0.21.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20240102182953-50ed04b92917 // indirect

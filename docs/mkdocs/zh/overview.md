@@ -26,9 +26,10 @@ tRPC-A2A-Go 是 A2A（Agent-to-Agent）协议 v1.0 的 Go 实现。它同时提�
 | agent card 发现与扩展 card | 支持 | 公开 card、鉴权后的 extended card、v1/v0 双格式归一化。 |
 | 任务管理 | 支持 | `GetTask`、`ListTasks`、`CancelTask`，Go client 暴露为 `GetTasks`、`ListTasks`、`CancelTasks`。 |
 | 内存与 Redis 任务存储 | 支持 | 可插拔 `TaskManager` 接口；可自带实现。 |
+| 留存任务的 owner 隔离 | 可选支持 | memory / Redis 通过 `WithOwnerResolver` 开启；tenant 路由本身不等于用户授权隔离。 |
 | 鉴权 | 支持 | JWT、API key、OAuth2，可链式组合，服务端与客户端两侧都有封装。 |
 | 推送通知 | 支持 | webhook 配置 CRUD、JWT 签名、JWKS 公钥发布。 |
-| 多租户托管 | 支持 | 一个进程承载多个 agent，按请求里的 `tenant` 路由并提供租户 card。 |
+| 多租户托管 | 支持 | 一个进程承载多个 agent，按请求里的 `tenant` 路由并提供租户 card；路由本身不隔离用户。 |
 | 子路径部署 | 支持 | `WithBasePath` 适配网关或统一前缀。 |
 | legacy v0.2.x wire 兼容 | 支持 | `compat/v0` 挂到同一端点、同一鉴权链，保留 v0 默认行为。 |
 | OpenTelemetry 指标 | 支持 | 请求数、耗时、TTFT；可注入 meter provider 或让 server 创建 OTLP provider。 |

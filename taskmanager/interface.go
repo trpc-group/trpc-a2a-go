@@ -13,6 +13,13 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
+// OwnerResolver derives the application-defined owner scope for retained task
+// data from the authenticated request context. The owner may identify a user,
+// group, project, or another authorization boundary. Retaining task managers
+// use it together with the request tenant; it is never written into protocol
+// objects.
+type OwnerResolver func(context.Context) (string, error)
+
 // ExecContext is the read-only snapshot of one incoming message for a
 // MessageProcessor to process.
 type ExecContext struct {

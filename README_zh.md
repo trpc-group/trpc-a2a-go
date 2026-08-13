@@ -109,39 +109,28 @@ go run main.go
 - 通过 `returnImmediately` 启动长任务
 - GetTask、SubscribeToTask 与 CancelTask
 - 通过 `contextId` 组织会话并读取消息历史
+- HTTP Basic 鉴权与按用户隔离的留存 Task
 
 REPL 命令见 [examples/basic/README.md](examples/basic/README.md)。
 
 ### 3. 鉴权示例 ([examples/auth](examples/auth))
 
-演示鉴权的完整示例：
-- 支持多种鉴权方式的 server 实现
-- 展示如何用不同鉴权方式连接的 client 示例
-- JWT、API key 与 OAuth2 实现
-- 所有鉴权参数的命令行选项
+该示例链式组合内置 API key 和 JWT provider，从已鉴权的 `auth.User` 派生留存 Task 的 owner，并对已完成 Task 验证同 owner 可访问、跨 owner 被拒绝。GetTask、SubscribeToTask 和 CancelTask 的交互式跨 owner 验证见 `examples/basic`。
 
 ```bash
-# Start the authentication server with OAuth2 support enabled
+# 启动鉴权 server。
 cd examples/auth/server
-go run main.go --enable-oauth true
+go run .
 
-# Run client with JWT authentication
+# 在另一个终端中使用 alice 的 API key。
 cd examples/auth/client
-go run main.go --auth jwt --jwt-secret "your-secret-key"
+go run . -auth apikey -api-key alice-key
 
-# Run client with API key authentication
-go run main.go --auth apikey --api-key "test-api-key"
+# 或使用 bob 的 API key。
+go run . -auth apikey -api-key bob-key
 
-# Run client with OAuth2 authentication
-go run main.go --auth oauth2 \
-  --oauth2-client-id "my-client-id" \
-  --oauth2-client-secret "my-client-secret"
-
-# Run client with JWT from a file
-go run main.go --auth jwt --jwt-secret-file "path/to/jwt-secret.key"
-
-# Specify custom message and session ID
-go run main.go --auth jwt --message "Custom message" --session-id "session123"
+# 或使用共享的 demo JWT secret。
+go run . -auth jwt
 ```
 
 ### 4. v0 兼容示例 ([examples/compat](examples/compat))
@@ -317,6 +306,8 @@ if err := srv.Start(":8080"); err != nil {
 Redis TaskManager 作为独立 module 发布，请使用
 `go get trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2@v2.0.0-alpha.3` 安装。
 
+A2A 的 `tenant` 用于选择 agent，不负责最终用户授权。memory 和 Redis 默认保留 tenant 内共享的留存 Task，配置 `WithOwnerResolver` 后才会增加 owner 隔离。`server.WithAuthProvider` 写入 `auth.User` 后，可通过 `auth.UserFromContext` 派生 owner；详见[服务端：按 owner 隔离留存状态](docs/mkdocs/zh/server.md#按-owner-隔离留存状态)与可运行的 [basic 示例](examples/basic/README.md)。
+
 ## 从 v0.x 迁移
 
 v1.0（`/v2`）版本用上文所示的单一 event-stream 契约，替换了原来多结果返回的 `MessageProcessor` + `TaskHandler` 回调。熟悉的名字得以保留：你依然实现 `MessageProcessor.ProcessMessage`，原来的 `TaskHandler` 动词以 `TaskHandle` 兼容层的形式延续，因此 v0.x 的 processor 函数体只需极少改动即可迁移——包括完全同步的函数体，而它正是 v0.x 常见的写法。（wire 说明：v1.0 的 JSON-RPC 绑定将操作命名为 `SendMessage`、`SendStreamingMessage`、`GetTask`、`ListTasks`、`CancelTask`、`SubscribeToTask` 以及 `*TaskPushNotificationConfig` 的 CRUD；带斜杠的名字——`message/send`、`tasks/get`……——是 v0.2.x 的 wire，仍由 `compat/v0` 提供服务。本指南沿用迁移读者已经熟悉的 v0.x 名称来指代这些操作。）
@@ -489,7 +480,7 @@ client, err := client.NewA2AClient(
 )
 ```
 
-不同鉴权方式的完整示例见 [examples/auth/client](examples/auth/client) 目录。
+可运行的 JWT 与 API key client/server 接线见 [examples/auth](examples/auth)。上述 OAuth2 option 使用相同的 client API 连接外部 token endpoint。
 
 ### 推送通知鉴权
 

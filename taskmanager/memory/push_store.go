@@ -28,7 +28,7 @@ type pushConfigStore struct {
 	mu sync.RWMutex
 	// closed prevents configs from being re-created after manager shutdown.
 	closed bool
-	// configs maps tenant+taskID -> configID -> internal registration. Generation is
+	// configs maps tenant+owner+taskID -> configID -> internal registration. Generation is
 	// intentionally kept out of the public protocol type.
 	configs map[scopedID]map[string]push.Registration
 }
@@ -41,6 +41,7 @@ func newPushConfigStore() *pushConfigStore {
 
 // save stores cfg, generating a resource ID when absent.
 func (s *pushConfigStore) save(
+	owner string,
 	cfg protocol.TaskPushNotificationConfig,
 ) (protocol.TaskPushNotificationConfig, error) {
 	if cfg.TaskID == "" {
@@ -55,22 +56,23 @@ func (s *pushConfigStore) save(
 		cfg.ID = "push-" + uuid.New().String()
 	}
 	cfg = clonePushConfig(cfg)
-	taskKey := newScopedID(cfg.Tenant, cfg.TaskID)
+	taskKey := newScopedID(cfg.Tenant, owner, cfg.TaskID)
 	if s.configs[taskKey] == nil {
 		s.configs[taskKey] = make(map[string]push.Registration)
 	}
 	s.configs[taskKey][cfg.ID] = push.Registration{
 		Config:     cfg,
 		Generation: uuid.New().String(),
+		Owner:      owner,
 	}
 	return clonePushConfig(cfg), nil
 }
 
 // list returns all configs for taskID, ordered by ID for stable pagination.
-func (s *pushConfigStore) list(tenant, taskID string) []protocol.TaskPushNotificationConfig {
+func (s *pushConfigStore) list(tenant, owner, taskID string) []protocol.TaskPushNotificationConfig {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	byID := s.configs[newScopedID(tenant, taskID)]
+	byID := s.configs[newScopedID(tenant, owner, taskID)]
 	out := make([]protocol.TaskPushNotificationConfig, 0, len(byID))
 	for _, registration := range byID {
 		out = append(out, clonePushConfig(registration.Config))
@@ -83,11 +85,11 @@ func (s *pushConfigStore) list(tenant, taskID string) []protocol.TaskPushNotific
 
 // get returns the config identified by taskID and configID.
 func (s *pushConfigStore) get(
-	tenant, taskID, configID string,
+	tenant, owner, taskID, configID string,
 ) (protocol.TaskPushNotificationConfig, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	byID := s.configs[newScopedID(tenant, taskID)]
+	byID := s.configs[newScopedID(tenant, owner, taskID)]
 	registration, ok := byID[configID]
 	return clonePushConfig(registration.Config), ok
 }
@@ -95,10 +97,10 @@ func (s *pushConfigStore) get(
 // registrations returns internal delivery snapshots, ordered by config ID.
 // Generation remains internal and lets the dispatcher discard queued work for
 // a config that was deleted or replaced after enqueue.
-func (s *pushConfigStore) registrations(tenant, taskID string) []push.Registration {
+func (s *pushConfigStore) registrations(tenant, owner, taskID string) []push.Registration {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	byID := s.configs[newScopedID(tenant, taskID)]
+	byID := s.configs[newScopedID(tenant, owner, taskID)]
 	out := make([]push.Registration, 0, len(byID))
 	for _, registration := range byID {
 		registration.Config = clonePushConfig(registration.Config)
@@ -119,7 +121,7 @@ func (s *pushConfigStore) isCurrent(
 ) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	byID := s.configs[newScopedID(registration.Config.Tenant, registration.Config.TaskID)]
+	byID := s.configs[newScopedID(registration.Config.Tenant, registration.Owner, registration.Config.TaskID)]
 	current, ok := byID[registration.Config.ID]
 	return ok && current.Generation == registration.Generation, nil
 }
@@ -135,10 +137,10 @@ func clonePushConfig(cfg protocol.TaskPushNotificationConfig) protocol.TaskPushN
 }
 
 // remove deletes a single config by ID; a missing config is a no-op.
-func (s *pushConfigStore) remove(tenant, taskID, configID string) {
+func (s *pushConfigStore) remove(tenant, owner, taskID, configID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	taskKey := newScopedID(tenant, taskID)
+	taskKey := newScopedID(tenant, owner, taskID)
 	if byID := s.configs[taskKey]; byID != nil {
 		delete(byID, configID)
 		if len(byID) == 0 {
@@ -148,10 +150,10 @@ func (s *pushConfigStore) remove(tenant, taskID, configID string) {
 }
 
 // removeAll deletes every config for taskID.
-func (s *pushConfigStore) removeAll(tenant, taskID string) {
+func (s *pushConfigStore) removeAll(tenant, owner, taskID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.configs, newScopedID(tenant, taskID))
+	delete(s.configs, newScopedID(tenant, owner, taskID))
 }
 
 func (s *pushConfigStore) close() {
