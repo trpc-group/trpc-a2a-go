@@ -301,12 +301,12 @@ func TestInlinePushConfigRegistration(t *testing.T) {
 				len(suspended.History), len(after.History))
 		}
 		manager.conversationMu.RLock()
-		_, stored := manager.messages[newScopedID("", followUp.Message.MessageID)]
+		_, stored := manager.messages[newScopedID("", "", followUp.Message.MessageID)]
 		manager.conversationMu.RUnlock()
 		if stored {
 			t.Fatalf("rejected continuation stored incoming message %s", followUp.Message.MessageID)
 		}
-		if live := manager.runs.live("", suspended.ID); live != nil {
+		if live := manager.runs.live("", "", suspended.ID); live != nil {
 			t.Fatal("rejected continuation did not release its execution slot")
 		}
 	})
@@ -460,7 +460,7 @@ func TestQueuedPushUsesRegistrationGeneration(t *testing.T) { //nolint:gocyclo /
 	}); err != nil {
 		t.Fatalf("set old config: %v", err)
 	}
-	oldRegistrations := manager.pushStore.registrations("", taskID)
+	oldRegistrations := manager.pushStore.registrations("", "", taskID)
 	if len(oldRegistrations) != 1 {
 		t.Fatalf("old registrations = %d, want 1", len(oldRegistrations))
 	}
@@ -497,7 +497,7 @@ func TestQueuedPushUsesRegistrationGeneration(t *testing.T) { //nolint:gocyclo /
 	}); err != nil {
 		t.Fatalf("re-create config: %v", err)
 	}
-	newRegistrations := manager.pushStore.registrations("", taskID)
+	newRegistrations := manager.pushStore.registrations("", "", taskID)
 	if len(newRegistrations) != 1 {
 		t.Fatalf("new registrations = %d, want 1", len(newRegistrations))
 	}
@@ -601,7 +601,7 @@ func TestSuspendWaitsForPushCapacityBeforeHandoff(t *testing.T) { //nolint:gocyc
 	}); err != nil {
 		t.Fatalf("set prefill config: %v", err)
 	}
-	prefillRegistrations := manager.pushStore.registrations("", prefillTaskID)
+	prefillRegistrations := manager.pushStore.registrations("", "", prefillTaskID)
 	prefillEvent := protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{
 		TaskID: prefillTaskID,
 		Status: protocol.TaskStatus{State: protocol.TaskStateWorking},
@@ -641,7 +641,7 @@ func TestSuspendWaitsForPushCapacityBeforeHandoff(t *testing.T) { //nolint:gocyc
 		state, ok := storedTaskState(manager, taskID)
 		return ok && state == protocol.TaskStateInputRequired
 	}, "task must persist input-required before publication")
-	exec := manager.runs.live("", taskID)
+	exec := manager.runs.live("", "", taskID)
 	yielding := exec != nil && exec.yieldDone != nil
 	if !yielding {
 		t.Fatal("input-required became visible before the suspend handoff barrier")

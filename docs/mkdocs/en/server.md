@@ -291,6 +291,34 @@ The Redis TaskManager requires Redis 5.0 or newer and atomically stores Task upd
 → [examples/redis](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis).
 Implement the `taskmanager.TaskManager` interface for a custom backend.
 
+### Owner-scoped retained state
+
+The A2A `tenant` selects and routes a hosted agent; it is not an end-user authorization boundary. By default, memory and Redis preserve the compatibility behavior in which callers within one tenant share the same retained-task namespace. Configure an `OwnerResolver` when tasks must also be isolated by user, group, project, or another application-defined owner.
+
+Authentication middleware runs before TaskManager operations, so a resolver can derive the owner from `auth.User`:
+
+```go
+func resolveOwner(ctx context.Context) (string, error) {
+    user, ok := auth.UserFromContext(ctx)
+    if !ok || user.ID == "" {
+        return "", errors.New("authenticated user is missing")
+    }
+    return user.ID, nil
+}
+
+tm, _ := memory.NewTaskManager(proc, memory.WithOwnerResolver(resolveOwner))
+srv, _ := server.NewA2AServer(tm,
+    server.WithAgentCard(agentCard),
+    server.WithAuthProvider(provider),
+)
+```
+
+For Redis, pass the same resolver as `redistm.WithOwnerResolver(resolveOwner)`. The scope is `(tenant, owner)`, and covers retained task and conversation history, continuations, `ListTasks`, `GetTask`, `CancelTask`, live execution slots, `SubscribeToTask` / Redis Streams, and push-notification configuration and delivery. A caller using another owner cannot discover the task: task-addressed operations return task-not-found and list operations return only that owner's tasks.
+
+The owner is resolved once and frozen for each execution round; later task operations resolve the current caller independently. A resolver error or empty owner rejects the operation before retained state is accessed and is surfaced as a redacted internal error. A nil resolver remains supported and preserves tenant-wide sharing.
+
+Redis always namespaces the empty tenant as `tenant:~default:`. This prerelease does not read older unprefixed keys, so drain active tasks before upgrading or migrate the old keys while preserving TTLs and Redis Cluster hash-slot relationships.
+
 Retention for the stateful managers:
 
 | | memory backend | redis backend |

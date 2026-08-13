@@ -59,6 +59,12 @@ type User struct {
 	OAuth2Info *OAuth2UserInfo
 }
 
+// UserFromContext returns the authenticated user installed by Middleware.
+func UserFromContext(ctx context.Context) (*User, bool) {
+	user, ok := ctx.Value(AuthUserKey).(*User)
+	return user, ok && user != nil
+}
+
 // OAuth2UserInfo contains additional user information from OAuth2 providers.
 type OAuth2UserInfo struct {
 	// AccessToken is the OAuth2 access token.

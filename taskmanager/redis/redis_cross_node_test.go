@@ -79,6 +79,7 @@ type readSequenceTransport struct {
 func (*nonBlockingEmptyTransport) CommitTaskEvent(
 	context.Context,
 	string,
+	string,
 	*protocol.Task,
 	protocol.StreamResponse,
 	bool,
@@ -90,6 +91,7 @@ func (*nonBlockingEmptyTransport) AppendEvent(
 	context.Context,
 	string,
 	string,
+	string,
 	protocol.StreamResponse,
 ) error {
 	return nil
@@ -97,6 +99,7 @@ func (*nonBlockingEmptyTransport) AppendEvent(
 
 func (*nonBlockingEmptyTransport) LoadTaskAndCursor(
 	context.Context,
+	string,
 	string,
 	string,
 ) (*protocol.Task, string, error) {
@@ -112,12 +115,14 @@ func (*nonBlockingEmptyTransport) RefreshTaskLease(
 	context.Context,
 	string,
 	string,
+	string,
 ) error {
 	return nil
 }
 
 func (t *nonBlockingEmptyTransport) ReadAfter(
 	context.Context,
+	string,
 	string,
 	string,
 	string,
@@ -128,6 +133,7 @@ func (t *nonBlockingEmptyTransport) ReadAfter(
 
 func (*readSequenceTransport) CommitTaskEvent(
 	context.Context,
+	string,
 	string,
 	*protocol.Task,
 	protocol.StreamResponse,
@@ -140,6 +146,7 @@ func (*readSequenceTransport) AppendEvent(
 	context.Context,
 	string,
 	string,
+	string,
 	protocol.StreamResponse,
 ) error {
 	return nil
@@ -147,6 +154,7 @@ func (*readSequenceTransport) AppendEvent(
 
 func (*readSequenceTransport) LoadTaskAndCursor(
 	context.Context,
+	string,
 	string,
 	string,
 ) (*protocol.Task, string, error) {
@@ -162,12 +170,14 @@ func (*readSequenceTransport) RefreshTaskLease(
 	context.Context,
 	string,
 	string,
+	string,
 ) error {
 	return nil
 }
 
 func (t *readSequenceTransport) ReadAfter(
 	context.Context,
+	string,
 	string,
 	string,
 	string,
@@ -295,7 +305,7 @@ func TestCrossNode_ResubscribeReceivesSubsequentEvents(t *testing.T) {
 	if !drainForState(t, chB, protocol.TaskStateCompleted) {
 		t.Fatal("cross-node resubscriber never received the completed event before the stream closed")
 	}
-	if got, err := nodeA.client.XLen(context.Background(), streamKey("", taskA.ID)).Result(); err != nil || got != 2 {
+	if got, err := nodeA.client.XLen(context.Background(), streamKey("", "", taskA.ID)).Result(); err != nil || got != 2 {
 		t.Fatalf("each status must be appended exactly once: xlen=%d err=%v", got, err)
 	}
 }
@@ -305,7 +315,7 @@ func TestCrossNode_ResubscribeReceivesSubsequentEvents(t *testing.T) {
 func TestCrossNode_DeliversEventPublishedRightAfterResubscribe(t *testing.T) {
 	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor())
 	task := storedTask(t, nodeA, "task-gap", "ctx-gap", protocol.TaskStateWorking)
-	if err := nodeA.appendTaskEvent(context.Background(), "", task.ID, protocol.NewStreamResponseStatusUpdate(
+	if err := nodeA.appendTaskEvent(context.Background(), "", "", task.ID, protocol.NewStreamResponseStatusUpdate(
 		statusEvent(protocol.TaskStateWorking, agentReply("w1")))); err != nil {
 		t.Fatalf("append working event: %v", err)
 	}
@@ -315,7 +325,7 @@ func TestCrossNode_DeliversEventPublishedRightAfterResubscribe(t *testing.T) {
 		t.Fatalf("OnResubscribe: %v", err)
 	}
 	// Publish the terminal event immediately after resubscribe.
-	if err := nodeA.appendTaskEvent(context.Background(), "", task.ID, protocol.NewStreamResponseStatusUpdate(
+	if err := nodeA.appendTaskEvent(context.Background(), "", "", task.ID, protocol.NewStreamResponseStatusUpdate(
 		statusEvent(protocol.TaskStateCompleted, agentReply("done")))); err != nil {
 		t.Fatalf("append completed event: %v", err)
 	}
@@ -367,7 +377,7 @@ func TestTaskEventsUseStreamByDefault(t *testing.T) {
 	if task == nil {
 		t.Fatalf("expected Task response, got %+v", response)
 	}
-	if got, err := mgr.client.XLen(context.Background(), streamKey("", task.ID)).Result(); err != nil || got != 2 {
+	if got, err := mgr.client.XLen(context.Background(), streamKey("", "", task.ID)).Result(); err != nil || got != 2 {
 		t.Fatalf("default event stream length = %d, want 2: %v", got, err)
 	}
 }
@@ -387,10 +397,10 @@ func TestSendStreamingInitialTaskDoesNotEnterJournal(t *testing.T) {
 		t.Fatalf("stream frames = %+v, want Task then two status updates", frames)
 	}
 	taskID := frames[0].GetTask().ID
-	if got, err := mgr.client.XLen(context.Background(), streamKey("", taskID)).Result(); err != nil || got != 2 {
+	if got, err := mgr.client.XLen(context.Background(), streamKey("", "", taskID)).Result(); err != nil || got != 2 {
 		t.Fatalf("journal length = %d, want only two processor updates: %v", got, err)
 	}
-	entries, err := mgr.client.XRange(context.Background(), streamKey("", taskID), "-", "+").Result()
+	entries, err := mgr.client.XRange(context.Background(), streamKey("", "", taskID), "-", "+").Result()
 	if err != nil {
 		t.Fatalf("read journal: %v", err)
 	}
@@ -447,8 +457,8 @@ func TestTaskEventCommitIsIdempotentAcrossInterleavedWrite(t *testing.T) {
 		TaskID: working.ID, ContextID: working.ContextID, Status: working.Status,
 	})
 	if err := transport.commitTaskEventWithOperationID(
-		context.Background(), "tenant-a", working, workingEvent, true, "op-a",
-	); err != nil {
+		context.Background(), "tenant-a", "",
+		working, workingEvent, true, "op-a"); err != nil {
 		t.Fatalf("first commit: %v", err)
 	}
 
@@ -458,22 +468,22 @@ func TestTaskEventCommitIsIdempotentAcrossInterleavedWrite(t *testing.T) {
 		TaskID: completed.ID, ContextID: completed.ContextID, Status: completed.Status,
 	})
 	if err := transport.commitTaskEventWithOperationID(
-		context.Background(), "tenant-a", completed, completedEvent, false, "op-b",
-	); err != nil {
+		context.Background(), "tenant-a", "",
+		completed, completedEvent, false, "op-b"); err != nil {
 		t.Fatalf("second commit: %v", err)
 	}
 	if err := transport.commitTaskEventWithOperationID(
-		context.Background(), "tenant-a", working, workingEvent, false, "op-a",
-	); err != nil {
+		context.Background(), "tenant-a", "",
+		working, workingEvent, false, "op-a"); err != nil {
 		t.Fatalf("replayed first commit: %v", err)
 	}
 
 	if got, err := manager.client.XLen(
-		context.Background(), streamKey("tenant-a", working.ID),
+		context.Background(), streamKey("tenant-a", "", working.ID),
 	).Result(); err != nil || got != 2 {
 		t.Fatalf("stream length after replay = %d, want 2: %v", got, err)
 	}
-	stored, err := manager.getTaskInternal(context.Background(), "tenant-a", working.ID)
+	stored, err := manager.getTaskInternal(context.Background(), "tenant-a", "", working.ID)
 	if err != nil {
 		t.Fatalf("load task: %v", err)
 	}
@@ -481,7 +491,7 @@ func TestTaskEventCommitIsIdempotentAcrossInterleavedWrite(t *testing.T) {
 		t.Fatalf("replayed operation rolled task back to %s", stored.Status.State)
 	}
 	if got, err := manager.client.ZCard(
-		context.Background(), streamDedupeKey("tenant-a", working.ID),
+		context.Background(), streamDedupeKey("tenant-a", "", working.ID),
 	).Result(); err != nil || got != 3 {
 		t.Fatalf("dedupe journal size = %d, want two operations plus sequence: %v", got, err)
 	}
@@ -494,16 +504,16 @@ func TestAppendTaskEventIsIdempotent(t *testing.T) {
 	first := protocol.NewStreamResponseArtifactUpdate(artifactEvent("artifact", "chunk-a"))
 	second := protocol.NewStreamResponseArtifactUpdate(artifactEvent("artifact", "chunk-b"))
 
-	if err := transport.appendEventWithOperationID(context.Background(), "", task.ID, first, "op-a"); err != nil {
+	if err := transport.appendEventWithOperationID(context.Background(), "", "", task.ID, first, "op-a"); err != nil {
 		t.Fatalf("first append: %v", err)
 	}
-	if err := transport.appendEventWithOperationID(context.Background(), "", task.ID, second, "op-b"); err != nil {
+	if err := transport.appendEventWithOperationID(context.Background(), "", "", task.ID, second, "op-b"); err != nil {
 		t.Fatalf("second append: %v", err)
 	}
-	if err := transport.appendEventWithOperationID(context.Background(), "", task.ID, first, "op-a"); err != nil {
+	if err := transport.appendEventWithOperationID(context.Background(), "", "", task.ID, first, "op-a"); err != nil {
 		t.Fatalf("replayed append: %v", err)
 	}
-	if got, err := manager.client.XLen(context.Background(), streamKey("", task.ID)).Result(); err != nil || got != 2 {
+	if got, err := manager.client.XLen(context.Background(), streamKey("", "", task.ID)).Result(); err != nil || got != 2 {
 		t.Fatalf("stream length after append replay = %d, want 2: %v", got, err)
 	}
 }
@@ -518,42 +528,43 @@ func TestTaskEventDedupeIsTenantScopedAndTypeChecked(t *testing.T) {
 		}
 		event := protocol.NewStreamResponseTask(task)
 		if err := transport.commitTaskEventWithOperationID(
-			context.Background(), tenant, task, event, true, "op-shared",
-		); err != nil {
+			context.Background(), tenant, "",
+			task, event, true, "op-shared"); err != nil {
 			t.Fatalf("commit for %s: %v", tenant, err)
 		}
 	}
 	for _, tenant := range []string{"tenant-a", "tenant-b"} {
 		if got, err := manager.client.XLen(
-			context.Background(), streamKey(tenant, "shared-task"),
+			context.Background(), streamKey(tenant, "", "shared-task"),
 		).Result(); err != nil || got != 1 {
 			t.Fatalf("%s stream length = %d, want 1: %v", tenant, got, err)
 		}
 	}
 
 	task := storedTask(t, manager, "task-wrong-dedupe", "ctx-wrong-dedupe", protocol.TaskStateWorking)
-	before, err := manager.client.Get(context.Background(), taskKey("", task.ID)).Bytes()
+	before, err := manager.client.Get(context.Background(), taskKey("", "", task.ID)).Bytes()
 	if err != nil {
 		t.Fatalf("load original task: %v", err)
 	}
 	if err := manager.client.Set(
-		context.Background(), streamDedupeKey("", task.ID), "wrong-type", 0,
+		context.Background(), streamDedupeKey("", "", task.ID), "wrong-type", 0,
 	).Err(); err != nil {
 		t.Fatalf("seed wrong-type dedupe journal: %v", err)
 	}
 	changed := copyTask(task)
 	changed.Status.State = protocol.TaskStateCompleted
 	err = transport.commitTaskEventWithOperationID(
-		context.Background(), "", changed, protocol.NewStreamResponseTask(changed), false, "op-wrong-type",
-	)
+		context.Background(), "", "",
+		changed, protocol.NewStreamResponseTask(changed), false, "op-wrong-type")
+
 	if err == nil {
 		t.Fatal("commit unexpectedly succeeded with wrong-type dedupe journal")
 	}
-	after, getErr := manager.client.Get(context.Background(), taskKey("", task.ID)).Bytes()
+	after, getErr := manager.client.Get(context.Background(), taskKey("", "", task.ID)).Bytes()
 	if getErr != nil || !bytes.Equal(after, before) {
 		t.Fatalf("failed commit changed task: before=%s after=%s err=%v", before, after, getErr)
 	}
-	if got, xlenErr := manager.client.XLen(context.Background(), streamKey("", task.ID)).Result(); xlenErr != nil || got != 0 {
+	if got, xlenErr := manager.client.XLen(context.Background(), streamKey("", "", task.ID)).Result(); xlenErr != nil || got != 0 {
 		t.Fatalf("failed commit partially appended event: len=%d err=%v", got, xlenErr)
 	}
 }
@@ -562,19 +573,19 @@ func TestReadAfterAdvancesPastMalformedEntry(t *testing.T) {
 	manager, _ := setupTest(t, scriptedExecutor())
 	task := storedTask(t, manager, "task-malformed-entry", "ctx-malformed-entry", protocol.TaskStateWorking)
 	if err := manager.client.XAdd(context.Background(), &redis.XAddArgs{
-		Stream: streamKey("", task.ID), Values: map[string]interface{}{"unexpected": "value"},
+		Stream: streamKey("", "", task.ID), Values: map[string]interface{}{"unexpected": "value"},
 	}).Err(); err != nil {
 		t.Fatalf("seed malformed entry: %v", err)
 	}
 	transport := manager.eventTransport.(*redisTaskEventTransport)
-	events, cursor, err := transport.ReadAfter(context.Background(), "", task.ID, "0-0")
+	events, cursor, err := transport.ReadAfter(context.Background(), "", "", task.ID, "0-0")
 	if err != nil {
 		t.Fatalf("ReadAfter malformed entry: %v", err)
 	}
 	if len(events) != 0 || cursor == "0-0" {
 		t.Fatalf("malformed entry result: events=%+v cursor=%q", events, cursor)
 	}
-	events, next, err := transport.ReadAfter(context.Background(), "", task.ID, cursor)
+	events, next, err := transport.ReadAfter(context.Background(), "", "", task.ID, cursor)
 	if err != nil || len(events) != 0 || next != cursor {
 		t.Fatalf("malformed entry was replayed: events=%+v cursor=%q next=%q err=%v", events, cursor, next, err)
 	}
@@ -666,7 +677,7 @@ func TestStreamResubscribe_LiveTaskRenewsLeaseUntilTerminal(t *testing.T) {
 	if task == nil || task.Status.State != protocol.TaskStateWorking {
 		t.Fatalf("expected working Task, got %+v", response)
 	}
-	if _, err := manager.storePushConfig(context.Background(), protocol.TaskPushNotificationConfig{
+	if _, err := manager.storePushConfig(context.Background(), "", protocol.TaskPushNotificationConfig{
 		TaskID: task.ID, URL: "https://example.com/live-task",
 	}); err != nil {
 		t.Fatalf("store push config: %v", err)
@@ -686,10 +697,10 @@ func TestStreamResubscribe_LiveTaskRenewsLeaseUntilTerminal(t *testing.T) {
 		mr.FastForward(700 * time.Millisecond)
 		time.Sleep(400 * time.Millisecond)
 		for _, key := range []string{
-			taskKey("", task.ID),
-			streamKey("", task.ID),
-			streamDedupeKey("", task.ID),
-			pushNotificationKey("", task.ID),
+			taskKey("", "", task.ID),
+			streamKey("", "", task.ID),
+			streamDedupeKey("", "", task.ID),
+			pushNotificationKey("", "", task.ID),
 		} {
 			if !mr.Exists(key) {
 				t.Fatalf("live lease did not retain %s after step %d", key, i+1)
@@ -699,7 +710,7 @@ func TestStreamResubscribe_LiveTaskRenewsLeaseUntilTerminal(t *testing.T) {
 
 	// Force the tenant index member stale; the next heartbeat must restore its
 	// score, otherwise ListTasks would prune a Task whose storage is still live.
-	if err := manager.client.ZAdd(context.Background(), taskIndexKey(""), redis.Z{
+	if err := manager.client.ZAdd(context.Background(), taskIndexKey("", ""), redis.Z{
 		Score: float64(time.Now().Add(-time.Second).UnixMilli()), Member: task.ID,
 	}).Err(); err != nil {
 		t.Fatalf("stale task index: %v", err)
@@ -734,10 +745,10 @@ func TestStreamResubscribe_LiveTaskRenewsLeaseUntilTerminal(t *testing.T) {
 	mr.FastForward(2 * expiration)
 	if got, err := manager.client.Exists(
 		context.Background(),
-		taskKey("", task.ID),
-		streamKey("", task.ID),
-		streamDedupeKey("", task.ID),
-		pushNotificationKey("", task.ID),
+		taskKey("", "", task.ID),
+		streamKey("", "", task.ID),
+		streamDedupeKey("", "", task.ID),
+		pushNotificationKey("", "", task.ID),
 	).Result(); err != nil || got != 0 {
 		t.Fatalf("terminal task lease kept renewing: exists=%d err=%v", got, err)
 	}
@@ -774,7 +785,7 @@ func TestContinuationRenewsLeaseBeforeProcessor(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("processor was not called")
 	}
-	if ttl := mr.TTL(taskKey("", task.ID)); ttl != expiration {
+	if ttl := mr.TTL(taskKey("", "", task.ID)); ttl != expiration {
 		t.Fatalf("task TTL at processor entry = %v, want %v", ttl, expiration)
 	}
 	close(release)
@@ -787,17 +798,17 @@ func TestContinuationRenewsLeaseBeforeProcessor(t *testing.T) {
 
 func TestRefreshTaskLeaseDoesNotCreateMissingTask(t *testing.T) {
 	manager, _ := setupTest(t, scriptedExecutor(), WithExpireTime(time.Second))
-	err := manager.refreshTaskLease(context.Background(), "tenant-a", "missing-task")
+	err := manager.refreshTaskLease(context.Background(), "tenant-a", "", "missing-task")
 	if !errors.Is(err, taskmanager.ErrTaskNotFoundSentinel) {
 		t.Fatalf("refresh missing task error = %v, want TaskNotFound", err)
 	}
 	if got, existsErr := manager.client.Exists(
 		context.Background(),
-		taskKey("tenant-a", "missing-task"),
-		streamKey("tenant-a", "missing-task"),
-		streamDedupeKey("tenant-a", "missing-task"),
-		taskIndexKey("tenant-a"),
-		pushNotificationKey("tenant-a", "missing-task"),
+		taskKey("tenant-a", "", "missing-task"),
+		streamKey("tenant-a", "", "missing-task"),
+		streamDedupeKey("tenant-a", "", "missing-task"),
+		taskIndexKey("tenant-a", ""),
+		pushNotificationKey("tenant-a", "", "missing-task"),
 	).Result(); existsErr != nil || got != 0 {
 		t.Fatalf("refresh created missing task storage: exists=%d err=%v", got, existsErr)
 	}
@@ -1000,12 +1011,12 @@ func TestCrossNode_AtomicSnapshotCursorHasNoOverlapOrGap(t *testing.T) {
 	first.ContextID = task.ContextID
 	task.Artifacts, _ = protocol.AppendArtifact(task.Artifacts, first.Artifact, false)
 	if err := nodeA.commitTaskEvent(
-		context.Background(), "", task, protocol.NewStreamResponseArtifactUpdate(first), false,
-	); err != nil {
+		context.Background(), "", "",
+		task, protocol.NewStreamResponseArtifactUpdate(first), false); err != nil {
 		t.Fatalf("store first task event: %v", err)
 	}
 
-	snapshot, cursor, err := nodeB.eventTransport.LoadTaskAndCursor(context.Background(), "", task.ID)
+	snapshot, cursor, err := nodeB.eventTransport.LoadTaskAndCursor(context.Background(), "", "", task.ID)
 	if err != nil {
 		t.Fatalf("loadTaskAndCursor: %v", err)
 	}
@@ -1013,7 +1024,7 @@ func TestCrossNode_AtomicSnapshotCursorHasNoOverlapOrGap(t *testing.T) {
 		t.Fatalf("snapshot must contain the committed artifact exactly once, got %+v", snapshot)
 	}
 	if duplicate, err := nodeB.client.XRead(context.Background(), &redis.XReadArgs{
-		Streams: []string{streamKey("", task.ID), cursor},
+		Streams: []string{streamKey("", "", task.ID), cursor},
 		Count:   1,
 		Block:   -1,
 	}).Result(); !errors.Is(err, redis.Nil) {
@@ -1027,12 +1038,12 @@ func TestCrossNode_AtomicSnapshotCursorHasNoOverlapOrGap(t *testing.T) {
 	second.Append = &appendChunk
 	task.Artifacts, _ = protocol.AppendArtifact(task.Artifacts, second.Artifact, true)
 	if err := nodeA.commitTaskEvent(
-		context.Background(), "", task, protocol.NewStreamResponseArtifactUpdate(second), false,
-	); err != nil {
+		context.Background(), "", "",
+		task, protocol.NewStreamResponseArtifactUpdate(second), false); err != nil {
 		t.Fatalf("store second task event: %v", err)
 	}
 	streams, err := nodeB.client.XRead(context.Background(), &redis.XReadArgs{
-		Streams: []string{streamKey("", task.ID), cursor},
+		Streams: []string{streamKey("", "", task.ID), cursor},
 		Count:   2,
 		Block:   -1,
 	}).Result()
@@ -1062,8 +1073,8 @@ func TestCrossNode_InputRequiredDoesNotCloseResubscribe(t *testing.T) {
 	input.ContextID = task.ContextID
 	task.Status = input.Status
 	if err := nodeA.commitTaskEvent(
-		context.Background(), "", task, protocol.NewStreamResponseStatusUpdate(input), false,
-	); err != nil {
+		context.Background(), "", "",
+		task, protocol.NewStreamResponseStatusUpdate(input), false); err != nil {
 		t.Fatalf("store input-required: %v", err)
 	}
 	if frame, ok := recvTimeout(t, stream); !ok || frame.GetStatusUpdate() == nil ||
@@ -1075,8 +1086,8 @@ func TestCrossNode_InputRequiredDoesNotCloseResubscribe(t *testing.T) {
 	completed.ContextID = task.ContextID
 	task.Status = completed.Status
 	if err := nodeA.commitTaskEvent(
-		context.Background(), "", task, protocol.NewStreamResponseStatusUpdate(completed), false,
-	); err != nil {
+		context.Background(), "", "",
+		task, protocol.NewStreamResponseStatusUpdate(completed), false); err != nil {
 		t.Fatalf("store completed: %v", err)
 	}
 	if !drainForState(t, stream, protocol.TaskStateCompleted) {
@@ -1092,7 +1103,7 @@ func TestCrossNode_ContinuationStatusMessageClearIsJournaled(t *testing.T) {
 	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor(agentReply("clarification")))
 	task := storedTask(t, nodeA, "task-clear-status", "ctx-clear-status", protocol.TaskStateInputRequired)
 	task.Status.Message = agentReply("need input")
-	if err := nodeA.storeTask(context.Background(), "", task); err != nil {
+	if err := nodeA.storeTask(context.Background(), "", "", task); err != nil {
 		t.Fatalf("store task status message: %v", err)
 	}
 
@@ -1149,7 +1160,7 @@ func TestCrossNode_SlowConsumerDoesNotLoseStream(t *testing.T) {
 		update := protocol.NewStreamResponseStatusUpdate(
 			statusEvent(protocol.TaskStateWorking, agentReply("still working")),
 		)
-		if err := nodeA.appendTaskEvent(context.Background(), "", task.ID, update); err != nil {
+		if err := nodeA.appendTaskEvent(context.Background(), "", "", task.ID, update); err != nil {
 			t.Fatalf("append stream event %d: %v", i, err)
 		}
 	}
@@ -1228,7 +1239,7 @@ func TestCrossNode_IdleTailerDoesNotStarveTaskStoragePool(t *testing.T) {
 func TestCrossNode_WrongTypeStreamFailsAtomically(t *testing.T) {
 	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor())
 	task := storedTask(t, nodeA, "task-wrongtype", "ctx-wrongtype", protocol.TaskStateWorking)
-	if err := nodeA.client.Set(context.Background(), streamKey("", task.ID), "not-a-stream", 0).Err(); err != nil {
+	if err := nodeA.client.Set(context.Background(), streamKey("", "", task.ID), "not-a-stream", 0).Err(); err != nil {
 		t.Fatalf("seed wrong-type stream key: %v", err)
 	}
 
@@ -1253,7 +1264,7 @@ func TestCrossNode_WrongTypeStreamFailsAtomically(t *testing.T) {
 func TestCrossNode_MessageAppendFailureIsNotExposedAsSuccess(t *testing.T) {
 	manager, _ := setupTest(t, scriptedExecutor(agentReply("reply")))
 	task := storedTask(t, manager, "task-message-fail", "ctx-message-fail", protocol.TaskStateWorking)
-	if err := manager.client.Set(context.Background(), streamKey("", task.ID), "not-a-stream", 0).Err(); err != nil {
+	if err := manager.client.Set(context.Background(), streamKey("", "", task.ID), "not-a-stream", 0).Err(); err != nil {
 		t.Fatalf("seed wrong-type stream key: %v", err)
 	}
 	params := sendParams("continue", task.ContextID)
@@ -1265,7 +1276,7 @@ func TestCrossNode_MessageAppendFailureIsNotExposedAsSuccess(t *testing.T) {
 	if !strings.Contains(err.Error(), "task event stream has wrong type") {
 		t.Fatalf("message append returned the wrong error: %v", err)
 	}
-	history, err := manager.getConversationHistory(context.Background(), "", task.ContextID, 100)
+	history, err := manager.getConversationHistory(context.Background(), "", "", task.ContextID, 100)
 	if err != nil {
 		t.Fatalf("getConversationHistory: %v", err)
 	}
@@ -1301,7 +1312,7 @@ func TestCrossNode_TaskCommitFailureIsNotExposedAsSuccess(t *testing.T) {
 			taskID := "task-" + test.name + "-fail"
 			contextID := "ctx-" + test.name + "-fail"
 			task := storedTask(t, manager, taskID, contextID, protocol.TaskStateWorking)
-			if err := manager.client.Set(context.Background(), streamKey("", task.ID), "not-a-stream", 0).Err(); err != nil {
+			if err := manager.client.Set(context.Background(), streamKey("", "", task.ID), "not-a-stream", 0).Err(); err != nil {
 				t.Fatalf("seed wrong-type stream key: %v", err)
 			}
 
@@ -1350,7 +1361,7 @@ func TestCrossNode_PersistenceFailureReturnsBeforeProcessorCloses(t *testing.T) 
 	})
 	manager, _ := setupTest(t, processor)
 	task := storedTask(t, manager, "task-fast-failure", "ctx-fast-failure", protocol.TaskStateWorking)
-	if err := manager.client.Set(context.Background(), streamKey("", task.ID), "not-a-stream", 0).Err(); err != nil {
+	if err := manager.client.Set(context.Background(), streamKey("", "", task.ID), "not-a-stream", 0).Err(); err != nil {
 		t.Fatalf("seed wrong-type stream key: %v", err)
 	}
 
@@ -1407,7 +1418,7 @@ func TestCrossNode_PersistenceFailureClosesStreamBeforeProcessorCloses(t *testin
 			manager, _ := setupTest(t, processor)
 			task := storedTask(t, manager, "task-stream-failure-"+test.name,
 				"ctx-stream-failure-"+test.name, protocol.TaskStateWorking)
-			if err := manager.client.Set(context.Background(), streamKey("", task.ID), "not-a-stream", 0).Err(); err != nil {
+			if err := manager.client.Set(context.Background(), streamKey("", "", task.ID), "not-a-stream", 0).Err(); err != nil {
 				t.Fatalf("seed wrong-type stream key: %v", err)
 			}
 
@@ -1465,7 +1476,7 @@ func TestCrossNode_FailedStatusCommitDoesNotAdvanceHistory(t *testing.T) {
 
 	deadline := time.Now().Add(time.Second)
 	for {
-		stored, err := manager.getTaskInternal(context.Background(), "", id)
+		stored, err := manager.getTaskInternal(context.Background(), "", "", id)
 		if err == nil && stored.Status.Message != nil &&
 			stored.Status.Message.Parts[0].TextContent() == "first" {
 			break
@@ -1475,7 +1486,7 @@ func TestCrossNode_FailedStatusCommitDoesNotAdvanceHistory(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if err := manager.client.Set(context.Background(), streamKey("", id), "not-a-stream", 0).Err(); err != nil {
+	if err := manager.client.Set(context.Background(), streamKey("", "", id), "not-a-stream", 0).Err(); err != nil {
 		t.Fatalf("replace stream with wrong type: %v", err)
 	}
 	releaseProcessor()
@@ -1483,7 +1494,7 @@ func TestCrossNode_FailedStatusCommitDoesNotAdvanceHistory(t *testing.T) {
 		t.Fatalf("unexpected failed status result: %v", err)
 	}
 
-	stored, err := manager.getTaskInternal(context.Background(), "", id)
+	stored, err := manager.getTaskInternal(context.Background(), "", "", id)
 	if err != nil {
 		t.Fatalf("get stored task: %v", err)
 	}
@@ -1491,7 +1502,7 @@ func TestCrossNode_FailedStatusCommitDoesNotAdvanceHistory(t *testing.T) {
 		stored.Status.Message.Parts[0].TextContent() != "first" {
 		t.Fatalf("failed commit changed stored status: %+v", stored.Status)
 	}
-	history, err := manager.getConversationHistory(context.Background(), "", stored.ContextID, 100)
+	history, err := manager.getConversationHistory(context.Background(), "", "", stored.ContextID, 100)
 	if err != nil {
 		t.Fatalf("get conversation history: %v", err)
 	}
@@ -1519,11 +1530,11 @@ func TestCrossNode_SubMillisecondExpirationIsClamped(t *testing.T) {
 	update.ContextID = task.ContextID
 	task.Status = update.Status
 	if err := manager.commitTaskEvent(
-		context.Background(), "", task, protocol.NewStreamResponseStatusUpdate(update), false,
-	); err != nil {
+		context.Background(), "", "",
+		task, protocol.NewStreamResponseStatusUpdate(update), false); err != nil {
 		t.Fatalf("commitTaskEvent with sub-millisecond configured TTL: %v", err)
 	}
-	if got, err := manager.client.XLen(context.Background(), streamKey("", task.ID)).Result(); err != nil || got != 1 {
+	if got, err := manager.client.XLen(context.Background(), streamKey("", "", task.ID)).Result(); err != nil || got != 1 {
 		t.Fatalf("stream event missing after clamped TTL: xlen=%d err=%v", got, err)
 	}
 }
@@ -1533,7 +1544,7 @@ func TestCrossNode_SubMillisecondExpirationIsClamped(t *testing.T) {
 func TestCrossNode_TaskCommitRefreshesPushConfigExpiration(t *testing.T) {
 	manager, _ := setupTest(t, scriptedExecutor())
 	task := storedTask(t, manager, "task-push-expire", "ctx-push-expire", protocol.TaskStateWorking)
-	pushKey := pushNotificationPrefix + task.ID
+	pushKey := pushNotificationKey("", "", task.ID)
 	if err := manager.client.HSet(context.Background(), pushKey, "config", "value").Err(); err != nil {
 		t.Fatalf("seed push config: %v", err)
 	}
@@ -1545,8 +1556,8 @@ func TestCrossNode_TaskCommitRefreshesPushConfigExpiration(t *testing.T) {
 	update.ContextID = task.ContextID
 	task.Status = update.Status
 	if err := manager.commitTaskEvent(
-		context.Background(), "", task, protocol.NewStreamResponseStatusUpdate(update), false,
-	); err != nil {
+		context.Background(), "", "",
+		task, protocol.NewStreamResponseStatusUpdate(update), false); err != nil {
 		t.Fatalf("commitTaskEvent: %v", err)
 	}
 	if ttl, err := manager.client.TTL(context.Background(), pushKey).Result(); err != nil || ttl <= 0 {
@@ -1559,7 +1570,7 @@ func TestCrossNode_TaskCommitRefreshesPushConfigExpiration(t *testing.T) {
 func TestCrossNode_CloseRejectsTailerAfterSnapshotRead(t *testing.T) {
 	nodeA, nodeB := twoNodeManagers(t, scriptedExecutor())
 	task := storedTask(t, nodeA, "task-close-admission", "ctx-close-admission", protocol.TaskStateWorking)
-	if _, _, err := nodeB.eventTransport.LoadTaskAndCursor(context.Background(), "", task.ID); err != nil {
+	if _, _, err := nodeB.eventTransport.LoadTaskAndCursor(context.Background(), "", "", task.ID); err != nil {
 		t.Fatalf("warm loadTaskAndCursor script: %v", err)
 	}
 	hook := &blockAfterCommandHook{

@@ -4,7 +4,7 @@
 //
 // trpc-a2a-go is licensed under the Apache License Version 2.0.
 
-// Package main provides example code for using different authentication methods with the A2A client.
+// Package main demonstrates API-key and JWT authentication with the A2A client.
 package main
 
 import (
@@ -12,294 +12,105 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"time"
 
-	"golang.org/x/oauth2/clientcredentials"
-	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/client"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
 
-// config holds the client configuration options.
-type config struct {
-	AuthMethod string
-	AgentURL   string
-	Timeout    time.Duration
+const (
+	defaultJWTSecret   = "auth-example-shared-secret"
+	defaultJWTAudience = "a2a-server"
+	defaultJWTIssuer   = "auth-example"
+)
 
-	// JWT Auth options
-	JWTSecret     string
-	JWTSecretFile string
-	JWTAudience   string
-	JWTIssuer     string
-	JWTExpiry     time.Duration
-
-	// API Key options
-	APIKey       string
-	APIKeyHeader string
-
-	// OAuth2 options
-	OAuth2ClientID     string
-	OAuth2ClientSecret string
-	OAuth2TokenURL     string
-	OAuth2Scopes       string
-
-	// Task options
-	TaskMessage string
-	SessionID   string
-}
-
-// parseFlags parses command-line flags and returns a Config.
-func parseFlags() config {
-	var config config
-
-	// Basic options
-	flag.StringVar(&config.AuthMethod, "auth", "jwt", "Authentication method (jwt, apikey, oauth2)")
-	flag.StringVar(&config.AgentURL, "url", "http://localhost:8080/", "Target A2A agent URL")
-	flag.DurationVar(&config.Timeout, "timeout", 60*time.Second, "Request timeout")
-
-	// JWT options
-	flag.StringVar(&config.JWTSecret, "jwt-secret", "my-secret-key", "JWT secret key")
-	flag.StringVar(&config.JWTSecretFile, "jwt-secret-file", "../server/jwt-secret.key", "File containing JWT secret key")
-	flag.StringVar(&config.JWTAudience, "jwt-audience", "a2a-server", "JWT audience")
-	flag.StringVar(&config.JWTIssuer, "jwt-issuer", "example", "JWT issuer")
-	flag.DurationVar(&config.JWTExpiry, "jwt-expiry", 1*time.Hour, "JWT expiration time")
-
-	// API Key options
-	flag.StringVar(&config.APIKey, "api-key", "test-api-key", "API key")
-	flag.StringVar(&config.APIKeyHeader, "api-key-header", "X-API-Key", "API key header name")
-
-	// OAuth2 options
-	flag.StringVar(&config.OAuth2ClientID, "oauth2-client-id", "my-client-id", "OAuth2 client ID")
-	flag.StringVar(&config.OAuth2ClientSecret, "oauth2-client-secret", "my-client-secret", "OAuth2 client secret")
-	flag.StringVar(&config.OAuth2TokenURL, "oauth2-token-url", "", "OAuth2 token URL (default: derived from agent URL)")
-	flag.StringVar(&config.OAuth2Scopes, "oauth2-scopes", "a2a.read,a2a.write", "OAuth2 scopes (comma-separated)")
-
-	// Task options
-	flag.StringVar(&config.TaskMessage, "message", "Hello, this is an authenticated request", "Message to send")
-	flag.StringVar(&config.SessionID, "session-id", "", "Optional session ID for the task")
-
-	flag.Parse()
-
-	return config
-}
+var (
+	url       = flag.String("url", "http://localhost:8080/", "A2A server URL")
+	method    = flag.String("auth", "apikey", "Authentication method: apikey or jwt")
+	apiKey    = flag.String("api-key", "alice-key", "API key (alice-key or bob-key)")
+	jwtSecret = flag.String("jwt-secret", defaultJWTSecret, "Shared JWT signing secret")
+	message   = flag.String("message", "Hello, authenticated world", "Message to send")
+)
 
 func main() {
-	config := parseFlags()
+	flag.Parse()
 
-	if config.AuthMethod == "" {
-		flag.Usage()
-		return
-	}
-
-	var a2aClient *client.A2AClient
-	var err error
-
-	// Create client with the specified authentication method
-	switch config.AuthMethod {
-	case "jwt":
-		a2aClient, err = createJWTClient(config)
-	case "apikey":
-		a2aClient, err = createAPIKeyClient(config)
-	case "oauth2":
-		a2aClient, err = createOAuth2Client(config)
-	default:
-		fmt.Printf("Unknown authentication method: %s\n", config.AuthMethod)
-		return
-	}
-
+	a2aClient, err := newClient(*url, *method, *apiKey, *jwtSecret)
 	if err != nil {
-		log.Fatalf("Failed to create client: %v", err)
+		log.Fatal(err)
 	}
 
-	// Create a simple task to test authentication
-	textPart := protocol.NewTextPart(config.TaskMessage)
-	message := protocol.NewMessage(protocol.MessageRoleUser, []*protocol.Part{textPart})
-
-	// Prepare message parameters
-	params := protocol.SendMessageParams{
-		Message: message,
-	}
-
-	// Add context ID if session ID is provided
-	if config.SessionID != "" {
-		// In the new protocol, we use contextID instead of sessionID
-		params.Message.ContextID = &config.SessionID
-	}
-
-	agentCard, err := a2aClient.GetAuthenticatedExtendedCard(context.Background())
-
-	if err != nil {
-		log.Fatalf("Failed to get extended card: %v", err)
-	}
-
-	fmt.Printf("Authenticated extended card: %v\n", agentCard.Name)
-	fmt.Printf("Authenticated extended card Desc: %v\n", agentCard.Description)
-
-	// Send the message
-	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	result, err := a2aClient.SendMessage(ctx, params)
-
+	result, err := a2aClient.SendMessage(ctx, protocol.SendMessageParams{
+		Message: protocol.NewMessage(
+			protocol.MessageRoleUser,
+			[]*protocol.Part{protocol.NewTextPart(*message)},
+		),
+	})
 	if err != nil {
-		log.Fatalf("Failed to send message: %v", err)
+		log.Fatalf("SendMessage failed: %v", err)
 	}
 
-	// Handle the response based on its type
-	if msg := result.GetMessage(); msg != nil {
-		fmt.Printf("Message Response: %s\n", msg.MessageID)
-		if msg.ContextID != nil {
-			fmt.Printf("Context ID: %s\n", *msg.ContextID)
-		}
-		for _, part := range msg.Parts {
-			if text := part.TextContent(); text != "" {
-				fmt.Printf("Response: %s\n", text)
-			}
-		}
-	} else if task := result.GetTask(); task != nil {
-		fmt.Printf("Task ID: %s, Status: %s\n", task.ID, task.Status.State)
-		if task.ContextID != "" {
-			fmt.Printf("Context ID: %s\n", task.ContextID)
-		}
-
-		taskQuery := protocol.TaskQueryParams{
-			ID: task.ID,
-		}
-
-		updatedTask, err := a2aClient.GetTasks(ctx, taskQuery)
-		if err != nil {
-			log.Fatalf("Failed to get task: %v", err)
-		}
-
-		fmt.Printf("Updated task status: %s\n", updatedTask.Status.State)
-	} else {
-		fmt.Println("Unknown response type")
+	task := result.GetTask()
+	if task == nil {
+		log.Fatalf("Expected a task, got %T", result)
 	}
-}
-
-// getJWTSecret retrieves the JWT secret from either the direct key or a file.
-func getJWTSecret(config config) ([]byte, error) {
-	// If a secret file is provided, read from it
-	if config.JWTSecretFile != "" {
-		secret, err := os.ReadFile(config.JWTSecretFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read JWT secret file: %w", err)
-		}
-		return secret, nil
+	fmt.Printf("Task ID: %s\n", task.ID)
+	fmt.Printf("Status: %s\n", task.Status.State)
+	if task.Status.Message != nil {
+		fmt.Printf("Response: %s\n", extractText(*task.Status.Message))
 	}
 
-	// Otherwise use the direct secret value
-	return []byte(config.JWTSecret), nil
-}
-
-// createJWTClient creates an A2A client with JWT authentication.
-func createJWTClient(config config) (*client.A2AClient, error) {
-	secret, err := getJWTSecret(config)
+	// The owner that created the task can retrieve it.
+	stored, err := a2aClient.GetTasks(ctx, protocol.TaskQueryParams{ID: task.ID})
 	if err != nil {
-		return nil, err
+		log.Fatalf("GetTask failed: %v", err)
 	}
+	fmt.Printf("Same-owner GetTask succeeded; status=%s\n", stored.Status.State)
 
-	return client.NewA2AClient(
-		config.AgentURL,
-		client.WithJWTAuth(secret, config.JWTAudience, config.JWTIssuer, config.JWTExpiry),
-	)
-}
-
-// createAPIKeyClient creates an A2A client with API key authentication.
-func createAPIKeyClient(config config) (*client.A2AClient, error) {
-	return client.NewA2AClient(
-		config.AgentURL,
-		client.WithAPIKeyAuth(config.APIKey, config.APIKeyHeader),
-	)
-}
-
-// createOAuth2Client creates an A2A client with OAuth2 authentication.
-func createOAuth2Client(config config) (*client.A2AClient, error) {
-	// Method 1: Using client credentials flow
-	return createOAuth2ClientCredentialsClient(config)
-
-	// Alternative methods:
-	// return createOAuth2TokenSourceClient(config)
-	// return createCustomOAuth2Client(config)
-}
-
-// createOAuth2ClientCredentialsClient creates a client using OAuth2 client credentials flow.
-func createOAuth2ClientCredentialsClient(config config) (*client.A2AClient, error) {
-	// Determine token URL if not specified
-	tokenURL := config.OAuth2TokenURL
-	if tokenURL == "" {
-		tokenURL = getOAuthTokenURL(config.AgentURL)
+	// API-key mode also proves the negative path with the other demo owner.
+	if *method == "apikey" {
+		otherAPIKey := "bob-key"
+		if *apiKey == otherAPIKey {
+			otherAPIKey = "alice-key"
+		}
+		otherClient, err := newClient(*url, *method, otherAPIKey, *jwtSecret)
+		if err != nil {
+			log.Fatalf("Create cross-owner client failed: %v", err)
+		}
+		if _, err := otherClient.GetTasks(ctx, protocol.TaskQueryParams{ID: task.ID}); err == nil || !strings.Contains(
+			err.Error(), `"code":-32001`,
+		) {
+			log.Fatalf("Cross-owner GetTask error = %v, want task-not-found", err)
+		}
+		fmt.Println("Cross-owner GetTask denied with task-not-found")
 	}
+}
 
-	// Parse scopes
-	scopes := []string{}
-	if config.OAuth2Scopes != "" {
-		for _, scope := range strings.Split(config.OAuth2Scopes, ",") {
-			scopes = append(scopes, strings.TrimSpace(scope))
+func newClient(url, method, apiKey, jwtSecret string) (*client.A2AClient, error) {
+	switch method {
+	case "apikey":
+		return client.NewA2AClient(url, client.WithAPIKeyAuth(apiKey, "X-API-Key"))
+	case "jwt":
+		return client.NewA2AClient(url, client.WithJWTAuth(
+			[]byte(jwtSecret),
+			defaultJWTAudience,
+			defaultJWTIssuer,
+			time.Hour,
+		))
+	default:
+		return nil, fmt.Errorf("unsupported auth method %q: use apikey or jwt", method)
+	}
+}
+
+func extractText(message protocol.Message) string {
+	for _, part := range message.Parts {
+		if text := part.TextContent(); text != "" {
+			return text
 		}
 	}
-
-	return client.NewA2AClient(
-		config.AgentURL,
-		client.WithOAuth2ClientCredentials(config.OAuth2ClientID, config.OAuth2ClientSecret, tokenURL, scopes),
-	)
-}
-
-// createOAuth2TokenSourceClient creates a client using a custom OAuth2 token source.
-func createOAuth2TokenSourceClient(config config) (*client.A2AClient, error) {
-	// Extract the OAuth token URL from agentURL
-	tokenURL := getOAuthTokenURL(config.AgentURL)
-
-	// Example with password credentials grant
-	config.OAuth2TokenURL = tokenURL
-	config.OAuth2Scopes = "a2a.read,a2a.write"
-
-	return createOAuth2ClientCredentialsClient(config)
-}
-
-// createCustomOAuth2Client creates a client with a completely custom OAuth2 provider.
-func createCustomOAuth2Client(config config) (*client.A2AClient, error) {
-	// Extract the OAuth token URL from agentURL
-	tokenURL := getOAuthTokenURL(config.AgentURL)
-
-	// Create a client credentials config
-	ccConfig := &clientcredentials.Config{
-		ClientID:     config.OAuth2ClientID,
-		ClientSecret: config.OAuth2ClientSecret,
-		TokenURL:     tokenURL,
-		Scopes:       []string{config.OAuth2Scopes},
-	}
-
-	// Create a custom OAuth2 provider
-	provider := auth.NewOAuth2ClientCredentialsProvider(
-		ccConfig.ClientID,
-		ccConfig.ClientSecret,
-		ccConfig.TokenURL,
-		ccConfig.Scopes,
-	)
-
-	// Use the custom provider
-	return client.NewA2AClient(
-		config.AgentURL,
-		client.WithAuthProvider(provider),
-	)
-}
-
-// getOAuthTokenURL is a helper function to get the OAuth token URL based on agent URL.
-func getOAuthTokenURL(agentURL string) string {
-	tokenURL := ""
-	if agentURL == "http://localhost:8080/" {
-		tokenURL = "http://localhost:8080/oauth2/token"
-	} else {
-		// Try to adapt to a different port
-		// This is a simple adaptation, not fully robust
-		tokenURL = agentURL + "oauth2/token"
-		if tokenURL[len(tokenURL)-1] == '/' {
-			tokenURL = tokenURL[:len(tokenURL)-1]
-		}
-	}
-	fmt.Printf("Using OAuth2 token URL: %s\n", tokenURL)
-	return tokenURL
+	return ""
 }

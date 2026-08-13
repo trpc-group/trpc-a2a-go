@@ -181,23 +181,23 @@ func TestClaimCancelSlot_BlocksConcurrentRegistration(t *testing.T) {
 	manager := newTestManager(t, echoExecutor())
 	const taskID = "task-claim-slot"
 
-	live, sentinel, yieldDone := manager.runs.claimCancelSlot("", taskID)
+	live, sentinel, yieldDone := manager.runs.claimCancelSlot("", "", taskID)
 	if live != nil || sentinel == nil {
 		t.Fatalf("expected to claim the free slot, got live=%v sentinel=%v", live, sentinel)
 	}
 	if yieldDone != nil {
 		t.Fatal("free slot unexpectedly reported a yield handoff")
 	}
-	if err := manager.runs.register(context.Background(), "", taskID, &execution{cancel: func() {}}); err == nil {
+	if err := manager.runs.register(context.Background(), "", "", taskID, &execution{cancel: func() {}}); err == nil {
 		t.Fatal("registration must be rejected while a cancel sentinel holds the slot")
 	}
-	manager.runs.deregister("", taskID, sentinel)
+	manager.runs.deregister("", "", taskID, sentinel)
 
 	exec := &execution{cancel: func() {}}
-	if err := manager.runs.register(context.Background(), "", taskID, exec); err != nil {
+	if err := manager.runs.register(context.Background(), "", "", taskID, exec); err != nil {
 		t.Fatalf("registration after sentinel release failed: %v", err)
 	}
-	manager.runs.release("", taskID, exec)
+	manager.runs.release("", "", taskID, exec)
 }
 
 // Cancellation and suspend handoff use the execution registry as their linearization point.
@@ -209,21 +209,21 @@ func TestCancelYieldLinearization(t *testing.T) {
 		const taskID = "task-cancel-wins-yield"
 		var cancelCalls atomic.Int32
 		exec := &execution{cancel: func() { cancelCalls.Add(1) }}
-		if err := manager.runs.register(context.Background(), "", taskID, exec); err != nil {
+		if err := manager.runs.register(context.Background(), "", "", taskID, exec); err != nil {
 			t.Fatalf("register execution: %v", err)
 		}
 		var releaseOnce sync.Once
-		release := func() { releaseOnce.Do(func() { manager.runs.release("", taskID, exec) }) }
+		release := func() { releaseOnce.Do(func() { manager.runs.release("", "", taskID, exec) }) }
 		defer release()
 
-		yieldDone, accepted := manager.runs.requestCancel("", taskID, exec)
+		yieldDone, accepted := manager.runs.requestCancel("", "", taskID, exec)
 		if !accepted || yieldDone != nil {
 			t.Fatalf("cancel result: accepted=%v yieldDone=%v, want accepted with no handoff", accepted, yieldDone)
 		}
 		if got := cancelCalls.Load(); got != 1 {
 			t.Fatalf("execution cancel calls = %d, want 1", got)
 		}
-		if manager.runs.beginYield("", taskID, exec) {
+		if manager.runs.beginYield("", "", taskID, exec) {
 			t.Fatal("suspend handoff started after cancellation had already won")
 		}
 
@@ -235,18 +235,18 @@ func TestCancelYieldLinearization(t *testing.T) {
 		const taskID = "task-yield-wins-cancel"
 		var cancelCalls atomic.Int32
 		exec := &execution{cancel: func() { cancelCalls.Add(1) }}
-		if err := manager.runs.register(context.Background(), "", taskID, exec); err != nil {
+		if err := manager.runs.register(context.Background(), "", "", taskID, exec); err != nil {
 			t.Fatalf("register execution: %v", err)
 		}
 		var releaseOnce sync.Once
-		release := func() { releaseOnce.Do(func() { manager.runs.release("", taskID, exec) }) }
+		release := func() { releaseOnce.Do(func() { manager.runs.release("", "", taskID, exec) }) }
 		defer release()
-		if !manager.runs.beginYield("", taskID, exec) {
+		if !manager.runs.beginYield("", "", taskID, exec) {
 			t.Fatal("suspend handoff did not start")
 		}
 		handoff := exec.yieldDone
 
-		yieldDone, accepted := manager.runs.requestCancel("", taskID, exec)
+		yieldDone, accepted := manager.runs.requestCancel("", "", taskID, exec)
 		if accepted || yieldDone != handoff {
 			t.Fatalf("cancel result: accepted=%v yieldDone=%v, want existing handoff %v",
 				accepted, yieldDone, handoff)
@@ -599,7 +599,7 @@ func TestResubscribe_ClientDisconnectDropsSubscriber(t *testing.T) {
 	eventually(t, func() bool {
 		manager.taskMu.RLock()
 		defer manager.taskMu.RUnlock()
-		return len(manager.subscribers[newScopedID("", taskID)]) == 0
+		return len(manager.subscribers[newScopedID("", "", taskID)]) == 0
 	}, "disconnected subscriber was not removed")
 }
 

@@ -22,9 +22,10 @@ the runtime contract see [Server](server.md) and [Client](client.md).
 | Blocking send, `returnImmediately`, live streaming, `SubscribeToTask` | ✅ | Four client consumption modes over the same agent. |
 | Stateless request-scoped execution | ✅ | Direct Messages and ephemeral Tasks with no retained state or conversation history. |
 | In-memory & Redis task stores | ✅ | Pluggable `TaskManager` interface; bring your own. |
+| Per-owner retained-task isolation | ✅ Opt-in | Memory and Redis use `WithOwnerResolver`; tenant routing alone is not end-user authorization. |
 | Authentication: JWT · API key · OAuth2 | ✅ | Chainable providers, server and client side. |
 | Push notifications (webhooks) signed with JWT + JWKS | ✅ | For disconnected, callback-driven operation. |
-| Multi-tenant hosting with per-tenant agent cards | ✅ | One process, many agents, routed by tenant. |
+| Multi-tenant hosting with per-tenant agent cards | ✅ | One process, many agents, routed by tenant; routing alone does not isolate users. |
 | Legacy v0.2.x wire compatibility | ✅ | `compat/v0` on the same endpoint and auth chain. |
 | Telemetry: OpenTelemetry metrics, TTFT tracking | ✅ | Pluggable meter provider and first-token policy. |
 | Cross-node `SubscribeToTask` on Redis | ✅ | Redis TaskManager journals Task events by default; Redis 5.0+ is required. |

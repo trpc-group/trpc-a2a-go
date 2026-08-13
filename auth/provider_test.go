@@ -7,6 +7,7 @@
 package auth_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,18 @@ import (
 	"golang.org/x/oauth2"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 )
+
+func TestUserFromContext(t *testing.T) {
+	if user, ok := auth.UserFromContext(context.Background()); ok || user != nil {
+		t.Fatalf("empty context returned user=%+v ok=%v", user, ok)
+	}
+	want := &auth.User{ID: "user-1"}
+	ctx := context.WithValue(context.Background(), auth.AuthUserKey, want)
+	got, ok := auth.UserFromContext(ctx)
+	if !ok || got != want {
+		t.Fatalf("UserFromContext() = %+v, %v; want %+v, true", got, ok, want)
+	}
+}
 
 func TestJWTAuthProvider(t *testing.T) {
 	// Setup test data

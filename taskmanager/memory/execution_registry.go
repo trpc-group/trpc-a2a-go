@@ -31,8 +31,8 @@ func newExecutionRegistry() *executionRegistry {
 // register publishes the cancellation handle of a starting run. A task admits
 // at most one live run; a continuation waits through the previous round's
 // short suspend handoff, while any other concurrent round is rejected.
-func (r *executionRegistry) register(ctx context.Context, tenant, taskID string, exec *execution) error {
-	key := newScopedID(tenant, taskID)
+func (r *executionRegistry) register(ctx context.Context, tenant, owner, taskID string, exec *execution) error {
+	key := newScopedID(tenant, owner, taskID)
 	for {
 		r.mu.Lock()
 		if r.closed {
@@ -65,8 +65,8 @@ func (r *executionRegistry) register(ctx context.Context, tenant, taskID string,
 
 // release aborts a registered run whose engine never started: it undoes
 // register's registration and engine count.
-func (r *executionRegistry) release(tenant, taskID string, exec *execution) {
-	r.deregister(tenant, taskID, exec)
+func (r *executionRegistry) release(tenant, owner, taskID string, exec *execution) {
+	r.deregister(tenant, owner, taskID, exec)
 	r.engines.Done()
 }
 
@@ -86,9 +86,10 @@ func (r *executionRegistry) wait() {
 // continuation can register (and then write) concurrently with it.
 func (r *executionRegistry) claimCancelSlot(
 	tenant string,
+	owner string,
 	taskID string,
 ) (live *execution, sentinel *execution, yieldDone <-chan struct{}) {
-	key := newScopedID(tenant, taskID)
+	key := newScopedID(tenant, owner, taskID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if exec, ok := r.executions[key]; ok {
@@ -107,10 +108,11 @@ func (r *executionRegistry) claimCancelSlot(
 // cancelRequested under the registry lock.
 func (r *executionRegistry) requestCancel(
 	tenant string,
+	owner string,
 	taskID string,
 	exec *execution,
 ) (yieldDone <-chan struct{}, accepted bool) {
-	key := newScopedID(tenant, taskID)
+	key := newScopedID(tenant, owner, taskID)
 	r.mu.Lock()
 	if r.executions[key] != exec {
 		r.mu.Unlock()
@@ -128,8 +130,8 @@ func (r *executionRegistry) requestCancel(
 }
 
 // deregister removes the handle if it still belongs to this run.
-func (r *executionRegistry) deregister(tenant, taskID string, exec *execution) {
-	key := newScopedID(tenant, taskID)
+func (r *executionRegistry) deregister(tenant, owner, taskID string, exec *execution) {
+	key := newScopedID(tenant, owner, taskID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.executions[key] == exec {
@@ -144,8 +146,8 @@ func (r *executionRegistry) deregister(tenant, taskID string, exec *execution) {
 // beginYield turns an active slot into a short handoff barrier. The slot
 // remains owned by exec until its suspend frame has reached every local
 // observer, but continuations wait for the handoff instead of failing.
-func (r *executionRegistry) beginYield(tenant, taskID string, exec *execution) bool {
-	key := newScopedID(tenant, taskID)
+func (r *executionRegistry) beginYield(tenant, owner, taskID string, exec *execution) bool {
+	key := newScopedID(tenant, owner, taskID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.executions[key] == exec && exec.yieldDone == nil && !exec.cancelRequested.Load() {
@@ -157,8 +159,8 @@ func (r *executionRegistry) beginYield(tenant, taskID string, exec *execution) b
 
 // abortYield restores an active slot when committing the suspended state fails.
 // Waiters wake and re-evaluate it as an ordinary active run.
-func (r *executionRegistry) abortYield(tenant, taskID string, exec *execution) {
-	key := newScopedID(tenant, taskID)
+func (r *executionRegistry) abortYield(tenant, owner, taskID string, exec *execution) {
+	key := newScopedID(tenant, owner, taskID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.executions[key] == exec && exec.yieldDone != nil {
@@ -168,10 +170,10 @@ func (r *executionRegistry) abortYield(tenant, taskID string, exec *execution) {
 }
 
 // live returns the cancellation handle of the task's live run, if any.
-func (r *executionRegistry) live(tenant, taskID string) *execution {
+func (r *executionRegistry) live(tenant, owner, taskID string) *execution {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.executions[newScopedID(tenant, taskID)]
+	return r.executions[newScopedID(tenant, owner, taskID)]
 }
 
 // isClosed reports whether shutdown has begun.

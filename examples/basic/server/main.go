@@ -7,18 +7,26 @@
 // Package main implements a basic A2A chat server built on the MessageProcessor
 // contract: one code path serves both message/send and message/stream, and the
 // framework owns the task lifecycle (creation, persistence, fan-out).
+//
+// Authentication and owner isolation:
+//  1. passwordAuthProvider validates HTTP Basic Auth (user/password)
+//  2. server.WithAuthProvider installs that user on the request context
+//  3. OwnerResolver maps auth.User.ID to the task-manager owner scope
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
+	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/server"
@@ -35,17 +43,69 @@ const longTaskMarker = "__long_task__"
 // show the words aggregated into this full sentence.
 const longTaskSentence = "Hello from the long task demo: we stream one word per second so SubscribeToTask can show live updates and GetTask can return the aggregated sentence until CancelTasks stops us early."
 
+var (
+	host     = flag.String("host", "localhost", "Host to listen on")
+	port     = flag.Int("port", 8080, "Port to listen on")
+	httpJSON = flag.Bool("http-json", true, "also mount the HTTP+JSON/REST binding on /")
+)
+
 func main() {
-	// Parse command-line flags.
-	host := flag.String("host", "localhost", "Host to listen on")
-	port := flag.Int("port", 8080, "Port to listen on")
-	httpJSON := flag.Bool("http-json", true, "also mount the HTTP+JSON/REST binding on /")
 	flag.Parse()
 
 	baseURL := fmt.Sprintf("http://%s:%d/", *host, *port)
+	agentCard := buildAgentCard(baseURL, *httpJSON)
 
-	// Create the agent card.
-	agentCard := server.AgentCard{
+	// Auth provider → middleware → OwnerResolver: each request's User.ID becomes
+	// the task-manager owner so alice/bob cannot see each other's tasks.
+	authProvider := &passwordAuthProvider{users: demoUsers}
+
+	taskManager, err := memory.NewTaskManager(&basicMessageProcessor{}, memory.WithOwnerResolver(resolveOwner))
+	if err != nil {
+		log.Fatalf("Failed to create task manager: %v", err)
+	}
+
+	opts := []server.Option{
+		server.WithAgentCard(agentCard),
+		server.WithAuthProvider(authProvider),
+	}
+
+	// add the HTTP+JSON endpoint if the flag is set
+	if *httpJSON {
+		// set the HTTP+JSON endpoint to enable the HTTP+JSON endpoint
+		opts = append(opts, server.WithHTTPJSONEndpoint("/"))
+	}
+
+	srv, err := server.NewA2AServer(taskManager, opts...)
+	if err != nil {
+		log.Fatalf("Failed to create server: %v", err)
+	}
+
+	// Set up a channel to listen for termination signals.
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Start the server in a goroutine.
+	go func() {
+		serverAddr := fmt.Sprintf("%s:%d", *host, *port)
+		log.Infof("Starting server on %s...", serverAddr)
+		log.Infof("  Agent Card: %s.well-known/agent-card.json", baseURL)
+		log.Infof("  JSON-RPC:   %s", baseURL)
+		if *httpJSON {
+			log.Infof("  HTTP+JSON:  %s (e.g. /message:send, /tasks/{id})", baseURL)
+		}
+		log.Infof("  Auth:       HTTP Basic (alice/alice-pass, bob/bob-pass)")
+		if err := srv.Start(serverAddr); err != nil {
+			log.Fatalf("Server failed: %v", err)
+		}
+	}()
+
+	// Wait for termination signal.
+	sig := <-sigChan
+	log.Infof("Received signal %v, shutting down...", sig)
+}
+
+func buildAgentCard(baseURL string, httpJSON bool) server.AgentCard {
+	card := server.AgentCard{
 		Name:        "Basic A2A Chat Example Server",
 		Description: "An interactive chat example with task lifecycle operations",
 		URL:         baseURL,
@@ -76,51 +136,44 @@ func main() {
 			},
 		},
 	}
-	if *httpJSON {
-		agentCard.SupportedInterfaces = append(agentCard.SupportedInterfaces, server.AgentInterface{
+	if httpJSON {
+		card.SupportedInterfaces = append(card.SupportedInterfaces, server.AgentInterface{
 			URL: baseURL, ProtocolBinding: protocol.ProtocolBindingHTTPJSON, ProtocolVersion: protocol.ProtocolVersionV1,
 		})
 	}
+	return card
+}
 
-	// Create the processor and inject it into a task manager.
-	// (redis.NewTaskManager accepts the same MessageProcessor for persistent storage.)
-	taskManager, err := memory.NewTaskManager(&basicMessageProcessor{})
-	if err != nil {
-		log.Fatalf("Failed to create task manager: %v", err)
+// Demo users → passwords. Keep in sync with examples/basic/client defaults.
+var demoUsers = map[string]string{
+	"alice": "alice-pass",
+	"bob":   "bob-pass",
+}
+
+// passwordAuthProvider is a minimal custom auth.Provider for the example.
+type passwordAuthProvider struct {
+	users map[string]string // username -> password
+}
+
+func (p *passwordAuthProvider) Authenticate(r *http.Request) (*auth.User, error) {
+	user, password, ok := r.BasicAuth()
+	if !ok {
+		return nil, auth.ErrMissingToken
 	}
-
-	opts := []server.Option{server.WithAgentCard(agentCard)}
-	if *httpJSON {
-		opts = append(opts, server.WithHTTPJSONEndpoint("/"))
+	expected, ok := p.users[user]
+	if !ok || expected != password {
+		return nil, auth.ErrInvalidToken
 	}
+	return &auth.User{ID: user}, nil
+}
 
-	// Create the server.
-	srv, err := server.NewA2AServer(taskManager, opts...)
-	if err != nil {
-		log.Fatalf("Failed to create server: %v", err)
+// resolveOwner scopes retained tasks to the authenticated user.
+func resolveOwner(ctx context.Context) (string, error) {
+	user, ok := auth.UserFromContext(ctx)
+	if !ok || user.ID == "" {
+		return "", errors.New("unauthenticated request")
 	}
-
-	// Set up a channel to listen for termination signals.
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	// Start the server in a goroutine.
-	go func() {
-		serverAddr := fmt.Sprintf("%s:%d", *host, *port)
-		log.Infof("Starting server on %s...", serverAddr)
-		log.Infof("  Agent Card: %s.well-known/agent-card.json", baseURL)
-		log.Infof("  JSON-RPC:   %s", baseURL)
-		if *httpJSON {
-			log.Infof("  HTTP+JSON:  %s (e.g. /message:send, /tasks/{id})", baseURL)
-		}
-		if err := srv.Start(serverAddr); err != nil {
-			log.Fatalf("Server failed: %v", err)
-		}
-	}()
-
-	// Wait for termination signal.
-	sig := <-sigChan
-	log.Infof("Received signal %v, shutting down...", sig)
+	return user.ID, nil
 }
 
 // basicMessageProcessor contains ordinary synchronous business logic.
@@ -135,9 +188,14 @@ func (e *basicMessageProcessor) ProcessMessage(
 ) (<-chan protocol.StreamEvent, error) {
 	handle := taskmanager.NewTaskHandle(ctx, ec)
 
+	owner := "unknown"
+	if user, ok := auth.UserFromContext(ctx); ok {
+		owner = user.ID
+	}
 	history := handle.GetMessageHistory()
 	log.Infof(
-		"Task context: taskID=%s contextID=%s historyCount=%d",
+		"Task context: owner=%s taskID=%s contextID=%s historyCount=%d",
+		owner,
 		handle.TaskID(),
 		handle.GetContextID(),
 		len(history),

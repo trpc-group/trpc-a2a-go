@@ -245,6 +245,34 @@ Redis TaskManager 要求 Redis 5.0 或更高版本，并默认将 Task 更新与
 
 → [examples/redis](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/redis)。实现 `taskmanager.TaskManager` 接口即可自带后端。
 
+### 按 owner 隔离留存状态
+
+A2A 的 `tenant` 用于选择和路由当前托管的 agent，它不是最终用户的授权边界。memory 和 Redis 默认保留兼容行为：同一 tenant 中的调用者共享留存任务命名空间。当 Task 还需要按用户、用户组、项目或其他业务 owner 隔离时，请配置 `OwnerResolver`。
+
+鉴权中间件会在 TaskManager 操作前执行，因此 resolver 可以直接从 `auth.User` 派生 owner：
+
+```go
+func resolveOwner(ctx context.Context) (string, error) {
+    user, ok := auth.UserFromContext(ctx)
+    if !ok || user.ID == "" {
+        return "", errors.New("缺少已鉴权用户")
+    }
+    return user.ID, nil
+}
+
+tm, _ := memory.NewTaskManager(proc, memory.WithOwnerResolver(resolveOwner))
+srv, _ := server.NewA2AServer(tm,
+    server.WithAgentCard(agentCard),
+    server.WithAuthProvider(provider),
+)
+```
+
+Redis 使用同一 resolver：`redistm.WithOwnerResolver(resolveOwner)`。隔离维度为 `(tenant, owner)`，覆盖 Task 与会话历史、continuation、`ListTasks`、`GetTask`、`CancelTask`、在途执行槽、`SubscribeToTask` / Redis Stream，以及 push notification 配置与投递。其他 owner 无法发现该 Task：按 Task 定址的操作返回 task-not-found，list 操作只返回当前 owner 的 Task。
+
+每个执行轮次只解析一次 owner，并在该轮内固定使用；后续跨请求的 Task 操作会独立解析当前调用者。resolver 返回错误或空 owner 时，操作会在访问留存状态前被拒绝，并对外表现为经脱敏的 internal error。resolver 为 nil 仍受支持，并保留 tenant 内共享行为。
+
+Redis 会始终将空 tenant 放入 `tenant:~default:` 命名空间。当前预发布版不读取旧的无前缀 key；升级前请先排空活跃 Task，或在保留 TTL 和 Redis Cluster hash slot 关系的前提下迁移旧 key。
+
 有状态 manager 的留存策略:
 
 | | memory 后端 | redis 后端 |
@@ -288,7 +316,7 @@ srv, _ := server.NewA2AServer(tm,
 )
 ```
 
-客户端用 `GetAuthenticatedExtendedCard` 获取；底层 wire 方法是 `GetExtendedAgentCard`。→ [examples/auth](https://github.com/trpc-group/trpc-a2a-go/tree/v2/examples/auth)。
+客户端用 `GetAuthenticatedExtendedCard` 获取；底层 wire 方法是 `GetExtendedAgentCard`。
 
 ## 推送通知
 

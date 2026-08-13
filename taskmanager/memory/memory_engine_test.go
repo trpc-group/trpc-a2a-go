@@ -128,7 +128,7 @@ func statusMessageText(task *protocol.Task) string {
 func storedTaskState(m *TaskManager, taskID string) (protocol.TaskState, bool) {
 	m.taskMu.RLock()
 	defer m.taskMu.RUnlock()
-	task, ok := m.tasks[newScopedID("", taskID)]
+	task, ok := m.tasks[newScopedID("", "", taskID)]
 	if !ok {
 		return "", false
 	}
@@ -188,7 +188,7 @@ func seedTask(m *TaskManager, task protocol.Task) {
 		task.Status.Timestamp = nowTimestamp()
 	}
 	m.taskMu.Lock()
-	m.tasks[newScopedID("", task.ID)] = &task
+	m.tasks[newScopedID("", "", task.ID)] = &task
 	m.taskMu.Unlock()
 }
 
@@ -223,7 +223,7 @@ func TestOnSendMessage_PureMessageLeavesNoTask(t *testing.T) {
 
 	// The reply must be stored in the conversation.
 	manager.conversationMu.RLock()
-	_, stored := manager.messages[newScopedID("", message.MessageID)]
+	_, stored := manager.messages[newScopedID("", "", message.MessageID)]
 	manager.conversationMu.RUnlock()
 	if !stored {
 		t.Error("Reply message not found in storage")
@@ -696,7 +696,7 @@ func TestOnSendMessageStream_OrderAndPersistBeforeBroadcast(t *testing.T) {
 		t.Errorf("Expected stamped IDs, got taskID=%q contextID=%q", initial.ID, initial.ContextID)
 	}
 	manager.taskMu.RLock()
-	storedHistory := len(manager.tasks[newScopedID("", initial.ID)].History)
+	storedHistory := len(manager.tasks[newScopedID("", "", initial.ID)].History)
 	manager.taskMu.RUnlock()
 	if storedHistory != 0 {
 		t.Fatalf("Initial Task history must not be written into storage, got %d entries", storedHistory)
@@ -723,7 +723,7 @@ func TestOnSendMessageStream_OrderAndPersistBeforeBroadcast(t *testing.T) {
 		t.Fatalf("Expected the artifact event third, got %+v", third)
 	}
 	manager.taskMu.RLock()
-	artifactCount := len(manager.tasks[newScopedID("", initial.ID)].Artifacts)
+	artifactCount := len(manager.tasks[newScopedID("", "", initial.ID)].Artifacts)
 	manager.taskMu.RUnlock()
 	if artifactCount != 1 {
 		t.Errorf("Expected 1 persisted artifact when the event is received, got %d", artifactCount)
@@ -769,7 +769,7 @@ func TestOnSendMessageStream_ArtifactFirstStartsWithTask(t *testing.T) {
 		t.Fatal("Expected the artifact-created task persisted before delivery")
 	}
 	manager.taskMu.RLock()
-	artifactCount := len(manager.tasks[newScopedID("", initial.ID)].Artifacts)
+	artifactCount := len(manager.tasks[newScopedID("", "", initial.ID)].Artifacts)
 	manager.taskMu.RUnlock()
 	if artifactCount != 1 {
 		t.Fatalf("Expected the artifact persisted before the initial Task frame, got %d", artifactCount)
@@ -1768,7 +1768,7 @@ func TestOnSendMessage_ContinuationContextMismatchRejected(t *testing.T) {
 		t.Fatalf("processor must not run for the rejected round, invocations=%d", got)
 	}
 	manager.conversationMu.RLock()
-	_, stored := manager.messages[newScopedID("", "mismatch-msg")]
+	_, stored := manager.messages[newScopedID("", "", "mismatch-msg")]
 	manager.conversationMu.RUnlock()
 	if stored {
 		t.Fatal("rejected continuation must not store the request message")
@@ -1915,7 +1915,7 @@ func TestConversationHistoryConcurrentAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 200; j++ {
-				manager.getConversationHistory("", contextID, 100)
+				manager.getConversationHistory("", "", contextID, 100)
 			}
 		}()
 	}

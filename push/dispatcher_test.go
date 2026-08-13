@@ -122,6 +122,45 @@ func TestDispatcherSnapshotsInputs(t *testing.T) {
 	}
 }
 
+func TestDispatcherPreservesPrivateOwnerForValidation(t *testing.T) {
+	validated := make(chan Registration, 1)
+	delivered := make(chan struct{}, 1)
+	d := NewDispatcher(context.Background(), SenderFunc(func(
+		context.Context, protocol.TaskPushNotificationConfig, protocol.StreamResponse,
+	) error {
+		delivered <- struct{}{}
+		return nil
+	}), 1, 1, func(_ context.Context, registration Registration) (bool, error) {
+		validated <- registration
+		return true, nil
+	})
+	defer d.Close()
+
+	registration := Registration{
+		Config: protocol.TaskPushNotificationConfig{
+			TaskID: "shared-task", ID: "shared-config", URL: "https://example.com",
+		},
+		Generation: "generation-1",
+		Owner:      "alice",
+	}
+	if err := d.Enqueue([]Registration{registration}, statusResponse(protocol.TaskStateWorking)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-validated:
+		if got.Owner != "alice" {
+			t.Fatalf("validation owner = %q, want alice", got.Owner)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("registration was not validated")
+	}
+	select {
+	case <-delivered:
+	case <-time.After(time.Second):
+		t.Fatal("push was not delivered")
+	}
+}
+
 func TestDispatcherBackpressureUnblocksOnClose(t *testing.T) {
 	started := make(chan struct{})
 	var once sync.Once

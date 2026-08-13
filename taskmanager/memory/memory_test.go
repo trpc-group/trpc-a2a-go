@@ -124,7 +124,7 @@ func TestTaskManager_OnSendMessage(t *testing.T) {
 
 			// Check that the reply message is in storage
 			manager.conversationMu.RLock()
-			_, exists := manager.messages[newScopedID("", message.MessageID)]
+			_, exists := manager.messages[newScopedID("", "", message.MessageID)]
 			manager.conversationMu.RUnlock()
 			if !exists {
 				t.Error("Message not found in storage")
@@ -414,10 +414,10 @@ func TestTaskManager_cleanupFailedSubscribersClosesRemovedSubscribers(t *testing
 	activeSub := newTaskSubscriber(taskID, 10, false)
 
 	manager.taskMu.Lock()
-	manager.subscribers[newScopedID("", taskID)] = []*taskSubscriber{failedSub, activeSub}
+	manager.subscribers[newScopedID("", "", taskID)] = []*taskSubscriber{failedSub, activeSub}
 	manager.taskMu.Unlock()
 
-	manager.cleanupFailedSubscribers("", taskID, []*taskSubscriber{failedSub})
+	manager.cleanupFailedSubscribers("", "", taskID, []*taskSubscriber{failedSub})
 
 	if !failedSub.Closed() {
 		t.Error("Expected failed subscriber to be closed")
@@ -427,7 +427,7 @@ func TestTaskManager_cleanupFailedSubscribersClosesRemovedSubscribers(t *testing
 	}
 
 	manager.taskMu.RLock()
-	subs := manager.subscribers[newScopedID("", taskID)]
+	subs := manager.subscribers[newScopedID("", "", taskID)]
 	manager.taskMu.RUnlock()
 
 	if len(subs) != 1 || subs[0] != activeSub {
@@ -447,7 +447,7 @@ func TestTaskManager_cleanExpiredTasks(t *testing.T) {
 		},
 	})
 	manager.taskMu.Lock()
-	manager.subscribers[newScopedID("", "expired-task")] = []*taskSubscriber{
+	manager.subscribers[newScopedID("", "", "expired-task")] = []*taskSubscriber{
 		newTaskSubscriber("expired-task", 10, false),
 	}
 	manager.taskMu.Unlock()
@@ -476,7 +476,7 @@ func TestTaskManager_cleanExpiredTasks(t *testing.T) {
 		t.Errorf("Expected 0 cleaned tasks with TTL=0, got %d", skipped)
 	}
 	manager.taskMu.RLock()
-	if _, exists := manager.tasks[newScopedID("", "expired-task")]; !exists {
+	if _, exists := manager.tasks[newScopedID("", "", "expired-task")]; !exists {
 		t.Error("Expired task should still exist when TTL=0")
 	}
 	manager.taskMu.RUnlock()
@@ -491,16 +491,16 @@ func TestTaskManager_cleanExpiredTasks(t *testing.T) {
 	manager.taskMu.RLock()
 	defer manager.taskMu.RUnlock()
 
-	if _, exists := manager.tasks[newScopedID("", "expired-task")]; exists {
+	if _, exists := manager.tasks[newScopedID("", "", "expired-task")]; exists {
 		t.Error("Expected expired task to be removed")
 	}
-	if _, exists := manager.subscribers[newScopedID("", "expired-task")]; exists {
+	if _, exists := manager.subscribers[newScopedID("", "", "expired-task")]; exists {
 		t.Error("Expected expired task subscribers to be removed")
 	}
-	if _, exists := manager.tasks[newScopedID("", "active-task")]; !exists {
+	if _, exists := manager.tasks[newScopedID("", "", "active-task")]; !exists {
 		t.Error("Active task should not be removed")
 	}
-	if _, exists := manager.tasks[newScopedID("", "recent-task")]; !exists {
+	if _, exists := manager.tasks[newScopedID("", "", "recent-task")]; !exists {
 		t.Error("Recently completed task should not be removed")
 	}
 }
@@ -524,10 +524,10 @@ func TestTaskManager_TaskTTLCleanupGoroutine(t *testing.T) {
 	})
 
 	manager.taskMu.Lock()
-	manager.subscribers[newScopedID("", taskID)] = []*taskSubscriber{sub}
+	manager.subscribers[newScopedID("", "", taskID)] = []*taskSubscriber{sub}
 	manager.taskMu.Unlock()
 
-	if _, err := manager.pushStore.save(protocol.TaskPushNotificationConfig{TaskID: taskID}); err != nil {
+	if _, err := manager.pushStore.save("", protocol.TaskPushNotificationConfig{TaskID: taskID}); err != nil {
 		t.Fatalf("Failed to seed push config: %v", err)
 	}
 
@@ -537,11 +537,11 @@ func TestTaskManager_TaskTTLCleanupGoroutine(t *testing.T) {
 
 	for {
 		manager.taskMu.RLock()
-		_, taskExists := manager.tasks[newScopedID("", taskID)]
-		_, subsExists := manager.subscribers[newScopedID("", taskID)]
+		_, taskExists := manager.tasks[newScopedID("", "", taskID)]
+		_, subsExists := manager.subscribers[newScopedID("", "", taskID)]
 		manager.taskMu.RUnlock()
 
-		pushConfigs := manager.pushStore.list("", taskID)
+		pushConfigs := manager.pushStore.list("", "", taskID)
 		pushExists := len(pushConfigs) > 0
 
 		if !taskExists && !subsExists && !pushExists && sub.Closed() {
@@ -579,7 +579,7 @@ func TestTaskManager_Close(t *testing.T) {
 	sub := newTaskSubscriber("close-test-task", 10, false)
 
 	manager.taskMu.Lock()
-	manager.subscribers[newScopedID("", "close-test-task")] = []*taskSubscriber{sub}
+	manager.subscribers[newScopedID("", "", "close-test-task")] = []*taskSubscriber{sub}
 	manager.taskMu.Unlock()
 
 	manager.Close()

@@ -15,10 +15,12 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	"trpc.group/trpc-go/trpc-a2a-go/v2/auth"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/client"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 )
@@ -27,18 +29,15 @@ import (
 // Sent by /long-task to simulate a long-running server turn (async/subscribe/cancel).
 const longTaskMarker = "__long_task__"
 
-// session holds REPL state across turns.
-type session struct {
-	client     *client.A2AClient
-	stream     bool
-	contextID  *string
-	lastTaskID string
-}
+var (
+	host     = flag.String("host", "localhost:8080", "server address")
+	stream   = flag.Bool("stream", false, "use message/stream instead of message/send")
+	httpJSON = flag.Bool("http-json", true, "use HTTP+JSON/REST binding (false = JSON-RPC)")
+	user     = flag.String("user", "alice", "Basic Auth username (alice or bob)")
+	password = flag.String("password", "alice-pass", "Basic Auth password matching examples/basic/server")
+)
 
 func main() {
-	host := flag.String("host", "localhost:8080", "server address")
-	stream := flag.Bool("stream", false, "use message/stream instead of message/send")
-	httpJSON := flag.Bool("http-json", true, "use HTTP+JSON/REST binding (false = JSON-RPC)")
 	flag.Parse()
 
 	opts := []client.Option{
@@ -46,6 +45,7 @@ func main() {
 		// for message/stream / SubscribeToTask is the entire SSE lifetime.
 		// 60s covers the 30s /long-task demo with some headroom.
 		client.WithTimeout(60 * time.Second),
+		client.WithAuthProvider(&basicAuthClientProvider{user: *user, password: *password}),
 	}
 	binding := "JSON-RPC"
 	if *httpJSON {
@@ -62,13 +62,53 @@ func main() {
 	if *stream {
 		mode = "message/stream"
 	}
-	fmt.Printf("Connected to http://%s/ (%s, %s)\n", *host, binding, mode)
+	fmt.Printf("Connected to http://%s/ (%s, %s, user=%s)\n", *host, binding, mode, *user)
 	printHelp()
 
 	s := &session{client: a2aClient, stream: *stream}
 	if err := s.runREPL(bufio.NewScanner(os.Stdin)); err != nil {
 		log.Fatalf("Failed to read stdin: %v", err)
 	}
+}
+
+// session holds REPL state across turns.
+type session struct {
+	client     *client.A2AClient
+	stream     bool
+	contextID  *string
+	lastTaskID string
+}
+
+// basicAuthClientProvider attaches HTTP Basic Auth to every client request.
+type basicAuthClientProvider struct {
+	user     string
+	password string
+}
+
+func (p *basicAuthClientProvider) Authenticate(*http.Request) (*auth.User, error) {
+	return &auth.User{ID: p.user}, nil
+}
+
+func (p *basicAuthClientProvider) ConfigureClient(c *http.Client) *http.Client {
+	base := c.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	cloned := *c
+	cloned.Transport = &basicAuthTransport{base: base, user: p.user, password: p.password}
+	return &cloned
+}
+
+type basicAuthTransport struct {
+	base     http.RoundTripper
+	user     string
+	password string
+}
+
+func (t *basicAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	cloned := req.Clone(req.Context())
+	cloned.SetBasicAuth(t.user, t.password)
+	return t.base.RoundTrip(cloned)
 }
 
 func (s *session) runREPL(scanner *bufio.Scanner) error {
