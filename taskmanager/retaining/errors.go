@@ -19,6 +19,8 @@ var (
 	ErrTaskTerminal = errors.New("retaining store: task is terminal")
 	// ErrOperationConflict reports reuse of an OperationID for different content.
 	ErrOperationConflict = errors.New("retaining store: operation id conflict")
+	// ErrMessageConflict reports reuse of a MessageID for different content.
+	ErrMessageConflict = errors.New("retaining store: message id conflict")
 	// ErrOperationExpired reports that an idempotent result left the operation journal.
 	ErrOperationExpired = errors.New("retaining store: operation result expired")
 	// ErrCommitUncertain asks the Manager to retry with the original OperationID.

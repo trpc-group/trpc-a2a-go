@@ -12,6 +12,7 @@ import (
 	"context"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 )
 
 // Cursor is an opaque position in one Task's event journal.
@@ -42,13 +43,6 @@ type StoredEvent struct {
 	Event  protocol.StreamResponse
 }
 
-// StoredPushConfig pairs a wire-level push configuration with its internal
-// storage generation. Generation is not exposed through the A2A protocol.
-type StoredPushConfig struct {
-	Config     protocol.TaskPushNotificationConfig
-	Generation uint64
-}
-
 // CommitTaskEventRequest atomically replaces a Task snapshot and appends the
 // Status or Artifact event that produced it.
 type CommitTaskEventRequest struct {
@@ -67,7 +61,6 @@ type CommitMessageEventRequest struct {
 	ExpectedVersion uint64
 	OperationID     string
 	Message         protocol.Message
-	Event           protocol.StreamResponse
 }
 
 // Store is the persistence boundary of a retaining task manager.
@@ -95,27 +88,31 @@ type Store interface {
 	CommitTaskEvent(ctx context.Context, req CommitTaskEventRequest) (uint64, Cursor, error)
 
 	// CommitMessageEvent first resolves OperationID idempotency, then atomically
-	// checks ExpectedVersion and rejects terminal Tasks before appending Event.
+	// checks ExpectedVersion and rejects terminal Tasks before appending the
+	// Message event derived from Message.
 	// Message/history projection is idempotent by MessageID and is retried even
-	// when the OperationID already exists. A Message event does not increment the
-	// Task version.
+	// when the OperationID already exists. Every Task-associated event advances
+	// Version, including an event that does not replace the Task snapshot.
 	CommitMessageEvent(ctx context.Context, req CommitMessageEventRequest) (uint64, Cursor, error)
 
-	// ReadTaskEvents returns events strictly after after, in Store order. It
-	// returns ErrCursorExpired rather than silently skipping trimmed events.
+	// ReadTaskEvents returns events strictly after after, in Store order, plus
+	// the last physical position inspected. next may advance past malformed
+	// backend entries even when no decodable event is returned. It returns
+	// ErrCursorExpired rather than silently skipping trimmed events.
 	ReadTaskEvents(
 		ctx context.Context,
 		key TaskKey,
 		after Cursor,
 		limit int,
-	) ([]StoredEvent, error)
+	) ([]StoredEvent, Cursor, error)
 
 	// RefreshTaskLease extends a live Task and its owned journal state without
 	// recreating a missing or logically expired Task.
 	RefreshTaskLease(ctx context.Context, key TaskKey) error
 
 	// SaveMessage idempotently stores message and its conversation index entry by
-	// MessageID. It is used for direct Messages and projections outside
+	// MessageID. Reusing a MessageID for different content returns
+	// ErrMessageConflict. It is used for direct Messages and projections outside
 	// CommitMessageEvent.
 	SaveMessage(ctx context.Context, tenant, owner string, message protocol.Message) error
 
@@ -139,19 +136,20 @@ type Store interface {
 	) (*protocol.ListTasksResult, error)
 
 	// SavePushConfig creates or replaces a config scoped by key. The Store treats
-	// key as authoritative, assigns server-owned fields, advances Generation, and
-	// returns a deep copy of the stored value.
+	// key as authoritative, rejects a payload whose non-empty scope disagrees,
+	// atomically verifies that the Task remains visible, assigns server-owned
+	// fields, advances Generation, and returns a deep copy of the registration.
 	SavePushConfig(
 		ctx context.Context,
 		key TaskKey,
 		config protocol.TaskPushNotificationConfig,
-	) (StoredPushConfig, error)
+	) (push.Registration, error)
 
 	// GetPushConfig returns one config only while its Task remains visible.
-	GetPushConfig(ctx context.Context, key TaskKey, configID string) (StoredPushConfig, error)
+	GetPushConfig(ctx context.Context, key TaskKey, configID string) (push.Registration, error)
 
 	// ListPushConfigs returns the visible configs for key in stable backend order.
-	ListPushConfigs(ctx context.Context, key TaskKey) ([]StoredPushConfig, error)
+	ListPushConfigs(ctx context.Context, key TaskKey) ([]push.Registration, error)
 
 	// DeletePushConfig removes configID from key. Deleting an absent config is a
 	// no-op, preserving the existing TaskManager behavior.

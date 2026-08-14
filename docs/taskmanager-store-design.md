@@ -149,11 +149,6 @@ type StoredEvent struct {
     Event  protocol.StreamResponse
 }
 
-type StoredPushConfig struct {
-    Config     protocol.TaskPushNotificationConfig
-    Generation uint64
-}
-
 type CommitTaskEventRequest struct {
     Key             TaskKey
     ExpectedVersion uint64
@@ -168,7 +163,6 @@ type CommitMessageEventRequest struct {
     ExpectedVersion uint64
     OperationID     string
     Message         protocol.Message
-    Event           protocol.StreamResponse
 }
 
 type Store interface {
@@ -176,7 +170,7 @@ type Store interface {
     LoadTaskAndCursor(ctx context.Context, key TaskKey) (*TaskRecord, error)
     CommitTaskEvent(ctx context.Context, req CommitTaskEventRequest) (uint64, Cursor, error)
     CommitMessageEvent(ctx context.Context, req CommitMessageEventRequest) (uint64, Cursor, error)
-    ReadTaskEvents(ctx context.Context, key TaskKey, after Cursor, limit int) ([]StoredEvent, error)
+    ReadTaskEvents(ctx context.Context, key TaskKey, after Cursor, limit int) ([]StoredEvent, Cursor, error)
     RefreshTaskLease(ctx context.Context, key TaskKey) error
 
     SaveMessage(ctx context.Context, tenant, owner string, message protocol.Message) error
@@ -184,9 +178,9 @@ type Store interface {
 
     ListTasks(ctx context.Context, tenant, owner string, params protocol.ListTasksParams) (*protocol.ListTasksResult, error)
 
-    SavePushConfig(ctx context.Context, key TaskKey, config protocol.TaskPushNotificationConfig) (StoredPushConfig, error)
-    GetPushConfig(ctx context.Context, key TaskKey, configID string) (StoredPushConfig, error)
-    ListPushConfigs(ctx context.Context, key TaskKey) ([]StoredPushConfig, error)
+    SavePushConfig(ctx context.Context, key TaskKey, config protocol.TaskPushNotificationConfig) (push.Registration, error)
+    GetPushConfig(ctx context.Context, key TaskKey, configID string) (push.Registration, error)
+    ListPushConfigs(ctx context.Context, key TaskKey) ([]push.Registration, error)
     DeletePushConfig(ctx context.Context, key TaskKey, configID string) error
 
     Close() error
@@ -205,7 +199,7 @@ type Notifier interface {
 
 `Cursor` 是一个有类型的 opaque string，对 Manager 完全不透明：Memory 可以编码递增整数，Redis 使用 Stream ID，MySQL 编码 `BIGINT` sequence。Manager 只保存、比较是否为空并原样传回 Store，不解析、不排序，也不能与 ListTasks page token 或 OperationID 混用。
 
-两个 Commit 方法返回“该 OperationID 首次成功提交时”的 Task version 和 Event cursor；Message Event 不改变 Task version，因此返回通过校验的原 version。
+两个 Commit 方法返回“该 OperationID 首次成功提交时”的 Task version 和 Event cursor。Version 是同一 Task 的 event-journal revision，每个 Task-associated Event 都递增，包括不替换 Task 快照的 Message Event；因此任一旧执行只要漏掉一条 Event，其后续 CAS 就会失败。`CommitMessageEvent` 只接收 Message，Store 从它唯一地构造 Message Event，避免同一次提交携带互相矛盾的两份内容。
 
 `OperationID` 在一次逻辑提交的重试过程中保持不变。Store 必须先查询 OperationID，再执行 version/终态校验：相同 OperationID 和相同请求应返回首次提交的原 version/cursor，不重复追加 Event；相同 OperationID 对应不同操作类型或不同请求摘要时必须报错。`CommitMessageEvent` 即使命中已有 OperationID，也要继续尝试请求中携带的幂等 Message/history 投影，因此上次调用已经提交 Event 但投影尚未完成时，重试会补齐投影而不是再次追加 Event。Status message 等由 Manager 在 Commit 之后单独触发的投影，也必须通过 `SaveMessage` 幂等执行。
 
@@ -220,7 +214,7 @@ Store 至少需要让通用 Manager 使用 `errors.Is` 区分以下情况：
 - Task 不存在或已逻辑过期。
 - Task version 冲突。
 - Task 已进入终态，不能再追加新的 Task-associated Event。
-- OperationID 被不同请求复用，或原提交结果已超出幂等保留窗口。
+- OperationID 被不同请求复用，或原提交结果已超出幂等保留窗口；MessageID 被不同内容复用。
 - Commit 结果不确定，必须使用原 OperationID 做有界重试。
 - Event cursor 已落后于后端保留窗口。
 - Store 已关闭。
@@ -255,7 +249,7 @@ Notifier 错误只记录日志并进入轮询退避，不影响已经提交的�
 
 ### 9.3 Task-associated Message
 
-纯 Message 首帧仍然产生无 Task 的直接响应，只通过 `SaveMessage` 保存 Message/history，不创建 Task Event。Task 已存在时，Message 使用当前 Task version 调用 `CommitMessageEvent`：Store 先处理 OperationID，再校验 expectedVersion 和 Task 非终态，随后把 Message 追加到 Task Event journal，并以 MessageID 幂等写入 conversation history；整个方法成功后 Manager 才把 Message 送入本地 SSE pipe。
+纯 Message 首帧仍然产生无 Task 的直接响应，只通过 `SaveMessage` 保存 Message/history，不创建 Task Event。Task 已存在时，Message 使用当前 Task version 调用 `CommitMessageEvent`：Store 先处理 OperationID，再校验 expectedVersion 和 Task 非终态，随后把由 Message 唯一构造的 Event 追加到 Task Event journal、递增 version，并以 MessageID 幂等写入 conversation history；整个方法成功后 Manager 才把 Message 送入本地 SSE pipe。相同 MessageID、不同内容必须返回冲突，不能覆盖原消息。
 
 由于 Redis Cluster 无法对 Task Stream 与 conversation keys 做跨 slot 原子事务，`CommitMessageEvent` 的一致性定义是“通过 version/终态校验的 Event 只追加一次，Message/history 可幂等补写”。MySQL 可以在一个事务内完成全部写入，Redis 使用 OperationID 原提交结果和幂等 history 写入在重试时补齐。若另一个节点已经推进 Task version，尤其已经提交终态，旧执行的 Message 不得进入 Event journal、history 或本地 SSE。
 
@@ -283,10 +277,10 @@ send(record.Task)
 cursor = record.Cursor
 
 loop:
-    events = Store.ReadTaskEvents(key, cursor, batchSize)
+    events, next = Store.ReadTaskEvents(key, cursor, batchSize)
+    cursor = next // 即使坏记录被跳过，物理读取位置也会推进
     if events is not empty:
         send events in order
-        cursor = events[last].Cursor
         reset idle backoff
         continue
 
@@ -313,7 +307,7 @@ Wait 可以丢失、重复或伪唤醒，Manager 每次醒来都重新读取 Sto
 | Event 与跨节点通知 | 先提交 Event，再 best-effort Notify |
 | Resubscribe snapshot 与起始 cursor | 必须来自同一原子观察点 |
 | 同一 Task 的并发更新 | expectedVersion CAS，禁止静默覆盖 |
-| Task-associated Message | OperationID 查询优先，然后校验 expectedVersion 和非终态 |
+| Task-associated Message | OperationID 查询优先，然后校验 expectedVersion 和非终态，并递增 journal version |
 | Event 重试 | OperationID 返回首次提交的 version/cursor，不重复追加 |
 | Message 与 conversation index | 按 MessageID 幂等 |
 | Task Event 与 conversation history 投影 | 有序、可重试；不承诺所有后端全局原子 |
@@ -358,17 +352,17 @@ Memory 的默认 retain 行为保持不变：conversation 默认闲置一小时�
 
 ## 14. Redis 适配
 
-Redis Store 复用当前 Task key、Stream、dedupe journal、Task index、Message/history 和 Push hash，不修改裸 Task JSON；为了正确恢复幂等提交结果，新增一个与 Task key 同 cluster slot 的 `stream-op-results:{taskKey}` HASH。现有私有 `taskEventTransport` 的方法被折叠进 Store 实现，不需要离线迁移已有 Task 数据。
+Redis Store 复用当前 Task key、Stream、dedupe journal、Task index 和 Message/history，不修改裸 Task JSON；为了正确恢复幂等提交结果，新增一个与 Task key 同 cluster slot 的 `stream-op-results:{taskKey}` HASH。Push 不能继续直接使用旧 `push:<taskID>` key：它与 Task key 不同 slot，无法原子校验 Task 可见性，因此 Store 使用同 slot 的 `stream-push:{taskKey}` HASH。Task/Event 数据不需要离线迁移，既有 Push 配置则需要在接入通用 Manager 前迁移或明确丢弃；首版实现不做容易产生双写歧义的运行时兼容读取。
 
-Redis `CommitTaskEvent` 继续使用 Lua 原子写 Task JSON 和 Stream Event。现有 `stream-dedupe` ZSET 保留 `__seq` 并按 operation sequence 提供有界淘汰；新的 result HASH 使用保留字段 `__task_version` 保存 Task version，并以 OperationID 为 field 保存 `{kind, requestDigest, version, cursor}`。Lua 先查 ZSET/HASH 中的 OperationID：摘要一致时返回原结果，摘要不一致时报错；只有新操作才比较 expectedVersion、执行 XADD/SET、递增 version 并记录结果。淘汰旧 ZSET operation member 时必须同时 HDEL 对应 result field，不能删除保留字段；Task/Stream/dedupe/result 四个 key 使用相同 TTL，`RefreshTaskLease` 在一个脚本内刷新四者但不得复活缺失 Task。
+Redis `CommitTaskEvent` 继续使用 Lua 原子写 Task JSON 和 Stream Event。现有 `stream-dedupe` ZSET 保留 `__seq` 并按 operation sequence 提供有界淘汰；新的 result HASH 使用保留字段 `__task_version` 保存 Task version，并以 `op:<OperationID>` 为 field 保存 `{kind, requestDigest, version, cursor}`，避免 OperationID 与保留字段冲突。Lua 先查 ZSET/HASH 中的 OperationID：摘要一致时返回原结果，摘要不一致时报错；只有新操作才比较 expectedVersion、执行 XADD/SET、递增 version 并记录结果。淘汰旧 ZSET operation member 时必须同时 HDEL 对应 result field，不能删除保留字段；Task/Stream/dedupe/result/tagged Push 五个 key 对齐 Task TTL，`RefreshTaskLease` 在一个脚本内刷新它们但不得复活缺失 Task。
 
-`CommitMessageEvent` 使用同一个 Lua 提交边界：幂等命中优先返回原结果；新操作读取当前 Task JSON 和 `__task_version`，校验 expectedVersion 并拒绝终态 Task，随后只追加 Stream Event，不递增 Task version。Redis Cluster slot 外的 Message/history 写入仍在脚本成功后幂等执行，重试即使命中旧 OperationID 也必须再次尝试该投影。
+`CommitMessageEvent` 使用同一个 Lua 提交边界：幂等命中优先返回原结果；新操作读取当前 Task JSON 和 `__task_version`，校验 expectedVersion 并拒绝终态 Task，随后追加 Stream Event 并递增 version，但不替换 Task JSON。Redis Cluster slot 外的 Message/history 写入仍在脚本成功后幂等执行，重试即使命中旧 OperationID 也必须再次尝试该投影。
 
 已有 Task 没有 result HASH 或 `__task_version` 时按 version 0 读取，第一次新版本写入时初始化。`LoadTaskAndCursor` 在同一个 Lua 中返回 Task JSON、Stream tail cursor 和 HASH 中的 Task version。该方案保持裸 Task JSON，但增加一个伴生 key；升级时必须同步升级所有副本，因为旧二进制既不会维护 version，也不会写入可恢复的 operation result。Task version 达到 HASH integer 上限或 operation sequence 达到 ZSET 可精确表示的整数上限前必须报后端错误，不能回绕或产生相同 score。
 
 Redis 首版传入 nil Notifier，依赖 Store 和 Manager 的有界退避轮询，不创建只负责计时的伪 Notifier。后续可以使用阻塞 XREAD 或 Pub/Sub 实现真正的低延迟唤醒；可靠性始终来自 Redis Stream 和定期重读，不来自通知通道。
 
-Redis `ReadTaskEvents` 必须在 Lua 中同时观察 Task、Stream first entry 和请求 cursor。请求 cursor 已不在 Stream 且早于 first entry 时返回 cursor expired，禁止直接返回 first entry 后的数据造成静默缺口；`0-0` 只作为空日志的内部初始位置，不接受客户端构造。
+Redis `ReadTaskEvents` 必须在 Lua 中同时观察 Task、Stream first entry 和请求 cursor。请求 cursor 已不在 Stream 时返回 cursor expired，禁止直接返回 first entry 后的数据造成静默缺口；返回值中的 next cursor 表示最后检查的物理 Stream entry，因此即使坏 entry 被丢弃也能继续前进。`0-0` 只作为空日志的内部初始位置，不接受客户端构造。
 
 Redis 的公开 module path、构造函数、默认 TTL、Stream 约 10,000 条上限、Push 和 Close 行为必须保持兼容。
 
@@ -399,7 +393,7 @@ a2a_push_configs
 
 关键字段：Task scope、`sequence`、`operation_id`、`operation_kind`、`request_digest`、`task_version`、`event_json`、`created_at`。主键或唯一键保证 `(task scope, sequence)` 和 `(task scope, operation_id)` 唯一；该 Event row 本身就是可恢复的 operation result。
 
-两个 Commit 方法都先按 OperationID 查询已有 Event row，命中且摘要一致时返回该 row 的 `task_version/sequence`，摘要不一致时报错。新 `CommitTaskEvent` 在一个事务中锁定或 CAS 更新 Task row、递增 `event_sequence`、插入 Event；新 `CommitMessageEvent` 在同一事务中校验 Task version 和非终态、递增 `event_sequence`、插入 Event 和幂等 Message。`LoadTaskAndCursor` 直接从 Task row 读取 `task_json` 和 `event_sequence`，天然获得同一观察点。
+两个 Commit 方法都先按 OperationID 查询已有 Event row，命中且摘要一致时返回该 row 的 `task_version/sequence`，摘要不一致时报错。新 `CommitTaskEvent` 在一个事务中锁定或 CAS 更新 Task row、同时递增 `version/event_sequence`、插入 Event；新 `CommitMessageEvent` 在同一事务中校验 Task version 和非终态，同样递增 `version/event_sequence`，再插入 Event 和幂等 Message，但不替换 `task_json`。`LoadTaskAndCursor` 直接从 Task row 读取 `task_json`、`version` 和 `event_sequence`，天然获得同一观察点。
 
 ### 15.4 `a2a_messages`
 
@@ -429,7 +423,7 @@ Store 返回的 Task 快照默认不包含 history；通用 Manager 按 `history
 
 ## 17. Push Notification
 
-通用 Manager 继续复用公共 `push.Dispatcher`。当前代码库不存在额外的 `push.Registration` 类型，因此 Store 使用最小的 `StoredPushConfig{Config, Generation}`：Config 是现有协议类型，Generation 是不进入协议 JSON 的存储版本。`TaskKey` 是保存和读取时的权威 scope，Store 不信任可变 Config 中携带的 tenant/taskID。每次注册或替换配置都生成新的 generation；Dispatcher 真正投递前使用 Store 检查当前 generation，已删除或被替换的 queued registration 不再投递。
+通用 Manager 继续复用公共 `push.Dispatcher` 及现有 `push.Registration`，不再新增同义的 Store 类型。`TaskKey` 是保存和读取时的权威 scope；Config 中非空 tenant/taskID 必须与它一致，Store 再覆盖为权威值，避免调用方误传 scope 被静默改写。`SavePushConfig` 必须在同一存储边界确认 Task 仍然可见，不能通过 Manager 先读后写留下 TTL/删除竞态。每次注册或替换配置都生成新的 string generation；Dispatcher 真正投递前使用 Store 检查当前 generation，已删除或被替换的 queued registration 不再投递。
 
 自动投递保持“同一配置有序、有界队列、队列满时背压、进程崩溃不保证 durable delivery”的当前语义。需要 durable outbox 时仍使用 `ManualDelivery`，不把 outbox 强行放入通用 Store。
 
@@ -452,7 +446,7 @@ Redis 与 MySQL 额外运行两个 Manager 实例共享同一后端的跨节点 
 - `memory.NewTaskManager`、Redis module path、`redis.NewTaskManager` 和现有 options 保持不变。
 - `taskmanager.TaskManager` 接口不修改。
 - Memory 的默认 TTL 和历史行为不修改。
-- Redis 保持当前 Task key 和裸 Task JSON，新增同 slot 的 operation result HASH；version 和原提交结果由该 HASH 保存，部署时同步升级所有副本。
+- Redis 保持当前 Task key 和裸 Task JSON，新增同 slot 的 operation result HASH，并把 Push 配置迁移到同 slot 的 tagged HASH；version 和原提交结果由 result HASH 保存，部署时同步升级所有副本。
 - Generic Manager 首先在 Memory 上落地并通过 conformance suite，再迁移 Redis；MySQL 只在 Memory/Redis 都通过后实现。
 - 每个阶段都保留可运行后端，不提交同时破坏 Memory 和 Redis 的中间状态。
 

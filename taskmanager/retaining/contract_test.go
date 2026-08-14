@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
+	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
 )
 
 var storeErrors = []error{
@@ -20,6 +21,7 @@ var storeErrors = []error{
 	ErrVersionConflict,
 	ErrTaskTerminal,
 	ErrOperationConflict,
+	ErrMessageConflict,
 	ErrOperationExpired,
 	ErrCommitUncertain,
 	ErrCursorExpired,
@@ -85,8 +87,8 @@ func (*contractStore) ReadTaskEvents(
 	TaskKey,
 	Cursor,
 	int,
-) ([]StoredEvent, error) {
-	return nil, nil
+) ([]StoredEvent, Cursor, error) {
+	return nil, "", nil
 }
 
 func (*contractStore) RefreshTaskLease(context.Context, TaskKey) error {
@@ -120,19 +122,19 @@ func (*contractStore) SavePushConfig(
 	context.Context,
 	TaskKey,
 	protocol.TaskPushNotificationConfig,
-) (StoredPushConfig, error) {
-	return StoredPushConfig{}, nil
+) (push.Registration, error) {
+	return push.Registration{}, nil
 }
 
 func (*contractStore) GetPushConfig(
 	context.Context,
 	TaskKey,
 	string,
-) (StoredPushConfig, error) {
-	return StoredPushConfig{}, nil
+) (push.Registration, error) {
+	return push.Registration{}, nil
 }
 
-func (*contractStore) ListPushConfigs(context.Context, TaskKey) ([]StoredPushConfig, error) {
+func (*contractStore) ListPushConfigs(context.Context, TaskKey) ([]push.Registration, error) {
 	return nil, nil
 }
 
