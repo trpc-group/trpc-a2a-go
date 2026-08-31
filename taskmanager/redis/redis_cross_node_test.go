@@ -362,6 +362,78 @@ func TestCrossNode_CancelWithoutLiveRunReachesResubscriber(t *testing.T) {
 	}
 }
 
+func TestCrossNode_CancelActiveExecutionStopsOwnerAndFencesLateEvent(t *testing.T) {
+	processorCanceled := make(chan struct{})
+	processor := executorFunc(func(
+		ctx context.Context, _ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent, 2)
+		go func() {
+			defer close(out)
+			out <- statusEvent(protocol.TaskStateWorking, nil)
+			<-ctx.Done()
+			close(processorCanceled)
+			// A processor may race one last event after observing cancellation.
+			// The distributed fence must reject it after cancel commits
+			// CANCELED.
+			out <- statusEvent(protocol.TaskStateInputRequired, agentReply("late"))
+		}()
+		return out, nil
+	})
+	nodeA, nodeB := twoNodeManagers(t, processor, WithExpireTime(600*time.Millisecond))
+
+	stream, err := nodeA.OnSendMessageStream(context.Background(), sendParams("start", "ctx-active-cancel"))
+	if err != nil {
+		t.Fatalf("nodeA OnSendMessageStream: %v", err)
+	}
+	initial := recvEvent(t, stream)
+	if initial.GetTask() == nil {
+		t.Fatalf("initial frame = %+v, want Task", initial.Result)
+	}
+	workingFrame := recvEvent(t, stream)
+	working := workingFrame.GetStatusUpdate()
+	if working == nil || working.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("working frame = %+v", working)
+	}
+
+	snapshot, err := nodeB.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: working.TaskID})
+	if err != nil {
+		t.Fatalf("nodeB OnCancelTask: %v", err)
+	}
+	if snapshot.Status.State != protocol.TaskStateCanceled {
+		t.Fatalf("cancel snapshot state = %s, want CANCELED", snapshot.Status.State)
+	}
+	if nodeB.liveRun("", "", working.TaskID) != nil {
+		t.Fatal("cancel request unexpectedly depended on a nodeB-local execution")
+	}
+
+	select {
+	case <-processorCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("nodeA processor did not observe cross-node cancellation")
+	}
+
+	sawCanceled := false
+	for event := range stream {
+		if update := event.GetStatusUpdate(); update != nil &&
+			update.Status.State == protocol.TaskStateInputRequired {
+			t.Fatal("late INPUT_REQUIRED bypassed the execution fence")
+		} else if update != nil && update.Status.State == protocol.TaskStateCanceled {
+			sawCanceled = true
+		}
+	}
+	if !sawCanceled {
+		t.Fatal("owner stream did not receive the committed CANCELED event")
+	}
+	stored, err := nodeB.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: working.TaskID})
+	if err != nil {
+		t.Fatalf("nodeB OnGetTask: %v", err)
+	}
+	if stored.Status.State != protocol.TaskStateCanceled {
+		t.Fatalf("stored state = %s, want CANCELED", stored.Status.State)
+	}
+}
+
 // Task events are journaled by default so a later subscription may resume on
 // any replica sharing Redis.
 func TestTaskEventsUseStreamByDefault(t *testing.T) {

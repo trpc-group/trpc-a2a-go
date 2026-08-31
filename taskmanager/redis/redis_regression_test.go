@@ -175,9 +175,8 @@ func TestTerminal_NotResurrectedByYieldedRound(t *testing.T) {
 	}
 }
 
-// Cancellation and suspension linearize under cancelMu. When cancellation
-// wins, a later suspend event must remain owned by the canceled round so its
-// close rule persists CANCELED instead of yielding and swallowing the cancel.
+// Cancellation and suspension linearize in Redis. When cancellation wins, it
+// persists CANCELED and fences a later suspend event.
 func TestCancelWinsConcurrentSuspendPersistsCanceled(t *testing.T) {
 	cancelObserved := make(chan struct{})
 	emitSuspend := make(chan struct{})
@@ -225,8 +224,8 @@ func TestCancelWinsConcurrentSuspendPersistsCanceled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OnCancelTask: %v", err)
 	}
-	if snapshot.Status.State != protocol.TaskStateWorking {
-		t.Fatalf("cancel snapshot state = %s, want WORKING", snapshot.Status.State)
+	if snapshot.Status.State != protocol.TaskStateCanceled {
+		t.Fatalf("cancel snapshot state = %s, want CANCELED", snapshot.Status.State)
 	}
 	select {
 	case <-cancelObserved:
@@ -235,35 +234,32 @@ func TestCancelWinsConcurrentSuspendPersistsCanceled(t *testing.T) {
 	}
 	releaseSuspend()
 
-	var sawSuspend, sawCanceled bool
+	var sawCanceled bool
 	deadline := time.After(2 * time.Second)
 	for !sawCanceled {
 		select {
 		case event, ok := <-stream:
 			if !ok {
-				t.Fatalf("stream closed before CANCELED; saw INPUT_REQUIRED=%v", sawSuspend)
+				t.Fatal("stream closed before CANCELED")
 			}
 			if update := event.GetStatusUpdate(); update != nil {
 				switch update.Status.State {
 				case protocol.TaskStateInputRequired:
-					sawSuspend = true
+					t.Fatal("post-cancel INPUT_REQUIRED bypassed execution fence")
 				case protocol.TaskStateCanceled:
 					sawCanceled = true
 				}
 			}
 		case <-deadline:
-			t.Fatalf("timed out waiting for CANCELED; saw INPUT_REQUIRED=%v", sawSuspend)
+			t.Fatal("timed out waiting for CANCELED")
 		}
-	}
-	if !sawSuspend {
-		t.Fatal("processor's post-cancel INPUT_REQUIRED event was not exercised")
 	}
 	pollTaskState(t, manager, taskID, protocol.TaskStateCanceled)
 }
 
 // When suspension wins the same linearization race, cancellation must receive
 // the existing handoff channel instead of canceling the yielded execution.
-func TestRequestExecutionCancelReturnsWinningYieldHandoff(t *testing.T) {
+func TestCancelLocalExecutionReturnsWinningYieldHandoff(t *testing.T) {
 	manager, _ := setupTest(t, scriptedExecutor())
 	defer manager.Close()
 	const taskID = "task-yield-wins-cancel-race"
@@ -283,7 +279,7 @@ func TestRequestExecutionCancelReturnsWinningYieldHandoff(t *testing.T) {
 		t.Fatal("beginExecutionYield did not claim the live execution")
 	}
 	wantHandoff := live.yieldDone
-	handoff, accepted := manager.requestExecutionCancel("", "", taskID, live)
+	handoff, accepted := manager.cancelLocalExecution("", "", taskID, live)
 	if accepted {
 		t.Fatal("cancellation was accepted after yield won")
 	}
@@ -368,6 +364,10 @@ func TestClose_PersistsCanceledBeforeClientClose(t *testing.T) {
 			go func() {
 				defer close(out)
 				<-ctx.Done()
+				// Exercise a late suspend after local shutdown cancellation. The
+				// suspended write must keep the lease because cancel already owns
+				// the local handoff; the close rule then persists CANCELED.
+				out <- statusEvent(protocol.TaskStateInputRequired, nil)
 			}()
 			return out, nil
 		})
