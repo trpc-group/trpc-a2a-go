@@ -263,6 +263,8 @@ func TestExecutionSweepRenewsConcurrentlyAndWithinBound(t *testing.T) {
 	manager.cancelMu.Unlock()
 }
 
+// TestExecutionCancelRecordsIntentAndLateTerminalWins verifies the owner may
+// still commit a terminal result after cancellation intent is recorded.
 func TestExecutionCancelRecordsIntentAndLateTerminalWins(t *testing.T) {
 	manager, _ := setupTest(t, scriptedExecutor())
 	defer manager.Close()
