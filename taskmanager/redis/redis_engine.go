@@ -414,7 +414,7 @@ func (m *TaskManager) prepareExecution(
 
 	// Recheck distributed ownership after all Redis-backed admission work and
 	// immediately before entering user code. A remote cancellation may have
-	// committed after the earlier acquire/register check; in that case the
+	// recorded intent after the earlier acquire/register check; in that case the
 	// processor must never start.
 	leaseCheckStarted = time.Now()
 	owned, canceled, err = m.executionLease.CheckAndRenewExecution(
@@ -659,8 +659,8 @@ func (ex *execution) finish() {
 		switch {
 		case ex.live.cancelRequested.Load():
 			// Manager shutdown cancels locally without a Redis cancel request,
-			// so it still needs the engine to persist CANCELED. A user cancel
-			// was already committed atomically and was adopted above.
+			// while a user cancel only records intent. In both cases the owner
+			// persists the close-rule CANCELED state here.
 			ex.processStatusEvent(&protocol.TaskStatusUpdateEvent{
 				Status: protocol.TaskStatus{State: protocol.TaskStateCanceled},
 			})
@@ -680,9 +680,9 @@ func (ex *execution) finish() {
 	}
 	if ex.runErr == nil && ex.live.cancelRequested.Load() &&
 		(ex.task == nil || ex.task.Status.State != protocol.TaskStateCanceled) {
-		// A write may have observed the Redis cancel fence while applying the
-		// close rule. Re-read the already committed terminal snapshot before
-		// completing the local response.
+		// A concurrent no-live cancel may have committed a terminal snapshot
+		// after ownership was released. Re-read it before completing the local
+		// response.
 		ex.adoptCommittedCancellation()
 	}
 	// §3.1: only rounds that wrote to the task answer with a Task snapshot; a
@@ -706,10 +706,9 @@ func (ex *execution) finish() {
 	close(ex.done)
 }
 
-// adoptCommittedCancellation publishes the CANCELED snapshot that a
-// tasks/cancel request already committed in Redis. It deliberately skips
-// persistence and push dispatch; both happened at the cancel linearization
-// point, while this owner only needs to finish its request-local response.
+// adoptCommittedCancellation publishes a CANCELED snapshot committed by a
+// concurrent no-live tasks/cancel request. It deliberately skips persistence
+// and push dispatch because both already happened in that request.
 func (ex *execution) adoptCommittedCancellation() bool {
 	task, err := ex.manager.getTaskInternal(
 		context.Background(), ex.ec.Tenant, ex.owner, ex.ec.TaskID,

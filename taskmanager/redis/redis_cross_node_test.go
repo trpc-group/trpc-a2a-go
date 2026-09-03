@@ -435,7 +435,7 @@ func TestCrossNode_CancelActiveExecutionStopsOwnerAndFencesLateEvent(t *testing.
 }
 
 // TestCrossNode_CancelDuringAdmissionPreventsProcessorStart verifies that a
-// remote cancellation committed during continuation preparation prevents the
+// remote cancellation requested during continuation preparation prevents the
 // owner from entering user processor code.
 func TestCrossNode_CancelDuringAdmissionPreventsProcessorStart(t *testing.T) {
 	var processorCalls atomic.Int32
@@ -493,8 +493,8 @@ func TestCrossNode_CancelDuringAdmissionPreventsProcessorStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("remote OnCancelTask: %v", err)
 	}
-	if canceled.Status.State != protocol.TaskStateCanceled {
-		t.Fatalf("remote cancel state = %s, want CANCELED", canceled.Status.State)
+	if canceled.Status.State != protocol.TaskStateInputRequired {
+		t.Fatalf("remote cancel state = %s, want current INPUT_REQUIRED", canceled.Status.State)
 	}
 	releaseHook()
 
@@ -508,7 +508,7 @@ func TestCrossNode_CancelDuringAdmissionPreventsProcessorStart(t *testing.T) {
 	}
 	select {
 	case ctxErr := <-continuationInvoked:
-		t.Fatalf("processor started after cancellation committed; ctx.Err=%v", ctxErr)
+		t.Fatalf("processor started after cancellation was requested; ctx.Err=%v", ctxErr)
 	default:
 	}
 	if got := processorCalls.Load(); got != 1 {

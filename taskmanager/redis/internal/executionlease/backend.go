@@ -18,8 +18,8 @@ import (
 var (
 	// ErrStale means the caller no longer owns the execution lease.
 	ErrStale = errors.New("execution lease is stale")
-	// ErrCancelRequested means a cancel request committed the terminal Task and
-	// fenced further writes from the current execution.
+	// ErrCancelRequested means a cancel request fenced non-terminal writes from
+	// the current execution; its close rule may still persist a terminal Task.
 	ErrCancelRequested = errors.New("execution cancellation requested")
 )
 

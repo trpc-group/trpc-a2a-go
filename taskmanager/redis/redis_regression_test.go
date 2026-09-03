@@ -35,6 +35,68 @@ func waitStreamClosed(t *testing.T, ch <-chan protocol.StreamResponse) {
 	}
 }
 
+// TestBlockingResponseDoesNotLetLiveTaskExpire verifies that execution control
+// renews Task storage even while the engine is blocked delivering a response.
+func TestBlockingResponseDoesNotLetLiveTaskExpire(t *testing.T) {
+	manager, redisServer := setupTest(t, scriptedExecutor(
+		statusEvent(protocol.TaskStateWorking, nil),
+		artifactEvent("artifact", "payload"),
+	), WithExpireTime(300*time.Millisecond),
+		WithTaskSubscriberBufferSize(1),
+		WithTaskSubscriberBlockingSend(true))
+	defer manager.Close()
+
+	stream, err := manager.OnSendMessageStream(
+		context.Background(), sendParams("start", "ctx-blocked-ttl"),
+	)
+	if err != nil {
+		t.Fatalf("OnSendMessageStream: %v", err)
+	}
+
+	var taskID string
+	var journaled bool
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		manager.cancelMu.RLock()
+		for key := range manager.executions {
+			taskID = key.id
+		}
+		manager.cancelMu.RUnlock()
+		if taskID != "" {
+			// The initial Task and WORKING fill the response queue. Once both
+			// events are journaled, the artifact broadcast is blocked.
+			if count, _ := manager.client.XLen(
+				context.Background(), streamKey("", "", taskID),
+			).Result(); count == 2 {
+				journaled = true
+				break
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if taskID == "" {
+		t.Fatal("execution never materialized a task")
+	}
+	if !journaled {
+		t.Fatal("execution did not block after journaling the initial events")
+	}
+
+	for i := 0; i < 5; i++ {
+		redisServer.FastForward(75 * time.Millisecond)
+		time.Sleep(60 * time.Millisecond)
+	}
+	if _, err := manager.getTaskInternal(context.Background(), "", "", taskID); err != nil {
+		t.Fatalf("live task expired while response delivery was blocked: %v", err)
+	}
+	if exists, err := manager.client.Exists(
+		context.Background(), executionKey("", "", taskID),
+	).Result(); err != nil || exists != 1 {
+		t.Fatalf("execution record not live: exists=%d err=%v", exists, err)
+	}
+
+	waitStreamClosed(t, stream)
+}
+
 // pollTaskState polls the store until the task reaches want or the deadline passes.
 func pollTaskState(t *testing.T, m *TaskManager, taskID string, want protocol.TaskState) {
 	t.Helper()

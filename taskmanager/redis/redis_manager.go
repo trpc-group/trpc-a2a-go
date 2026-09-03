@@ -1372,7 +1372,7 @@ func (m *TaskManager) releaseExecution(tenant, owner, taskID string, live *liveE
 }
 
 // cancelLocalExecution linearizes local context cancellation against a suspend
-// handoff. Distributed cancellation was already committed by the Backend.
+// handoff after the Backend records the distributed cancellation intent.
 func (m *TaskManager) cancelLocalExecution(
 	tenant string,
 	owner string,
