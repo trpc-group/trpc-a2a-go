@@ -314,14 +314,14 @@ func newRedisTaskEventTransport(
 }
 
 // streamKey shares the task key's Redis Cluster slot without changing the
-// existing task key. Redis hashes the full task key and the {...} portion of
-// the stream key, which are the same bytes for manager-generated task IDs.
+// existing task key. taskCompanionKey preserves the established key format for
+// generated IDs and handles braces in legacy/custom IDs.
 func streamKey(tenant, owner, taskID string) string {
-	return streamPrefix + "{" + taskKey(tenant, owner, taskID) + "}"
+	return taskCompanionKey(streamPrefix, taskKey(tenant, owner, taskID))
 }
 
 func streamDedupeKey(tenant, owner, taskID string) string {
-	return streamDedupePrefix + "{" + taskKey(tenant, owner, taskID) + "}"
+	return taskCompanionKey(streamDedupePrefix, taskKey(tenant, owner, taskID))
 }
 
 func (t *redisTaskEventTransport) CommitTaskEvent(

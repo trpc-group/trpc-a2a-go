@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -89,6 +90,85 @@ func conversationKey(tenant, owner, contextID string) string {
 
 func taskKey(tenant, owner, taskID string) string {
 	return ownerKeyPrefix(tenant, owner) + taskPrefix + taskID
+}
+
+// taskCompanionKey derives a per-task key in the task key's Redis Cluster
+// slot. The existing format is retained for ordinary IDs. Legacy/custom IDs
+// may contain braces, so an existing hash tag must be reused instead of being
+// nested inside another pair of braces. A key with no valid tag but an early
+// closing brace uses a short, slot-equivalent tag.
+func taskCompanionKey(prefix, task string) string {
+	if hashKey, ok := redisClusterHashKey(task); ok {
+		return prefix + "{" + hashKey + "}:" + task
+	}
+	if !strings.ContainsRune(task, '}') {
+		return prefix + "{" + task + "}"
+	}
+	return prefix + "{" + redisClusterSlotTag(redisClusterSlot(task)) + "}:" + task
+}
+
+func redisClusterHashKey(key string) (string, bool) {
+	start := strings.IndexByte(key, '{')
+	if start < 0 {
+		return key, false
+	}
+	end := strings.IndexByte(key[start+1:], '}')
+	if end <= 0 {
+		return key, false
+	}
+	return key[start+1 : start+end+1], true
+}
+
+func redisClusterSlot(key string) uint16 {
+	if hashKey, ok := redisClusterHashKey(key); ok {
+		key = hashKey
+	}
+	var crc uint16
+	for i := 0; i < len(key); i++ {
+		crc ^= uint16(key[i]) << 8
+		for bit := 0; bit < 8; bit++ {
+			if crc&0x8000 != 0 {
+				crc = crc<<1 ^ 0x1021
+			} else {
+				crc <<= 1
+			}
+		}
+	}
+	return crc % 16384
+}
+
+var redisClusterSlotTags struct {
+	sync.Once
+	values [16384][3]byte
+}
+
+func redisClusterSlotTag(slot uint16) string {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	redisClusterSlotTags.Do(func() {
+		remaining := len(redisClusterSlotTags.values)
+		var candidate [3]byte
+	fill:
+		for i := 0; i < len(alphabet); i++ {
+			candidate[0] = alphabet[i]
+			for j := 0; j < len(alphabet); j++ {
+				candidate[1] = alphabet[j]
+				for k := 0; k < len(alphabet); k++ {
+					candidate[2] = alphabet[k]
+					candidateSlot := redisClusterSlot(string(candidate[:]))
+					if redisClusterSlotTags.values[candidateSlot] != [3]byte{} {
+						continue
+					}
+					redisClusterSlotTags.values[candidateSlot] = candidate
+					remaining--
+					if remaining == 0 {
+						break fill
+					}
+				}
+			}
+		}
+	})
+	tag := redisClusterSlotTags.values[slot]
+	return string(tag[:])
 }
 
 func taskIndexKey(tenant, owner string) string {

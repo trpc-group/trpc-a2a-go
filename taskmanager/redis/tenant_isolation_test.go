@@ -33,6 +33,61 @@ func testOwnerResolver(ctx context.Context) (string, error) {
 	return owner, nil
 }
 
+func TestTaskCompanionKeysShareRedisClusterSlot(t *testing.T) {
+	tests := []struct {
+		name   string
+		tenant string
+		owner  string
+		taskID string
+	}{
+		{name: "generated-style", taskID: "task-123"},
+		{name: "tenant-and-owner", tenant: "tenant-a", owner: "alice", taskID: "task-123"},
+		{name: "legacy-hash-tag", taskID: "job{evil}"},
+		{name: "closing-brace", taskID: "job}evil"},
+		{name: "empty-hash-tag", taskID: "legacy{}partition"},
+		{name: "unclosed-hash-tag", taskID: "legacy{partition"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			task := taskKey(test.tenant, test.owner, test.taskID)
+			want := redisClusterSlot(task)
+			for name, key := range map[string]string{
+				"stream":    streamKey(test.tenant, test.owner, test.taskID),
+				"dedupe":    streamDedupeKey(test.tenant, test.owner, test.taskID),
+				"execution": executionKey(test.tenant, test.owner, test.taskID),
+			} {
+				if got := redisClusterSlot(key); got != want {
+					t.Errorf("%s key slot = %d, want task slot %d: task=%q companion=%q", name, got, want, task, key)
+				}
+			}
+		})
+	}
+}
+
+func TestRedisClusterSlotKnownVectors(t *testing.T) {
+	tests := map[string]uint16{
+		"123456789":            12739,
+		"foo":                  12182,
+		"foo{bar}":             5061,
+		"foo{}{bar}":           8363,
+		"{user1000}.following": 3443,
+	}
+	for key, want := range tests {
+		if got := redisClusterSlot(key); got != want {
+			t.Errorf("redisClusterSlot(%q) = %d, want %d", key, got, want)
+		}
+	}
+}
+
+func TestRedisClusterSlotTagsCoverAllSlots(t *testing.T) {
+	for slot := uint16(0); slot < 16384; slot++ {
+		tag := redisClusterSlotTag(slot)
+		if got := redisClusterSlot(tag); got != slot {
+			t.Fatalf("redisClusterSlotTag(%d) = %q in slot %d", slot, tag, got)
+		}
+	}
+}
+
 func TestTaskManagerOwnerIsolation(t *testing.T) {
 	manager, mr := setupTest(t, scriptedExecutor(
 		statusEvent(protocol.TaskStateWorking, nil),

@@ -25,7 +25,7 @@ import (
 const executionPrefix = "execution:"
 
 func executionKey(tenant, owner, taskID string) string {
-	return executionPrefix + "{" + taskKey(tenant, owner, taskID) + "}"
+	return taskCompanionKey(executionPrefix, taskKey(tenant, owner, taskID))
 }
 
 // acquireExecutionScript claims a task's execution hash.
