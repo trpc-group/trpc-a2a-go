@@ -157,8 +157,15 @@ if ARGV[8] ~= '' then
     local next_task = cjson.decode(ARGV[1])
     local next_state = next_task.status and next_task.status.state or ''
     if next_state == 'TASK_STATE_COMPLETED' or next_state == 'TASK_STATE_FAILED' or
-       next_state == 'TASK_STATE_CANCELED' or next_state == 'TASK_STATE_REJECTED' or ARGV[10] == '1' then
+       next_state == 'TASK_STATE_CANCELED' or next_state == 'TASK_STATE_REJECTED' then
         redis.call('DEL', KEYS[4])
+    elseif ARGV[10] == '1' then
+        local redis_time = redis.call('TIME')
+        local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+        redis.call('HSET', KEYS[4],
+            'yielding', '1',
+            'lease_until_ms', now_ms + tonumber(ARGV[9]))
+        redis.call('PEXPIRE', KEYS[4], ARGV[11])
     end
 end
 return event_id
@@ -400,8 +407,9 @@ func (t *redisTaskEventTransport) commitTaskEventWithLease(
 		allowCreateFlag,
 		operationID,
 		runID,
-		time.Now().UnixMilli(),
+		t.executionLeaseDuration.Milliseconds(),
 		releaseFlag,
+		t.executionRetention.Milliseconds(),
 	).Result(); err != nil {
 		return fmt.Errorf("failed to store task and event: %w", mapExecutionScriptError(err))
 	}

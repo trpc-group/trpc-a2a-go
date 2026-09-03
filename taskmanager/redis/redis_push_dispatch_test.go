@@ -524,6 +524,217 @@ func TestRedisPushBackpressureSerializesSuspendContinuation(t *testing.T) { //no
 	}
 }
 
+func TestRedisPushBackpressureSerializesCrossNodeSuspendContinuation(t *testing.T) { //nolint:gocyclo // Concurrent handoff phases stay explicit.
+	started := make(chan struct{})
+	release := make(chan struct{})
+	sender := &firstBlockingSender{started: started, release: release}
+	firstContext := make(chan context.Context, 2)
+	secondStarted := make(chan bool, 1)
+	var round atomic.Int32
+	processor := executorFunc(func(
+		ctx context.Context, _ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent, 1)
+		if round.Add(1) == 1 {
+			firstContext <- ctx
+			firstContext <- ctx
+			go func() {
+				out <- statusEvent(protocol.TaskStateInputRequired, agentReply("need more"))
+				<-ctx.Done()
+				close(out)
+			}()
+		} else {
+			select {
+			case <-ctx.Done():
+				secondStarted <- false
+			default:
+				select {
+				case first := <-firstContext:
+					select {
+					case <-first.Done():
+						secondStarted <- true
+					default:
+						secondStarted <- false
+					}
+				default:
+					secondStarted <- false
+				}
+			}
+			out <- statusEvent(protocol.TaskStateCompleted, agentReply("done"))
+			close(out)
+		}
+		return out, nil
+	})
+	nodeA, nodeB := twoNodeManagers(t, processor, WithPushNotifications(push.Config{
+		Sender:                  sender,
+		MaxConcurrentDeliveries: 1,
+		DeliveryQueueSize:       1,
+	}))
+	nodeB.processor = processor
+	var releaseOnce sync.Once
+	releaseFirst := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseFirst)
+
+	// Occupy node A's sole worker and queue slot so suspension blocks before
+	// publishing its response and canceling the old processor context.
+	prefill := storedTask(t, nodeA, "task-cross-node-prefill", "ctx-cross-node-prefill", protocol.TaskStateWorking)
+	if _, err := nodeA.OnPushNotificationSet(context.Background(), protocol.TaskPushNotificationConfig{
+		TaskID: prefill.ID,
+		ID:     "prefill-hook",
+		URL:    "https://prefill.example/hook",
+	}); err != nil {
+		t.Fatalf("prefill Set: %v", err)
+	}
+	prefillResponse := func(state protocol.TaskState) protocol.StreamResponse {
+		return protocol.NewStreamResponseStatusUpdate(&protocol.TaskStatusUpdateEvent{
+			TaskID: prefill.ID,
+			Status: protocol.TaskStatus{State: state},
+		})
+	}
+	nodeA.dispatchPush("", "", prefill.ID, prefillResponse(protocol.TaskStateWorking))
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prefill push delivery did not start")
+	}
+	nodeA.dispatchPush("", "", prefill.ID, prefillResponse(protocol.TaskStateSubmitted))
+
+	params := sendParams("start", "ctx-cross-node-suspend")
+	params.Configuration = &protocol.SendMessageConfiguration{PushConfig: &protocol.TaskPushNotificationConfig{
+		ID:  "suspend-hook",
+		URL: "https://suspend.example/hook",
+	}}
+	stream, err := nodeA.OnSendMessageStream(context.Background(), params)
+	if err != nil {
+		t.Fatalf("nodeA OnSendMessageStream: %v", err)
+	}
+	first := <-firstContext
+	initial := recvEvent(t, stream)
+	task := initial.GetTask()
+	if task == nil {
+		t.Fatalf("initial stream event = %+v, want Task", initial.Result)
+	}
+	waitTaskState(t, nodeA, task.ID, protocol.TaskStateInputRequired)
+	if yielding, err := nodeA.client.HGet(
+		context.Background(), executionKey("", "", task.ID), "yielding",
+	).Result(); err != nil || yielding != "1" {
+		t.Fatalf("execution yielding marker = %q, err=%v; want 1", yielding, err)
+	}
+
+	type continuationResult struct {
+		response *protocol.SendMessageResponse
+		err      error
+	}
+	continuationDone := make(chan continuationResult, 1)
+	go func() {
+		followUp := sendParams("more", "")
+		followUp.Message.TaskID = &task.ID
+		response, err := nodeB.OnSendMessage(context.Background(), followUp)
+		continuationDone <- continuationResult{response: response, err: err}
+	}()
+
+	select {
+	case canceled := <-secondStarted:
+		t.Fatalf("remote processor started during handoff; old context canceled=%v", canceled)
+	case <-time.After(100 * time.Millisecond):
+	}
+	select {
+	case <-first.Done():
+		t.Fatal("old processor context canceled before suspend publication completed")
+	default:
+	}
+
+	releaseFirst()
+	frame := recvEvent(t, stream)
+	update := frame.GetStatusUpdate()
+	if update == nil || update.Status.State != protocol.TaskStateInputRequired {
+		t.Fatalf("suspend frame = %+v, want INPUT_REQUIRED", frame.Result)
+	}
+	select {
+	case canceled := <-secondStarted:
+		if !canceled {
+			t.Fatal("remote processor started before old processor context was canceled")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote continuation did not start after suspend handoff")
+	}
+	select {
+	case result := <-continuationDone:
+		if result.err != nil {
+			t.Fatalf("remote continuation: %v", result.err)
+		}
+		completed := result.response.GetTask()
+		if completed == nil || completed.Status.State != protocol.TaskStateCompleted {
+			t.Fatalf("remote continuation response = %+v, want COMPLETED", result.response)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote continuation did not complete")
+	}
+}
+
+func TestRedisInlinePushConfigWrongTypeFailsSuspendedTask(t *testing.T) {
+	taskID := make(chan string, 1)
+	emit := make(chan struct{})
+	processor := executorFunc(func(
+		_ context.Context, ec *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		taskID <- ec.TaskID
+		out := make(chan protocol.StreamEvent, 1)
+		go func() {
+			<-emit
+			out <- statusEvent(protocol.TaskStateInputRequired, agentReply("need more"))
+			close(out)
+		}()
+		return out, nil
+	})
+	manager, _ := setupTest(t, processor, WithPushNotifications(push.Config{ManualDelivery: true}))
+	t.Cleanup(func() { _ = manager.Close() })
+
+	params := sendParams("start", "ctx-push-wrongtype")
+	params.Configuration = &protocol.SendMessageConfiguration{PushConfig: &protocol.TaskPushNotificationConfig{
+		ID:  "inline-hook",
+		URL: "https://example.com/hook",
+	}}
+	type sendResult struct {
+		response *protocol.SendMessageResponse
+		err      error
+	}
+	result := make(chan sendResult, 1)
+	go func() {
+		response, err := manager.OnSendMessage(context.Background(), params)
+		result <- sendResult{response: response, err: err}
+	}()
+	id := <-taskID
+	if err := manager.client.Set(
+		context.Background(), pushNotificationKey("", "", id), "wrong-type", 0,
+	).Err(); err != nil {
+		t.Fatalf("seed push config wrong type: %v", err)
+	}
+	close(emit)
+
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatalf("OnSendMessage: %v", got.err)
+		}
+		failed := got.response.GetTask()
+		if failed == nil || failed.Status.State != protocol.TaskStateFailed {
+			t.Fatalf("response = %+v, want FAILED Task", got.response)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnSendMessage did not finish after inline push config failure")
+	}
+	stored, err := manager.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: id})
+	if err != nil || stored.Status.State != protocol.TaskStateFailed {
+		t.Fatalf("stored task = %+v, err=%v; want FAILED", stored, err)
+	}
+	if exists, err := manager.client.Exists(
+		context.Background(), executionKey("", "", id),
+	).Result(); err != nil || exists != 0 {
+		t.Fatalf("execution lease after failure: exists=%d err=%v, want absent", exists, err)
+	}
+}
+
 // TestRedisPushRejectedWhenDisabled verifies the -32003 gate when neither
 // automatic nor manual delivery is enabled.
 func TestRedisPushRejectedWhenDisabled(t *testing.T) {

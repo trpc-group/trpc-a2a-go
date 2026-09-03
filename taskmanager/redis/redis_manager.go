@@ -1237,8 +1237,9 @@ func (m *TaskManager) commitTaskEvent(
 }
 
 // commitExecutionTaskEvent adds runID fencing to the Task/Event transaction.
-// A terminal or suspended state releases the execution record in the same Lua
-// commit, so a continuation never observes a handoff before ownership ends.
+// A terminal state releases the execution record in the same Lua commit. A
+// suspended state marks it yielding so other nodes wait until response
+// publication and processor cancellation complete.
 func (m *TaskManager) commitExecutionTaskEvent(
 	ctx context.Context,
 	tenant string,

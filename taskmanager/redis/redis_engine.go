@@ -53,9 +53,9 @@ type liveExecution struct {
 	// (task marked CANCELED) from an processor finishing in submitted/working
 	// without a conclusion (task marked FAILED).
 	cancelRequested atomic.Bool
-	// released is set while a terminal or suspended release commit is in flight
-	// and remains set after it atomically gives up the distributed record. The
-	// early mark prevents the control loop from mistaking that DEL for lease loss.
+	// released is set while a terminal or explicit release is in flight and
+	// remains set after it gives up the distributed record. The early mark
+	// prevents the control loop from mistaking that DEL for lease loss.
 	released atomic.Bool
 	// leaseLost prevents close rules from writing after another run takes over.
 	leaseLost atomic.Bool
@@ -919,7 +919,7 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 	// committed successfully.
 	response := protocol.NewStreamResponseStatusUpdate(ev)
 	releaseLease := final || yielding
-	if releaseLease {
+	if final {
 		// Redis deletes the execution record inside the commit. Publish that intent
 		// before starting the script so a concurrent sweep cannot interpret the
 		// intentional DEL as ownership loss and close the response pipe early.
@@ -929,7 +929,7 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		context.Background(), ex.ec.Tenant, ex.owner, ex.live.runID, nextTask, response,
 		allowCreate, releaseLease,
 	); err != nil {
-		if releaseLease {
+		if final {
 			ex.live.released.Store(false)
 		}
 		if yielding {
@@ -968,12 +968,19 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		ex.offerImmediateTask()
 		ex.broadcastWithoutPush(response)
 		ex.closePipe()
-		// The suspended round no longer owns the task after publishing its
-		// final frame. Cancel its processor context before removing it from the
-		// registry: Close cannot discover the execution once the slot is released,
-		// but still waits for its drain engine to finish.
+		// Keep the distributed yielding lease until the final frame is published
+		// and the old processor has observed cancellation. A remote continuation
+		// or cancellation waits for the explicit release below.
 		ex.live.cancel()
-		ex.manager.deregisterExecution(ex.ec.Tenant, ex.owner, ex.ec.TaskID, ex.live)
+		ex.live.released.Store(true)
+		if err := ex.manager.executionLease.ReleaseExecution(
+			context.Background(), ex.ec.Tenant, ex.owner, ex.ec.TaskID, ex.live.runID,
+		); err != nil {
+			ex.live.released.Store(false)
+			log.Warnf("RedisTaskManager: failed to release yielded execution for task %s: %v", ex.ec.TaskID, err)
+		} else {
+			ex.manager.deregisterExecution(ex.ec.Tenant, ex.owner, ex.ec.TaskID, ex.live)
+		}
 		return
 	}
 

@@ -39,7 +39,8 @@ func executionKey(tenant, owner, taskID string) string {
 // ARGV[2] lease duration (ms)
 // ARGV[3] execution key TTL (ms)
 //
-// Returns {code, task}: 1 acquired, 2 lease held, 3 cancel pending, 4 terminal.
+// Returns {code, task}: 1 acquired, 2 lease held, 3 cancel pending, 4 terminal,
+// 5 suspend handoff in progress.
 var acquireExecutionScript = redisclient.NewScript(`
 local task_type = redis.call('TYPE', KEYS[1]).ok
 if task_type ~= 'none' and task_type ~= 'string' then
@@ -70,6 +71,9 @@ if current_run then
     local redis_time = redis.call('TIME')
     local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
     if lease_until > now_ms then
+        if redis.call('HGET', KEYS[2], 'yielding') == '1' then
+            return {5, task or ''}
+        end
         return {2, task or ''}
     end
 end
@@ -79,7 +83,8 @@ local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2
 redis.call('HSET', KEYS[2],
     'run_id', ARGV[1],
     'lease_until_ms', now_ms + tonumber(ARGV[2]),
-    'cancel_requested', '0')
+    'cancel_requested', '0',
+    'yielding', '0')
 redis.call('PEXPIRE', KEYS[2], ARGV[3])
 return {1, task or ''}
 `)
@@ -147,7 +152,7 @@ return 1
 // ARGV[9] lease duration (ms)
 //
 // Returns {code, task[, event_id]}: 1 intent only, 2 committed, 3 not
-// cancelable, 4 not found, 5 CAS mismatch.
+// cancelable, 4 not found, 5 CAS mismatch, 6 suspend handoff in progress.
 var requestExecutionCancelScript = redisclient.NewScript(`
 local task_type = redis.call('TYPE', KEYS[1]).ok
 if task_type ~= 'none' and task_type ~= 'string' then
@@ -175,6 +180,9 @@ local lease_until = tonumber(redis.call('HGET', KEYS[4], 'lease_until_ms') or '0
 local redis_time = redis.call('TIME')
 local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
 local active = redis.call('HGET', KEYS[4], 'run_id') and lease_until > now_ms
+if active and redis.call('HGET', KEYS[4], 'yielding') == '1' then
+    return {6, task or ''}
+end
 if not task then
     if active then
         redis.call('HSET', KEYS[4],
@@ -222,29 +230,39 @@ func (t *redisTaskEventTransport) AcquireExecution(
 	ctx context.Context,
 	tenant, owner, taskID, runID string,
 ) (*protocol.Task, bool, bool, error) {
-	values, err := acquireExecutionScript.Run(
-		ctx,
-		t.client,
-		[]string{taskKey(tenant, owner, taskID), executionKey(tenant, owner, taskID)},
-		runID,
-		t.executionLeaseDuration.Milliseconds(),
-		t.executionRetention.Milliseconds(),
-	).Slice()
-	if err != nil {
-		return nil, false, false, fmt.Errorf("acquire execution for task %s: %w", taskID, err)
+	for {
+		values, err := acquireExecutionScript.Run(
+			ctx,
+			t.client,
+			[]string{taskKey(tenant, owner, taskID), executionKey(tenant, owner, taskID)},
+			runID,
+			t.executionLeaseDuration.Milliseconds(),
+			t.executionRetention.Milliseconds(),
+		).Slice()
+		if err != nil {
+			return nil, false, false, fmt.Errorf("acquire execution for task %s: %w", taskID, err)
+		}
+		if len(values) < 2 {
+			return nil, false, false, fmt.Errorf("acquire execution for task %s: invalid result", taskID)
+		}
+		code, ok := values[0].(int64)
+		if !ok || code < 1 || code > 5 {
+			return nil, false, false, fmt.Errorf("acquire execution for task %s: invalid result code", taskID)
+		}
+		if code == 5 {
+			select {
+			case <-ctx.Done():
+				return nil, false, false, fmt.Errorf("acquire execution for task %s: %w", taskID, ctx.Err())
+			case <-time.After(10 * time.Millisecond):
+			}
+			continue
+		}
+		task, err := decodeOptionalExecutionTask(values[1])
+		if err != nil {
+			return nil, false, false, fmt.Errorf("acquire execution for task %s: %w", taskID, err)
+		}
+		return task, code == 1, code == 3, nil
 	}
-	if len(values) < 2 {
-		return nil, false, false, fmt.Errorf("acquire execution for task %s: invalid result", taskID)
-	}
-	code, ok := values[0].(int64)
-	if !ok || code < 1 || code > 4 {
-		return nil, false, false, fmt.Errorf("acquire execution for task %s: invalid result code", taskID)
-	}
-	task, err := decodeOptionalExecutionTask(values[1])
-	if err != nil {
-		return nil, false, false, fmt.Errorf("acquire execution for task %s: %w", taskID, err)
-	}
-	return task, code == 1, code == 3, nil
 }
 
 func (t *redisTaskEventTransport) RequestExecutionCancel(
@@ -340,6 +358,13 @@ func (t *redisTaskEventTransport) RequestExecutionCancel(
 			return resultTask, true, nil
 		case 3:
 			return resultTask, false, nil
+		case 6:
+			select {
+			case <-ctx.Done():
+				return nil, false, fmt.Errorf("request cancellation for task %s: %w", taskID, ctx.Err())
+			case <-time.After(10 * time.Millisecond):
+			}
+			continue
 		default:
 			return nil, false, fmt.Errorf(
 				"request cancellation for task %s: unknown result code %d", taskID, code,
@@ -523,9 +548,9 @@ func (m *TaskManager) renewExecution(run scopedLiveExecution) {
 
 func (m *TaskManager) loseExecution(live *liveExecution) {
 	if live.released.Load() {
-		// A terminal or suspended commit may have deleted the Redis record
-		// before its caller receives the script result. That is an intentional
-		// release, not ownership loss.
+		// A terminal commit or explicit release may have deleted the Redis record
+		// before its caller receives the result. That is intentional, not an
+		// ownership loss.
 		return
 	}
 	if live.cancelRequested.Load() {
