@@ -374,8 +374,8 @@ func TestCrossNode_CancelActiveExecutionStopsOwnerAndFencesLateEvent(t *testing.
 			<-ctx.Done()
 			close(processorCanceled)
 			// A processor may race one last event after observing cancellation.
-			// The distributed fence must reject it after cancel commits
-			// CANCELED.
+			// The distributed intent fence must reject it before the owner
+			// close rule commits CANCELED.
 			out <- statusEvent(protocol.TaskStateInputRequired, agentReply("late"))
 		}()
 		return out, nil
@@ -400,8 +400,8 @@ func TestCrossNode_CancelActiveExecutionStopsOwnerAndFencesLateEvent(t *testing.
 	if err != nil {
 		t.Fatalf("nodeB OnCancelTask: %v", err)
 	}
-	if snapshot.Status.State != protocol.TaskStateCanceled {
-		t.Fatalf("cancel snapshot state = %s, want CANCELED", snapshot.Status.State)
+	if snapshot.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("cancel snapshot state = %s, want current WORKING", snapshot.Status.State)
 	}
 	if nodeB.liveRun("", "", working.TaskID) != nil {
 		t.Fatal("cancel request unexpectedly depended on a nodeB-local execution")

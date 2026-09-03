@@ -175,8 +175,8 @@ func TestTerminal_NotResurrectedByYieldedRound(t *testing.T) {
 	}
 }
 
-// Cancellation and suspension linearize in Redis. When cancellation wins, it
-// persists CANCELED and fences a later suspend event.
+// Cancellation and suspension linearize in Redis. When cancellation intent
+// wins, it fences a later suspend event and lets the owner persist CANCELED.
 func TestCancelWinsConcurrentSuspendPersistsCanceled(t *testing.T) {
 	cancelObserved := make(chan struct{})
 	emitSuspend := make(chan struct{})
@@ -224,8 +224,8 @@ func TestCancelWinsConcurrentSuspendPersistsCanceled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OnCancelTask: %v", err)
 	}
-	if snapshot.Status.State != protocol.TaskStateCanceled {
-		t.Fatalf("cancel snapshot state = %s, want CANCELED", snapshot.Status.State)
+	if snapshot.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("cancel snapshot state = %s, want current WORKING", snapshot.Status.State)
 	}
 	select {
 	case <-cancelObserved:

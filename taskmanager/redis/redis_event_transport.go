@@ -120,7 +120,12 @@ if ARGV[8] ~= '' then
     if current_run ~= ARGV[8] or lease_until <= now_ms then
         return redis.error_reply('EXECUTION_STALE')
     end
-    if redis.call('HGET', KEYS[4], 'cancel_requested') == '1' then
+    local next_task = cjson.decode(ARGV[1])
+    local next_state = next_task.status and next_task.status.state or ''
+    local next_terminal = next_state == 'TASK_STATE_COMPLETED' or
+        next_state == 'TASK_STATE_FAILED' or next_state == 'TASK_STATE_CANCELED' or
+        next_state == 'TASK_STATE_REJECTED'
+    if redis.call('HGET', KEYS[4], 'cancel_requested') == '1' and not next_terminal then
         return redis.error_reply('EXECUTION_CANCEL_REQUESTED')
     end
     local current_task = redis.call('GET', KEYS[1])

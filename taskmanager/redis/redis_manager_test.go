@@ -1055,8 +1055,8 @@ func TestOnCancelTaskLiveExecution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OnCancelTask failed: %v", err)
 	}
-	if snapshot.Status.State != protocol.TaskStateCanceled {
-		t.Errorf("live-cancel snapshot state = %s, want CANCELED", snapshot.Status.State)
+	if snapshot.Status.State != protocol.TaskStateWorking {
+		t.Errorf("live-cancel snapshot state = %s, want current WORKING", snapshot.Status.State)
 	}
 
 	frame = <-ch
@@ -1076,7 +1076,7 @@ func TestOnCancelTaskLiveExecution(t *testing.T) {
 	}
 }
 
-func TestOnCancelTaskWinsLateCompleted(t *testing.T) {
+func TestOnCancelTaskAllowsLateCompleted(t *testing.T) {
 	processor := executorFunc(func(
 		ctx context.Context, ec *taskmanager.ExecContext,
 	) (<-chan protocol.StreamEvent, error) {
@@ -1085,7 +1085,7 @@ func TestOnCancelTaskWinsLateCompleted(t *testing.T) {
 			defer close(out)
 			out <- statusEvent(protocol.TaskStateWorking, nil)
 			<-ctx.Done()
-			// A terminal event emitted after cancellation must be fenced.
+			// A terminal event that wins the owner close-rule race is retained.
 			out <- statusEvent(protocol.TaskStateCompleted, agentReply("finished anyway"))
 		}()
 		return out, nil
@@ -1112,8 +1112,8 @@ func TestOnCancelTaskWinsLateCompleted(t *testing.T) {
 	}
 
 	frame = <-ch
-	if su := frame.GetStatusUpdate(); su == nil || su.Status.State != protocol.TaskStateCanceled {
-		t.Fatalf("expected CANCELED frame, got %+v", frame.Result)
+	if su := frame.GetStatusUpdate(); su == nil || su.Status.State != protocol.TaskStateCompleted {
+		t.Fatalf("expected COMPLETED frame, got %+v", frame.Result)
 	}
 	if _, ok := <-ch; ok {
 		t.Error("expected stream closed")
@@ -1123,8 +1123,8 @@ func TestOnCancelTaskWinsLateCompleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OnGetTask failed: %v", err)
 	}
-	if stored.Status.State != protocol.TaskStateCanceled {
-		t.Errorf("stored state = %s, want CANCELED", stored.Status.State)
+	if stored.Status.State != protocol.TaskStateCompleted {
+		t.Errorf("stored state = %s, want COMPLETED", stored.Status.State)
 	}
 }
 

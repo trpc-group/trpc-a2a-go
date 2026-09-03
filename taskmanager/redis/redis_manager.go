@@ -497,9 +497,10 @@ func (m *TaskManager) buildSendResponse(
 	return nil, taskmanager.ErrInternalError("processor produced no result")
 }
 
-// OnCancelTask handles the tasks/cancel request. Redis atomically persists the
-// CANCELED Task and event before fencing a live owner, so the returned snapshot
-// is terminal even when the MessageProcessor is running on another node.
+// OnCancelTask handles the tasks/cancel request. For a live execution Redis
+// records cancellation intent and returns the current snapshot; the owner then
+// persists its close-rule result. Without a live execution, Redis commits the
+// CANCELED Task and event directly.
 func (m *TaskManager) OnCancelTask(
 	ctx context.Context,
 	params protocol.TaskIDParams,
@@ -533,6 +534,11 @@ func (m *TaskManager) OnCancelTask(
 			_, _ = m.cancelLocalExecution(params.Tenant, owner, params.ID, live)
 		}
 		return nil, taskmanager.ErrTaskNotFound(params.ID)
+	case !isFinalState(task.Status.State):
+		if live := m.liveRun(params.Tenant, owner, params.ID); live != nil {
+			_, _ = m.cancelLocalExecution(params.Tenant, owner, params.ID, live)
+		}
+		return task, nil
 	default:
 		return nil, taskmanager.ErrTaskNotCancelable(params.ID, task.Status.State)
 	}

@@ -8,10 +8,14 @@ package redis
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
+
+	redisclient "github.com/redis/go-redis/v9"
 
 	"trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2/internal/executionlease"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
@@ -23,6 +27,48 @@ type blockingReleaseBackend struct {
 	committed chan struct{}
 	resume    chan struct{}
 	once      sync.Once
+}
+
+type mutateOnGetClient struct {
+	redisclient.UniversalClient
+	target string
+	mutate func(context.Context, []byte)
+}
+
+// Get returns the observed Task and then injects a concurrent owner commit.
+func (c *mutateOnGetClient) Get(ctx context.Context, key string) *redisclient.StringCmd {
+	cmd := c.UniversalClient.Get(ctx, key)
+	if key == c.target && cmd.Err() == nil {
+		c.mutate(ctx, []byte(cmd.Val()))
+	}
+	return cmd
+}
+
+type blockingRenewBackend struct {
+	executionlease.Backend
+	started chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	active  int
+	max     int
+}
+
+// CheckAndRenewExecution blocks so the test can observe sweep parallelism.
+func (b *blockingRenewBackend) CheckAndRenewExecution(
+	context.Context, string, string, string, string,
+) (bool, bool, error) {
+	b.mu.Lock()
+	b.active++
+	if b.active > b.max {
+		b.max = b.active
+	}
+	b.mu.Unlock()
+	b.started <- struct{}{}
+	<-b.release
+	b.mu.Lock()
+	b.active--
+	b.mu.Unlock()
+	return true, false, nil
 }
 
 func (b *blockingReleaseBackend) CommitExecutionTaskEvent(
@@ -92,7 +138,130 @@ func TestExecutionLeaseSingleWriterAndStaleCommitFence(t *testing.T) {
 	}
 }
 
-func TestExecutionCancelCommitsAndReleaseClearsLease(t *testing.T) {
+// TestExecutionCancelRecordsIntentAcrossRacingTaskUpdate verifies that a live
+// owner's update cannot consume every cancellation CAS attempt.
+func TestExecutionCancelRecordsIntentAcrossRacingTaskUpdate(t *testing.T) {
+	manager, _ := setupTest(t, scriptedExecutor())
+	defer manager.Close()
+	ctx := context.Background()
+	task := storedTask(t, manager, "task-cancel-race", "ctx-cancel-race", protocol.TaskStateWorking)
+	const runID = "run-cancel-race"
+	if _, acquired, _, err := manager.executionLease.AcquireExecution(
+		ctx, "", "", task.ID, runID,
+	); err != nil || !acquired {
+		t.Fatalf("AcquireExecution = (%v, %v), want acquired", acquired, err)
+	}
+
+	original := manager.executionLease.(*redisTaskEventTransport)
+	wrapped := *original
+	var commits int
+	var commitErr error
+	wrapped.client = &mutateOnGetClient{
+		UniversalClient: original.client,
+		target:          taskKey("", "", task.ID),
+		mutate: func(ctx context.Context, payload []byte) {
+			var updated protocol.Task
+			if err := json.Unmarshal(payload, &updated); err != nil {
+				commitErr = err
+				return
+			}
+			if updated.Metadata == nil {
+				updated.Metadata = make(map[string]interface{})
+			}
+			updated.Metadata["revision"] = commits + 1
+			event := &protocol.TaskStatusUpdateEvent{
+				TaskID: updated.ID, ContextID: updated.ContextID, Status: updated.Status,
+			}
+			commitErr = manager.commitExecutionTaskEvent(
+				ctx, "", "", runID, &updated,
+				protocol.NewStreamResponseStatusUpdate(event), false, false,
+			)
+			if commitErr == nil {
+				commits++
+			}
+		},
+	}
+
+	snapshot, committed, err := wrapped.RequestExecutionCancel(ctx, "", "", task.ID)
+	if err != nil {
+		t.Fatalf("RequestExecutionCancel: %v", err)
+	}
+	if committed {
+		t.Fatal("live cancellation committed CANCELED instead of recording intent")
+	}
+	if snapshot == nil || snapshot.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("cancel snapshot = %+v, want current WORKING Task", snapshot)
+	}
+	if commitErr != nil || commits != 1 {
+		t.Fatalf("racing owner commits = %d, error = %v; want one successful commit", commits, commitErr)
+	}
+	if got := manager.client.HGet(ctx, executionKey("", "", task.ID), "cancel_requested").Val(); got != "1" {
+		t.Fatalf("cancel_requested = %q, want 1", got)
+	}
+}
+
+// TestExecutionSweepRenewsConcurrentlyAndWithinBound verifies that one slow
+// Redis round trip does not serialize every live execution renewal.
+func TestExecutionSweepRenewsConcurrentlyAndWithinBound(t *testing.T) {
+	manager, _ := setupTest(t, scriptedExecutor())
+	manager.controlCancel()
+	manager.controlWg.Wait()
+	manager.controlCtx, manager.controlCancel = context.WithCancel(context.Background())
+	defer manager.Close()
+
+	runs := executionRenewalConcurrency + 3
+	backend := &blockingRenewBackend{
+		Backend: manager.executionLease,
+		started: make(chan struct{}, runs),
+		release: make(chan struct{}),
+	}
+	manager.executionLease = backend
+	manager.cancelMu.Lock()
+	for i := 0; i < runs; i++ {
+		key := newScopedID("", "", fmt.Sprintf("task-renew-%d", i))
+		live := &liveExecution{cancel: func() {}, runID: fmt.Sprintf("run-renew-%d", i)}
+		live.leaseUntilMillis.Store(time.Now().Add(time.Minute).UnixMilli())
+		manager.executions[key] = live
+	}
+	manager.cancelMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		manager.sweepExecutions()
+		close(done)
+	}()
+	for i := 0; i < executionRenewalConcurrency; i++ {
+		select {
+		case <-backend.started:
+		case <-time.After(time.Second):
+			t.Fatalf("only %d renewals started concurrently", i)
+		}
+	}
+	select {
+	case <-backend.started:
+		t.Fatalf("renewal concurrency exceeded %d", executionRenewalConcurrency)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(backend.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("concurrent renewal sweep did not finish")
+	}
+	backend.mu.Lock()
+	maxActive := backend.max
+	backend.mu.Unlock()
+	if maxActive != executionRenewalConcurrency {
+		t.Fatalf("maximum concurrent renewals = %d, want %d", maxActive, executionRenewalConcurrency)
+	}
+	manager.cancelMu.Lock()
+	for key := range manager.executions {
+		delete(manager.executions, key)
+	}
+	manager.cancelMu.Unlock()
+}
+
+func TestExecutionCancelRecordsIntentAndLateTerminalWins(t *testing.T) {
 	manager, _ := setupTest(t, scriptedExecutor())
 	defer manager.Close()
 	ctx := context.Background()
@@ -103,14 +272,14 @@ func TestExecutionCancelCommitsAndReleaseClearsLease(t *testing.T) {
 	); err != nil || !acquired {
 		t.Fatalf("AcquireExecution = (%v, %v), want acquired", acquired, err)
 	}
-	canceled, committed, err := manager.executionLease.RequestExecutionCancel(
+	snapshot, committed, err := manager.executionLease.RequestExecutionCancel(
 		ctx, "", "", task.ID,
 	)
-	if err != nil || !committed {
-		t.Fatalf("RequestExecutionCancel = (%v, %v), want committed", committed, err)
+	if err != nil || committed {
+		t.Fatalf("RequestExecutionCancel = (%v, %v), want intent only", committed, err)
 	}
-	if canceled == nil || canceled.Status.State != protocol.TaskStateCanceled {
-		t.Fatalf("canceled task = %+v, want CANCELED", canceled)
+	if snapshot == nil || snapshot.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("cancel snapshot = %+v, want current WORKING Task", snapshot)
 	}
 
 	task.Status.State = protocol.TaskStateWorking
@@ -121,10 +290,17 @@ func TestExecutionCancelCommitsAndReleaseClearsLease(t *testing.T) {
 		ctx, "", "", "run-owner", task,
 		protocol.NewStreamResponseStatusUpdate(event), false, false,
 	); !errors.Is(err, executionlease.ErrCancelRequested) {
-		t.Fatalf("owner write after cancel error = %v, want cancel requested", err)
+		t.Fatalf("non-terminal owner write after cancel error = %v, want cancel requested", err)
 	}
-	if err := manager.executionLease.ReleaseExecution(ctx, "", "", task.ID, "run-owner"); err != nil {
-		t.Fatalf("ReleaseExecution: %v", err)
+
+	task.Status.State = protocol.TaskStateCompleted
+	event.Status = task.Status
+	event.Final = true
+	if err := manager.commitExecutionTaskEvent(
+		ctx, "", "", "run-owner", task,
+		protocol.NewStreamResponseStatusUpdate(event), false, true,
+	); err != nil {
+		t.Fatalf("late terminal owner write after cancel: %v", err)
 	}
 
 	if exists, err := manager.client.Exists(ctx, executionKey("", "", task.ID)).Result(); err != nil || exists != 0 {
@@ -134,9 +310,9 @@ func TestExecutionCancelCommitsAndReleaseClearsLease(t *testing.T) {
 		ctx, "", "", task.ID, "run-next",
 	)
 	if err != nil || acquired || pending || terminal == nil ||
-		terminal.Status.State != protocol.TaskStateCanceled {
+		terminal.Status.State != protocol.TaskStateCompleted {
 		t.Fatalf(
-			"AcquireExecution after cancel = (%+v, %v, %v, %v), want terminal CANCELED",
+			"AcquireExecution after cancel = (%+v, %v, %v, %v), want terminal COMPLETED",
 			terminal, acquired, pending, err,
 		)
 	}

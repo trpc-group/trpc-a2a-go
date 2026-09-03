@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	redisclient "github.com/redis/go-redis/v9"
@@ -23,6 +24,8 @@ import (
 )
 
 const executionPrefix = "execution:"
+
+const executionRenewalConcurrency = 32
 
 func executionKey(tenant, owner, taskID string) string {
 	return taskCompanionKey(executionPrefix, taskKey(tenant, owner, taskID))
@@ -88,7 +91,8 @@ return {1, task or ''}
 // ARGV[2] lease duration (ms)
 // ARGV[3] execution key TTL (ms)
 //
-// Returns {owned, canceled} as 1/0. A cancel flag skips renewal.
+// Returns {owned, canceled} as 1/0. A cancel flag is reported while renewal
+// continues so the owner can persist its close-rule result.
 var checkAndRenewExecutionScript = redisclient.NewScript(`
 local execution_type = redis.call('TYPE', KEYS[1]).ok
 if execution_type ~= 'none' and execution_type ~= 'hash' then
@@ -103,12 +107,12 @@ local lease_until = tonumber(redis.call('HGET', KEYS[1], 'lease_until_ms') or '0
 if lease_until <= now_ms then
     return {0, 0}
 end
-if redis.call('HGET', KEYS[1], 'cancel_requested') == '1' then
-    return {1, 1}
-end
 local next_lease_until = now_ms + tonumber(ARGV[2])
 redis.call('HSET', KEYS[1], 'lease_until_ms', next_lease_until)
 redis.call('PEXPIRE', KEYS[1], ARGV[3])
+if redis.call('HGET', KEYS[1], 'cancel_requested') == '1' then
+    return {1, 1}
+end
 return {1, 0}
 `)
 
@@ -187,6 +191,13 @@ if state == 'TASK_STATE_COMPLETED' or state == 'TASK_STATE_FAILED' or
    state == 'TASK_STATE_CANCELED' or state == 'TASK_STATE_REJECTED' then
     return {3, task}
 end
+if active then
+    redis.call('HSET', KEYS[4],
+        'cancel_requested', '1',
+        'lease_until_ms', now_ms + tonumber(ARGV[9]))
+    redis.call('PEXPIRE', KEYS[4], ARGV[8])
+    return {1, task}
+end
 if task ~= ARGV[1] then
     return {5, task}
 end
@@ -203,14 +214,7 @@ if excess > 0 then
     redis.call('ZREMRANGEBYRANK', KEYS[3], 0, excess - 1)
 end
 redis.call('PEXPIRE', KEYS[3], ARGV[5])
-if active then
-    redis.call('HSET', KEYS[4],
-        'cancel_requested', '1',
-        'lease_until_ms', now_ms + tonumber(ARGV[9]))
-    redis.call('PEXPIRE', KEYS[4], ARGV[8])
-else
-    redis.call('DEL', KEYS[4])
-end
+redis.call('DEL', KEYS[4])
 return {2, ARGV[2], event_id}
 `)
 
@@ -248,7 +252,10 @@ func (t *redisTaskEventTransport) RequestExecutionCancel(
 	tenant, owner, taskID string,
 ) (*protocol.Task, bool, error) {
 	operationID := "cancel-" + protocol.GenerateMessageID()
-	for attempt := 0; attempt < 4; attempt++ {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
 		currentBytes, err := t.client.Get(ctx, taskKey(tenant, owner, taskID)).Bytes()
 		if errors.Is(err, redisclient.Nil) {
 			// Lazy-created runs may not have a Task yet. Lua still records
@@ -339,9 +346,6 @@ func (t *redisTaskEventTransport) RequestExecutionCancel(
 			)
 		}
 	}
-	return nil, false, fmt.Errorf(
-		"request cancellation for task %s: concurrent task updates did not settle", taskID,
-	)
 }
 
 func (t *redisTaskEventTransport) CheckAndRenewExecution(
@@ -457,29 +461,63 @@ func (m *TaskManager) sweepExecutions() {
 	}
 	m.cancelMu.RUnlock()
 
-	for _, run := range liveRuns {
-		leaseCheckStarted := time.Now()
-		owned, canceled, err := m.executionLease.CheckAndRenewExecution(
-			m.controlCtx, run.key.tenant, run.key.owner, run.key.id, run.live.runID,
-		)
-		if err != nil {
-			if time.Now().UnixMilli() >= run.live.leaseUntilMillis.Load() {
-				m.loseExecution(run.live)
-			} else {
-				log.Warnf("RedisTaskManager: failed to check execution lease for task %s: %v", run.key.id, err)
+	if len(liveRuns) == 0 {
+		return
+	}
+	workerCount := executionRenewalConcurrency
+	if len(liveRuns) < workerCount {
+		workerCount = len(liveRuns)
+	}
+	jobs := make(chan scopedLiveExecution)
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for i := 0; i < workerCount; i++ {
+		go func() {
+			defer workers.Done()
+			for run := range jobs {
+				m.renewExecution(run)
 			}
-			continue
+		}()
+	}
+	for _, run := range liveRuns {
+		select {
+		case jobs <- run:
+		case <-m.controlCtx.Done():
+			close(jobs)
+			workers.Wait()
+			return
 		}
-		if !owned {
+	}
+	close(jobs)
+	workers.Wait()
+}
+
+func (m *TaskManager) renewExecution(run scopedLiveExecution) {
+	leaseCheckStarted := time.Now()
+	owned, canceled, err := m.executionLease.CheckAndRenewExecution(
+		m.controlCtx, run.key.tenant, run.key.owner, run.key.id, run.live.runID,
+	)
+	if err != nil {
+		if time.Now().UnixMilli() >= run.live.leaseUntilMillis.Load() {
 			m.loseExecution(run.live)
-			continue
+		} else {
+			log.Warnf("RedisTaskManager: failed to check execution lease for task %s: %v", run.key.id, err)
 		}
-		run.live.leaseUntilMillis.Store(
-			leaseCheckStarted.Add(m.executionLeaseDuration).UnixMilli(),
-		)
-		if canceled {
-			_, _ = m.cancelLocalExecution(run.key.tenant, run.key.owner, run.key.id, run.live)
-		}
+		return
+	}
+	if !owned {
+		m.loseExecution(run.live)
+		return
+	}
+	run.live.leaseUntilMillis.Store(
+		leaseCheckStarted.Add(m.executionLeaseDuration).UnixMilli(),
+	)
+	if err := m.refreshTaskLease(m.controlCtx, run.key.tenant, run.key.owner, run.key.id); err != nil &&
+		!errors.Is(err, taskmanager.ErrTaskNotFoundSentinel) && !errors.Is(err, context.Canceled) {
+		log.Warnf("RedisTaskManager: failed to refresh live task %s: %v", run.key.id, err)
+	}
+	if canceled {
+		_, _ = m.cancelLocalExecution(run.key.tenant, run.key.owner, run.key.id, run.live)
 	}
 }
 
@@ -491,9 +529,9 @@ func (m *TaskManager) loseExecution(live *liveExecution) {
 		return
 	}
 	if live.cancelRequested.Load() {
-		// The Task is already terminal in Redis. Let the engine adopt and
-		// publish that snapshot instead of turning cancellation into a stale
-		// lease error on the request-local stream.
+		// The owner is already winding down after observing cancellation. Do
+		// not turn that accepted intent into a stale lease error while its
+		// close rule or a racing terminal event is still being persisted.
 		live.cancel()
 		return
 	}
@@ -526,11 +564,30 @@ func (m *TaskManager) finishCanceledAdmission(
 		m.releaseExecution(tenant, owner, taskID, live)
 		return err
 	}
-	if stored.Status.State != protocol.TaskStateCanceled {
+	if isFinalState(stored.Status.State) {
 		m.releaseExecution(tenant, owner, taskID, live)
-		return executionlease.ErrCancelRequested
+		return taskmanager.ErrInvalidParams(
+			fmt.Sprintf("task %s is in terminal state %s", taskID, stored.Status.State))
+	}
+	canceled := copyTask(stored)
+	canceled.Status = protocol.TaskStatus{
+		State:     protocol.TaskStateCanceled,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+	event := &protocol.TaskStatusUpdateEvent{
+		TaskID: canceled.ID, ContextID: canceled.ContextID, Status: canceled.Status, Final: true,
 	}
 	live.requestCancel()
+	live.released.Store(true)
+	if err := m.commitExecutionTaskEvent(
+		context.Background(), tenant, owner, live.runID, canceled,
+		protocol.NewStreamResponseStatusUpdate(event), false, true,
+	); err != nil {
+		live.released.Store(false)
+		m.releaseExecution(tenant, owner, taskID, live)
+		return err
+	}
+	m.dispatchCanceledTask(newScopedID(tenant, owner, taskID), canceled)
 	m.releaseExecution(tenant, owner, taskID, live)
 	return taskmanager.ErrInvalidParams(fmt.Sprintf("task %s was canceled before execution started", taskID))
 }
