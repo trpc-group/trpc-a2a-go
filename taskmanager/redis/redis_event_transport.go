@@ -16,6 +16,7 @@ import (
 
 	redisclient "github.com/redis/go-redis/v9"
 
+	"trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2/internal/executionlease"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
@@ -91,8 +92,9 @@ const (
 // with respect to other clients but do not roll back commands after a runtime
 // error. The task and stream keys share one Redis Cluster slot (see streamKey).
 var commitTaskEventScript = redisclient.NewScript(`
-if ARGV[6] ~= '1' and redis.call('EXISTS', KEYS[1]) == 0 then
-    return redis.error_reply('task does not exist')
+local task_type = redis.call('TYPE', KEYS[1]).ok
+if task_type ~= 'none' and task_type ~= 'string' then
+    return redis.error_reply('task has wrong type')
 end
 local stream_type = redis.call('TYPE', KEYS[2]).ok
 if stream_type ~= 'none' and stream_type ~= 'stream' then
@@ -102,9 +104,45 @@ local dedupe_type = redis.call('TYPE', KEYS[3]).ok
 if dedupe_type ~= 'none' and dedupe_type ~= 'zset' then
     return redis.error_reply('task event dedupe journal has wrong type')
 end
+local execution_type = redis.call('TYPE', KEYS[4]).ok
+if execution_type ~= 'none' and execution_type ~= 'hash' then
+    return redis.error_reply('execution record has wrong type')
+end
 local existing = redis.call('ZSCORE', KEYS[3], ARGV[7])
 if existing then
     return existing
+end
+if ARGV[8] ~= '' then
+    local current_run = redis.call('HGET', KEYS[4], 'run_id')
+    local lease_until = tonumber(redis.call('HGET', KEYS[4], 'lease_until_ms') or '0')
+    local redis_time = redis.call('TIME')
+    local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+    if current_run ~= ARGV[8] or lease_until <= now_ms then
+        return redis.error_reply('EXECUTION_STALE')
+    end
+    local next_task = cjson.decode(ARGV[1])
+    local next_state = next_task.status and next_task.status.state or ''
+    local next_terminal = next_state == 'TASK_STATE_COMPLETED' or
+        next_state == 'TASK_STATE_FAILED' or next_state == 'TASK_STATE_CANCELED' or
+        next_state == 'TASK_STATE_REJECTED'
+    if redis.call('HGET', KEYS[4], 'cancel_requested') == '1' then
+        local cancel_terminal = next_state == 'TASK_STATE_CANCELED'
+        if not cancel_terminal and (not next_terminal or ARGV[12] ~= '1') then
+            return redis.error_reply('EXECUTION_CANCEL_REQUESTED')
+        end
+    end
+    local current_task = redis.call('GET', KEYS[1])
+    if current_task then
+        local decoded = cjson.decode(current_task)
+        local current_state = decoded.status and decoded.status.state or ''
+        if current_state == 'TASK_STATE_COMPLETED' or current_state == 'TASK_STATE_FAILED' or
+           current_state == 'TASK_STATE_CANCELED' or current_state == 'TASK_STATE_REJECTED' then
+            return redis.error_reply('EXECUTION_STALE')
+        end
+    end
+end
+if ARGV[6] ~= '1' and redis.call('EXISTS', KEYS[1]) == 0 then
+    return redis.error_reply('task does not exist')
 end
 local event_id = redis.call(
     'XADD', KEYS[2], 'MAXLEN', '~', ARGV[3], '*', ARGV[4], ARGV[2]
@@ -118,6 +156,21 @@ if excess > 0 then
     redis.call('ZREMRANGEBYRANK', KEYS[3], 0, excess - 1)
 end
 redis.call('PEXPIRE', KEYS[3], ARGV[5])
+if ARGV[8] ~= '' then
+    local next_task = cjson.decode(ARGV[1])
+    local next_state = next_task.status and next_task.status.state or ''
+    if next_state == 'TASK_STATE_COMPLETED' or next_state == 'TASK_STATE_FAILED' or
+       next_state == 'TASK_STATE_CANCELED' or next_state == 'TASK_STATE_REJECTED' then
+        redis.call('DEL', KEYS[4])
+    elseif ARGV[10] == '1' then
+        local redis_time = redis.call('TIME')
+        local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+        redis.call('HSET', KEYS[4],
+            'yielding', '1',
+            'lease_until_ms', now_ms + tonumber(ARGV[9]))
+        redis.call('PEXPIRE', KEYS[4], ARGV[11])
+    end
+end
 return event_id
 `)
 
@@ -125,9 +178,9 @@ return event_id
 // Its TTL is capped to the Task's remaining TTL so an event-only write cannot
 // leave an orphan stream after the Task expires.
 var appendEventScript = redisclient.NewScript(`
-local task_ttl = redis.call('PTTL', KEYS[1])
-if task_ttl == -2 then
-    return redis.error_reply('task does not exist')
+local task_type = redis.call('TYPE', KEYS[1]).ok
+if task_type ~= 'none' and task_type ~= 'string' then
+    return redis.error_reply('task has wrong type')
 end
 local stream_type = redis.call('TYPE', KEYS[2]).ok
 if stream_type ~= 'none' and stream_type ~= 'stream' then
@@ -137,10 +190,37 @@ local dedupe_type = redis.call('TYPE', KEYS[3]).ok
 if dedupe_type ~= 'none' and dedupe_type ~= 'zset' then
     return redis.error_reply('task event dedupe journal has wrong type')
 end
+local execution_type = redis.call('TYPE', KEYS[4]).ok
+if execution_type ~= 'none' and execution_type ~= 'hash' then
+    return redis.error_reply('execution record has wrong type')
+end
 local existing = redis.call('ZSCORE', KEYS[3], ARGV[4])
 if existing then
     return existing
 end
+local task = redis.call('GET', KEYS[1])
+if not task then
+    return redis.error_reply('task does not exist')
+end
+if ARGV[5] ~= '' then
+    local current_run = redis.call('HGET', KEYS[4], 'run_id')
+    local lease_until = tonumber(redis.call('HGET', KEYS[4], 'lease_until_ms') or '0')
+    local redis_time = redis.call('TIME')
+    local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+    if current_run ~= ARGV[5] or lease_until <= now_ms then
+        return redis.error_reply('EXECUTION_STALE')
+    end
+    if redis.call('HGET', KEYS[4], 'cancel_requested') == '1' then
+        return redis.error_reply('EXECUTION_CANCEL_REQUESTED')
+    end
+    local decoded = cjson.decode(task)
+    local state = decoded.status and decoded.status.state or ''
+    if state == 'TASK_STATE_COMPLETED' or state == 'TASK_STATE_FAILED' or
+       state == 'TASK_STATE_CANCELED' or state == 'TASK_STATE_REJECTED' then
+        return redis.error_reply('EXECUTION_STALE')
+    end
+end
+local task_ttl = redis.call('PTTL', KEYS[1])
 local event_id = redis.call(
     'XADD', KEYS[2], 'MAXLEN', '~', ARGV[2], '*', ARGV[3], ARGV[1]
 )
@@ -216,28 +296,47 @@ return {1, task, cursor}
 `)
 
 type redisTaskEventTransport struct {
-	client     redisclient.UniversalClient
-	expiration time.Duration
+	client                 redisclient.UniversalClient
+	expiration             time.Duration
+	executionLeaseDuration time.Duration
+	executionRetention     time.Duration
 }
 
 var _ taskEventTransport = (*redisTaskEventTransport)(nil)
+var _ executionlease.Backend = (*redisTaskEventTransport)(nil)
 
 func newRedisTaskEventTransport(
 	client redisclient.UniversalClient,
 	expiration time.Duration,
 ) *redisTaskEventTransport {
-	return &redisTaskEventTransport{client: client, expiration: expiration}
+	leaseDuration := 30 * time.Second
+	if expiration < 2*leaseDuration {
+		leaseDuration = expiration / 2
+	}
+	if leaseDuration < 30*time.Millisecond {
+		leaseDuration = 30 * time.Millisecond
+	}
+	executionRetention := expiration
+	if executionRetention < 2*leaseDuration {
+		executionRetention = 2 * leaseDuration
+	}
+	return &redisTaskEventTransport{
+		client:                 client,
+		expiration:             expiration,
+		executionLeaseDuration: leaseDuration,
+		executionRetention:     executionRetention,
+	}
 }
 
 // streamKey shares the task key's Redis Cluster slot without changing the
-// existing task key. Redis hashes the full task key and the {...} portion of
-// the stream key, which are the same bytes for manager-generated task IDs.
+// existing task key. taskCompanionKey preserves the established key format for
+// generated IDs and handles braces in legacy/custom IDs.
 func streamKey(tenant, owner, taskID string) string {
-	return streamPrefix + "{" + taskKey(tenant, owner, taskID) + "}"
+	return taskCompanionKey(streamPrefix, taskKey(tenant, owner, taskID))
 }
 
 func streamDedupeKey(tenant, owner, taskID string) string {
-	return streamDedupePrefix + "{" + taskKey(tenant, owner, taskID) + "}"
+	return taskCompanionKey(streamDedupePrefix, taskKey(tenant, owner, taskID))
 }
 
 func (t *redisTaskEventTransport) CommitTaskEvent(
@@ -262,6 +361,23 @@ func (t *redisTaskEventTransport) commitTaskEventWithOperationID(
 	allowCreate bool,
 	operationID string,
 ) error {
+	return t.commitTaskEventWithLease(
+		ctx, tenant, owner, task, event, allowCreate, operationID, "", false, false,
+	)
+}
+
+func (t *redisTaskEventTransport) commitTaskEventWithLease(
+	ctx context.Context,
+	tenant string,
+	owner string,
+	task *protocol.Task,
+	event protocol.StreamResponse,
+	allowCreate bool,
+	operationID string,
+	runID string,
+	release bool,
+	terminalCanWinCancel bool,
+) error {
 	taskBytes, err := json.Marshal(task)
 	if err != nil {
 		return fmt.Errorf("failed to serialize task: %w", err)
@@ -274,6 +390,14 @@ func (t *redisTaskEventTransport) commitTaskEventWithOperationID(
 	if allowCreate {
 		allowCreateFlag = 1
 	}
+	releaseFlag := 0
+	if release {
+		releaseFlag = 1
+	}
+	terminalCanWinCancelFlag := 0
+	if terminalCanWinCancel {
+		terminalCanWinCancelFlag = 1
+	}
 	if _, err := commitTaskEventScript.Run(
 		ctx,
 		t.client,
@@ -281,6 +405,7 @@ func (t *redisTaskEventTransport) commitTaskEventWithOperationID(
 			taskKey(tenant, owner, task.ID),
 			streamKey(tenant, owner, task.ID),
 			streamDedupeKey(tenant, owner, task.ID),
+			executionKey(tenant, owner, task.ID),
 		},
 		taskBytes,
 		eventBytes,
@@ -289,10 +414,31 @@ func (t *redisTaskEventTransport) commitTaskEventWithOperationID(
 		t.expiration.Milliseconds(),
 		allowCreateFlag,
 		operationID,
+		runID,
+		t.executionLeaseDuration.Milliseconds(),
+		releaseFlag,
+		t.executionRetention.Milliseconds(),
+		terminalCanWinCancelFlag,
 	).Result(); err != nil {
-		return fmt.Errorf("failed to store task and event: %w", err)
+		return fmt.Errorf("failed to store task and event: %w", mapExecutionScriptError(err))
 	}
 	return nil
+}
+
+func (t *redisTaskEventTransport) CommitExecutionTaskEvent(
+	ctx context.Context,
+	tenant, owner string,
+	runID string,
+	task *protocol.Task,
+	event protocol.StreamResponse,
+	allowCreate bool,
+	release bool,
+	terminalCanWinCancel bool,
+) error {
+	return t.commitTaskEventWithLease(
+		ctx, tenant, owner, task, event, allowCreate,
+		"op-"+protocol.GenerateMessageID(), runID, release, terminalCanWinCancel,
+	)
 }
 
 func (t *redisTaskEventTransport) AppendEvent(
@@ -315,6 +461,18 @@ func (t *redisTaskEventTransport) appendEventWithOperationID(
 	event protocol.StreamResponse,
 	operationID string,
 ) error {
+	return t.appendEventWithLease(ctx, tenant, owner, taskID, event, operationID, "")
+}
+
+func (t *redisTaskEventTransport) appendEventWithLease(
+	ctx context.Context,
+	tenant string,
+	owner string,
+	taskID string,
+	event protocol.StreamResponse,
+	operationID string,
+	runID string,
+) error {
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("failed to marshal stream event for task %s: %w", taskID, err)
@@ -326,15 +484,29 @@ func (t *redisTaskEventTransport) appendEventWithOperationID(
 			taskKey(tenant, owner, taskID),
 			streamKey(tenant, owner, taskID),
 			streamDedupeKey(tenant, owner, taskID),
+			executionKey(tenant, owner, taskID),
 		},
 		payload,
 		streamMaxLen,
 		streamField,
 		operationID,
+		runID,
+		time.Now().UnixMilli(),
 	).Result(); err != nil {
-		return fmt.Errorf("failed to append stream event for task %s: %w", taskID, err)
+		return fmt.Errorf("failed to append stream event for task %s: %w", taskID, mapExecutionScriptError(err))
 	}
 	return nil
+}
+
+func (t *redisTaskEventTransport) AppendExecutionEvent(
+	ctx context.Context,
+	tenant, owner, taskID, runID string,
+	event protocol.StreamResponse,
+) error {
+	return t.appendEventWithLease(
+		ctx, tenant, owner, taskID, event,
+		"op-"+protocol.GenerateMessageID(), runID,
+	)
 }
 
 func (t *redisTaskEventTransport) LoadTaskAndCursor(

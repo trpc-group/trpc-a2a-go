@@ -21,6 +21,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 
+	"trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2/internal/executionlease"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/taskmanager"
 )
@@ -56,6 +57,26 @@ type blockAfterCommandHook struct {
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
+}
+
+type blockAfterFinalRenewBackend struct {
+	executionlease.Backend
+	calls   atomic.Int32
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockAfterFinalRenewBackend) CheckAndRenewExecution(
+	ctx context.Context,
+	tenant, owner, taskID, runID string,
+) (bool, bool, error) {
+	owned, canceled, err := b.Backend.CheckAndRenewExecution(ctx, tenant, owner, taskID, runID)
+	if b.calls.Add(1) == 2 {
+		b.once.Do(func() { close(b.entered) })
+		<-b.release
+	}
+	return owned, canceled, err
 }
 
 // nonBlockingEmptyTransport is a valid polling transport that currently has
@@ -359,6 +380,852 @@ func TestCrossNode_CancelWithoutLiveRunReachesResubscriber(t *testing.T) {
 
 	if !drainForState(t, chB, protocol.TaskStateCanceled) {
 		t.Fatal("cross-node resubscriber never received the CANCELED event")
+	}
+}
+
+// TestCrossNode_CancelActiveExecutionStopsOwnerAndFencesLateEvent verifies distributed cancellation.
+func TestCrossNode_CancelActiveExecutionStopsOwnerAndFencesLateEvent(t *testing.T) {
+	processorCanceled := make(chan struct{})
+	processor := executorFunc(func(
+		ctx context.Context, _ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent, 2)
+		go func() {
+			defer close(out)
+			out <- statusEvent(protocol.TaskStateWorking, nil)
+			<-ctx.Done()
+			close(processorCanceled)
+			// A processor may race one last event after observing cancellation.
+			// The distributed intent fence must reject it before the owner
+			// close rule commits CANCELED.
+			out <- statusEvent(protocol.TaskStateInputRequired, agentReply("late"))
+		}()
+		return out, nil
+	})
+	nodeA, nodeB := twoNodeManagers(t, processor, WithExpireTime(600*time.Millisecond))
+
+	stream, err := nodeA.OnSendMessageStream(context.Background(), sendParams("start", "ctx-active-cancel"))
+	if err != nil {
+		t.Fatalf("nodeA OnSendMessageStream: %v", err)
+	}
+	initial := recvEvent(t, stream)
+	if initial.GetTask() == nil {
+		t.Fatalf("initial frame = %+v, want Task", initial.Result)
+	}
+	workingFrame := recvEvent(t, stream)
+	working := workingFrame.GetStatusUpdate()
+	if working == nil || working.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("working frame = %+v", working)
+	}
+
+	snapshot, err := nodeB.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: working.TaskID})
+	if err != nil {
+		t.Fatalf("nodeB OnCancelTask: %v", err)
+	}
+	if snapshot.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("cancel snapshot state = %s, want current WORKING", snapshot.Status.State)
+	}
+	if nodeB.liveRun("", "", working.TaskID) != nil {
+		t.Fatal("cancel request unexpectedly depended on a nodeB-local execution")
+	}
+
+	select {
+	case <-processorCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("nodeA processor did not observe cross-node cancellation")
+	}
+
+	sawCanceled := false
+	for event := range stream {
+		if update := event.GetStatusUpdate(); update != nil &&
+			update.Status.State == protocol.TaskStateInputRequired {
+			t.Fatal("late INPUT_REQUIRED bypassed the execution fence")
+		} else if update != nil && update.Status.State == protocol.TaskStateCanceled {
+			sawCanceled = true
+		}
+	}
+	if !sawCanceled {
+		t.Fatal("owner stream did not receive the committed CANCELED event")
+	}
+	stored, err := nodeB.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: working.TaskID})
+	if err != nil {
+		t.Fatalf("nodeB OnGetTask: %v", err)
+	}
+	if stored.Status.State != protocol.TaskStateCanceled {
+		t.Fatalf("stored state = %s, want CANCELED", stored.Status.State)
+	}
+}
+
+func TestCrossNode_CancelAcknowledgedAfterContextDelivery(t *testing.T) {
+	processor := executorFunc(func(
+		ctx context.Context, _ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent, 1)
+		out <- statusEvent(protocol.TaskStateWorking, nil)
+		go func() {
+			<-ctx.Done()
+			close(out)
+		}()
+		return out, nil
+	})
+	nodeA, nodeB := twoNodeManagers(t, processor, WithExpireTime(600*time.Millisecond))
+	stream, err := nodeA.OnSendMessageStream(context.Background(), sendParams("start", "ctx-cancel-delivery"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream: %v", err)
+	}
+	initial := recvEvent(t, stream)
+	task := initial.GetTask()
+	if task == nil {
+		t.Fatalf("initial frame = %+v, want Task", initial.Result)
+	}
+	if update := recvEvent(t, stream); update.GetStatusUpdate() == nil ||
+		update.GetStatusUpdate().Status.State != protocol.TaskStateWorking {
+		t.Fatalf("working frame = %+v", update.Result)
+	}
+
+	cancelEntered := make(chan struct{})
+	releaseCancel := make(chan struct{})
+	var cancelOnce sync.Once
+	nodeA.cancelMu.Lock()
+	live := nodeA.executions[newScopedID("", "", task.ID)]
+	if live == nil {
+		nodeA.cancelMu.Unlock()
+		t.Fatal("live execution not registered")
+	}
+	originalCancel := live.cancel
+	live.cancel = func() {
+		cancelOnce.Do(func() { close(cancelEntered) })
+		<-releaseCancel
+		originalCancel()
+	}
+	nodeA.cancelMu.Unlock()
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseCancel) }) }
+	t.Cleanup(release)
+
+	type cancelResult struct {
+		task *protocol.Task
+		err  error
+	}
+	cancelDone := make(chan cancelResult, 1)
+	go func() {
+		canceled, err := nodeB.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: task.ID})
+		cancelDone <- cancelResult{task: canceled, err: err}
+	}()
+	select {
+	case <-cancelEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner did not begin local context cancellation")
+	}
+	if got := nodeA.client.HGet(
+		context.Background(), executionKey("", "", task.ID), "cancel_acknowledged",
+	).Val(); got != "0" {
+		t.Fatalf("cancel_acknowledged = %q before context delivery, want 0", got)
+	}
+	select {
+	case got := <-cancelDone:
+		t.Fatalf("remote cancel returned before context delivery: task=%+v err=%v", got.task, got.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case got := <-cancelDone:
+		if got.err != nil || got.task == nil || got.task.Status.State != protocol.TaskStateWorking {
+			t.Fatalf("remote cancel = (%+v, %v), want accepted WORKING snapshot", got.task, got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote cancel did not return after context delivery")
+	}
+	if !drainForState(t, stream, protocol.TaskStateCanceled) {
+		t.Fatal("owner stream never reached CANCELED")
+	}
+}
+
+// TestCrossNode_TerminalCancelAcknowledgedAfterContextDelivery verifies that a
+// processor terminal state may win a remote cancellation only after the owner
+// has delivered cancellation to the processor context.
+func TestCrossNode_TerminalCancelAcknowledgedAfterContextDelivery(t *testing.T) {
+	emitTerminal := make(chan struct{})
+	contextCanceled := make(chan struct{})
+	processorDone := make(chan struct{})
+	processor := executorFunc(func(
+		ctx context.Context, _ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent)
+		go func() {
+			defer close(processorDone)
+			defer close(out)
+			out <- statusEvent(protocol.TaskStateWorking, nil)
+			<-emitTerminal
+			out <- statusEvent(protocol.TaskStateCompleted, nil)
+			<-ctx.Done()
+			close(contextCanceled)
+		}()
+		return out, nil
+	})
+	nodeA, nodeB := twoNodeManagers(t, processor)
+	stream, err := nodeA.OnSendMessageStream(context.Background(), sendParams("start", "ctx-terminal-cancel-delivery"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream: %v", err)
+	}
+	initial := recvEvent(t, stream)
+	task := initial.GetTask()
+	if task == nil {
+		t.Fatalf("initial frame = %+v, want Task", initial.Result)
+	}
+	workingFrame := recvEvent(t, stream)
+	if update := workingFrame.GetStatusUpdate(); update == nil ||
+		update.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("working frame = %+v", update)
+	}
+
+	// Ensure the terminal commit, rather than the control sweep, is what observes
+	// the pending cancellation.
+	nodeA.controlCancel()
+	nodeA.controlWg.Wait()
+	type cancelResult struct {
+		task *protocol.Task
+		err  error
+	}
+	cancelDone := make(chan cancelResult, 1)
+	go func() {
+		canceled, err := nodeB.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: task.ID})
+		cancelDone <- cancelResult{task: canceled, err: err}
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for nodeA.client.HGet(
+		context.Background(), executionKey("", "", task.ID), "cancel_requested",
+	).Val() != "1" {
+		if time.Now().After(deadline) {
+			t.Fatal("remote cancellation intent was not recorded")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(emitTerminal)
+
+	select {
+	case got := <-cancelDone:
+		if got.err != nil || got.task == nil || got.task.Status.State != protocol.TaskStateWorking {
+			t.Fatalf("remote cancel = (%+v, %v), want accepted WORKING snapshot", got.task, got.err)
+		}
+		select {
+		case <-contextCanceled:
+		default:
+			t.Fatal("remote cancel returned before terminal winner received context cancellation")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote cancel did not return after terminal commit")
+	}
+	select {
+	case <-processorDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processor did not exit after terminal cancellation delivery")
+	}
+	if !drainForState(t, stream, protocol.TaskStateCompleted) {
+		t.Fatal("owner stream never reached terminal COMPLETED state")
+	}
+	stored, err := nodeB.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: task.ID})
+	if err != nil || stored.Status.State != protocol.TaskStateCompleted {
+		t.Fatalf("stored task = %+v, err=%v; want COMPLETED", stored, err)
+	}
+}
+
+// TestCrossNode_CancelDuringAdmissionPreventsProcessorStart verifies that a
+// remote cancellation requested during continuation preparation prevents the
+// owner from entering user processor code.
+func TestCrossNode_CancelDuringAdmissionPreventsProcessorStart(t *testing.T) {
+	var processorCalls atomic.Int32
+	continuationInvoked := make(chan error, 1)
+	processor := executorFunc(func(
+		ctx context.Context, _ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent, 1)
+		if processorCalls.Add(1) == 1 {
+			out <- statusEvent(protocol.TaskStateInputRequired, nil)
+		} else {
+			continuationInvoked <- ctx.Err()
+			out <- statusEvent(protocol.TaskStateCompleted, nil)
+		}
+		close(out)
+		return out, nil
+	})
+	nodeA, nodeB := twoNodeManagers(t, processor)
+
+	seed, err := nodeA.OnSendMessage(context.Background(), sendParams("seed", "ctx-admission-cancel"))
+	if err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	task := seed.GetTask()
+	if task == nil || task.Status.State != protocol.TaskStateInputRequired {
+		t.Fatalf("seed response = %+v, want INPUT_REQUIRED Task", seed)
+	}
+
+	// Pause after continuation history has been read. AcquireExecution and the
+	// first CheckAndRenewExecution have completed, but ProcessMessage has not.
+	hook := &blockAfterCommandHook{
+		name:    "lrange",
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseHook := func() { releaseOnce.Do(func() { close(hook.release) }) }
+	t.Cleanup(releaseHook)
+	nodeA.client.AddHook(hook)
+
+	result := make(chan error, 1)
+	go func() {
+		params := sendParams("continue", task.ContextID)
+		params.Message.TaskID = &task.ID
+		_, err := nodeA.OnSendMessage(context.Background(), params)
+		result <- err
+	}()
+	select {
+	case <-hook.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("continuation did not reach the admission history read")
+	}
+
+	type cancelResult struct {
+		task *protocol.Task
+		err  error
+	}
+	cancelDone := make(chan cancelResult, 1)
+	go func() {
+		canceled, err := nodeB.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: task.ID})
+		cancelDone <- cancelResult{task: canceled, err: err}
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for nodeA.client.HGet(
+		context.Background(), executionKey("", "", task.ID), "cancel_requested",
+	).Val() != "1" {
+		if time.Now().After(deadline) {
+			t.Fatal("remote cancellation intent was not recorded")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case got := <-cancelDone:
+		t.Fatalf("remote cancel returned before owner crossed admission: task=%+v err=%v", got.task, got.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	releaseHook()
+	select {
+	case got := <-cancelDone:
+		if got.err != nil {
+			t.Fatalf("remote OnCancelTask: %v", got.err)
+		}
+		if got.task.Status.State != protocol.TaskStateInputRequired {
+			t.Fatalf("remote cancel state = %s, want current INPUT_REQUIRED", got.task.Status.State)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote cancel did not return after owner acknowledged admission")
+	}
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, taskmanager.ErrInvalidParamsSentinel) {
+			t.Fatalf("continuation error = %v, want invalid params", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("continuation did not return after remote cancellation")
+	}
+	select {
+	case ctxErr := <-continuationInvoked:
+		t.Fatalf("processor started after cancellation was requested; ctx.Err=%v", ctxErr)
+	default:
+	}
+	if got := processorCalls.Load(); got != 1 {
+		t.Fatalf("processor calls = %d, want only the seed round", got)
+	}
+	if live := nodeA.liveRun("", "", task.ID); live != nil {
+		t.Fatal("canceled admission left a local execution registered")
+	}
+	if exists, err := nodeA.client.Exists(
+		context.Background(), executionKey("", "", task.ID),
+	).Result(); err != nil || exists != 0 {
+		t.Fatalf("canceled admission execution lease: exists=%d err=%v, want absent", exists, err)
+	}
+	stored, err := nodeA.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: task.ID})
+	if err != nil || stored.Status.State != protocol.TaskStateCanceled {
+		t.Fatalf("stored task after canceled admission = %+v, err=%v; want CANCELED", stored, err)
+	}
+}
+
+// TestCrossNode_CancelObservedAfterFinalRenewDoesNotStartProcessor verifies the
+// local admission gate when an owner observes cancellation after its final
+// distributed lease check but before entering user code.
+func TestCrossNode_CancelObservedAfterFinalRenewDoesNotStartProcessor(t *testing.T) {
+	var processorCalls atomic.Int32
+	processor := executorFunc(func(
+		_ context.Context, _ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent, 1)
+		if processorCalls.Add(1) == 1 {
+			out <- statusEvent(protocol.TaskStateInputRequired, nil)
+		} else {
+			out <- statusEvent(protocol.TaskStateCompleted, nil)
+		}
+		close(out)
+		return out, nil
+	})
+	nodeA, nodeB := twoNodeManagers(t, processor)
+
+	seed, err := nodeA.OnSendMessage(context.Background(), sendParams("seed", "ctx-final-renew-cancel"))
+	if err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	task := seed.GetTask()
+	if task == nil || task.Status.State != protocol.TaskStateInputRequired {
+		t.Fatalf("seed response = %+v, want INPUT_REQUIRED Task", seed)
+	}
+	nodeA.controlCancel()
+	nodeA.controlWg.Wait()
+
+	backend := &blockAfterFinalRenewBackend{
+		Backend: nodeA.executionLease,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	nodeA.executionLease = backend
+	var releaseOnce sync.Once
+	releaseRenew := func() { releaseOnce.Do(func() { close(backend.release) }) }
+	t.Cleanup(releaseRenew)
+	continuationDone := make(chan error, 1)
+	go func() {
+		params := sendParams("continue", task.ContextID)
+		params.Message.TaskID = &task.ID
+		_, err := nodeA.OnSendMessage(context.Background(), params)
+		continuationDone <- err
+	}()
+	select {
+	case <-backend.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("continuation did not finish its final lease check")
+	}
+
+	type cancelResult struct {
+		task *protocol.Task
+		err  error
+	}
+	cancelDone := make(chan cancelResult, 1)
+	go func() {
+		canceled, err := nodeB.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: task.ID})
+		cancelDone <- cancelResult{task: canceled, err: err}
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for nodeA.client.HGet(
+		context.Background(), executionKey("", "", task.ID), "cancel_requested",
+	).Val() != "1" {
+		if time.Now().After(deadline) {
+			t.Fatal("remote cancellation intent was not recorded")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	live := nodeA.liveRun("", "", task.ID)
+	if live == nil {
+		t.Fatal("continuation was not registered locally")
+	}
+	// Deterministically model the control sweep observing the Redis intent in
+	// the narrow window while the final lease check is returning.
+	if _, accepted := nodeA.cancelLocalExecution("", "", task.ID, live); !accepted {
+		t.Fatal("owner did not observe remote cancellation")
+	}
+	select {
+	case got := <-cancelDone:
+		t.Fatalf("cancel returned before processor admission resolved: task=%+v err=%v", got.task, got.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	releaseRenew()
+	select {
+	case got := <-cancelDone:
+		if got.err != nil {
+			t.Fatalf("remote OnCancelTask: %v", got.err)
+		}
+		if got.task == nil || got.task.Status.State != protocol.TaskStateInputRequired {
+			t.Fatalf("cancel snapshot = %+v, want INPUT_REQUIRED", got.task)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote cancel did not return after admission resolved")
+	}
+	select {
+	case err := <-continuationDone:
+		if !errors.Is(err, taskmanager.ErrInvalidParamsSentinel) {
+			t.Fatalf("continuation error = %v, want invalid params", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("continuation did not finish")
+	}
+	if got := processorCalls.Load(); got != 1 {
+		t.Fatalf("processor calls = %d, want only seed round", got)
+	}
+	stored, err := nodeB.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: task.ID})
+	if err != nil || stored.Status.State != protocol.TaskStateCanceled {
+		t.Fatalf("stored task = %+v, err=%v; want CANCELED", stored, err)
+	}
+}
+
+// TestCrossNode_ReleasePreservesUnobservedCancel verifies that an owner whose
+// processor closes before the next control sweep cannot delete remote intent.
+func TestCrossNode_ReleasePreservesUnobservedCancel(t *testing.T) {
+	var calls atomic.Int32
+	continuationStarted := make(chan struct{})
+	closeContinuation := make(chan struct{})
+	processor := executorFunc(func(
+		_ context.Context, _ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent, 1)
+		if calls.Add(1) == 1 {
+			out <- statusEvent(protocol.TaskStateInputRequired, nil)
+			close(out)
+			return out, nil
+		}
+		close(continuationStarted)
+		go func() {
+			<-closeContinuation
+			close(out)
+		}()
+		return out, nil
+	})
+	nodeA, nodeB := twoNodeManagers(t, processor)
+
+	seed, err := nodeA.OnSendMessage(context.Background(), sendParams("seed", "ctx-release-cancel"))
+	if err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	task := seed.GetTask()
+	if task == nil || task.Status.State != protocol.TaskStateInputRequired {
+		t.Fatalf("seed response = %+v, want INPUT_REQUIRED Task", seed)
+	}
+	// Stop automatic observation so release itself must preserve and finish the
+	// cancellation intent.
+	nodeA.controlCancel()
+	nodeA.controlWg.Wait()
+
+	continuationDone := make(chan error, 1)
+	go func() {
+		params := sendParams("continue", task.ContextID)
+		params.Message.TaskID = &task.ID
+		_, err := nodeA.OnSendMessage(context.Background(), params)
+		continuationDone <- err
+	}()
+	select {
+	case <-continuationStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("continuation did not start")
+	}
+
+	type cancelResult struct {
+		task *protocol.Task
+		err  error
+	}
+	cancelDone := make(chan cancelResult, 1)
+	go func() {
+		canceled, err := nodeB.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: task.ID})
+		cancelDone <- cancelResult{task: canceled, err: err}
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for nodeA.client.HGet(
+		context.Background(), executionKey("", "", task.ID), "cancel_requested",
+	).Val() != "1" {
+		if time.Now().After(deadline) {
+			t.Fatal("remote cancellation intent was not recorded")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(closeContinuation)
+
+	select {
+	case err := <-continuationDone:
+		if err != nil {
+			t.Fatalf("continuation: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("continuation did not finish")
+	}
+	select {
+	case got := <-cancelDone:
+		if got.err != nil {
+			t.Fatalf("remote OnCancelTask: %v", got.err)
+		}
+		if got.task == nil || got.task.Status.State != protocol.TaskStateInputRequired {
+			t.Fatalf("cancel response = %+v, want accepted INPUT_REQUIRED snapshot", got.task)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote cancel did not finish after owner release")
+	}
+	stored, err := nodeB.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: task.ID})
+	if err != nil || stored.Status.State != protocol.TaskStateCanceled {
+		t.Fatalf("stored task = %+v, err=%v; want CANCELED", stored, err)
+	}
+	if exists, err := nodeB.client.Exists(
+		context.Background(), executionKey("", "", task.ID),
+	).Result(); err != nil || exists != 0 {
+		t.Fatalf("execution record = %d, err=%v; want absent", exists, err)
+	}
+}
+
+// TestCrossNode_CloseRuleHonorsUnobservedCancel verifies that a framework
+// close rule cannot turn an accepted remote cancellation into FAILED merely
+// because the owner has not yet observed the intent in its control sweep.
+func TestCrossNode_CloseRuleHonorsUnobservedCancel(t *testing.T) {
+	closeProcessor := make(chan struct{})
+	processor := executorFunc(func(
+		_ context.Context, _ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent, 1)
+		out <- statusEvent(protocol.TaskStateWorking, nil)
+		go func() {
+			<-closeProcessor
+			close(out)
+		}()
+		return out, nil
+	})
+	nodeA, nodeB := twoNodeManagers(t, processor)
+	stream, err := nodeA.OnSendMessageStream(context.Background(), sendParams("start", "ctx-close-rule-cancel"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream: %v", err)
+	}
+	initial := recvEvent(t, stream)
+	task := initial.GetTask()
+	if task == nil {
+		t.Fatalf("initial frame = %+v, want Task", initial.Result)
+	}
+	workingFrame := recvEvent(t, stream)
+	if update := workingFrame.GetStatusUpdate(); update == nil ||
+		update.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("working frame = %+v", update)
+	}
+
+	nodeA.controlCancel()
+	nodeA.controlWg.Wait()
+	type cancelResult struct {
+		task *protocol.Task
+		err  error
+	}
+	cancelDone := make(chan cancelResult, 1)
+	go func() {
+		canceled, err := nodeB.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: task.ID})
+		cancelDone <- cancelResult{task: canceled, err: err}
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for nodeA.client.HGet(
+		context.Background(), executionKey("", "", task.ID), "cancel_requested",
+	).Val() != "1" {
+		if time.Now().After(deadline) {
+			t.Fatal("remote cancellation intent was not recorded")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(closeProcessor)
+
+	select {
+	case got := <-cancelDone:
+		if got.err != nil || got.task == nil || got.task.Status.State != protocol.TaskStateWorking {
+			t.Fatalf("remote cancel = (%+v, %v), want accepted WORKING snapshot", got.task, got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote cancel did not finish after processor close")
+	}
+	if !drainForState(t, stream, protocol.TaskStateCanceled) {
+		t.Fatal("owner close rule did not publish CANCELED")
+	}
+	stored, err := nodeB.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: task.ID})
+	if err != nil || stored.Status.State != protocol.TaskStateCanceled {
+		t.Fatalf("stored task = %+v, err=%v; want CANCELED", stored, err)
+	}
+}
+
+func TestCrossNode_CancelCommitsAfterOwnerLeaseExpires(t *testing.T) {
+	processor := executorFunc(func(
+		ctx context.Context, _ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent, 1)
+		out <- statusEvent(protocol.TaskStateWorking, nil)
+		go func() {
+			<-ctx.Done()
+			close(out)
+		}()
+		return out, nil
+	})
+	nodeA, redisServer := setupTest(t, processor, WithExpireTime(600*time.Millisecond))
+	t.Cleanup(func() { _ = nodeA.Close() })
+	baseTime := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	redisServer.SetTime(baseTime)
+	nodeBClient := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = nodeBClient.Close() })
+	nodeB, err := NewTaskManager(scriptedExecutor(), nodeBClient, WithExpireTime(600*time.Millisecond))
+	if err != nil {
+		t.Fatalf("nodeB NewTaskManager: %v", err)
+	}
+	t.Cleanup(func() { _ = nodeB.Close() })
+
+	stream, err := nodeA.OnSendMessageStream(context.Background(), sendParams("start", "ctx-owner-expiry"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream: %v", err)
+	}
+	initial := recvEvent(t, stream)
+	task := initial.GetTask()
+	if task == nil {
+		t.Fatalf("initial frame = %+v, want Task", initial.Result)
+	}
+	workingFrame := recvEvent(t, stream)
+	working := workingFrame.GetStatusUpdate()
+	if working == nil || working.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("working frame = %+v", working)
+	}
+	nodeA.controlCancel()
+	nodeA.controlWg.Wait()
+
+	type cancelResult struct {
+		task *protocol.Task
+		err  error
+	}
+	cancelDone := make(chan cancelResult, 1)
+	go func() {
+		canceled, err := nodeB.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: task.ID})
+		cancelDone <- cancelResult{task: canceled, err: err}
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for nodeA.client.HGet(
+		context.Background(), executionKey("", "", task.ID), "cancel_requested",
+	).Val() != "1" {
+		if time.Now().After(deadline) {
+			t.Fatal("remote cancellation intent was not recorded")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	redisServer.SetTime(baseTime.Add(nodeA.executionLeaseDuration + time.Millisecond))
+
+	select {
+	case got := <-cancelDone:
+		if got.err != nil {
+			t.Fatalf("remote OnCancelTask: %v", got.err)
+		}
+		if got.task == nil || got.task.Status.State != protocol.TaskStateWorking {
+			t.Fatalf("cancel response = %+v, want accepted WORKING snapshot", got.task)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote cancel did not take over after owner lease expiry")
+	}
+	stored, err := nodeB.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: task.ID})
+	if err != nil || stored.Status.State != protocol.TaskStateCanceled {
+		t.Fatalf("stored task = %+v, err=%v; want CANCELED", stored, err)
+	}
+}
+
+func TestCrossNode_CancelTimeoutLeavesDurableIntent(t *testing.T) {
+	processor := executorFunc(func(
+		ctx context.Context, _ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent, 1)
+		out <- statusEvent(protocol.TaskStateWorking, nil)
+		go func() {
+			<-ctx.Done()
+			close(out)
+		}()
+		return out, nil
+	})
+	nodeA, redisServer := setupTest(t, processor, WithExpireTime(2*time.Second))
+	t.Cleanup(func() { _ = nodeA.Close() })
+	nodeBClient := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = nodeBClient.Close() })
+	nodeB, err := NewTaskManager(scriptedExecutor(), nodeBClient, WithExpireTime(2*time.Second))
+	if err != nil {
+		t.Fatalf("nodeB NewTaskManager: %v", err)
+	}
+	t.Cleanup(func() { _ = nodeB.Close() })
+
+	stream, err := nodeA.OnSendMessageStream(context.Background(), sendParams("start", "ctx-cancel-timeout"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream: %v", err)
+	}
+	initial := recvEvent(t, stream)
+	task := initial.GetTask()
+	if task == nil {
+		t.Fatalf("initial frame = %+v, want Task", initial.Result)
+	}
+	workingFrame := recvEvent(t, stream)
+	if update := workingFrame.GetStatusUpdate(); update == nil || update.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("working frame = %+v", update)
+	}
+	nodeA.controlCancel()
+	nodeA.controlWg.Wait()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := nodeB.OnCancelTask(ctx, protocol.TaskIDParams{ID: task.ID}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("remote cancel error = %v, want deadline exceeded", err)
+	}
+	if got := nodeA.client.HGet(
+		context.Background(), executionKey("", "", task.ID), "cancel_requested",
+	).Val(); got != "1" {
+		t.Fatalf("cancel_requested = %q, want durable intent", got)
+	}
+	if got := nodeA.client.HGet(
+		context.Background(), executionKey("", "", task.ID), "cancel_acknowledged",
+	).Val(); got != "0" {
+		t.Fatalf("cancel_acknowledged = %q, want unacknowledged timeout", got)
+	}
+}
+
+func TestCrossNode_CancelBeforeLazyTaskNeverReturnsNullSuccess(t *testing.T) {
+	taskID := make(chan string, 1)
+	releaseProcessor := make(chan struct{})
+	processor := executorFunc(func(
+		_ context.Context, ec *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		taskID <- ec.TaskID
+		<-releaseProcessor
+		out := make(chan protocol.StreamEvent, 1)
+		out <- statusEvent(protocol.TaskStateCompleted, nil)
+		close(out)
+		return out, nil
+	})
+	nodeA, nodeB := twoNodeManagers(t, processor, WithExpireTime(600*time.Millisecond))
+	sendDone := make(chan error, 1)
+	go func() {
+		_, err := nodeA.OnSendMessage(context.Background(), sendParams("start", "ctx-lazy-cancel"))
+		sendDone <- err
+	}()
+	id := <-taskID
+
+	type cancelResult struct {
+		task *protocol.Task
+		err  error
+	}
+	cancelDone := make(chan cancelResult, 1)
+	go func() {
+		canceled, err := nodeB.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: id})
+		cancelDone <- cancelResult{task: canceled, err: err}
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for nodeA.client.HGet(
+		context.Background(), executionKey("", "", id), "cancel_requested",
+	).Val() != "1" {
+		if time.Now().After(deadline) {
+			t.Fatal("remote cancellation intent was not recorded")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(releaseProcessor)
+
+	select {
+	case got := <-cancelDone:
+		if got.task != nil || !errors.Is(got.err, taskmanager.ErrTaskNotFoundSentinel) {
+			t.Fatalf("cancel before lazy task = (%+v, %v), want TaskNotFound", got.task, got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote cancel did not finish after processor admission")
+	}
+	select {
+	case err := <-sendDone:
+		if err != nil {
+			t.Fatalf("late terminal send: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("late terminal send did not finish")
 	}
 }
 

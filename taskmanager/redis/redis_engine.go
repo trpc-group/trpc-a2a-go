@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"trpc.group/trpc-go/trpc-a2a-go/taskmanager/redis/v2/internal/executionlease"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/log"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/protocol"
 	"trpc.group/trpc-go/trpc-a2a-go/v2/push"
@@ -46,10 +47,26 @@ func (c detachedCtx) Value(key any) any { return c.parent.Value(key) }
 // engine finishes.
 type liveExecution struct {
 	cancel context.CancelFunc
+	// runID fences every distributed write performed by this execution.
+	runID string
 	// cancelRequested distinguishes a cancellation-triggered channel close
 	// (task marked CANCELED) from an processor finishing in submitted/working
 	// without a conclusion (task marked FAILED).
 	cancelRequested atomic.Bool
+	// processorReady is protected by TaskManager.cancelMu. It becomes true once
+	// ProcessMessage has returned, or once admission has decided not to call it.
+	// A remote cancellation is acknowledged only after this point, ensuring user
+	// code cannot first be entered after tasks/cancel has returned successfully.
+	processorReady bool
+	// released is set while a terminal or explicit release is in flight and
+	// remains set after it gives up the distributed record. The early mark
+	// prevents the control loop from mistaking that DEL for lease loss.
+	released atomic.Bool
+	// leaseLost prevents close rules from writing after another run takes over.
+	leaseLost atomic.Bool
+	// leaseUntilMillis is the last confirmed ownership deadline and provides a
+	// local fail-closed boundary during transient Redis failures.
+	leaseUntilMillis atomic.Int64
 	// pipe is the message/stream response pipe (nil for unary requests). It is
 	// kept on the handle so manager Close can end every in-flight stream and
 	// unblock an engine parked on a blocking pipe send.
@@ -147,24 +164,18 @@ type execution struct {
 	done chan struct{}
 }
 
-// resolveContinuation loads and validates the task a continuation message
-// targets, returning the stored snapshot. A message without a taskId is a
-// fresh round and resolves to nil. When taskId is set it is the same value
-// the caller registered the execution under (see prepareExecution).
-func (m *TaskManager) resolveContinuation(
-	ctx context.Context,
-	tenant string,
-	owner string,
+// validateContinuation validates the Task snapshot returned at the same Redis
+// linearization point as execution acquisition.
+func validateContinuation(
 	message *protocol.Message,
+	loaded *protocol.Task,
 ) (*protocol.Task, error) {
 	if message.TaskID == nil || *message.TaskID == "" {
 		return nil, nil
 	}
 	taskID := *message.TaskID
-
-	loaded, err := m.getTaskInternal(ctx, tenant, owner, taskID)
-	if err != nil {
-		return nil, err
+	if loaded == nil {
+		return nil, taskmanager.ErrTaskNotFound(taskID)
 	}
 	if isFinalState(loaded.Status.State) {
 		// A terminal task is immutable: reject without invoking the MessageProcessor.
@@ -216,7 +227,7 @@ func (m *TaskManager) prepareExecution(
 	ex := &execution{
 		manager:         m,
 		ec:              &taskmanager.ExecContext{},
-		live:            &liveExecution{cancel: cancel},
+		live:            &liveExecution{cancel: cancel, runID: "run-" + protocol.GenerateMessageID()},
 		owner:           owner,
 		immediateResult: make(chan sendOutcome, 1),
 		runFailed:       make(chan error, 1),
@@ -231,23 +242,77 @@ func (m *TaskManager) prepareExecution(
 		ex.live.pipe = ex.pipe
 	}
 
-	// Register-or-reject atomically under the registry lock before the
-	// continuation load, the message store, and the MessageProcessor: a task admits
-	// at most one live run, and a cancel arriving mid-round must find the
-	// handle. Registering before the load also orders the load after the
-	// previous round's (or a no-live cancel's) last write — the slot frees
-	// only after that write — so the working copy below can never be a stale
-	// pre-terminal snapshot that would smuggle writes past a terminal state.
-	// A rejected request never reaches the MessageProcessor and leaves no trace.
+	// Acquire distributed ownership before publishing the local CancelFunc. A
+	// remote cancel in the small acquire/register window leaves a durable intent;
+	// the synchronous CheckAndRenew below observes it before user code runs.
+	task, acquired, cancelPending, err := m.executionLease.AcquireExecution(
+		ctx, request.Tenant, owner, taskID, ex.live.runID,
+	)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	switch {
+	case cancelPending:
+		canceledTask, committed, _, cancelErr := m.executionLease.RequestExecutionCancel(
+			ctx, request.Tenant, owner, taskID,
+		)
+		cancel()
+		if cancelErr != nil {
+			return nil, cancelErr
+		}
+		if committed {
+			m.dispatchCanceledTask(newScopedID(request.Tenant, owner, taskID), canceledTask)
+		}
+		return nil, taskmanager.ErrInvalidParams(fmt.Sprintf("task %s cancellation is pending", taskID))
+	case !acquired && task != nil && isFinalState(task.Status.State):
+		cancel()
+		return nil, taskmanager.ErrInvalidParams(
+			fmt.Sprintf("task %s is in terminal state %s", task.ID, task.Status.State))
+	case !acquired:
+		cancel()
+		return nil, taskmanager.ErrInvalidParams(fmt.Sprintf("task %s already has an active execution", taskID))
+	}
+	ex.live.leaseUntilMillis.Store(time.Now().Add(m.executionLeaseDuration).UnixMilli())
+
+	// Register-or-reject atomically under the process-local registry lock. The
+	// Redis lease remains the cross-node source of truth; this map only exposes
+	// CancelFunc and response pipes owned by this process.
 	if err := m.registerExecution(ctx, request.Tenant, owner, taskID, ex.live); err != nil {
+		releaseErr := m.executionLease.ReleaseExecution(
+			context.Background(), request.Tenant, owner, taskID, ex.live.runID,
+		)
+		if errors.Is(releaseErr, executionlease.ErrCancelRequested) {
+			if cancelErr := m.finishReleasedCancellation(request.Tenant, owner, taskID); cancelErr != nil {
+				log.Warnf("RedisTaskManager: failed to finish cancellation for task %s: %v", taskID, cancelErr)
+			}
+		}
 		cancel()
 		return nil, err
 	}
 
-	// Continuation: a request addressing an existing task loads it, rejects
-	// terminal tasks without invoking the MessageProcessor (the task is frozen), and
-	// hands the MessageProcessor the current snapshot via ec.Task.
-	task, err := m.resolveContinuation(ctx, request.Tenant, owner, message)
+	leaseCheckStarted := time.Now()
+	owned, canceled, err := m.executionLease.CheckAndRenewExecution(
+		ctx, request.Tenant, owner, taskID, ex.live.runID,
+	)
+	if err != nil || !owned {
+		m.releaseExecution(request.Tenant, owner, taskID, ex.live)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		return nil, executionlease.ErrStale
+	}
+	ex.live.leaseUntilMillis.Store(leaseCheckStarted.Add(m.executionLeaseDuration).UnixMilli())
+	if canceled {
+		err := m.finishCanceledAdmission(request.Tenant, owner, taskID, ex.live)
+		cancel()
+		return nil, err
+	}
+
+	// Continuation validation uses the Task snapshot returned by Acquire, so no
+	// cancel or terminal transition can land between ownership and the load.
+	task, err = validateContinuation(message, task)
 	if err != nil {
 		m.releaseExecution(request.Tenant, owner, taskID, ex.live)
 		cancel()
@@ -290,20 +355,33 @@ func (m *TaskManager) prepareExecution(
 		// reference SDKs and avoiding the same message in both Task fields.
 		if task.Status.Message != nil {
 			statusMessage := task.Status.Message
-			task.Status.Message = nil
+			nextTask := copyTask(task)
+			nextTask.Status.Message = nil
 			// Clearing the current status message changes the Task snapshot. Commit a
 			// same-state status event with it so a cross-node subscriber that loaded
 			// the old snapshot cannot miss this continuation-side transition.
 			event := &protocol.TaskStatusUpdateEvent{
-				TaskID:    task.ID,
-				ContextID: task.ContextID,
-				Status:    task.Status,
+				TaskID:    nextTask.ID,
+				ContextID: nextTask.ContextID,
+				Status:    nextTask.Status,
 			}
-			if err := m.commitTaskEvent(ctx, request.Tenant, owner, task, protocol.NewStreamResponseStatusUpdate(event), false); err != nil {
+			if err := m.commitExecutionTaskEvent(
+				ctx, request.Tenant, owner, ex.live.runID, nextTask,
+				protocol.NewStreamResponseStatusUpdate(event), false, false, false,
+			); err != nil {
+				if errors.Is(err, executionlease.ErrCancelRequested) {
+					ex.live.requestCancel()
+					cancelErr := m.finishCanceledAdmission(
+						request.Tenant, owner, taskID, ex.live,
+					)
+					cancel()
+					return nil, cancelErr
+				}
 				m.releaseExecution(request.Tenant, owner, taskID, ex.live)
 				cancel()
 				return nil, fmt.Errorf("failed to advance task status history: %w", err)
 			}
+			task = nextTask
 			m.storeStatusMessage(request.Tenant, owner, taskID, contextID, statusMessage)
 		}
 		// The engine's working copy must not alias ec.Task (the MessageProcessor's
@@ -343,13 +421,62 @@ func (m *TaskManager) prepareExecution(
 		}
 		processorEC.PushConfig = &pushConfig
 	}
+
+	// Recheck distributed ownership after all Redis-backed admission work and
+	// immediately before entering user code. A remote cancellation may have
+	// recorded intent after the earlier acquire/register check; in that case the
+	// processor must never start.
+	leaseCheckStarted = time.Now()
+	owned, canceled, err = m.executionLease.CheckAndRenewExecution(
+		context.Background(), request.Tenant, owner, taskID, ex.live.runID,
+	)
+	if err != nil || !owned {
+		m.releaseExecution(request.Tenant, owner, taskID, ex.live)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		return nil, executionlease.ErrStale
+	}
+	ex.live.leaseUntilMillis.Store(leaseCheckStarted.Add(m.executionLeaseDuration).UnixMilli())
+	if canceled {
+		err := m.finishCanceledAdmission(request.Tenant, owner, taskID, ex.live)
+		cancel()
+		return nil, err
+	}
+	// Linearize a locally observed cancellation against processor admission. If
+	// cancellation wins this lock, skip user code. If it arrives just after the
+	// gate, its Redis acknowledgement waits until ProcessMessage has returned,
+	// so tasks/cancel can never return before the processor was entered.
+	m.cancelMu.Lock()
+	canceledBeforeStart := ex.live.cancelRequested.Load()
+	if canceledBeforeStart {
+		ex.live.processorReady = true
+	}
+	m.cancelMu.Unlock()
+	if canceledBeforeStart {
+		err := m.finishCanceledAdmission(request.Tenant, owner, taskID, ex.live)
+		cancel()
+		return nil, err
+	}
 	events, err := m.processor.ProcessMessage(execCtx, &processorEC)
+	canceledWhileStarting := m.markProcessorReady(request.Tenant, owner, taskID, ex.live)
 	if err != nil {
+		if canceledWhileStarting || ex.live.cancelRequested.Load() {
+			cancelErr := m.finishCanceledAdmission(request.Tenant, owner, taskID, ex.live)
+			cancel()
+			return nil, cancelErr
+		}
 		m.releaseExecution(request.Tenant, owner, taskID, ex.live)
 		cancel()
 		return nil, err
 	}
 	if events == nil {
+		if canceledWhileStarting || ex.live.cancelRequested.Load() {
+			cancelErr := m.finishCanceledAdmission(request.Tenant, owner, taskID, ex.live)
+			cancel()
+			return nil, cancelErr
+		}
 		m.releaseExecution(request.Tenant, owner, taskID, ex.live)
 		cancel()
 		return nil, taskmanager.ErrInternalError("processor returned nil channel")
@@ -523,7 +650,7 @@ func (ex *execution) handleEvent(event protocol.StreamEvent) int {
 			ex.violate("processor emitted event for foreign task")
 			return engineDrainViolation
 		}
-		ex.processStatusEvent(ev)
+		ex.processStatusEvent(ev, true)
 		if ex.runErr != nil {
 			return engineConsuming
 		}
@@ -557,30 +684,22 @@ func (ex *execution) handleEvent(event protocol.StreamEvent) int {
 // close rules: ownership of the task moved on at the suspend event — a
 // continuation or a no-live cancel may already be writing it.
 func (ex *execution) finish() {
-	if ex.runErr == nil && ex.task != nil && !ex.yielded && !isFinalState(ex.task.Status.State) {
-		switch {
-		case ex.live.cancelRequested.Load():
-			// Cancellation-triggered close: the framework marks the task
-			// CANCELED on the MessageProcessor's behalf. If the MessageProcessor emitted its
-			// own terminal state after the cancel, it won (handled above:
-			// the task is already terminal and this branch is skipped).
-			ex.processStatusEvent(&protocol.TaskStatusUpdateEvent{
-				Status: protocol.TaskStatus{State: protocol.TaskStateCanceled},
-			})
-		case !ex.taskTouched:
-			// This round never wrote to the task: it must not apply close rules
-			// to state some other round left behind (the close rules are
-			// round-scoped).
-		case ex.task.Status.State == protocol.TaskStateSubmitted ||
-			ex.task.Status.State == protocol.TaskStateWorking:
-			// Finishing without a conclusion is an MessageProcessor bug: fail
-			// explicitly rather than pretend completion.
-			ex.failTask("processor finished without terminal state")
-		default:
-			// input-required / auth-required: the task stays suspended
-			// awaiting a follow-up message (continuation round).
-		}
+	if ex.live.leaseLost.Load() && ex.runErr == nil {
+		ex.failRun(fmt.Errorf("execution lease lost for task %s: %w", ex.ec.TaskID, executionlease.ErrStale))
 	}
+	if ex.runErr == nil && ex.live.cancelRequested.Load() &&
+		(ex.task == nil || ex.task.Status.State != protocol.TaskStateCanceled) {
+		ex.adoptCommittedCancellation()
+	}
+	ex.applyCloseRule()
+	if ex.runErr == nil && ex.live.cancelRequested.Load() &&
+		(ex.task == nil || ex.task.Status.State != protocol.TaskStateCanceled) {
+		// A concurrent no-live cancel may have committed a terminal snapshot
+		// after ownership was released. Re-read it before completing the local
+		// response.
+		ex.adoptCommittedCancellation()
+	}
+	ex.releaseLease()
 	// §3.1: only rounds that wrote to the task answer with a Task snapshot; a
 	// continuation that merely replied with Messages answers with the Message.
 	if ex.runErr == nil && ex.task != nil && ex.taskTouched {
@@ -592,6 +711,81 @@ func (ex *execution) finish() {
 	ex.manager.deregisterExecution(ex.ec.Tenant, ex.owner, ex.ec.TaskID, ex.live)
 	ex.live.cancel()
 	close(ex.done)
+}
+
+func (ex *execution) applyCloseRule() {
+	if ex.runErr != nil || ex.task == nil || ex.yielded || isFinalState(ex.task.Status.State) {
+		return
+	}
+	switch {
+	case ex.live.cancelRequested.Load():
+		// Manager shutdown cancels locally without a Redis cancel request,
+		// while a user cancel only records intent. In both cases the owner
+		// persists the close-rule CANCELED state here.
+		ex.processStatusEvent(&protocol.TaskStatusUpdateEvent{
+			Status: protocol.TaskStatus{State: protocol.TaskStateCanceled},
+		}, false)
+	case !ex.taskTouched:
+		// This round never wrote to the task: it must not apply close rules
+		// to state some other round left behind (the close rules are
+		// round-scoped).
+	case ex.task.Status.State == protocol.TaskStateSubmitted ||
+		ex.task.Status.State == protocol.TaskStateWorking:
+		// Finishing without a conclusion is an MessageProcessor bug: fail
+		// explicitly rather than pretend completion.
+		ex.failTask("processor finished without terminal state")
+	default:
+		// input-required / auth-required: the task stays suspended
+		// awaiting a follow-up message (continuation round).
+	}
+}
+
+func (ex *execution) releaseLease() {
+	if ex.live.released.Load() {
+		return
+	}
+	err := ex.manager.executionLease.ReleaseExecution(
+		context.Background(), ex.ec.Tenant, ex.owner, ex.ec.TaskID, ex.live.runID,
+	)
+	if errors.Is(err, executionlease.ErrCancelRequested) {
+		ex.live.requestCancel()
+		if cancelErr := ex.manager.finishReleasedCancellation(
+			ex.ec.Tenant, ex.owner, ex.ec.TaskID,
+		); cancelErr != nil {
+			ex.failRun(fmt.Errorf("failed to finish cancellation for task %s: %w", ex.ec.TaskID, cancelErr))
+		} else {
+			ex.adoptCommittedCancellation()
+		}
+	} else if err != nil {
+		log.Warnf("RedisTaskManager: failed to release execution for task %s: %v", ex.ec.TaskID, err)
+	}
+	ex.live.released.Store(true)
+}
+
+// adoptCommittedCancellation publishes a CANCELED snapshot committed by a
+// concurrent no-live tasks/cancel request. It deliberately skips persistence
+// and push dispatch because both already happened in that request.
+func (ex *execution) adoptCommittedCancellation() bool {
+	task, err := ex.manager.getTaskInternal(
+		context.Background(), ex.ec.Tenant, ex.owner, ex.ec.TaskID,
+	)
+	if err != nil {
+		if !errors.Is(err, taskmanager.ErrTaskNotFoundSentinel) {
+			log.Warnf("RedisTaskManager: failed to load canceled task %s: %v", ex.ec.TaskID, err)
+		}
+		return false
+	}
+	if task.Status.State != protocol.TaskStateCanceled {
+		return false
+	}
+	ex.task = copyTask(task)
+	ex.taskTouched = true
+	event := &protocol.TaskStatusUpdateEvent{
+		TaskID: task.ID, ContextID: task.ContextID, Status: task.Status, Final: true,
+	}
+	ex.offerImmediateTask()
+	ex.broadcastWithoutPush(protocol.NewStreamResponseStatusUpdate(event))
+	return true
 }
 
 // violate logs a contract violation and, when a non-terminal task exists,
@@ -611,7 +805,7 @@ func (ex *execution) failTask(reason string) {
 			State:   protocol.TaskStateFailed,
 			Message: ex.failureStatusMessage(reason),
 		},
-	})
+	}, false)
 }
 
 // failureStatusMessage wraps a framework failure reason as an agent message
@@ -668,7 +862,13 @@ func (ex *execution) processMessageEvent(msg *protocol.Message) {
 	ex.manager.stampReplyMessage(&contextID, msg)
 	response := protocol.NewStreamResponseMessage(msg)
 	if ex.task != nil {
-		if err := ex.manager.appendTaskEvent(context.Background(), ex.ec.Tenant, ex.owner, ex.ec.TaskID, response); err != nil {
+		if err := ex.manager.appendExecutionEvent(
+			context.Background(), ex.ec.Tenant, ex.owner, ex.ec.TaskID, ex.live.runID, response,
+		); err != nil {
+			if errors.Is(err, executionlease.ErrCancelRequested) {
+				ex.live.requestCancel()
+				return
+			}
 			ex.failRun(fmt.Errorf("failed to store message event for task %s: %w", ex.ec.TaskID, err))
 			return
 		}
@@ -714,7 +914,10 @@ func (ex *execution) rollStatusMessage(message *protocol.Message) {
 // processStatusEvent applies a status update to the task (lazily creating it
 // on the first task event), persists it, and only then broadcasts it: at any
 // moment GetTask reads a state >= what the stream has delivered.
-func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
+func (ex *execution) processStatusEvent(
+	ev *protocol.TaskStatusUpdateEvent,
+	terminalCanWinCancel bool,
+) {
 	if ev.Status.State == "" || ev.Status.State == protocol.TaskStateUnspecified {
 		// A stateless status event would strand the task in a dangling
 		// non-terminal state (never TTL-collected, resubscribable forever).
@@ -748,13 +951,14 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 	}
 	var previousStatusMessage *protocol.Message
 	allowCreate := ex.task == nil
+	var nextTask *protocol.Task
 	if allowCreate {
-		ex.task = ex.newTask(ev.TaskID, ev.ContextID, status)
+		nextTask = ex.newTask(ev.TaskID, ev.ContextID, status)
 	} else {
 		previousStatusMessage = ex.task.Status.Message
-		ex.task.Status = status
+		nextTask = copyTask(ex.task)
+		nextTask.Status = status
 	}
-	ex.taskTouched = true
 	ev.Status = status
 	final := isFinalState(status.State)
 	suspended := !final && isSuspendedState(status.State)
@@ -772,43 +976,47 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 	// execution result: the mutated working copy is never returned as if it had
 	// committed successfully.
 	response := protocol.NewStreamResponseStatusUpdate(ev)
-	if err := ex.manager.commitTaskEvent(context.Background(), ex.ec.Tenant, ex.owner, ex.task, response, allowCreate); err != nil {
+	releaseLease := final || yielding
+	if final {
+		// A terminal event ends the processor's work even if its event channel is
+		// still open. Cancel before publishing the terminal snapshot so a remote
+		// tasks/cancel request that observes that snapshot cannot return before
+		// cancellation has reached the owning processor context.
+		ex.live.cancel()
+		// Redis deletes the execution record inside the commit. Publish that intent
+		// before starting the script so a concurrent sweep cannot interpret the
+		// intentional DEL as ownership loss and close the response pipe early.
+		ex.live.released.Store(true)
+	}
+	if err := ex.manager.commitExecutionTaskEvent(
+		context.Background(), ex.ec.Tenant, ex.owner, ex.live.runID, nextTask, response,
+		allowCreate, releaseLease, terminalCanWinCancel,
+	); err != nil {
+		if final {
+			ex.live.released.Store(false)
+		}
 		if yielding {
 			ex.manager.abortExecutionYield(ex.ec.Tenant, ex.owner, ex.ec.TaskID, ex.live)
+		}
+		if errors.Is(err, executionlease.ErrCancelRequested) {
+			ex.live.requestCancel()
+			return
 		}
 		ex.failRun(fmt.Errorf("failed to store task %s status %s: %w", ev.TaskID, status.State, err))
 		return
 	}
+	ex.task = nextTask
+	ex.taskTouched = true
 	ex.sendInitialTask(initial)
 	// The old status message is durably superseded only after the Task/event
 	// commit succeeds. Moving it earlier would leave failed updates reflected in
 	// conversation history while the stored Task still carried the same message.
 	ex.rollStatusMessage(previousStatusMessage)
-	if err := ex.persistInlinePushConfig(); err != nil {
-		if yielding {
-			ex.manager.abortExecutionYield(ex.ec.Tenant, ex.owner, ex.ec.TaskID, ex.live)
-		}
-		log.Errorf("RedisTaskManager: failed to persist inline push config for task %s: %v", ex.ec.TaskID, err)
-		ex.failTask("failed to persist inline push config")
+	if !ex.persistExecutionPushConfig(final, yielding) {
 		return
 	}
 	if yielding {
-		ex.yielded = true
-		// Queue automatic push before exposing the suspend state. A full bounded
-		// queue may delay publication, but a client can never observe a state it
-		// cannot yet continue. The handoff starts before enqueue so a client that
-		// polls the persisted task also waits instead of being rejected. It also
-		// serializes current-request delivery with a continuation round.
-		ex.manager.dispatchPush(ex.ec.Tenant, ex.owner, ex.ec.TaskID, response)
-		ex.offerImmediateTask()
-		ex.broadcastWithoutPush(response)
-		ex.closePipe()
-		// The suspended round no longer owns the task after publishing its
-		// final frame. Cancel its processor context before removing it from the
-		// registry: Close cannot discover the execution once the slot is released,
-		// but still waits for its drain engine to finish.
-		ex.live.cancel()
-		ex.manager.deregisterExecution(ex.ec.Tenant, ex.owner, ex.ec.TaskID, ex.live)
+		ex.finishYield(response)
 		return
 	}
 
@@ -820,6 +1028,49 @@ func (ex *execution) processStatusEvent(ev *protocol.TaskStatusUpdateEvent) {
 		// Nothing can follow a terminal frame: end the response stream here
 		// instead of trusting the MessageProcessor to close its channel promptly.
 		ex.closePipe()
+	}
+}
+
+func (ex *execution) persistExecutionPushConfig(final, yielding bool) bool {
+	err := ex.persistInlinePushConfig()
+	if err == nil {
+		return true
+	}
+	if yielding {
+		ex.manager.abortExecutionYield(ex.ec.Tenant, ex.owner, ex.ec.TaskID, ex.live)
+	}
+	if final {
+		ex.failRun(fmt.Errorf("failed to persist inline push config for terminal task %s: %w", ex.ec.TaskID, err))
+		return false
+	}
+	log.Errorf("RedisTaskManager: failed to persist inline push config for task %s: %v", ex.ec.TaskID, err)
+	ex.failTask("failed to persist inline push config")
+	return false
+}
+
+func (ex *execution) finishYield(response protocol.StreamResponse) {
+	ex.yielded = true
+	// Queue automatic push before exposing the suspend state. A full bounded
+	// queue may delay publication, but a client can never observe a state it
+	// cannot yet continue. The handoff starts before enqueue so a client that
+	// polls the persisted task also waits instead of being rejected. It also
+	// serializes current-request delivery with a continuation round.
+	ex.manager.dispatchPush(ex.ec.Tenant, ex.owner, ex.ec.TaskID, response)
+	ex.offerImmediateTask()
+	ex.broadcastWithoutPush(response)
+	ex.closePipe()
+	// Keep the distributed yielding lease until the final frame is published
+	// and the old processor has observed cancellation. A remote continuation
+	// or cancellation waits for the explicit release below.
+	ex.live.cancel()
+	ex.live.released.Store(true)
+	if err := ex.manager.executionLease.ReleaseExecution(
+		context.Background(), ex.ec.Tenant, ex.owner, ex.ec.TaskID, ex.live.runID,
+	); err != nil {
+		ex.live.released.Store(false)
+		log.Warnf("RedisTaskManager: failed to release yielded execution for task %s: %v", ex.ec.TaskID, err)
+	} else {
+		ex.manager.deregisterExecution(ex.ec.Tenant, ex.owner, ex.ec.TaskID, ex.live)
 	}
 }
 
@@ -842,25 +1093,38 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 		}
 	}
 	allowCreate := ex.task == nil
+	var nextTask *protocol.Task
 	if allowCreate {
-		ex.task = ex.newTask(ev.TaskID, ev.ContextID, protocol.TaskStatus{
+		nextTask = ex.newTask(ev.TaskID, ev.ContextID, protocol.TaskStatus{
 			State:     protocol.TaskStateSubmitted,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		})
+	} else {
+		nextTask = copyTask(ex.task)
 	}
 	var appendedAsNew bool
-	ex.task.Artifacts, appendedAsNew = protocol.AppendArtifact(ex.task.Artifacts, ev.Artifact, ev.Append != nil && *ev.Append)
+	nextTask.Artifacts, appendedAsNew = protocol.AppendArtifact(
+		nextTask.Artifacts, ev.Artifact, ev.Append != nil && *ev.Append,
+	)
 	if appendedAsNew {
 		log.Warnf("RedisTaskManager: artifact %s for task %s used append=true with no prior chunk; stored as a new artifact",
 			ev.Artifact.ArtifactID, ex.ec.TaskID)
 	}
-	ex.taskTouched = true
 	// Persist before broadcast (consistency order).
 	response := protocol.NewStreamResponseArtifactUpdate(ev)
-	if err := ex.manager.commitTaskEvent(context.Background(), ex.ec.Tenant, ex.owner, ex.task, response, allowCreate); err != nil {
+	if err := ex.manager.commitExecutionTaskEvent(
+		context.Background(), ex.ec.Tenant, ex.owner, ex.live.runID, nextTask, response,
+		allowCreate, false, false,
+	); err != nil {
+		if errors.Is(err, executionlease.ErrCancelRequested) {
+			ex.live.requestCancel()
+			return
+		}
 		ex.failRun(fmt.Errorf("failed to store task %s artifact: %w", ev.TaskID, err))
 		return
 	}
+	ex.task = nextTask
+	ex.taskTouched = true
 	ex.sendInitialTask(initial)
 	if err := ex.persistInlinePushConfig(); err != nil {
 		log.Errorf("RedisTaskManager: failed to persist inline push config for task %s: %v", ex.ec.TaskID, err)

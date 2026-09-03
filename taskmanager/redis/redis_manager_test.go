@@ -1055,10 +1055,8 @@ func TestOnCancelTaskLiveExecution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OnCancelTask failed: %v", err)
 	}
-	// The live path returns the currently stored snapshot; the terminal state
-	// is persisted by the engine when the MessageProcessor winds down.
 	if snapshot.Status.State != protocol.TaskStateWorking {
-		t.Errorf("live-cancel snapshot state = %s, want working", snapshot.Status.State)
+		t.Errorf("live-cancel snapshot state = %s, want current WORKING", snapshot.Status.State)
 	}
 
 	frame = <-ch
@@ -1078,7 +1076,62 @@ func TestOnCancelTaskLiveExecution(t *testing.T) {
 	}
 }
 
-func TestOnCancelTaskCompletedWins(t *testing.T) {
+func TestOnCancelTaskLiveUnaryExecution(t *testing.T) {
+	taskID := make(chan string, 1)
+	processor := executorFunc(func(
+		ctx context.Context, ec *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		taskID <- ec.TaskID
+		out := make(chan protocol.StreamEvent)
+		go func() {
+			defer close(out)
+			out <- statusEvent(protocol.TaskStateWorking, nil)
+			<-ctx.Done()
+		}()
+		return out, nil
+	})
+	m, _ := setupTest(t, processor, WithExpireTime(600*time.Millisecond))
+	t.Cleanup(func() { _ = m.Close() })
+
+	type sendResult struct {
+		response *protocol.SendMessageResponse
+		err      error
+	}
+	sendDone := make(chan sendResult, 1)
+	go func() {
+		response, err := m.OnSendMessage(context.Background(), sendParams("job", "ctx-unary-cancel"))
+		sendDone <- sendResult{response: response, err: err}
+	}()
+	id := <-taskID
+	waitTaskState(t, m, id, protocol.TaskStateWorking)
+
+	snapshot, err := m.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: id})
+	if err != nil {
+		t.Fatalf("OnCancelTask: %v", err)
+	}
+	if snapshot == nil || snapshot.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("cancel snapshot = %+v, want WORKING", snapshot)
+	}
+	select {
+	case got := <-sendDone:
+		if got.err != nil {
+			t.Fatalf("OnSendMessage: %v", got.err)
+		}
+		canceled := got.response.GetTask()
+		if canceled == nil || canceled.Status.State != protocol.TaskStateCanceled {
+			t.Fatalf("send response = %+v, want CANCELED Task", got.response)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocking unary send did not finish after cancellation")
+	}
+	stored, err := m.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: id})
+	if err != nil || stored.Status.State != protocol.TaskStateCanceled {
+		t.Fatalf("stored task = %+v, err=%v; want CANCELED", stored, err)
+	}
+}
+
+// TestOnCancelTaskAllowsLateCompleted verifies a racing terminal result can win cancellation.
+func TestOnCancelTaskAllowsLateCompleted(t *testing.T) {
 	processor := executorFunc(func(
 		ctx context.Context, ec *taskmanager.ExecContext,
 	) (<-chan protocol.StreamEvent, error) {
@@ -1087,8 +1140,7 @@ func TestOnCancelTaskCompletedWins(t *testing.T) {
 			defer close(out)
 			out <- statusEvent(protocol.TaskStateWorking, nil)
 			<-ctx.Done()
-			// The work actually finished first: the MessageProcessor's terminal
-			// event wins over the framework's CANCELED.
+			// A terminal event that wins the owner close-rule race is retained.
 			out <- statusEvent(protocol.TaskStateCompleted, agentReply("finished anyway"))
 		}()
 		return out, nil
@@ -1127,7 +1179,7 @@ func TestOnCancelTaskCompletedWins(t *testing.T) {
 		t.Fatalf("OnGetTask failed: %v", err)
 	}
 	if stored.Status.State != protocol.TaskStateCompleted {
-		t.Errorf("stored state = %s, want COMPLETED (processor terminal wins)", stored.Status.State)
+		t.Errorf("stored state = %s, want COMPLETED", stored.Status.State)
 	}
 }
 
