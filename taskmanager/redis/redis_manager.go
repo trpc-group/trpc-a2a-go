@@ -509,39 +509,104 @@ func (m *TaskManager) OnCancelTask(
 	if err != nil {
 		return nil, err
 	}
-	task, committed, err := m.executionLease.RequestExecutionCancel(ctx, params.Tenant, owner, params.ID)
+	var acceptedSnapshot *protocol.Task
+	intentRecorded := false
+	for {
+		task, committed, acknowledged, err := m.executionLease.RequestExecutionCancel(
+			ctx, params.Tenant, owner, params.ID,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if committed {
+			m.afterCancellationCommit(params.Tenant, owner, params.ID, task)
+			if intentRecorded {
+				return acceptedCancellationSnapshot(acceptedSnapshot, params.ID)
+			}
+			return task, nil
+		}
+		if task != nil && isFinalState(task.Status.State) {
+			if intentRecorded {
+				return acceptedCancellationSnapshot(acceptedSnapshot, params.ID)
+			}
+			return nil, taskmanager.ErrTaskNotCancelable(params.ID, task.Status.State)
+		}
+		if !intentRecorded {
+			if task != nil {
+				acceptedSnapshot = copyTask(task)
+			}
+			intentRecorded = true
+		}
+		if live := m.liveRun(params.Tenant, owner, params.ID); live != nil {
+			yieldDone, accepted := m.cancelLocalExecution(params.Tenant, owner, params.ID, live)
+			if yieldDone != nil {
+				select {
+				case <-yieldDone:
+					continue
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+			if !accepted {
+				continue
+			}
+		}
+		if acknowledged {
+			return acceptedCancellationSnapshot(acceptedSnapshot, params.ID)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func acceptedCancellationSnapshot(task *protocol.Task, taskID string) (*protocol.Task, error) {
+	if task == nil {
+		return nil, taskmanager.ErrTaskNotFound(taskID)
+	}
+	return task, nil
+}
+
+func (m *TaskManager) afterCancellationCommit(
+	tenant string,
+	owner string,
+	taskID string,
+	task *protocol.Task,
+) {
+	if err := m.ensureTaskIndexed(context.Background(), tenant, owner, taskID); err != nil {
+		log.Warnf("RedisTaskManager: failed to refresh canceled task index for task %s: %v", taskID, err)
+	}
+	if err := m.client.Expire(
+		context.Background(), pushNotificationKey(tenant, owner, taskID), m.expiration,
+	).Err(); err != nil {
+		log.Warnf("RedisTaskManager: failed to refresh canceled task push config for task %s: %v", taskID, err)
+	}
+	m.dispatchCanceledTask(newScopedID(tenant, owner, taskID), task)
+	if live := m.liveRun(tenant, owner, taskID); live != nil {
+		_, _ = m.cancelLocalExecution(tenant, owner, taskID, live)
+	}
+}
+
+func (m *TaskManager) finishReleasedCancellation(
+	tenant string,
+	owner string,
+	taskID string,
+) error {
+	canceled, committed, _, err := m.executionLease.RequestExecutionCancel(
+		context.Background(), tenant, owner, taskID,
+	)
+	if errors.Is(err, taskmanager.ErrTaskNotFoundSentinel) {
+		return nil
+	}
 	if err != nil {
-		return nil, err
+		return err
 	}
-	key := newScopedID(params.Tenant, owner, params.ID)
-	switch {
-	case committed:
-		if err := m.ensureTaskIndexed(context.Background(), params.Tenant, owner, params.ID); err != nil {
-			log.Warnf("RedisTaskManager: failed to refresh canceled task index for task %s: %v", params.ID, err)
-		}
-		if err := m.client.Expire(
-			context.Background(), pushNotificationKey(params.Tenant, owner, params.ID), m.expiration,
-		).Err(); err != nil {
-			log.Warnf("RedisTaskManager: failed to refresh canceled task push config for task %s: %v", params.ID, err)
-		}
-		m.dispatchCanceledTask(key, task)
-		if live := m.liveRun(params.Tenant, owner, params.ID); live != nil {
-			_, _ = m.cancelLocalExecution(params.Tenant, owner, params.ID, live)
-		}
-		return task, nil
-	case task == nil:
-		if live := m.liveRun(params.Tenant, owner, params.ID); live != nil {
-			_, _ = m.cancelLocalExecution(params.Tenant, owner, params.ID, live)
-		}
-		return nil, taskmanager.ErrTaskNotFound(params.ID)
-	case !isFinalState(task.Status.State):
-		if live := m.liveRun(params.Tenant, owner, params.ID); live != nil {
-			_, _ = m.cancelLocalExecution(params.Tenant, owner, params.ID, live)
-		}
-		return task, nil
-	default:
-		return nil, taskmanager.ErrTaskNotCancelable(params.ID, task.Status.State)
+	if committed {
+		m.afterCancellationCommit(tenant, owner, taskID, canceled)
 	}
+	return nil
 }
 
 // OnPushNotificationSet handles tasks/pushNotificationConfig/set requests.
@@ -1249,12 +1314,13 @@ func (m *TaskManager) commitExecutionTaskEvent(
 	event protocol.StreamResponse,
 	allowCreate bool,
 	release bool,
+	terminalCanWinCancel bool,
 ) error {
 	if err := m.ensureTaskIndexed(ctx, tenant, owner, task.ID); err != nil {
 		return err
 	}
 	if err := m.executionLease.CommitExecutionTaskEvent(
-		ctx, tenant, owner, runID, task, event, allowCreate, release,
+		ctx, tenant, owner, runID, task, event, allowCreate, release, terminalCanWinCancel,
 	); err != nil {
 		return err
 	}
@@ -1360,9 +1426,16 @@ func (m *TaskManager) registerExecution(
 // undoes registerExecution's registration and engine count.
 func (m *TaskManager) releaseExecution(tenant, owner, taskID string, live *liveExecution) {
 	if live.runID != "" && !live.released.Load() {
-		if err := m.executionLease.ReleaseExecution(
+		err := m.executionLease.ReleaseExecution(
 			context.Background(), tenant, owner, taskID, live.runID,
-		); err != nil {
+		)
+		if errors.Is(err, executionlease.ErrCancelRequested) {
+			live.requestCancel()
+			m.markProcessorReady(tenant, owner, taskID, live)
+			if cancelErr := m.finishReleasedCancellation(tenant, owner, taskID); cancelErr != nil {
+				log.Warnf("RedisTaskManager: failed to finish cancellation for task %s: %v", taskID, cancelErr)
+			}
+		} else if err != nil {
 			log.Warnf("RedisTaskManager: failed to release execution for task %s: %v", taskID, err)
 		}
 		live.released.Store(true)
@@ -1391,9 +1464,46 @@ func (m *TaskManager) cancelLocalExecution(
 		return yieldDone, false
 	}
 	live.cancelRequested.Store(true)
-	m.cancelMu.Unlock()
 	live.cancel()
+	acknowledge := live.processorReady
+	m.cancelMu.Unlock()
+	if acknowledge {
+		m.acknowledgeExecutionCancel(tenant, owner, taskID, live)
+	}
 	return nil, true
+}
+
+// markProcessorReady closes the cancellation admission handshake after
+// ProcessMessage has returned, or after admission has decided not to call it.
+func (m *TaskManager) markProcessorReady(
+	tenant string,
+	owner string,
+	taskID string,
+	live *liveExecution,
+) bool {
+	key := newScopedID(tenant, owner, taskID)
+	m.cancelMu.Lock()
+	live.processorReady = true
+	canceled := live.cancelRequested.Load()
+	registered := m.executions[key] == live
+	m.cancelMu.Unlock()
+	if canceled && registered {
+		m.acknowledgeExecutionCancel(tenant, owner, taskID, live)
+	}
+	return canceled
+}
+
+func (m *TaskManager) acknowledgeExecutionCancel(
+	tenant string,
+	owner string,
+	taskID string,
+	live *liveExecution,
+) {
+	if err := m.executionLease.AcknowledgeExecutionCancel(
+		context.Background(), tenant, owner, taskID, live.runID,
+	); err != nil {
+		log.Warnf("RedisTaskManager: failed to acknowledge cancellation for task %s: %v", taskID, err)
+	}
 }
 
 // liveRun returns the task's currently registered execution handle, if any.

@@ -84,6 +84,7 @@ redis.call('HSET', KEYS[2],
     'run_id', ARGV[1],
     'lease_until_ms', now_ms + tonumber(ARGV[2]),
     'cancel_requested', '0',
+    'cancel_acknowledged', '0',
     'yielding', '0')
 redis.call('PEXPIRE', KEYS[2], ARGV[3])
 return {1, task or ''}
@@ -126,12 +127,34 @@ return {1, 0}
 // KEYS[1] execution record (hash)
 // ARGV[1] run_id
 //
-// Returns 1 if deleted, 0 if the caller is not the current owner.
+// Returns 1 if released, 0 if the caller is not the current owner, and 2 when
+// a pending cancellation was preserved for the no-live cancellation path.
 var releaseExecutionScript = redisclient.NewScript(`
 if redis.call('HGET', KEYS[1], 'run_id') ~= ARGV[1] then
     return 0
 end
+if redis.call('HGET', KEYS[1], 'cancel_requested') == '1' then
+    redis.call('HSET', KEYS[1],
+        'lease_until_ms', '0',
+        'cancel_acknowledged', '1',
+        'yielding', '0')
+    return 2
+end
 redis.call('DEL', KEYS[1])
+return 1
+`)
+
+// acknowledgeExecutionCancelScript records that the owner has canceled its
+// local processor context and crossed the processor admission boundary.
+var acknowledgeExecutionCancelScript = redisclient.NewScript(`
+if redis.call('HGET', KEYS[1], 'run_id') ~= ARGV[1] then
+    return 0
+end
+if redis.call('HGET', KEYS[1], 'cancel_requested') ~= '1' then
+    return 0
+end
+redis.call('HSET', KEYS[1], 'cancel_acknowledged', '1')
+redis.call('PEXPIRE', KEYS[1], ARGV[2])
 return 1
 `)
 
@@ -151,8 +174,9 @@ return 1
 // ARGV[8] execution key TTL (ms)
 // ARGV[9] lease duration (ms)
 //
-// Returns {code, task[, event_id]}: 1 intent only, 2 committed, 3 not
-// cancelable, 4 not found, 5 CAS mismatch, 6 suspend handoff in progress.
+// Returns {code, task[, event_id]}: 1 intent acknowledged, 2 committed, 3 not
+// cancelable, 4 not found, 5 CAS mismatch, 6 suspend handoff in progress, and
+// 7 intent recorded but not yet acknowledged by the owner.
 var requestExecutionCancelScript = redisclient.NewScript(`
 local task_type = redis.call('TYPE', KEYS[1]).ok
 if task_type ~= 'none' and task_type ~= 'string' then
@@ -185,12 +209,19 @@ if active and redis.call('HGET', KEYS[4], 'yielding') == '1' then
 end
 if not task then
     if active then
-        redis.call('HSET', KEYS[4],
-            'cancel_requested', '1',
-            'lease_until_ms', now_ms + tonumber(ARGV[9]))
-        redis.call('PEXPIRE', KEYS[4], ARGV[8])
-        return {1, ''}
+        if redis.call('HGET', KEYS[4], 'cancel_requested') ~= '1' then
+            redis.call('HSET', KEYS[4],
+                'cancel_requested', '1',
+                'cancel_acknowledged', '0',
+                'lease_until_ms', now_ms + tonumber(ARGV[9]))
+            redis.call('PEXPIRE', KEYS[4], ARGV[8])
+        end
+        if redis.call('HGET', KEYS[4], 'cancel_acknowledged') == '1' then
+            return {1, ''}
+        end
+        return {7, ''}
     end
+    redis.call('DEL', KEYS[4])
     return {4, ''}
 end
 local decoded = cjson.decode(task)
@@ -200,11 +231,17 @@ if state == 'TASK_STATE_COMPLETED' or state == 'TASK_STATE_FAILED' or
     return {3, task}
 end
 if active then
-    redis.call('HSET', KEYS[4],
-        'cancel_requested', '1',
-        'lease_until_ms', now_ms + tonumber(ARGV[9]))
-    redis.call('PEXPIRE', KEYS[4], ARGV[8])
-    return {1, task}
+    if redis.call('HGET', KEYS[4], 'cancel_requested') ~= '1' then
+        redis.call('HSET', KEYS[4],
+            'cancel_requested', '1',
+            'cancel_acknowledged', '0',
+            'lease_until_ms', now_ms + tonumber(ARGV[9]))
+        redis.call('PEXPIRE', KEYS[4], ARGV[8])
+    end
+    if redis.call('HGET', KEYS[4], 'cancel_acknowledged') == '1' then
+        return {1, task}
+    end
+    return {7, task}
 end
 if task ~= ARGV[1] then
     return {5, task}
@@ -268,11 +305,11 @@ func (t *redisTaskEventTransport) AcquireExecution(
 func (t *redisTaskEventTransport) RequestExecutionCancel(
 	ctx context.Context,
 	tenant, owner, taskID string,
-) (*protocol.Task, bool, error) {
+) (*protocol.Task, bool, bool, error) {
 	operationID := "cancel-" + protocol.GenerateMessageID()
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, false, err
+			return nil, false, false, err
 		}
 		currentBytes, err := t.client.Get(ctx, taskKey(tenant, owner, taskID)).Bytes()
 		if errors.Is(err, redisclient.Nil) {
@@ -282,12 +319,12 @@ func (t *redisTaskEventTransport) RequestExecutionCancel(
 			err = nil
 		}
 		if err != nil {
-			return nil, false, fmt.Errorf("load task %s for cancellation: %w", taskID, err)
+			return nil, false, false, fmt.Errorf("load task %s for cancellation: %w", taskID, err)
 		}
 
 		canceledBytes, eventBytes, err := encodeCanceledTaskEvent(currentBytes, taskID)
 		if err != nil {
-			return nil, false, err
+			return nil, false, false, err
 		}
 
 		values, err := requestExecutionCancelScript.Run(
@@ -310,45 +347,63 @@ func (t *redisTaskEventTransport) RequestExecutionCancel(
 			t.executionLeaseDuration.Milliseconds(),
 		).Slice()
 		if err != nil {
-			return nil, false, fmt.Errorf("request cancellation for task %s: %w", taskID, err)
+			return nil, false, false, fmt.Errorf("request cancellation for task %s: %w", taskID, err)
 		}
 		if len(values) < 2 {
-			return nil, false, fmt.Errorf("request cancellation for task %s: invalid result", taskID)
+			return nil, false, false, fmt.Errorf("request cancellation for task %s: invalid result", taskID)
 		}
 		code, ok := values[0].(int64)
 		if !ok {
-			return nil, false, fmt.Errorf("request cancellation for task %s: invalid result code", taskID)
+			return nil, false, false, fmt.Errorf("request cancellation for task %s: invalid result code", taskID)
 		}
 		if code == 5 {
 			continue
 		}
 		if code == 4 {
-			return nil, false, taskmanager.ErrTaskNotFound(taskID)
+			return nil, false, false, taskmanager.ErrTaskNotFound(taskID)
 		}
 		resultTask, err := decodeOptionalExecutionTask(values[1])
 		if err != nil {
-			return nil, false, fmt.Errorf("request cancellation for task %s: %w", taskID, err)
+			return nil, false, false, fmt.Errorf("request cancellation for task %s: %w", taskID, err)
 		}
 		switch code {
 		case 1:
-			return resultTask, false, nil
+			return resultTask, false, true, nil
 		case 2:
-			return resultTask, true, nil
+			return resultTask, true, true, nil
 		case 3:
-			return resultTask, false, nil
+			return resultTask, false, false, nil
 		case 6:
 			select {
 			case <-ctx.Done():
-				return nil, false, fmt.Errorf("request cancellation for task %s: %w", taskID, ctx.Err())
+				return nil, false, false, fmt.Errorf("request cancellation for task %s: %w", taskID, ctx.Err())
 			case <-time.After(10 * time.Millisecond):
 			}
 			continue
+		case 7:
+			return resultTask, false, false, nil
 		default:
-			return nil, false, fmt.Errorf(
+			return nil, false, false, fmt.Errorf(
 				"request cancellation for task %s: unknown result code %d", taskID, code,
 			)
 		}
 	}
+}
+
+func (t *redisTaskEventTransport) AcknowledgeExecutionCancel(
+	ctx context.Context,
+	tenant, owner, taskID, runID string,
+) error {
+	if _, err := acknowledgeExecutionCancelScript.Run(
+		ctx,
+		t.client,
+		[]string{executionKey(tenant, owner, taskID)},
+		runID,
+		t.executionRetention.Milliseconds(),
+	).Result(); err != nil {
+		return fmt.Errorf("acknowledge cancellation for task %s: %w", taskID, err)
+	}
+	return nil
 }
 
 func encodeCanceledTaskEvent(currentBytes []byte, taskID string) ([]byte, []byte, error) {
@@ -412,13 +467,17 @@ func (t *redisTaskEventTransport) ReleaseExecution(
 	ctx context.Context,
 	tenant, owner, taskID, runID string,
 ) error {
-	if _, err := releaseExecutionScript.Run(
+	result, err := releaseExecutionScript.Run(
 		ctx,
 		t.client,
 		[]string{executionKey(tenant, owner, taskID)},
 		runID,
-	).Result(); err != nil {
+	).Int()
+	if err != nil {
 		return fmt.Errorf("release execution for task %s: %w", taskID, err)
+	}
+	if result == 2 {
+		return fmt.Errorf("release execution for task %s: %w", taskID, executionlease.ErrCancelRequested)
 	}
 	return nil
 }
@@ -489,7 +548,7 @@ func (m *TaskManager) sweepExecutions() {
 	m.cancelMu.RLock()
 	liveRuns := make([]scopedLiveExecution, 0, len(m.executions))
 	for key, live := range m.executions {
-		if live.runID != "" && !live.released.Load() {
+		if live.runID != "" {
 			liveRuns = append(liveRuns, scopedLiveExecution{key: key, live: live})
 		}
 	}
@@ -593,6 +652,8 @@ func (m *TaskManager) finishCanceledAdmission(
 	taskID string,
 	live *liveExecution,
 ) error {
+	live.requestCancel()
+	m.markProcessorReady(tenant, owner, taskID, live)
 	stored, err := m.getTaskInternal(context.Background(), tenant, owner, taskID)
 	if err != nil {
 		m.releaseExecution(tenant, owner, taskID, live)
@@ -611,11 +672,10 @@ func (m *TaskManager) finishCanceledAdmission(
 	event := &protocol.TaskStatusUpdateEvent{
 		TaskID: canceled.ID, ContextID: canceled.ContextID, Status: canceled.Status, Final: true,
 	}
-	live.requestCancel()
 	live.released.Store(true)
 	if err := m.commitExecutionTaskEvent(
 		context.Background(), tenant, owner, live.runID, canceled,
-		protocol.NewStreamResponseStatusUpdate(event), false, true,
+		protocol.NewStreamResponseStatusUpdate(event), false, true, false,
 	); err != nil {
 		live.released.Store(false)
 		m.releaseExecution(tenant, owner, taskID, live)

@@ -125,8 +125,11 @@ if ARGV[8] ~= '' then
     local next_terminal = next_state == 'TASK_STATE_COMPLETED' or
         next_state == 'TASK_STATE_FAILED' or next_state == 'TASK_STATE_CANCELED' or
         next_state == 'TASK_STATE_REJECTED'
-    if redis.call('HGET', KEYS[4], 'cancel_requested') == '1' and not next_terminal then
-        return redis.error_reply('EXECUTION_CANCEL_REQUESTED')
+    if redis.call('HGET', KEYS[4], 'cancel_requested') == '1' then
+        local cancel_terminal = next_state == 'TASK_STATE_CANCELED'
+        if not cancel_terminal and (not next_terminal or ARGV[12] ~= '1') then
+            return redis.error_reply('EXECUTION_CANCEL_REQUESTED')
+        end
     end
     local current_task = redis.call('GET', KEYS[1])
     if current_task then
@@ -359,7 +362,7 @@ func (t *redisTaskEventTransport) commitTaskEventWithOperationID(
 	operationID string,
 ) error {
 	return t.commitTaskEventWithLease(
-		ctx, tenant, owner, task, event, allowCreate, operationID, "", false,
+		ctx, tenant, owner, task, event, allowCreate, operationID, "", false, false,
 	)
 }
 
@@ -373,6 +376,7 @@ func (t *redisTaskEventTransport) commitTaskEventWithLease(
 	operationID string,
 	runID string,
 	release bool,
+	terminalCanWinCancel bool,
 ) error {
 	taskBytes, err := json.Marshal(task)
 	if err != nil {
@@ -389,6 +393,10 @@ func (t *redisTaskEventTransport) commitTaskEventWithLease(
 	releaseFlag := 0
 	if release {
 		releaseFlag = 1
+	}
+	terminalCanWinCancelFlag := 0
+	if terminalCanWinCancel {
+		terminalCanWinCancelFlag = 1
 	}
 	if _, err := commitTaskEventScript.Run(
 		ctx,
@@ -410,6 +418,7 @@ func (t *redisTaskEventTransport) commitTaskEventWithLease(
 		t.executionLeaseDuration.Milliseconds(),
 		releaseFlag,
 		t.executionRetention.Milliseconds(),
+		terminalCanWinCancelFlag,
 	).Result(); err != nil {
 		return fmt.Errorf("failed to store task and event: %w", mapExecutionScriptError(err))
 	}
@@ -424,10 +433,11 @@ func (t *redisTaskEventTransport) CommitExecutionTaskEvent(
 	event protocol.StreamResponse,
 	allowCreate bool,
 	release bool,
+	terminalCanWinCancel bool,
 ) error {
 	return t.commitTaskEventWithLease(
 		ctx, tenant, owner, task, event, allowCreate,
-		"op-"+protocol.GenerateMessageID(), runID, release,
+		"op-"+protocol.GenerateMessageID(), runID, release, terminalCanWinCancel,
 	)
 }
 

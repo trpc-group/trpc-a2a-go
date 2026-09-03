@@ -18,8 +18,8 @@ import (
 var (
 	// ErrStale means the caller no longer owns the execution lease.
 	ErrStale = errors.New("execution lease is stale")
-	// ErrCancelRequested means a cancel request fenced non-terminal writes from
-	// the current execution; its close rule may still persist a terminal Task.
+	// ErrCancelRequested means a cancel request fenced a write from the current
+	// execution; its close rule should persist a CANCELED Task.
 	ErrCancelRequested = errors.New("execution cancellation requested")
 )
 
@@ -33,7 +33,11 @@ type Backend interface {
 	RequestExecutionCancel(
 		ctx context.Context,
 		tenant, owner, taskID string,
-	) (task *protocol.Task, committed bool, err error)
+	) (task *protocol.Task, committed bool, acknowledged bool, err error)
+	AcknowledgeExecutionCancel(
+		ctx context.Context,
+		tenant, owner, taskID, runID string,
+	) error
 	CheckAndRenewExecution(
 		ctx context.Context,
 		tenant, owner, taskID, runID string,
@@ -50,6 +54,7 @@ type Backend interface {
 		event protocol.StreamResponse,
 		allowCreate bool,
 		release bool,
+		terminalCanWinCancel bool,
 	) error
 	AppendExecutionEvent(
 		ctx context.Context,

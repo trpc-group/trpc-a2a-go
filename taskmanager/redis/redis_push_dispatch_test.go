@@ -9,6 +9,7 @@ package redis
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -732,6 +733,68 @@ func TestRedisInlinePushConfigWrongTypeFailsSuspendedTask(t *testing.T) {
 		context.Background(), executionKey("", "", id),
 	).Result(); err != nil || exists != 0 {
 		t.Fatalf("execution lease after failure: exists=%d err=%v, want absent", exists, err)
+	}
+}
+
+func TestRedisInlinePushConfigWrongTypeTerminalFirstReturnsError(t *testing.T) {
+	taskID := make(chan string, 1)
+	emit := make(chan struct{})
+	processor := executorFunc(func(
+		_ context.Context, ec *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		taskID <- ec.TaskID
+		out := make(chan protocol.StreamEvent, 1)
+		go func() {
+			<-emit
+			out <- statusEvent(protocol.TaskStateCompleted, nil)
+			close(out)
+		}()
+		return out, nil
+	})
+	manager, _ := setupTest(t, processor, WithPushNotifications(push.Config{ManualDelivery: true}))
+	t.Cleanup(func() { _ = manager.Close() })
+
+	params := sendParams("start", "ctx-terminal-push-wrongtype")
+	params.Configuration = &protocol.SendMessageConfiguration{PushConfig: &protocol.TaskPushNotificationConfig{
+		ID:  "inline-hook",
+		URL: "https://example.com/hook",
+	}}
+	type sendResult struct {
+		response *protocol.SendMessageResponse
+		err      error
+	}
+	result := make(chan sendResult, 1)
+	go func() {
+		response, err := manager.OnSendMessage(context.Background(), params)
+		result <- sendResult{response: response, err: err}
+	}()
+	id := <-taskID
+	if err := manager.client.Set(
+		context.Background(), pushNotificationKey("", "", id), "wrong-type", 0,
+	).Err(); err != nil {
+		t.Fatalf("seed push config wrong type: %v", err)
+	}
+	close(emit)
+
+	select {
+	case got := <-result:
+		if got.err == nil || got.response != nil {
+			t.Fatalf("OnSendMessage = (%+v, %v), want execution error", got.response, got.err)
+		}
+		if !strings.Contains(got.err.Error(), "failed to persist inline push config for terminal task") {
+			t.Fatalf("OnSendMessage error = %v", got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnSendMessage did not surface terminal inline push failure")
+	}
+	stored, err := manager.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: id})
+	if err != nil || stored.Status.State != protocol.TaskStateCompleted {
+		t.Fatalf("stored task = %+v, err=%v; want committed COMPLETED", stored, err)
+	}
+	if exists, err := manager.client.Exists(
+		context.Background(), executionKey("", "", id),
+	).Result(); err != nil || exists != 0 {
+		t.Fatalf("execution lease after terminal failure: exists=%d err=%v, want absent", exists, err)
 	}
 }
 

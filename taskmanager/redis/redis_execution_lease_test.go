@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -53,6 +54,24 @@ type blockingRenewBackend struct {
 	max     int
 }
 
+type blockingIndexClient struct {
+	redisclient.UniversalClient
+	entered chan struct{}
+	resume  chan struct{}
+	blocked atomic.Bool
+}
+
+func (c *blockingIndexClient) TxPipelined(
+	ctx context.Context,
+	fn func(redisclient.Pipeliner) error,
+) ([]redisclient.Cmder, error) {
+	if c.blocked.CompareAndSwap(false, true) {
+		close(c.entered)
+		<-c.resume
+	}
+	return c.UniversalClient.TxPipelined(ctx, fn)
+}
+
 // CheckAndRenewExecution blocks so the test can observe sweep parallelism.
 func (b *blockingRenewBackend) CheckAndRenewExecution(
 	context.Context, string, string, string, string,
@@ -80,9 +99,10 @@ func (b *blockingReleaseBackend) CommitExecutionTaskEvent(
 	event protocol.StreamResponse,
 	allowCreate bool,
 	release bool,
+	terminalCanWinCancel bool,
 ) error {
 	err := b.Backend.CommitExecutionTaskEvent(
-		ctx, tenant, owner, runID, task, event, allowCreate, release,
+		ctx, tenant, owner, runID, task, event, allowCreate, release, terminalCanWinCancel,
 	)
 	if err == nil && release {
 		b.once.Do(func() {
@@ -129,12 +149,12 @@ func TestExecutionLeaseSingleWriterAndStaleCommitFence(t *testing.T) {
 	}
 	response := protocol.NewStreamResponseStatusUpdate(event)
 	if err := manager.commitExecutionTaskEvent(
-		ctx, "", "", "run-1", task, response, true, false,
+		ctx, "", "", "run-1", task, response, true, false, false,
 	); !errors.Is(err, executionlease.ErrStale) {
 		t.Fatalf("stale CommitExecutionTaskEvent error = %v, want stale", err)
 	}
 	if err := manager.commitExecutionTaskEvent(
-		ctx, "", "", "run-2", task, response, true, false,
+		ctx, "", "", "run-2", task, response, true, false, false,
 	); err != nil {
 		t.Fatalf("owner CommitExecutionTaskEvent: %v", err)
 	}
@@ -176,7 +196,7 @@ func TestExecutionCancelRecordsIntentAcrossRacingTaskUpdate(t *testing.T) {
 			}
 			commitErr = manager.commitExecutionTaskEvent(
 				ctx, "", "", runID, &updated,
-				protocol.NewStreamResponseStatusUpdate(event), false, false,
+				protocol.NewStreamResponseStatusUpdate(event), false, false, false,
 			)
 			if commitErr == nil {
 				commits++
@@ -184,7 +204,7 @@ func TestExecutionCancelRecordsIntentAcrossRacingTaskUpdate(t *testing.T) {
 		},
 	}
 
-	snapshot, committed, err := wrapped.RequestExecutionCancel(ctx, "", "", task.ID)
+	snapshot, committed, _, err := wrapped.RequestExecutionCancel(ctx, "", "", task.ID)
 	if err != nil {
 		t.Fatalf("RequestExecutionCancel: %v", err)
 	}
@@ -276,7 +296,7 @@ func TestExecutionCancelRecordsIntentAndLateTerminalWins(t *testing.T) {
 	); err != nil || !acquired {
 		t.Fatalf("AcquireExecution = (%v, %v), want acquired", acquired, err)
 	}
-	snapshot, committed, err := manager.executionLease.RequestExecutionCancel(
+	snapshot, committed, _, err := manager.executionLease.RequestExecutionCancel(
 		ctx, "", "", task.ID,
 	)
 	if err != nil || committed {
@@ -292,7 +312,7 @@ func TestExecutionCancelRecordsIntentAndLateTerminalWins(t *testing.T) {
 	}
 	if err := manager.commitExecutionTaskEvent(
 		ctx, "", "", "run-owner", task,
-		protocol.NewStreamResponseStatusUpdate(event), false, false,
+		protocol.NewStreamResponseStatusUpdate(event), false, false, false,
 	); !errors.Is(err, executionlease.ErrCancelRequested) {
 		t.Fatalf("non-terminal owner write after cancel error = %v, want cancel requested", err)
 	}
@@ -302,7 +322,7 @@ func TestExecutionCancelRecordsIntentAndLateTerminalWins(t *testing.T) {
 	event.Final = true
 	if err := manager.commitExecutionTaskEvent(
 		ctx, "", "", "run-owner", task,
-		protocol.NewStreamResponseStatusUpdate(event), false, true,
+		protocol.NewStreamResponseStatusUpdate(event), false, true, true,
 	); err != nil {
 		t.Fatalf("late terminal owner write after cancel: %v", err)
 	}
@@ -319,6 +339,37 @@ func TestExecutionCancelRecordsIntentAndLateTerminalWins(t *testing.T) {
 			"AcquireExecution after cancel = (%+v, %v, %v, %v), want terminal COMPLETED",
 			terminal, acquired, pending, err,
 		)
+	}
+}
+
+func TestExecutionCancelRequiresOwnerAcknowledgement(t *testing.T) {
+	manager, _ := setupTest(t, scriptedExecutor())
+	t.Cleanup(func() { _ = manager.Close() })
+	ctx := context.Background()
+	task := storedTask(t, manager, "task-cancel-ack", "ctx-cancel-ack", protocol.TaskStateWorking)
+	if _, acquired, _, err := manager.executionLease.AcquireExecution(
+		ctx, "", "", task.ID, "run-owner",
+	); err != nil || !acquired {
+		t.Fatalf("AcquireExecution = (%v, %v), want acquired", acquired, err)
+	}
+
+	snapshot, committed, acknowledged, err := manager.executionLease.RequestExecutionCancel(
+		ctx, "", "", task.ID,
+	)
+	if err != nil || committed || acknowledged {
+		t.Fatalf("first cancel = (%+v, %v, %v, %v), want pending intent", snapshot, committed, acknowledged, err)
+	}
+	if err := manager.executionLease.AcknowledgeExecutionCancel(
+		ctx, "", "", task.ID, "run-owner",
+	); err != nil {
+		t.Fatalf("AcknowledgeExecutionCancel: %v", err)
+	}
+	snapshot, committed, acknowledged, err = manager.executionLease.RequestExecutionCancel(
+		ctx, "", "", task.ID,
+	)
+	if err != nil || committed || !acknowledged || snapshot == nil ||
+		snapshot.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("acknowledged cancel = (%+v, %v, %v, %v), want acknowledged WORKING", snapshot, committed, acknowledged, err)
 	}
 }
 
@@ -416,5 +467,95 @@ func TestReleaseCommitDoesNotRaceLeaseSweep(t *testing.T) {
 				t.Fatal("stream remained open after release frame")
 			}
 		})
+	}
+}
+
+// TestTerminalPreparationKeepsRenewing verifies that cross-slot index work
+// before the fenced terminal commit does not open a takeover window.
+func TestTerminalPreparationKeepsRenewing(t *testing.T) {
+	emitTerminal := make(chan struct{})
+	processor := executorFunc(func(
+		_ context.Context, _ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent)
+		go func() {
+			defer close(out)
+			out <- statusEvent(protocol.TaskStateWorking, nil)
+			<-emitTerminal
+			out <- statusEvent(protocol.TaskStateCompleted, nil)
+		}()
+		return out, nil
+	})
+	manager, redisServer := setupTest(t, processor, WithExpireTime(600*time.Millisecond))
+	manager.controlCancel()
+	manager.controlWg.Wait()
+	manager.controlCtx, manager.controlCancel = context.WithCancel(context.Background())
+	t.Cleanup(func() { _ = manager.Close() })
+	baseTime := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	redisServer.SetTime(baseTime)
+
+	stream, err := manager.OnSendMessageStream(context.Background(), sendParams("start", "ctx-terminal-renew"))
+	if err != nil {
+		t.Fatalf("OnSendMessageStream: %v", err)
+	}
+	initial := recvEvent(t, stream)
+	if initial.GetTask() == nil {
+		t.Fatalf("initial frame = %+v, want Task", initial.Result)
+	}
+	workingFrame := recvEvent(t, stream)
+	working := workingFrame.GetStatusUpdate()
+	if working == nil || working.Status.State != protocol.TaskStateWorking {
+		t.Fatalf("working frame = %+v", working)
+	}
+
+	blocked := &blockingIndexClient{
+		UniversalClient: manager.client,
+		entered:         make(chan struct{}),
+		resume:          make(chan struct{}),
+	}
+	manager.client = blocked
+	var resumeOnce sync.Once
+	resume := func() { resumeOnce.Do(func() { close(blocked.resume) }) }
+	t.Cleanup(resume)
+	close(emitTerminal)
+	select {
+	case <-blocked.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal event did not block before the fenced commit")
+	}
+
+	redisServer.SetTime(baseTime.Add(200 * time.Millisecond))
+	manager.sweepExecutions()
+	redisServer.SetTime(baseTime.Add(400 * time.Millisecond))
+
+	otherClient := redisclient.NewClient(&redisclient.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = otherClient.Close() })
+	other, err := NewTaskManager(scriptedExecutor(), otherClient, WithExpireTime(600*time.Millisecond))
+	if err != nil {
+		t.Fatalf("second NewTaskManager: %v", err)
+	}
+	t.Cleanup(func() { _ = other.Close() })
+	_, acquired, _, err := other.executionLease.AcquireExecution(
+		context.Background(), "", "", working.TaskID, "run-takeover",
+	)
+	if err != nil {
+		t.Fatalf("second AcquireExecution: %v", err)
+	}
+	if acquired {
+		t.Fatal("second node acquired while terminal event was still pre-commit")
+	}
+
+	resume()
+	completedFrame := recvEvent(t, stream)
+	completed := completedFrame.GetStatusUpdate()
+	if completed == nil || completed.Status.State != protocol.TaskStateCompleted {
+		t.Fatalf("terminal frame = %+v, want COMPLETED", completed)
+	}
+	if _, ok := <-stream; ok {
+		t.Fatal("stream remained open after terminal frame")
+	}
+	stored, err := manager.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: working.TaskID})
+	if err != nil || stored.Status.State != protocol.TaskStateCompleted {
+		t.Fatalf("stored task = %+v, err=%v; want COMPLETED", stored, err)
 	}
 }
