@@ -411,6 +411,29 @@ func (m *TaskManager) prepareExecution(
 		}
 		processorEC.PushConfig = &pushConfig
 	}
+
+	// Recheck distributed ownership after all Redis-backed admission work and
+	// immediately before entering user code. A remote cancellation may have
+	// committed after the earlier acquire/register check; in that case the
+	// processor must never start.
+	leaseCheckStarted = time.Now()
+	owned, canceled, err = m.executionLease.CheckAndRenewExecution(
+		context.Background(), request.Tenant, owner, taskID, ex.live.runID,
+	)
+	if err != nil || !owned {
+		m.releaseExecution(request.Tenant, owner, taskID, ex.live)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		return nil, executionlease.ErrStale
+	}
+	ex.live.leaseUntilMillis.Store(leaseCheckStarted.Add(m.executionLeaseDuration).UnixMilli())
+	if canceled {
+		err := m.finishCanceledAdmission(request.Tenant, owner, taskID, ex.live)
+		cancel()
+		return nil, err
+	}
 	events, err := m.processor.ProcessMessage(execCtx, &processorEC)
 	if err != nil {
 		m.releaseExecution(request.Tenant, owner, taskID, ex.live)

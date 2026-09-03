@@ -434,6 +434,100 @@ func TestCrossNode_CancelActiveExecutionStopsOwnerAndFencesLateEvent(t *testing.
 	}
 }
 
+// TestCrossNode_CancelDuringAdmissionPreventsProcessorStart verifies that a
+// remote cancellation committed during continuation preparation prevents the
+// owner from entering user processor code.
+func TestCrossNode_CancelDuringAdmissionPreventsProcessorStart(t *testing.T) {
+	var processorCalls atomic.Int32
+	continuationInvoked := make(chan error, 1)
+	processor := executorFunc(func(
+		ctx context.Context, _ *taskmanager.ExecContext,
+	) (<-chan protocol.StreamEvent, error) {
+		out := make(chan protocol.StreamEvent, 1)
+		if processorCalls.Add(1) == 1 {
+			out <- statusEvent(protocol.TaskStateInputRequired, nil)
+		} else {
+			continuationInvoked <- ctx.Err()
+			out <- statusEvent(protocol.TaskStateCompleted, nil)
+		}
+		close(out)
+		return out, nil
+	})
+	nodeA, nodeB := twoNodeManagers(t, processor)
+
+	seed, err := nodeA.OnSendMessage(context.Background(), sendParams("seed", "ctx-admission-cancel"))
+	if err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	task := seed.GetTask()
+	if task == nil || task.Status.State != protocol.TaskStateInputRequired {
+		t.Fatalf("seed response = %+v, want INPUT_REQUIRED Task", seed)
+	}
+
+	// Pause after continuation history has been read. AcquireExecution and the
+	// first CheckAndRenewExecution have completed, but ProcessMessage has not.
+	hook := &blockAfterCommandHook{
+		name:    "lrange",
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseHook := func() { releaseOnce.Do(func() { close(hook.release) }) }
+	t.Cleanup(releaseHook)
+	nodeA.client.AddHook(hook)
+
+	result := make(chan error, 1)
+	go func() {
+		params := sendParams("continue", task.ContextID)
+		params.Message.TaskID = &task.ID
+		_, err := nodeA.OnSendMessage(context.Background(), params)
+		result <- err
+	}()
+	select {
+	case <-hook.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("continuation did not reach the admission history read")
+	}
+
+	canceled, err := nodeB.OnCancelTask(context.Background(), protocol.TaskIDParams{ID: task.ID})
+	if err != nil {
+		t.Fatalf("remote OnCancelTask: %v", err)
+	}
+	if canceled.Status.State != protocol.TaskStateCanceled {
+		t.Fatalf("remote cancel state = %s, want CANCELED", canceled.Status.State)
+	}
+	releaseHook()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, taskmanager.ErrInvalidParamsSentinel) {
+			t.Fatalf("continuation error = %v, want invalid params", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("continuation did not return after remote cancellation")
+	}
+	select {
+	case ctxErr := <-continuationInvoked:
+		t.Fatalf("processor started after cancellation committed; ctx.Err=%v", ctxErr)
+	default:
+	}
+	if got := processorCalls.Load(); got != 1 {
+		t.Fatalf("processor calls = %d, want only the seed round", got)
+	}
+	if live := nodeA.liveRun("", "", task.ID); live != nil {
+		t.Fatal("canceled admission left a local execution registered")
+	}
+	if exists, err := nodeA.client.Exists(
+		context.Background(), executionKey("", "", task.ID),
+	).Result(); err != nil || exists != 0 {
+		t.Fatalf("canceled admission execution lease: exists=%d err=%v, want absent", exists, err)
+	}
+	stored, err := nodeA.OnGetTask(context.Background(), protocol.TaskQueryParams{ID: task.ID})
+	if err != nil || stored.Status.State != protocol.TaskStateCanceled {
+		t.Fatalf("stored task after canceled admission = %+v, err=%v; want CANCELED", stored, err)
+	}
+}
+
 // Task events are journaled by default so a later subscription may resume on
 // any replica sharing Redis.
 func TestTaskEventsUseStreamByDefault(t *testing.T) {
