@@ -71,6 +71,7 @@ func (b *blockingRenewBackend) CheckAndRenewExecution(
 	return true, false, nil
 }
 
+// CommitExecutionTaskEvent blocks a successful lease-releasing commit.
 func (b *blockingReleaseBackend) CommitExecutionTaskEvent(
 	ctx context.Context,
 	tenant, owner string,
@@ -92,6 +93,7 @@ func (b *blockingReleaseBackend) CommitExecutionTaskEvent(
 	return err
 }
 
+// TestExecutionLeaseSingleWriterAndStaleCommitFence verifies lease ownership fencing.
 func TestExecutionLeaseSingleWriterAndStaleCommitFence(t *testing.T) {
 	manager, _ := setupTest(t, scriptedExecutor())
 	defer manager.Close()
@@ -318,6 +320,7 @@ func TestExecutionCancelRecordsIntentAndLateTerminalWins(t *testing.T) {
 	}
 }
 
+// TestReleaseCommitDoesNotRaceLeaseSweep verifies intentional release is not treated as lease loss.
 func TestReleaseCommitDoesNotRaceLeaseSweep(t *testing.T) {
 	tests := []struct {
 		name  string

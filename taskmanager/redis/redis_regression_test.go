@@ -237,8 +237,8 @@ func TestTerminal_NotResurrectedByYieldedRound(t *testing.T) {
 	}
 }
 
-// Cancellation and suspension linearize in Redis. When cancellation intent
-// wins, it fences a later suspend event and lets the owner persist CANCELED.
+// TestCancelWinsConcurrentSuspendPersistsCanceled verifies cancellation intent
+// fences a later suspend event and lets the owner persist CANCELED.
 func TestCancelWinsConcurrentSuspendPersistsCanceled(t *testing.T) {
 	cancelObserved := make(chan struct{})
 	emitSuspend := make(chan struct{})
@@ -298,11 +298,12 @@ func TestCancelWinsConcurrentSuspendPersistsCanceled(t *testing.T) {
 
 	var sawCanceled bool
 	deadline := time.After(2 * time.Second)
-	for !sawCanceled {
+drain:
+	for {
 		select {
 		case event, ok := <-stream:
 			if !ok {
-				t.Fatal("stream closed before CANCELED")
+				break drain
 			}
 			if update := event.GetStatusUpdate(); update != nil {
 				switch update.Status.State {
@@ -316,11 +317,14 @@ func TestCancelWinsConcurrentSuspendPersistsCanceled(t *testing.T) {
 			t.Fatal("timed out waiting for CANCELED")
 		}
 	}
+	if !sawCanceled {
+		t.Fatal("stream closed before CANCELED")
+	}
 	pollTaskState(t, manager, taskID, protocol.TaskStateCanceled)
 }
 
-// When suspension wins the same linearization race, cancellation must receive
-// the existing handoff channel instead of canceling the yielded execution.
+// TestCancelLocalExecutionReturnsWinningYieldHandoff verifies that suspension
+// wins by exposing its handoff channel instead of canceling the yielded run.
 func TestCancelLocalExecutionReturnsWinningYieldHandoff(t *testing.T) {
 	manager, _ := setupTest(t, scriptedExecutor())
 	defer manager.Close()

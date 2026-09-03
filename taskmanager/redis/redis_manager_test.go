@@ -1076,6 +1076,7 @@ func TestOnCancelTaskLiveExecution(t *testing.T) {
 	}
 }
 
+// TestOnCancelTaskAllowsLateCompleted verifies a racing terminal result can win cancellation.
 func TestOnCancelTaskAllowsLateCompleted(t *testing.T) {
 	processor := executorFunc(func(
 		ctx context.Context, ec *taskmanager.ExecContext,

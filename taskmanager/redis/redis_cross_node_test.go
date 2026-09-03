@@ -362,6 +362,7 @@ func TestCrossNode_CancelWithoutLiveRunReachesResubscriber(t *testing.T) {
 	}
 }
 
+// TestCrossNode_CancelActiveExecutionStopsOwnerAndFencesLateEvent verifies distributed cancellation.
 func TestCrossNode_CancelActiveExecutionStopsOwnerAndFencesLateEvent(t *testing.T) {
 	processorCanceled := make(chan struct{})
 	processor := executorFunc(func(
