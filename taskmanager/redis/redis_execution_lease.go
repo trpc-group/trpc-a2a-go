@@ -285,31 +285,9 @@ func (t *redisTaskEventTransport) RequestExecutionCancel(
 			return nil, false, fmt.Errorf("load task %s for cancellation: %w", taskID, err)
 		}
 
-		var canceledBytes, eventBytes []byte
-		if len(currentBytes) > 0 {
-			var task protocol.Task
-			if err := json.Unmarshal(currentBytes, &task); err != nil {
-				return nil, false, fmt.Errorf("decode task %s for cancellation: %w", taskID, err)
-			}
-			if !isFinalState(task.Status.State) {
-				canceled := copyTask(&task)
-				status := protocol.TaskStatus{
-					State:     protocol.TaskStateCanceled,
-					Timestamp: time.Now().UTC().Format(time.RFC3339),
-				}
-				canceled.Status = status
-				event := &protocol.TaskStatusUpdateEvent{
-					TaskID: canceled.ID, ContextID: canceled.ContextID, Status: status, Final: true,
-				}
-				canceledBytes, err = json.Marshal(canceled)
-				if err != nil {
-					return nil, false, fmt.Errorf("encode canceled task %s: %w", taskID, err)
-				}
-				eventBytes, err = json.Marshal(protocol.NewStreamResponseStatusUpdate(event))
-				if err != nil {
-					return nil, false, fmt.Errorf("encode canceled event for task %s: %w", taskID, err)
-				}
-			}
+		canceledBytes, eventBytes, err := encodeCanceledTaskEvent(currentBytes, taskID)
+		if err != nil {
+			return nil, false, err
 		}
 
 		values, err := requestExecutionCancelScript.Run(
@@ -371,6 +349,37 @@ func (t *redisTaskEventTransport) RequestExecutionCancel(
 			)
 		}
 	}
+}
+
+func encodeCanceledTaskEvent(currentBytes []byte, taskID string) ([]byte, []byte, error) {
+	if len(currentBytes) == 0 {
+		return nil, nil, nil
+	}
+	var task protocol.Task
+	if err := json.Unmarshal(currentBytes, &task); err != nil {
+		return nil, nil, fmt.Errorf("decode task %s for cancellation: %w", taskID, err)
+	}
+	if isFinalState(task.Status.State) {
+		return nil, nil, nil
+	}
+	canceled := copyTask(&task)
+	status := protocol.TaskStatus{
+		State:     protocol.TaskStateCanceled,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+	canceled.Status = status
+	event := &protocol.TaskStatusUpdateEvent{
+		TaskID: canceled.ID, ContextID: canceled.ContextID, Status: status, Final: true,
+	}
+	canceledBytes, err := json.Marshal(canceled)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode canceled task %s: %w", taskID, err)
+	}
+	eventBytes, err := json.Marshal(protocol.NewStreamResponseStatusUpdate(event))
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode canceled event for task %s: %w", taskID, err)
+	}
+	return canceledBytes, eventBytes, nil
 }
 
 func (t *redisTaskEventTransport) CheckAndRenewExecution(
