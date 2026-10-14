@@ -91,6 +91,8 @@ const (
 // stream type is checked before either write because Redis scripts are atomic
 // with respect to other clients but do not roll back commands after a runtime
 // error. The task and stream keys share one Redis Cluster slot (see streamKey).
+// The caller supplies the next Task state separately so lease checks do not
+// decode its full snapshot. Calls without that argument retain a decode fallback.
 var commitTaskEventScript = redisclient.NewScript(`
 local task_type = redis.call('TYPE', KEYS[1]).ok
 if task_type ~= 'none' and task_type ~= 'string' then
@@ -112,6 +114,7 @@ local existing = redis.call('ZSCORE', KEYS[3], ARGV[7])
 if existing then
     return existing
 end
+local next_state = ARGV[13] or ''
 if ARGV[8] ~= '' then
     local current_run = redis.call('HGET', KEYS[4], 'run_id')
     local lease_until = tonumber(redis.call('HGET', KEYS[4], 'lease_until_ms') or '0')
@@ -120,8 +123,10 @@ if ARGV[8] ~= '' then
     if current_run ~= ARGV[8] or lease_until <= now_ms then
         return redis.error_reply('EXECUTION_STALE')
     end
-    local next_task = cjson.decode(ARGV[1])
-    local next_state = next_task.status and next_task.status.state or ''
+    if not ARGV[13] then
+        local next_task = cjson.decode(ARGV[1])
+        next_state = next_task.status and next_task.status.state or ''
+    end
     local next_terminal = next_state == 'TASK_STATE_COMPLETED' or
         next_state == 'TASK_STATE_FAILED' or next_state == 'TASK_STATE_CANCELED' or
         next_state == 'TASK_STATE_REJECTED'
@@ -157,8 +162,6 @@ if excess > 0 then
 end
 redis.call('PEXPIRE', KEYS[3], ARGV[5])
 if ARGV[8] ~= '' then
-    local next_task = cjson.decode(ARGV[1])
-    local next_state = next_task.status and next_task.status.state or ''
     if next_state == 'TASK_STATE_COMPLETED' or next_state == 'TASK_STATE_FAILED' or
        next_state == 'TASK_STATE_CANCELED' or next_state == 'TASK_STATE_REJECTED' then
         redis.call('DEL', KEYS[4])
@@ -419,6 +422,7 @@ func (t *redisTaskEventTransport) commitTaskEventWithLease(
 		releaseFlag,
 		t.executionRetention.Milliseconds(),
 		terminalCanWinCancelFlag,
+		string(task.Status.State),
 	).Result(); err != nil {
 		return fmt.Errorf("failed to store task and event: %w", mapExecutionScriptError(err))
 	}
