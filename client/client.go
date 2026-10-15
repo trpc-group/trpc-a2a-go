@@ -221,12 +221,16 @@ func (c *A2AClient) sendA2AStreamRequest(ctx context.Context, id, method string,
 	if resp == nil || resp.Body == nil {
 		return nil, fmt.Errorf("a2aClient.sendA2AStreamRequest: unexpected nil response")
 	}
+	resp.Body = newCancelStreamBody(ctx, resp.Body)
 	// Check for non-success HTTP status codes.
 	// For SSE, a successful setup should result in 200 OK.
 	if resp.StatusCode != http.StatusOK {
 		// Read body for error details if possible.
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("a2aClient.sendA2AStreamRequest: read error response: %w", err)
+		}
 		return nil, fmt.Errorf(
 			"a2aClient.sendA2AStreamRequest: unexpected http status %d establishing stream: %s",
 			resp.StatusCode, string(bodyBytes),
@@ -254,8 +258,8 @@ func (c *A2AClient) processSSEStream(
 	eventsChan chan<- protocol.StreamingMessageEvent,
 ) {
 	// Ensure resources are cleaned up when the goroutine exits.
-	defer resp.Body.Close()
 	defer close(eventsChan)
+	defer resp.Body.Close()
 
 	reader := sse.NewEventReader(resp.Body, sse.WithBuffer(make([]byte, c.initialBufSize), c.maxBufSize))
 	log.Debugf("SSE Processor started for request %s", reqID)
@@ -269,7 +273,9 @@ func (c *A2AClient) processSSEStream(
 			// Read the next event from the stream.
 			eventBytes, eventType, err := reader.ReadEvent()
 			if err != nil {
-				if err == io.EOF {
+				if ctx.Err() != nil {
+					log.Debugf("SSE canceled for request %s: %v", reqID, ctx.Err())
+				} else if err == io.EOF {
 					log.Debugf("SSE stream ended cleanly (EOF) for request %s", reqID)
 				} else if errors.Is(err, context.Canceled) ||
 					strings.Contains(err.Error(), "connection reset by peer") {
