@@ -19,6 +19,12 @@ import (
 type Option func(*A2AClient)
 
 // HTTPReqHandler is a custom HTTP request handler for a2a client.
+//
+// For streaming requests, the returned response body (including error responses)
+// must support Close being called concurrently with Read. Close must unblock a
+// pending Read so that request cancellation can finish. Handlers and middleware
+// that wrap response bodies must preserve these properties; implementing
+// io.ReadCloser alone, such as io.NopCloser around a blocking reader, is not enough.
 type HTTPReqHandler interface {
 	Handle(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error)
 }
@@ -146,6 +152,8 @@ func WithAuthProvider(provider auth.ClientProvider) Option {
 // WithHTTPReqHandler sets the terminal HTTP request handler for the A2AClient.
 // HTTP request middleware is applied around this handler after all client
 // options have been processed.
+// Custom streaming response bodies must satisfy the concurrent Read/Close and
+// read-unblocking requirements documented on HTTPReqHandler.
 func WithHTTPReqHandler(handler HTTPReqHandler) Option {
 	return func(c *A2AClient) {
 		c.httpReqHandler = handler
