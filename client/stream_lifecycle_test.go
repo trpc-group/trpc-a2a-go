@@ -93,9 +93,15 @@ func TestSDKBlockedBodyCancellation(t *testing.T) {
 type countedBody struct {
 	io.Reader
 	closes atomic.Int32
+	closed chan struct{}
 }
 
-func (b *countedBody) Close() error { b.closes.Add(1); return nil }
+func (b *countedBody) Close() error {
+	if b.closes.Add(1) == 1 {
+		close(b.closed)
+	}
+	return nil
+}
 
 const messageEvent = `data: {"kind":"message","messageId":"m1","role":"agent","parts":[{"kind":"text","text":"hello"}]}` + "\n\n"
 
@@ -114,7 +120,7 @@ func TestSDKNormalEOFAndBackpressure(t *testing.T) {
 			case "wrong_type":
 				typ = "text/plain"
 			}
-			b := &countedBody{Reader: strings.NewReader(body)}
+			b := &countedBody{Reader: strings.NewReader(body), closed: make(chan struct{})}
 			c, e := sdk.NewA2AClient("http://unused", sdk.WithHTTPReqHandler(syntheticHandler{b, 200, typ}), sdk.WithChannelSize(1))
 			if e != nil {
 				t.Fatal(e)
@@ -139,6 +145,8 @@ func TestSDKNormalEOFAndBackpressure(t *testing.T) {
 						t.Fatal("producer never filled event buffer")
 					}
 					cancel()
+					// Keep the consumer stalled until cancellation closes the body.
+					await(t, b.closed, "body cleanup with a stalled consumer")
 				}
 				count := 0
 				done := make(chan struct{})
