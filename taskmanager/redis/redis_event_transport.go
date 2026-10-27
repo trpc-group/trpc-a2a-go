@@ -24,10 +24,9 @@ import (
 
 // taskEventTransport distributes Task events between Redis TaskManager
 // instances. Cursors are opaque and implementations must preserve event order.
-// CommitTaskEvent and LoadTaskAndCursor provide the atomic boundaries needed so
-// a concurrent Task-changing event is either reflected by the loaded snapshot
-// and cursor or returned by a subsequent ReadAfter call, never lost between the
-// two.
+// Task snapshots carry the Stream cursor they represent. LoadTaskAndCursor plus
+// ReadAfter therefore returns coalesced events after an older snapshot instead
+// of losing them behind the current Stream tail.
 type taskEventTransport interface {
 	// CommitTaskEvent atomically stores a Task snapshot and the event that
 	// produced it. allowCreate is true only for a task's first event; later
@@ -48,8 +47,8 @@ type taskEventTransport interface {
 		taskID string,
 		event protocol.StreamResponse,
 	) error
-	// LoadTaskAndCursor atomically loads the current Task snapshot and current
-	// event cursor. A subscriber reads only events committed after that cursor.
+	// LoadTaskAndCursor atomically loads a Task snapshot and the event cursor
+	// represented by that snapshot. A subscriber replays later events.
 	LoadTaskAndCursor(
 		ctx context.Context,
 		tenant string,
@@ -69,6 +68,24 @@ type taskEventTransport interface {
 	// RefreshTaskLease extends an existing live Task and its event journal. It
 	// must not create a missing Task.
 	RefreshTaskLease(ctx context.Context, tenant string, owner string, taskID string) error
+	// FlushExecutionTaskSnapshot writes a complete Task snapshot and its
+	// represented Stream cursor without appending another event.
+	FlushExecutionTaskSnapshot(
+		ctx context.Context,
+		tenant, owner, runID string,
+		task *protocol.Task,
+	) error
+	CommitExecutionTaskEventWithOptions(
+		ctx context.Context,
+		tenant, owner string,
+		runID string,
+		task *protocol.Task,
+		event protocol.StreamResponse,
+		allowCreate bool,
+		release bool,
+		terminalCanWinCancel bool,
+		commitOpts taskCommitOptions,
+	) error
 }
 
 const (
@@ -80,12 +97,23 @@ const (
 	// write safe when go-redis retries after an ambiguous network failure.
 	streamDedupePrefix = "stream-dedupe:"
 	// streamField is the single XADD field carrying the JSON-encoded StreamResponse.
-	streamField = "e"
-	// streamMaxLen caps each task's event stream (XADD MAXLEN ~).
-	streamMaxLen = 10000
+	streamField         = "e"
+	defaultStreamMaxLen = 10000
+	// snapshotCursorPrefix stores the Stream event ID reflected by task:*.
+	snapshotCursorPrefix = "task-snapshot-cursor:"
 	// streamReadCount caps entries returned per read.
 	streamReadCount = 64
 )
+
+// taskCommitOptions controls whether commitTaskEventScript writes the complete
+// Task snapshot together with the event.
+type taskCommitOptions struct {
+	skipTaskSet bool
+}
+
+func taskCommitOptionsEmpty(opts taskCommitOptions) bool {
+	return !opts.skipTaskSet
+}
 
 // commitTaskEventScript atomically persists a Task snapshot and its event. The
 // stream type is checked before either write because Redis scripts are atomic
@@ -152,7 +180,13 @@ end
 local event_id = redis.call(
     'XADD', KEYS[2], 'MAXLEN', '~', ARGV[3], '*', ARGV[4], ARGV[2]
 )
-redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[5])
+if (ARGV[14] or '') ~= '1' then
+    redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[5])
+    redis.call('SET', KEYS[5], event_id, 'PX', ARGV[5])
+else
+    redis.call('PEXPIRE', KEYS[1], ARGV[5])
+    redis.call('PEXPIRE', KEYS[5], ARGV[5])
+end
 redis.call('PEXPIRE', KEYS[2], ARGV[5])
 local sequence = redis.call('ZINCRBY', KEYS[3], 1, '__seq')
 redis.call('ZADD', KEYS[3], sequence, ARGV[7])
@@ -175,6 +209,46 @@ if ARGV[8] ~= '' then
     end
 end
 return event_id
+`)
+
+// flushTaskSnapshotScript persists a task snapshot without appending a stream event.
+var flushTaskSnapshotScript = redisclient.NewScript(`
+local task_type = redis.call('TYPE', KEYS[1]).ok
+if task_type ~= 'none' and task_type ~= 'string' then
+    return redis.error_reply('task has wrong type')
+end
+local execution_type = redis.call('TYPE', KEYS[4]).ok
+if execution_type ~= 'none' and execution_type ~= 'hash' then
+    return redis.error_reply('execution record has wrong type')
+end
+if ARGV[3] ~= '' then
+    local current_run = redis.call('HGET', KEYS[4], 'run_id')
+    local lease_until = tonumber(redis.call('HGET', KEYS[4], 'lease_until_ms') or '0')
+    local redis_time = redis.call('TIME')
+    local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+    if current_run ~= ARGV[3] or lease_until <= now_ms then
+        return redis.error_reply('EXECUTION_STALE')
+    end
+    local current_task = redis.call('GET', KEYS[1])
+    if current_task then
+        local decoded = cjson.decode(current_task)
+        local current_state = decoded.status and decoded.status.state or ''
+        if current_state == 'TASK_STATE_COMPLETED' or current_state == 'TASK_STATE_FAILED' or
+           current_state == 'TASK_STATE_CANCELED' or current_state == 'TASK_STATE_REJECTED' then
+            return redis.error_reply('EXECUTION_STALE')
+        end
+    end
+end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+local tail = redis.call('XREVRANGE', KEYS[2], '+', '-', 'COUNT', 1)
+local cursor = '0-0'
+if #tail > 0 then
+    cursor = tail[1][1]
+end
+redis.call('SET', KEYS[5], cursor, 'PX', ARGV[2])
+redis.call('PEXPIRE', KEYS[2], ARGV[2])
+redis.call('PEXPIRE', KEYS[3], ARGV[2])
+return 1
 `)
 
 // appendEventScript persists an event that does not change the Task snapshot.
@@ -279,21 +353,25 @@ if redis.call('PEXPIRE', KEYS[1], ARGV[1]) == 0 then
 end
 redis.call('PEXPIRE', KEYS[2], ARGV[1])
 redis.call('PEXPIRE', KEYS[3], ARGV[1])
+redis.call('PEXPIRE', KEYS[4], ARGV[1])
 return 1
 `)
 
-// loadTaskAndCursorScript returns a Task snapshot and the stream tail from one
-// Redis linearization point. A concurrent commitTaskEventScript therefore lands
-// wholly before the snapshot/cursor pair or wholly after it.
+// loadTaskAndCursorScript returns a Task snapshot and the event cursor stored
+// with that exact snapshot. Coalesced events after the cursor are replayed by
+// the subscriber instead of being skipped.
 var loadTaskAndCursorScript = redisclient.NewScript(`
 local task = redis.call('GET', KEYS[1])
 if not task then
     return {0, '', '0-0'}
 end
-local tail = redis.call('XREVRANGE', KEYS[2], '+', '-', 'COUNT', 1)
-local cursor = '0-0'
-if #tail > 0 then
-    cursor = tail[1][1]
+local cursor = redis.call('GET', KEYS[3])
+if not cursor then
+    local tail = redis.call('XREVRANGE', KEYS[2], '+', '-', 'COUNT', 1)
+    cursor = '0-0'
+    if #tail > 0 then
+        cursor = tail[1][1]
+    end
 end
 return {1, task, cursor}
 `)
@@ -301,6 +379,7 @@ return {1, task, cursor}
 type redisTaskEventTransport struct {
 	client                 redisclient.UniversalClient
 	expiration             time.Duration
+	streamMaxLen           int64
 	executionLeaseDuration time.Duration
 	executionRetention     time.Duration
 }
@@ -311,7 +390,11 @@ var _ executionlease.Backend = (*redisTaskEventTransport)(nil)
 func newRedisTaskEventTransport(
 	client redisclient.UniversalClient,
 	expiration time.Duration,
+	streamMaxLen int64,
 ) *redisTaskEventTransport {
+	if streamMaxLen <= 0 {
+		streamMaxLen = defaultStreamMaxLen
+	}
 	leaseDuration := 30 * time.Second
 	if expiration < 2*leaseDuration {
 		leaseDuration = expiration / 2
@@ -326,6 +409,7 @@ func newRedisTaskEventTransport(
 	return &redisTaskEventTransport{
 		client:                 client,
 		expiration:             expiration,
+		streamMaxLen:           streamMaxLen,
 		executionLeaseDuration: leaseDuration,
 		executionRetention:     executionRetention,
 	}
@@ -340,6 +424,10 @@ func streamKey(tenant, owner, taskID string) string {
 
 func streamDedupeKey(tenant, owner, taskID string) string {
 	return taskCompanionKey(streamDedupePrefix, taskKey(tenant, owner, taskID))
+}
+
+func snapshotCursorKey(tenant, owner, taskID string) string {
+	return taskCompanionKey(snapshotCursorPrefix, taskKey(tenant, owner, taskID))
 }
 
 func (t *redisTaskEventTransport) CommitTaskEvent(
@@ -365,7 +453,7 @@ func (t *redisTaskEventTransport) commitTaskEventWithOperationID(
 	operationID string,
 ) error {
 	return t.commitTaskEventWithLease(
-		ctx, tenant, owner, task, event, allowCreate, operationID, "", false, false,
+		ctx, tenant, owner, task, event, allowCreate, operationID, "", false, false, taskCommitOptions{},
 	)
 }
 
@@ -380,10 +468,15 @@ func (t *redisTaskEventTransport) commitTaskEventWithLease(
 	runID string,
 	release bool,
 	terminalCanWinCancel bool,
+	commitOpts taskCommitOptions,
 ) error {
-	taskBytes, err := json.Marshal(task)
-	if err != nil {
-		return fmt.Errorf("failed to serialize task: %w", err)
+	var taskBytes []byte
+	if !commitOpts.skipTaskSet {
+		var err error
+		taskBytes, err = json.Marshal(task)
+		if err != nil {
+			return fmt.Errorf("failed to serialize task: %w", err)
+		}
 	}
 	eventBytes, err := json.Marshal(event)
 	if err != nil {
@@ -401,6 +494,10 @@ func (t *redisTaskEventTransport) commitTaskEventWithLease(
 	if terminalCanWinCancel {
 		terminalCanWinCancelFlag = 1
 	}
+	skipTaskSetFlag := 0
+	if commitOpts.skipTaskSet {
+		skipTaskSetFlag = 1
+	}
 	if _, err := commitTaskEventScript.Run(
 		ctx,
 		t.client,
@@ -409,10 +506,11 @@ func (t *redisTaskEventTransport) commitTaskEventWithLease(
 			streamKey(tenant, owner, task.ID),
 			streamDedupeKey(tenant, owner, task.ID),
 			executionKey(tenant, owner, task.ID),
+			snapshotCursorKey(tenant, owner, task.ID),
 		},
 		taskBytes,
 		eventBytes,
-		streamMaxLen,
+		t.streamMaxLen,
 		streamField,
 		t.expiration.Milliseconds(),
 		allowCreateFlag,
@@ -423,6 +521,7 @@ func (t *redisTaskEventTransport) commitTaskEventWithLease(
 		t.executionRetention.Milliseconds(),
 		terminalCanWinCancelFlag,
 		string(task.Status.State),
+		skipTaskSetFlag,
 	).Result(); err != nil {
 		return fmt.Errorf("failed to store task and event: %w", mapExecutionScriptError(err))
 	}
@@ -441,8 +540,53 @@ func (t *redisTaskEventTransport) CommitExecutionTaskEvent(
 ) error {
 	return t.commitTaskEventWithLease(
 		ctx, tenant, owner, task, event, allowCreate,
-		"op-"+protocol.GenerateMessageID(), runID, release, terminalCanWinCancel,
+		"op-"+protocol.GenerateMessageID(), runID, release, terminalCanWinCancel, taskCommitOptions{},
 	)
+}
+
+func (t *redisTaskEventTransport) CommitExecutionTaskEventWithOptions(
+	ctx context.Context,
+	tenant, owner string,
+	runID string,
+	task *protocol.Task,
+	event protocol.StreamResponse,
+	allowCreate bool,
+	release bool,
+	terminalCanWinCancel bool,
+	commitOpts taskCommitOptions,
+) error {
+	return t.commitTaskEventWithLease(
+		ctx, tenant, owner, task, event, allowCreate,
+		"op-"+protocol.GenerateMessageID(), runID, release, terminalCanWinCancel, commitOpts,
+	)
+}
+
+func (t *redisTaskEventTransport) FlushExecutionTaskSnapshot(
+	ctx context.Context,
+	tenant, owner, runID string,
+	task *protocol.Task,
+) error {
+	taskBytes, err := json.Marshal(task)
+	if err != nil {
+		return fmt.Errorf("failed to serialize task: %w", err)
+	}
+	if _, err := flushTaskSnapshotScript.Run(
+		ctx,
+		t.client,
+		[]string{
+			taskKey(tenant, owner, task.ID),
+			streamKey(tenant, owner, task.ID),
+			streamDedupeKey(tenant, owner, task.ID),
+			executionKey(tenant, owner, task.ID),
+			snapshotCursorKey(tenant, owner, task.ID),
+		},
+		taskBytes,
+		t.expiration.Milliseconds(),
+		runID,
+	).Result(); err != nil {
+		return fmt.Errorf("failed to flush task snapshot: %w", mapExecutionScriptError(err))
+	}
+	return nil
 }
 
 func (t *redisTaskEventTransport) AppendEvent(
@@ -491,7 +635,7 @@ func (t *redisTaskEventTransport) appendEventWithLease(
 			executionKey(tenant, owner, taskID),
 		},
 		payload,
-		streamMaxLen,
+		t.streamMaxLen,
 		streamField,
 		operationID,
 		runID,
@@ -522,7 +666,11 @@ func (t *redisTaskEventTransport) LoadTaskAndCursor(
 	values, err := loadTaskAndCursorScript.Run(
 		ctx,
 		t.client,
-		[]string{taskKey(tenant, owner, taskID), streamKey(tenant, owner, taskID)},
+		[]string{
+			taskKey(tenant, owner, taskID),
+			streamKey(tenant, owner, taskID),
+			snapshotCursorKey(tenant, owner, taskID),
+		},
 	).Slice()
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to load task %s and stream cursor: %w", taskID, err)
@@ -614,6 +762,7 @@ func (t *redisTaskEventTransport) RefreshTaskLease(
 			taskKey(tenant, owner, taskID),
 			streamKey(tenant, owner, taskID),
 			streamDedupeKey(tenant, owner, taskID),
+			snapshotCursorKey(tenant, owner, taskID),
 		},
 		t.expiration.Milliseconds(),
 	).Int()

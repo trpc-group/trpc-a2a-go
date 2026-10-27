@@ -350,6 +350,10 @@ func TestTaskManagerTenantDataIsolationAndTaskIndex(t *testing.T) {
 	if got, want := streamKey("", "", taskID), "stream:{"+taskKey("", "", taskID)+"}"; got != want {
 		t.Fatalf("default tenant stream hash tag = %q, want %q", got, want)
 	}
+	if got, want := snapshotCursorKey("", "", taskID),
+		snapshotCursorPrefix+"{"+taskKey("", "", taskID)+"}"; got != want {
+		t.Fatalf("default tenant snapshot cursor hash tag = %q, want %q", got, want)
+	}
 	if taskKey("tenant-a", "", taskID) == taskKey("tenant-b", "", taskID) {
 		t.Fatal("different tenants produced the same Redis task key")
 	}

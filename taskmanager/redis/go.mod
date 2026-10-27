@@ -9,6 +9,8 @@ require (
 	trpc.group/trpc-go/trpc-a2a-go/v2 v2.0.0-alpha.3
 )
 
+replace trpc.group/trpc-go/trpc-a2a-go/v2 => ../..
+
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect

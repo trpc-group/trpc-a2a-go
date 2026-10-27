@@ -141,6 +141,26 @@ func (*nonBlockingEmptyTransport) RefreshTaskLease(
 	return nil
 }
 
+func (*nonBlockingEmptyTransport) CommitExecutionTaskEventWithOptions(
+	context.Context,
+	string, string,
+	string,
+	*protocol.Task,
+	protocol.StreamResponse,
+	bool, bool, bool,
+	taskCommitOptions,
+) error {
+	return nil
+}
+
+func (*nonBlockingEmptyTransport) FlushExecutionTaskSnapshot(
+	context.Context,
+	string, string, string,
+	*protocol.Task,
+) error {
+	return nil
+}
+
 func (t *nonBlockingEmptyTransport) ReadAfter(
 	context.Context,
 	string,
@@ -192,6 +212,26 @@ func (*readSequenceTransport) RefreshTaskLease(
 	string,
 	string,
 	string,
+) error {
+	return nil
+}
+
+func (*readSequenceTransport) CommitExecutionTaskEventWithOptions(
+	context.Context,
+	string, string,
+	string,
+	*protocol.Task,
+	protocol.StreamResponse,
+	bool, bool, bool,
+	taskCommitOptions,
+) error {
+	return nil
+}
+
+func (*readSequenceTransport) FlushExecutionTaskSnapshot(
+	context.Context,
+	string, string, string,
+	*protocol.Task,
 ) error {
 	return nil
 }
