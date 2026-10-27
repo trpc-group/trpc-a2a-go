@@ -113,6 +113,43 @@ func (b *blockingReleaseBackend) CommitExecutionTaskEvent(
 	return err
 }
 
+func (b *blockingReleaseBackend) CommitExecutionTaskEventWithOptions(
+	ctx context.Context,
+	tenant, owner string,
+	runID string,
+	task *protocol.Task,
+	event protocol.StreamResponse,
+	allowCreate bool,
+	release bool,
+	terminalCanWinCancel bool,
+	commitOpts taskCommitOptions,
+) error {
+	committer, ok := b.Backend.(interface {
+		CommitExecutionTaskEventWithOptions(
+			context.Context,
+			string, string,
+			string,
+			*protocol.Task,
+			protocol.StreamResponse,
+			bool, bool, bool,
+			taskCommitOptions,
+		) error
+	})
+	if !ok {
+		return errors.New("wrapped backend does not support commit options")
+	}
+	err := committer.CommitExecutionTaskEventWithOptions(
+		ctx, tenant, owner, runID, task, event, allowCreate, release, terminalCanWinCancel, commitOpts,
+	)
+	if err == nil && release {
+		b.once.Do(func() {
+			close(b.committed)
+			<-b.resume
+		})
+	}
+	return err
+}
+
 // TestExecutionLeaseSingleWriterAndStaleCommitFence verifies lease ownership fencing.
 func TestExecutionLeaseSingleWriterAndStaleCommitFence(t *testing.T) {
 	manager, _ := setupTest(t, scriptedExecutor())

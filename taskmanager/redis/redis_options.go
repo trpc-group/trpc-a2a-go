@@ -43,6 +43,13 @@ type TaskManagerOptions struct {
 	// SubscribeToTask always uses Redis Streams and this value is ignored.
 	// Deprecated: cross-node resubscribe is always enabled.
 	CrossNodeResubscribe bool
+
+	// Persistence controls complete Task snapshot write coalescing. Stream
+	// events are always written immediately.
+	Persistence TaskPersistenceConfig
+
+	// TaskEventStreamMaxLen caps each task event stream (XADD MAXLEN ~). Defaults to 10000.
+	TaskEventStreamMaxLen int64
 }
 
 // DefaultRedisTaskManagerOptions returns the default configuration options.
@@ -53,6 +60,8 @@ func DefaultRedisTaskManagerOptions() *TaskManagerOptions {
 		TaskSubscriberBufSize:      defaultTaskSubscriberBufferSize,
 		TaskSubscriberBlockingSend: false,
 		CrossNodeResubscribe:       true,
+		Persistence:                DefaultTaskPersistenceConfig(),
+		TaskEventStreamMaxLen:      defaultStreamMaxLen,
 	}
 }
 
@@ -122,5 +131,21 @@ func WithPushNotifications(cfg push.Config) TaskManagerOption {
 func WithCrossNodeResubscribe(enabled bool) TaskManagerOption {
 	return func(opts *TaskManagerOptions) {
 		opts.CrossNodeResubscribe = true
+	}
+}
+
+// WithTaskPersistence configures complete Task snapshot write coalescing.
+func WithTaskPersistence(cfg TaskPersistenceConfig) TaskManagerOption {
+	return func(opts *TaskManagerOptions) {
+		opts.Persistence = cfg
+	}
+}
+
+// WithTaskEventStreamMaxLen sets the per-task Redis stream MAXLEN ~ cap.
+func WithTaskEventStreamMaxLen(maxLen int64) TaskManagerOption {
+	return func(opts *TaskManagerOptions) {
+		if maxLen > 0 {
+			opts.TaskEventStreamMaxLen = maxLen
+		}
 	}
 }

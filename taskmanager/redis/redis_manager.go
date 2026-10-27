@@ -305,7 +305,7 @@ func NewTaskManager(
 		expiration = time.Millisecond
 	}
 
-	transport := newRedisTaskEventTransport(client, expiration)
+	transport := newRedisTaskEventTransport(client, expiration, options.TaskEventStreamMaxLen)
 	manager := &TaskManager{
 		processor:              processor,
 		client:                 client,
@@ -949,9 +949,9 @@ func (m *TaskManager) OnResubscribe(
 	if err != nil {
 		return nil, err
 	}
-	// The transport loads the Task and event cursor at one atomic boundary. A
-	// concurrent task-event commit is therefore either reflected by both values
-	// or by neither: the snapshot and subsequent read contain no gap or overlap.
+	// The transport loads the Task and the Stream cursor represented by that
+	// snapshot. In coalesced mode, events committed after the last snapshot are
+	// deliberately replayed by the tailer so no update is skipped.
 	task, startID, err := m.eventTransport.LoadTaskAndCursor(ctx, params.Tenant, owner, params.ID)
 	if err != nil {
 		return nil, err
@@ -1230,6 +1230,18 @@ func (m *TaskManager) getConversationHistory(
 // such — callers that take irreversible actions on not-found (cancel paths)
 // must be able to tell the two apart.
 func (m *TaskManager) getTaskInternal(ctx context.Context, tenant, owner, taskID string) (*protocol.Task, error) {
+	if m.options.Persistence.FlushOnGetTask {
+		if err := m.flushPendingSnapshotForTask(ctx, tenant, owner, taskID); err != nil {
+			log.Warnf("RedisTaskManager: flush before get task %s: %v", taskID, err)
+		}
+	}
+	if m.options.Persistence.coalesced() {
+		if live := m.liveRun(tenant, owner, taskID); live != nil && live.coalescer != nil && live.coalescer.hasDirty() {
+			if task := live.currentTask.Load(); task != nil {
+				return copyTask(task), nil
+			}
+		}
+	}
 	taskBytes, err := m.client.Get(ctx, taskKey(tenant, owner, taskID)).Bytes()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
@@ -1316,18 +1328,65 @@ func (m *TaskManager) commitExecutionTaskEvent(
 	release bool,
 	terminalCanWinCancel bool,
 ) error {
+	return m.commitExecutionTaskEventWithOptions(
+		ctx, tenant, owner, runID, task, event, allowCreate, release, terminalCanWinCancel, taskCommitOptions{},
+	)
+}
+
+func (m *TaskManager) commitExecutionTaskEventWithOptions(
+	ctx context.Context,
+	tenant string,
+	owner string,
+	runID string,
+	task *protocol.Task,
+	event protocol.StreamResponse,
+	allowCreate bool,
+	release bool,
+	terminalCanWinCancel bool,
+	commitOpts taskCommitOptions,
+) error {
 	if err := m.ensureTaskIndexed(ctx, tenant, owner, task.ID); err != nil {
 		return err
 	}
-	if err := m.executionLease.CommitExecutionTaskEvent(
-		ctx, tenant, owner, runID, task, event, allowCreate, release, terminalCanWinCancel,
-	); err != nil {
-		return err
+	var commitErr error
+	if wc, ok := m.executionLease.(interface {
+		CommitExecutionTaskEventWithOptions(
+			context.Context,
+			string, string,
+			string,
+			*protocol.Task,
+			protocol.StreamResponse,
+			bool, bool, bool,
+			taskCommitOptions,
+		) error
+	}); ok {
+		commitErr = wc.CommitExecutionTaskEventWithOptions(
+			ctx, tenant, owner, runID, task, event, allowCreate, release, terminalCanWinCancel, commitOpts,
+		)
+	} else if taskCommitOptionsEmpty(commitOpts) {
+		commitErr = m.executionLease.CommitExecutionTaskEvent(
+			ctx, tenant, owner, runID, task, event, allowCreate, release, terminalCanWinCancel,
+		)
+	} else {
+		commitErr = m.eventTransport.CommitExecutionTaskEventWithOptions(
+			ctx, tenant, owner, runID, task, event, allowCreate, release, terminalCanWinCancel, commitOpts,
+		)
+	}
+	if commitErr != nil {
+		return commitErr
 	}
 	if err := m.client.Expire(ctx, pushNotificationKey(tenant, owner, task.ID), m.expiration).Err(); err != nil {
 		log.Warnf("RedisTaskManager: failed to refresh push config expiration for task %s: %v", task.ID, err)
 	}
 	return nil
+}
+
+func (m *TaskManager) flushPendingSnapshotForTask(ctx context.Context, tenant, owner, taskID string) error {
+	live := m.liveRun(tenant, owner, taskID)
+	if live == nil || live.coalescer == nil {
+		return nil
+	}
+	return live.coalescer.Flush(ctx)
 }
 
 // refreshTaskLease extends the storage owned by a live execution without

@@ -75,6 +75,10 @@ type liveExecution struct {
 	// A continuation waits for it instead of being rejected as concurrent, so
 	// every observer can safely react to the suspend frame immediately.
 	yieldDone chan struct{}
+	// currentTask mirrors the engine's latest task snapshot for tasks/get overlay.
+	currentTask atomic.Pointer[protocol.Task]
+	// coalescer batches complete Redis Task snapshots during streaming artifact updates.
+	coalescer *snapshotCoalescer
 }
 
 // requestCancel records the cancel request and cancels the MessageProcessor context.
@@ -290,6 +294,7 @@ func (m *TaskManager) prepareExecution(
 		cancel()
 		return nil, err
 	}
+	ex.live.coalescer = newSnapshotCoalescer(m, request.Tenant, owner, taskID, ex.live.runID)
 
 	leaseCheckStarted := time.Now()
 	owned, canceled, err := m.executionLease.CheckAndRenewExecution(
@@ -684,6 +689,12 @@ func (ex *execution) handleEvent(event protocol.StreamEvent) int {
 // close rules: ownership of the task moved on at the suspend event — a
 // continuation or a no-live cancel may already be writing it.
 func (ex *execution) finish() {
+	if ex.live.coalescer != nil {
+		ex.live.coalescer.stop()
+		if err := ex.live.coalescer.Flush(context.Background()); err != nil && ex.runErr == nil {
+			log.Warnf("RedisTaskManager: flush coalesced snapshot for task %s: %v", ex.ec.TaskID, err)
+		}
+	}
 	if ex.live.leaseLost.Load() && ex.runErr == nil {
 		ex.failRun(fmt.Errorf("execution lease lost for task %s: %w", ex.ec.TaskID, executionlease.ErrStale))
 	}
@@ -911,6 +922,54 @@ func (ex *execution) rollStatusMessage(message *protocol.Message) {
 	ex.manager.storeStatusMessage(ex.ec.Tenant, ex.owner, ex.ec.TaskID, ex.ec.ContextID, message)
 }
 
+// flushCoalescerBeforeStatus persists pending artifact snapshots so a later
+// status commit cannot be overwritten by a delayed coalesced flush.
+func (ex *execution) flushCoalescerBeforeStatus() bool {
+	if ex.live.coalescer == nil {
+		return true
+	}
+	if err := ex.live.coalescer.Flush(context.Background()); err != nil {
+		ex.failRun(fmt.Errorf("failed to flush task %s before status update: %w", ex.ec.TaskID, err))
+		return false
+	}
+	return true
+}
+
+func (ex *execution) discardStatusEvent(ev *protocol.TaskStatusUpdateEvent) bool {
+	if ev.Status.State == "" || ev.Status.State == protocol.TaskStateUnspecified {
+		// A stateless status event would strand the task in a dangling
+		// non-terminal state (never TTL-collected, resubscribable forever).
+		ex.violate("status event without a state")
+		return true
+	}
+	// A terminal state is immutable: never write over one, whoever set it.
+	if ex.task != nil && isFinalState(ex.task.Status.State) {
+		log.Warnf("RedisTaskManager: discarding status %s for task %s already in terminal state %s",
+			ev.Status.State, ex.ec.TaskID, ex.task.Status.State)
+		return true
+	}
+	return false
+}
+
+func (ex *execution) handleStatusCommitError(
+	err error,
+	final, yielding bool,
+	taskID string,
+	state protocol.TaskState,
+) {
+	if final {
+		ex.live.released.Store(false)
+	}
+	if yielding {
+		ex.manager.abortExecutionYield(ex.ec.Tenant, ex.owner, ex.ec.TaskID, ex.live)
+	}
+	if errors.Is(err, executionlease.ErrCancelRequested) {
+		ex.live.requestCancel()
+		return
+	}
+	ex.failRun(fmt.Errorf("failed to store task %s status %s: %w", taskID, state, err))
+}
+
 // processStatusEvent applies a status update to the task (lazily creating it
 // on the first task event), persists it, and only then broadcasts it: at any
 // moment GetTask reads a state >= what the stream has delivered.
@@ -918,16 +977,7 @@ func (ex *execution) processStatusEvent(
 	ev *protocol.TaskStatusUpdateEvent,
 	terminalCanWinCancel bool,
 ) {
-	if ev.Status.State == "" || ev.Status.State == protocol.TaskStateUnspecified {
-		// A stateless status event would strand the task in a dangling
-		// non-terminal state (never TTL-collected, resubscribable forever).
-		ex.violate("status event without a state")
-		return
-	}
-	// A terminal state is immutable: never write over one, whoever set it.
-	if ex.task != nil && isFinalState(ex.task.Status.State) {
-		log.Warnf("RedisTaskManager: discarding status %s for task %s already in terminal state %s",
-			ev.Status.State, ex.ec.TaskID, ex.task.Status.State)
+	if !ex.flushCoalescerBeforeStatus() || ex.discardStatusEvent(ev) {
 		return
 	}
 	// Internal callers (close rules, violations) pass events with empty IDs.
@@ -992,21 +1042,12 @@ func (ex *execution) processStatusEvent(
 		context.Background(), ex.ec.Tenant, ex.owner, ex.live.runID, nextTask, response,
 		allowCreate, releaseLease, terminalCanWinCancel,
 	); err != nil {
-		if final {
-			ex.live.released.Store(false)
-		}
-		if yielding {
-			ex.manager.abortExecutionYield(ex.ec.Tenant, ex.owner, ex.ec.TaskID, ex.live)
-		}
-		if errors.Is(err, executionlease.ErrCancelRequested) {
-			ex.live.requestCancel()
-			return
-		}
-		ex.failRun(fmt.Errorf("failed to store task %s status %s: %w", ev.TaskID, status.State, err))
+		ex.handleStatusCommitError(err, final, yielding, ev.TaskID, status.State)
 		return
 	}
 	ex.task = nextTask
 	ex.taskTouched = true
+	ex.live.currentTask.Store(nextTask)
 	ex.sendInitialTask(initial)
 	// The old status message is durably superseded only after the Task/event
 	// commit succeeds. Moving it earlier would leave failed updates reflected in
@@ -1112,9 +1153,18 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 	}
 	// Persist before broadcast (consistency order).
 	response := protocol.NewStreamResponseArtifactUpdate(ev)
-	if err := ex.manager.commitExecutionTaskEvent(
+	commitOpts := ex.manager.buildTaskCommitOptions(allowCreate)
+	commitLocked := commitOpts.skipTaskSet && ex.live.coalescer != nil && ex.live.coalescer.beginCommit()
+	if commitLocked {
+		defer func() {
+			if commitLocked {
+				ex.live.coalescer.abortCommit()
+			}
+		}()
+	}
+	if err := ex.manager.commitExecutionTaskEventWithOptions(
 		context.Background(), ex.ec.Tenant, ex.owner, ex.live.runID, nextTask, response,
-		allowCreate, false, false,
+		allowCreate, false, false, commitOpts,
 	); err != nil {
 		if errors.Is(err, executionlease.ErrCancelRequested) {
 			ex.live.requestCancel()
@@ -1123,8 +1173,17 @@ func (ex *execution) processArtifactEvent(ev *protocol.TaskArtifactUpdateEvent) 
 		ex.failRun(fmt.Errorf("failed to store task %s artifact: %w", ev.TaskID, err))
 		return
 	}
+	if commitLocked {
+		if err := ex.live.coalescer.completeCommit(nextTask); err != nil {
+			commitLocked = false
+			ex.failRun(fmt.Errorf("failed to flush task %s snapshot: %w", ev.TaskID, err))
+			return
+		}
+		commitLocked = false
+	}
 	ex.task = nextTask
 	ex.taskTouched = true
+	ex.live.currentTask.Store(nextTask)
 	ex.sendInitialTask(initial)
 	if err := ex.persistInlinePushConfig(); err != nil {
 		log.Errorf("RedisTaskManager: failed to persist inline push config for task %s: %v", ex.ec.TaskID, err)

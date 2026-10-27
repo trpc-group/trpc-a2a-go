@@ -164,6 +164,7 @@ return 1
 // KEYS[2] event stream
 // KEYS[3] event dedupe journal (zset)
 // KEYS[4] execution record (hash)
+// KEYS[5] Task snapshot Stream cursor (string)
 // ARGV[1] observed task bytes (CAS)
 // ARGV[2] canceled task JSON
 // ARGV[3] canceled event JSON
@@ -251,6 +252,7 @@ local event_id = redis.call(
     'XADD', KEYS[2], 'MAXLEN', '~', ARGV[4], '*', ARGV[7], ARGV[3]
 )
 redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[5])
+redis.call('SET', KEYS[5], event_id, 'PX', ARGV[5])
 redis.call('PEXPIRE', KEYS[2], ARGV[5])
 local sequence = redis.call('ZINCRBY', KEYS[3], 1, '__seq')
 redis.call('ZADD', KEYS[3], sequence, ARGV[6])
@@ -335,11 +337,12 @@ func (t *redisTaskEventTransport) RequestExecutionCancel(
 				streamKey(tenant, owner, taskID),
 				streamDedupeKey(tenant, owner, taskID),
 				executionKey(tenant, owner, taskID),
+				snapshotCursorKey(tenant, owner, taskID),
 			},
 			currentBytes,
 			canceledBytes,
 			eventBytes,
-			streamMaxLen,
+			t.streamMaxLen,
 			t.expiration.Milliseconds(),
 			operationID,
 			streamField,

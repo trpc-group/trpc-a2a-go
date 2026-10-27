@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Redis TaskManager persistence
+
+- Redis TaskManager adds optional **coalesced Task snapshot persistence**. Stream events are still appended immediately for cross-node subscriptions, while complete `task:*` snapshots can be flushed by time or event-count thresholds. Each snapshot stores the exact Stream cursor it represents so `tasks/resubscribe` replays unflushed events without gaps. The default `TaskPersistencePerEvent` mode preserves the historical write-on-every-event behavior; configure coalescing with `WithTaskPersistence` and Stream retention with `WithTaskEventStreamMaxLen`.
+
 ### A2A v1.0 conformance fixes
 
 - **`securityRequirements` now uses the specified wire shape.** `SecurityRequirement.schemes` is `map<string, StringList>` in the proto, so scopes serialize as `{"schemes": {"google": {"list": ["openid"]}}}`. The previous form omitted the `StringList` level, which meant the specification's own sample Agent Card failed to parse and every card this SDK served declared its requirements in a shape no conformant peer could read. Cards written by earlier v2 prereleases (bare scope arrays) and v0 cards still parse.
